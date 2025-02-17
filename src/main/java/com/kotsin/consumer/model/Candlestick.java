@@ -17,6 +17,7 @@ public class Candlestick {
     private double high;
     private double low;
     private double close;
+    private int volume;
 
     private String exchange;
     private String exchangeType;
@@ -27,6 +28,7 @@ public class Candlestick {
         this.high = Double.MIN_VALUE;
         this.low = Double.MAX_VALUE;
         this.close = 0;
+        this.volume = 0;
     }
 
     /**
@@ -38,6 +40,7 @@ public class Candlestick {
         high = Math.max(high, price);
         low = Math.min(low, price);
         close = price;
+        this.volume += tick.getLastQuantity();
 
         exchange = tick.getExchange();
         exchangeType = tick.getExchangeType();
@@ -55,6 +58,7 @@ public class Candlestick {
         this.high = Math.max(this.high, other.high);
         this.low = Math.min(this.low, other.low);
         this.close = other.close;
+        this.volume += other.volume;
 
         this.exchange = other.exchange;
         this.exchangeType = other.exchangeType;
