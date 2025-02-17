@@ -22,6 +22,7 @@ public class Candlestick {
     private String exchange;
     private String exchangeType;
     private String companyName;
+    private String scripCode;
 
     public Candlestick() {
         this.open = 0;
@@ -45,6 +46,7 @@ public class Candlestick {
         exchange = tick.getExchange();
         exchangeType = tick.getExchangeType();
         companyName = tick.getCompanyName();
+        scripCode = String.valueOf(tick.getToken());
     }
 
     /**
@@ -63,6 +65,7 @@ public class Candlestick {
         this.exchange = other.exchange;
         this.exchangeType = other.exchangeType;
         this.companyName = other.companyName;
+        scripCode = String.valueOf(other.getScripCode());
     }
 
     /**
