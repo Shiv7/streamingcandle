@@ -49,7 +49,7 @@ public class ConsumerApplication {
 
             // For windowSize == 1, consume raw stock events from "stock-events"
             // For all else, consume from "1-min-candle"
-            String inputTopic = (windowSize == 1) ? "stock-events" : "1-min-candle";
+            String inputTopic = (windowSize == 1) ? "forwardtesting-data" : "1-min-candle";
 
             // Output topic is e.g. "2-min-candle", "15-min-candle", etc.
             String outputTopic = windowSize + "-min-candle";
@@ -71,7 +71,7 @@ public class ConsumerApplication {
                 Map.of(AdminClientConfig.BOOTSTRAP_SERVERS_CONFIG, BOOTSTRAP_SERVERS))) {
 
             List<NewTopic> topics = List.of(
-                    new NewTopic("stock-events", 1, (short) 1),
+                    new NewTopic("forwardtesting-data", 1, (short) 1),
                     new NewTopic("1-min-candle", 1, (short) 1),
                     new NewTopic("2-min-candle", 1, (short) 1),
                     new NewTopic("3-min-candle", 1, (short) 1),
