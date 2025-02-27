@@ -22,7 +22,7 @@ public class ConsumerApplication {
     private CandlestickProcessor candlestickProcessor;
 
     // Your Kafka broker address
-    private static final String BOOTSTRAP_SERVERS = "43.205.184.227:9092";
+    private static final String BOOTSTRAP_SERVERS = "172.31.0.121:9092";
 
     /**
      * Mapping of unique app IDs to the desired window size, in minutes.
