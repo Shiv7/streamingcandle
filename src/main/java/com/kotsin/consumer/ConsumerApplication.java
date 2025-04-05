@@ -47,7 +47,7 @@ public class ConsumerApplication {
             String appId = entry.getKey();
             int windowSize = entry.getValue();
 
-            // For windowSize == 1, consume raw stock events from "stock-events"
+            // For windowSize == 1, consume raw stock events from "forwardtesting-data"
             // For all else, consume from "1-min-candle"
             String inputTopic = (windowSize == 1) ? "forwardtesting-data" : "1-min-candle";
 

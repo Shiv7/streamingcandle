@@ -5,10 +5,20 @@ import org.apache.kafka.common.serialization.Serdes;
 import org.apache.kafka.streams.StreamsConfig;
 import org.springframework.stereotype.Component;
 
+import java.time.ZoneId;
+import java.time.ZonedDateTime;
 import java.util.Properties;
 
 @Component
 public class KafkaConfig {
+
+    public static final ZonedDateTime START_3RD_APRIL_915 = ZonedDateTime.of(
+            2025, 4, 3, 9, 15, 0, 0, ZoneId.of("Asia/Kolkata")
+    );
+    public static final ZonedDateTime END_3RD_APRIL_1530 = ZonedDateTime.of(
+            2025, 4, 3, 15, 30, 0, 0, ZoneId.of("Asia/Kolkata")
+    );
+
     private static final String BOOTSTRAP_SERVERS = "172.31.0.121:9092";
 
     /**

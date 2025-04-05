@@ -3,6 +3,7 @@ package com.kotsin.consumer.processor;
 import com.kotsin.consumer.config.KafkaConfig;
 import com.kotsin.consumer.model.Candlestick;
 import com.kotsin.consumer.model.TickData;
+import com.kotsin.consumer.model.TimeRangeFilterTransformer;
 import org.apache.kafka.common.serialization.Serdes;
 import org.apache.kafka.streams.*;
 import org.apache.kafka.streams.kstream.*;
@@ -16,6 +17,9 @@ import java.time.Duration;
 import java.time.ZoneId;
 import java.time.ZonedDateTime;
 import java.util.Properties;
+
+import static com.kotsin.consumer.config.KafkaConfig.END_3RD_APRIL_1530;
+import static com.kotsin.consumer.config.KafkaConfig.START_3RD_APRIL_915;
 
 /**
  * Generic Kafka Streams processor to convert tick data or smaller candles into bigger candlestick windows.
@@ -62,6 +66,14 @@ public class CandlestickProcessor {
                 inputTopic, Consumed.with(Serdes.String(), TickData.serde())
         );
 
+
+        // 1) Use transform() to filter by date/time range
+        inputStream = inputStream.transform(() ->
+                new TimeRangeFilterTransformer<>(
+                        START_3RD_APRIL_915,  // 2025-04-03T09:15+05:30
+                        END_3RD_APRIL_1530    // 2025-04-03T15:30+05:30
+                )
+        );
         // 1-minute window with zero grace => emits final window result at exactly window end
         TimeWindows timeWindows = TimeWindows.of(Duration.ofMinutes(1))
                 .grace(Duration.ZERO);
