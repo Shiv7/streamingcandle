@@ -4,6 +4,7 @@ import com.kotsin.consumer.util.KafkaRecordTimestampExtractor;
 import org.apache.kafka.clients.producer.ProducerConfig;
 import org.apache.kafka.common.serialization.Serdes;
 import org.apache.kafka.streams.StreamsConfig;
+import org.apache.kafka.streams.errors.LogAndContinueExceptionHandler;
 import org.springframework.stereotype.Component;
 
 import java.time.ZoneId;
@@ -45,6 +46,24 @@ public class KafkaConfig {
         
         // Disable caching so records are processed & forwarded promptly
         props.put(StreamsConfig.CACHE_MAX_BYTES_BUFFERING_CONFIG, 0);
+        
+        // CRITICAL: State store and changelog configurations to prevent OffsetOutOfRangeException
+        // Adjust retention period for changelog topics (adjust based on your needs - e.g., 1 day)
+        props.put(StreamsConfig.RETENTION_MS_CONFIG, 24 * 60 * 60 * 1000L); // 24 hours retention
+        
+        // Set state directory for persistent state stores
+        props.put(StreamsConfig.STATE_DIR_CONFIG, "/tmp/kafka-streams-state");
+        
+        // Configure cleanup policy
+        props.put(StreamsConfig.TOPOLOGY_OPTIMIZATION_CONFIG, StreamsConfig.OPTIMIZE);
+        
+        // Use earliest offset when restarting to ensure we don't miss data
+        props.put(StreamsConfig.PROCESSING_GUARANTEE_CONFIG, StreamsConfig.EXACTLY_ONCE_V2);
+        props.put(StreamsConfig.DEFAULT_DESERIALIZATION_EXCEPTION_HANDLER_CLASS_CONFIG, 
+                  LogAndContinueExceptionHandler.class.getName());
+        
+        // Configure auto.offset.reset for consumer
+        props.put(StreamsConfig.CONSUMER_PREFIX + "auto.offset.reset", "earliest");
         
         return props;
     }
