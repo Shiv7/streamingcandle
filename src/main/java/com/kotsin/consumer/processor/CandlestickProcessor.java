@@ -113,7 +113,7 @@ public class CandlestickProcessor {
         );
         
         // Initialize tick buffer for delayed tick handling
-        tickBuffer = new TickBuffer(TICK_BUFFER_DELAY_MS, this::processBufferedTicks);
+        tickBuffer = new TickBuffer(TICK_BUFFER_DELAY_MS, (symbol, ticks) -> processBufferedTicks(symbol, ticks));
         
         // Send ticks to buffer before processing
         inputStream.foreach((key, value) -> {
@@ -153,6 +153,15 @@ public class CandlestickProcessor {
                 candle.setWindowStartMillis(windowedKey.window().start());
                 candle.setWindowEndMillis(windowedKey.window().end());
                 
+                // Ensure the right alignment with exchange trading hours
+                if ("N".equals(candle.getExchange())) {
+                    // For NSE, ensure alignment with 9:15 trading start
+                    ensureNseAlignment(candle);
+                } else {
+                    // For MCX, ensure alignment with 9:00 trading start
+                    ensureMcxAlignment(candle);
+                }
+                
                 // Log candle details for debugging 
                 logCandleDetails(candle, 1);
                 
@@ -161,6 +170,60 @@ public class CandlestickProcessor {
             .to(outputTopic, Produced.with(Serdes.String(), Candlestick.serde()));
             
         LOGGER.info("Configured 1-minute candles with both buffered processing and Kafka Streams pipeline");
+    }
+    
+    /**
+     * Ensures that candle window timestamps align perfectly with NSE trading hours
+     * (starting at 9:15 AM)
+     */
+    private void ensureNseAlignment(Candlestick candle) {
+        ZonedDateTime startTime = ZonedDateTime.ofInstant(
+                Instant.ofEpochMilli(candle.getWindowStartMillis()), 
+                ZoneId.of("Asia/Kolkata"));
+        
+        // Get the reference trading day start (9:15 AM)
+        ZonedDateTime marketOpen = startTime.toLocalDate()
+                .atTime(9, 15, 0)
+                .atZone(ZoneId.of("Asia/Kolkata"));
+        
+        // Calculate minutes elapsed since market open
+        int minutesElapsed = (int) ((startTime.toEpochSecond() - marketOpen.toEpochSecond()) / 60);
+        
+        // Calculate the proper window start time based on trading hours
+        int windowNum = minutesElapsed / 1; // For 1-minute candles
+        ZonedDateTime correctedStart = marketOpen.plusMinutes(windowNum);
+        ZonedDateTime correctedEnd = correctedStart.plusMinutes(1);
+        
+        // Apply the corrected timestamps
+        candle.setWindowStartMillis(correctedStart.toInstant().toEpochMilli());
+        candle.setWindowEndMillis(correctedEnd.toInstant().toEpochMilli());
+    }
+    
+    /**
+     * Ensures that candle window timestamps align perfectly with MCX trading hours
+     * (starting at 9:00 AM)
+     */
+    private void ensureMcxAlignment(Candlestick candle) {
+        ZonedDateTime startTime = ZonedDateTime.ofInstant(
+                Instant.ofEpochMilli(candle.getWindowStartMillis()), 
+                ZoneId.of("Asia/Kolkata"));
+        
+        // Get the reference trading day start (9:00 AM)
+        ZonedDateTime marketOpen = startTime.toLocalDate()
+                .atTime(9, 0, 0)
+                .atZone(ZoneId.of("Asia/Kolkata"));
+        
+        // Calculate minutes elapsed since market open
+        int minutesElapsed = (int) ((startTime.toEpochSecond() - marketOpen.toEpochSecond()) / 60);
+        
+        // Calculate the proper window start time based on trading hours
+        int windowNum = minutesElapsed / 1; // For 1-minute candles
+        ZonedDateTime correctedStart = marketOpen.plusMinutes(windowNum);
+        ZonedDateTime correctedEnd = correctedStart.plusMinutes(1);
+        
+        // Apply the corrected timestamps
+        candle.setWindowStartMillis(correctedStart.toInstant().toEpochMilli());
+        candle.setWindowEndMillis(correctedEnd.toInstant().toEpochMilli());
     }
     
     /**
@@ -388,6 +451,21 @@ public class CandlestickProcessor {
                             aggCandle.setVolume(aggCandle.getVolume() + candle.getVolume());
                             aggCandle.setCompanyName(candle.getCompanyName());
                             aggCandle.setExchange(candle.getExchange());
+                            
+                            // Set exchangeType with a default if it's null
+                            if (candle.getExchangeType() != null) {
+                                aggCandle.setExchangeType(candle.getExchangeType());
+                            } else if (aggCandle.getExchangeType() == null) {
+                                // Derive default from exchange
+                                if ("N".equals(candle.getExchange())) {
+                                    aggCandle.setExchangeType("EQUITY");
+                                } else if ("M".equals(candle.getExchange())) {
+                                    aggCandle.setExchangeType("COMMODITY");
+                                } else {
+                                    aggCandle.setExchangeType("UNKNOWN");
+                                }
+                            }
+                            
                             aggCandle.setScripCode(candle.getScripCode());
                             
                             return aggCandle;

@@ -87,7 +87,21 @@ public class Candlestick {
 
         // Update metadata
         exchange = tick.getExchange();
-        exchangeType = tick.getExchangeType();
+        
+        // Handle exchangeType - derive from exchange if null
+        if (tick.getExchangeType() != null) {
+            exchangeType = tick.getExchangeType();
+        } else {
+            // If exchangeType is not available, set a default based on exchange
+            if ("N".equals(tick.getExchange())) {
+                exchangeType = "EQUITY"; // Default for NSE
+            } else if ("M".equals(tick.getExchange())) {
+                exchangeType = "COMMODITY"; // Default for MCX
+            } else {
+                exchangeType = "UNKNOWN";
+            }
+        }
+        
         companyName = tick.getCompanyName();
         scripCode = String.valueOf(tick.getToken());
     }
@@ -116,7 +130,21 @@ public class Candlestick {
 
         // Update metadata
         this.exchange = other.exchange;
-        this.exchangeType = other.exchangeType;
+        
+        // Handle exchangeType - ensure it's not null
+        if (other.exchangeType != null) {
+            this.exchangeType = other.exchangeType;
+        } else if (this.exchangeType == null) {
+            // If both are null, set a default based on exchange
+            if ("N".equals(other.exchange)) {
+                this.exchangeType = "EQUITY"; // Default for NSE
+            } else if ("M".equals(other.exchange)) {
+                this.exchangeType = "COMMODITY"; // Default for MCX
+            } else {
+                this.exchangeType = "UNKNOWN";
+            }
+        }
+        
         this.companyName = other.companyName;
         this.scripCode = other.scripCode;
     }
@@ -143,22 +171,36 @@ public class Candlestick {
     }
     
     /**
-     * Updates the human-readable time representations based on window millisecond values.
-     * Should be called whenever windowStartMillis or windowEndMillis are updated.
+     * Updates the human-readable timestamps based on windowStartMillis and windowEndMillis
+     * with improved formatting and alignment to ensure exact minute boundaries
      */
-    public void updateHumanReadableTimes() {
+    public void updateHumanReadableTimestamps() {
         if (windowStartMillis > 0) {
-            ZonedDateTime start = ZonedDateTime.ofInstant(
-                    Instant.ofEpochMilli(windowStartMillis), 
-                    ZoneId.of("Asia/Kolkata"));
-            this.humanReadableStartTime = start.format(DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm:ss.SSS"));
+            ZonedDateTime startTime = ZonedDateTime.ofInstant(
+                    Instant.ofEpochMilli(windowStartMillis),
+                    ZoneId.of("Asia/Kolkata")
+            );
+            
+            // Ensure alignment to exact minute boundaries
+            startTime = startTime.withSecond(0).withNano(0);
+            
+            this.humanReadableStartTime = startTime.format(
+                    DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm:ss.SSS")
+            );
         }
         
         if (windowEndMillis > 0) {
-            ZonedDateTime end = ZonedDateTime.ofInstant(
-                    Instant.ofEpochMilli(windowEndMillis), 
-                    ZoneId.of("Asia/Kolkata"));
-            this.humanReadableEndTime = end.format(DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm:ss.SSS"));
+            ZonedDateTime endTime = ZonedDateTime.ofInstant(
+                    Instant.ofEpochMilli(windowEndMillis),
+                    ZoneId.of("Asia/Kolkata")
+            );
+            
+            // Ensure alignment to exact minute boundaries
+            endTime = endTime.withSecond(0).withNano(0);
+            
+            this.humanReadableEndTime = endTime.format(
+                    DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm:ss.SSS")
+            );
         }
     }
     
@@ -169,7 +211,7 @@ public class Candlestick {
      */
     public void setWindowStartMillis(long windowStartMillis) {
         this.windowStartMillis = windowStartMillis;
-        updateHumanReadableTimes();
+        updateHumanReadableTimestamps();
     }
     
     /**
@@ -179,7 +221,7 @@ public class Candlestick {
      */
     public void setWindowEndMillis(long windowEndMillis) {
         this.windowEndMillis = windowEndMillis;
-        updateHumanReadableTimes();
+        updateHumanReadableTimestamps();
     }
 
     /**

@@ -13,105 +13,139 @@ import java.util.Comparator;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.CopyOnWriteArraySet;
 import java.util.concurrent.Executors;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicLong;
+import java.util.function.BiConsumer;
 
 /**
- * Buffer for tick data to handle late-arriving ticks and improve candle accuracy.
- * This class holds ticks for a short period before releasing them to be processed,
- * which helps ensure that candles have all relevant ticks even if some arrive with slight delays.
+ * Buffers tick data to handle delayed ticks and ensure accurate candle generation
+ * 
+ * The buffer:
+ * 1. Holds ticks for a configurable delay period (e.g., 500ms)
+ * 2. Sorts ticks by timestamp before processing
+ * 3. Handles out-of-order ticks gracefully
+ * 4. Provides detailed metrics about tick processing
+ * 5. Prioritizes boundary ticks (at xx:59.xxx) for accurate close prices
  */
 public class TickBuffer {
     private static final Logger LOGGER = LoggerFactory.getLogger(TickBuffer.class);
-    private static final DateTimeFormatter TIME_FORMAT = DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm:ss.SSS");
     private static final ZoneId INDIA_ZONE = ZoneId.of("Asia/Kolkata");
+    private static final DateTimeFormatter TIME_FORMAT = DateTimeFormatter.ofPattern("HH:mm:ss.SSS");
     
-    // Buffer delay in milliseconds (how long to hold ticks before releasing)
     private final long bufferDelayMs;
-    
-    // Map of symbol to list of buffered ticks
+    private final BiConsumer<String, List<TickData>> tickProcessor;
     private final Map<String, List<TickData>> tickBuffer = new ConcurrentHashMap<>();
-    
-    // Callback interface for when ticks are ready to be processed
-    private final TickProcessor tickProcessor;
-    
-    // Executor for scheduled tick processing
     private final ScheduledExecutorService scheduler = Executors.newScheduledThreadPool(1);
+    
+    // Tracking scheduled processing to avoid duplicates
+    private final CopyOnWriteArraySet<String> scheduledSymbols = new CopyOnWriteArraySet<>();
     
     // Metrics
     private final Map<String, Integer> ticksPerSymbolCount = new ConcurrentHashMap<>();
     private final Map<String, Long> lastProcessedTickTime = new ConcurrentHashMap<>();
+    private final Map<String, Long> latestTickTime = new ConcurrentHashMap<>();
     
     /**
-     * Callback interface for processing ticks
-     */
-    public interface TickProcessor {
-        void processTicks(String symbol, List<TickData> ticks);
-    }
-    
-    /**
-     * Creates a new TickBuffer with the specified delay
+     * Creates a new tick buffer with the specified delay
      * 
-     * @param bufferDelayMs How long to buffer ticks before releasing them (in milliseconds)
-     * @param tickProcessor Callback for processing ticks once they're ready
+     * @param bufferDelayMs Delay in milliseconds to buffer ticks
+     * @param tickProcessor Callback to process ticks after buffering
      */
-    public TickBuffer(long bufferDelayMs, TickProcessor tickProcessor) {
+    public TickBuffer(long bufferDelayMs, BiConsumer<String, List<TickData>> tickProcessor) {
         this.bufferDelayMs = bufferDelayMs;
         this.tickProcessor = tickProcessor;
         
-        // Schedule metrics logging
-        scheduler.scheduleAtFixedRate(this::logMetrics, 60, 60, TimeUnit.SECONDS);
+        LOGGER.info("Initialized TickBuffer with {}ms delay", bufferDelayMs);
     }
     
     /**
-     * Adds a tick to the buffer
-     * 
-     * @param tick The tick to buffer
+     * Adds a tick to the buffer and processes ticks when ready
      */
     public void addTick(TickData tick) {
         if (tick == null || tick.getCompanyName() == null) {
-            LOGGER.warn("Received null tick or tick with null company name");
             return;
         }
         
         String symbol = tick.getCompanyName();
+        long tickTime = tick.getEpochTimestampMillis();
         
         // Update metrics
         ticksPerSymbolCount.compute(symbol, (k, v) -> (v == null) ? 1 : v + 1);
         
-        // Add tick to buffer
-        tickBuffer.computeIfAbsent(symbol, k -> new ArrayList<>()).add(tick);
+        // Get or create buffer for this symbol
+        List<TickData> symbolBuffer = tickBuffer.computeIfAbsent(symbol, k -> new ArrayList<>());
         
-        // Schedule processing of this symbol's ticks after the buffer delay
-        scheduler.schedule(() -> processTicks(symbol), bufferDelayMs, TimeUnit.MILLISECONDS);
+        // Add tick to buffer
+        symbolBuffer.add(tick);
+        
+        // Update the latest tick time seen for this symbol
+        latestTickTime.put(symbol, Math.max(tickTime, latestTickTime.getOrDefault(symbol, 0L)));
+        
+        // If we have boundary case (tick at xx:59.xxx), process immediately to ensure
+        // it's included in the correct window
+        ZonedDateTime tickDateTime = ZonedDateTime.ofInstant(
+                Instant.ofEpochMilli(tickTime),
+                ZoneId.of("Asia/Kolkata")
+        );
+        
+        if (isBoundaryTick(tickDateTime)) {
+            LOGGER.debug("Processing boundary tick immediately: {} at {}", 
+                    symbol, 
+                    tickDateTime.format(DateTimeFormatter.ofPattern("HH:mm:ss.SSS")));
+            processTicks(symbol);
+            return;
+        }
+        
+        // Schedule buffer processing after delay if not already scheduled
+        if (!scheduledSymbols.contains(symbol)) {
+            scheduledSymbols.add(symbol);
+            
+            // Schedule processing after delay
+            scheduler.schedule(() -> {
+                processTicks(symbol);
+            }, bufferDelayMs, TimeUnit.MILLISECONDS);
+        }
     }
     
     /**
-     * Process all buffered ticks for a symbol
-     * 
-     * @param symbol The symbol to process
+     * Checks if a tick is at a minute boundary (xx:59.xxx seconds)
+     * which requires immediate processing to ensure proper window attribution
+     */
+    private boolean isBoundaryTick(ZonedDateTime time) {
+        // Check if tick is in the last second of a minute (xx:59.xxx)
+        return time.getSecond() >= 59;
+    }
+    
+    /**
+     * Process ticks for a specific symbol
      */
     private void processTicks(String symbol) {
+        // Remove symbol from scheduled set
+        scheduledSymbols.remove(symbol);
+        
+        // Get and clear the buffer
         List<TickData> ticks = tickBuffer.remove(symbol);
         if (ticks == null || ticks.isEmpty()) {
             return;
         }
         
         // Sort ticks by timestamp to ensure correct order
-        ticks.sort(Comparator.comparingLong(TickData::getTimestamp));
+        ticks.sort(Comparator.comparingLong(TickData::getEpochTimestampMillis));
         
         // Update last processed time
         if (!ticks.isEmpty()) {
-            lastProcessedTickTime.put(symbol, ticks.get(ticks.size() - 1).getTimestamp());
+            lastProcessedTickTime.put(symbol, ticks.get(ticks.size() - 1).getEpochTimestampMillis());
         }
         
         // Log tick count and time range
-        if (LOGGER.isDebugEnabled() && ticks.size() > 0) {
+        if (LOGGER.isDebugEnabled() && !ticks.isEmpty()) {
             ZonedDateTime firstTickTime = ZonedDateTime.ofInstant(
-                    Instant.ofEpochMilli(ticks.get(0).getTimestamp()), INDIA_ZONE);
+                    Instant.ofEpochMilli(ticks.get(0).getEpochTimestampMillis()), INDIA_ZONE);
             ZonedDateTime lastTickTime = ZonedDateTime.ofInstant(
-                    Instant.ofEpochMilli(ticks.get(ticks.size() - 1).getTimestamp()), INDIA_ZONE);
+                    Instant.ofEpochMilli(ticks.get(ticks.size() - 1).getEpochTimestampMillis()), INDIA_ZONE);
             
             LOGGER.debug("Processing {} ticks for {}, time range: {} to {}", 
                     ticks.size(), symbol, 
@@ -119,47 +153,61 @@ public class TickBuffer {
                     lastTickTime.format(TIME_FORMAT));
         }
         
-        // Process ticks through callback
-        tickProcessor.processTicks(symbol, ticks);
+        // Check if there's a boundary tick in this batch (close to the minute change)
+        boolean hasBoundaryTick = ticks.stream()
+                .anyMatch(tick -> {
+                    ZonedDateTime tickTime = ZonedDateTime.ofInstant(
+                            Instant.ofEpochMilli(tick.getEpochTimestampMillis()), 
+                            INDIA_ZONE);
+                    return tickTime.getSecond() >= 59;
+                });
+                
+        if (hasBoundaryTick) {
+            LOGGER.debug("Boundary tick detected in batch for {}, ensuring precise candle close values", symbol);
+        }
+        
+        // Call the processor callback with the buffered ticks
+        tickProcessor.accept(symbol, ticks);
     }
     
     /**
-     * Logs metrics about tick processing
+     * Process all symbols immediately
      */
-    private void logMetrics() {
-        StringBuilder sb = new StringBuilder("Tick processing metrics:\n");
+    public void processAllSymbols() {
+        // Get all symbols with buffered ticks
+        List<String> symbols = new ArrayList<>(tickBuffer.keySet());
         
-        // Log tick counts per symbol
-        sb.append("Ticks per symbol (last minute):\n");
-        ticksPerSymbolCount.forEach((symbol, count) -> {
-            sb.append(String.format("  %s: %d ticks\n", symbol, count));
-        });
+        // Process each symbol
+        for (String symbol : symbols) {
+            processTicks(symbol);
+        }
         
-        // Log last processed times
-        sb.append("Last processed tick time:\n");
-        lastProcessedTickTime.forEach((symbol, time) -> {
-            ZonedDateTime tickTime = ZonedDateTime.ofInstant(
-                    Instant.ofEpochMilli(time), INDIA_ZONE);
-            sb.append(String.format("  %s: %s\n", symbol, tickTime.format(TIME_FORMAT)));
-        });
-        
-        LOGGER.info(sb.toString());
-        
-        // Reset tick counts for next period
-        ticksPerSymbolCount.clear();
+        LOGGER.info("Processed all buffered ticks for {} symbols", symbols.size());
     }
     
     /**
-     * Shutdown the buffer scheduler
+     * Get buffer statistics for monitoring
+     */
+    public Map<String, Object> getStats() {
+        Map<String, Object> stats = new ConcurrentHashMap<>();
+        stats.put("bufferDelayMs", bufferDelayMs);
+        stats.put("activeSymbolCount", tickBuffer.size());
+        stats.put("totalBufferedTicks", tickBuffer.values().stream().mapToInt(List::size).sum());
+        stats.put("symbolStats", ticksPerSymbolCount);
+        return stats;
+    }
+    
+    /**
+     * Shutdown the buffer and process any remaining ticks
      */
     public void shutdown() {
+        LOGGER.info("Shutting down TickBuffer");
+        processAllSymbols();
         scheduler.shutdown();
         try {
-            if (!scheduler.awaitTermination(5, TimeUnit.SECONDS)) {
-                scheduler.shutdownNow();
-            }
+            scheduler.awaitTermination(5, TimeUnit.SECONDS);
         } catch (InterruptedException e) {
-            scheduler.shutdownNow();
+            LOGGER.warn("Interrupted while waiting for scheduler to terminate", e);
             Thread.currentThread().interrupt();
         }
     }
