@@ -161,16 +161,17 @@ public class CandlestickProcessor {
                     .process(() -> new RecordTimestampOverrideProcessor());
             
             // Add debug logging to verify the timestamp before writing to Kafka
-            outputStream.peek((key, value) -> {
-                ZonedDateTime outputTime = ZonedDateTime.ofInstant(
-                        Instant.ofEpochMilli(value.getWindowEndMillis()), 
-                        ZoneId.of("Asia/Kolkata"));
-                LOGGER.info("Writing 30m candle for {}: window {}. Timestamp: {}",
-                        key,
-                        value.getFormattedTimeWindow(),
-                        outputTime.format(DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm:ss")));
-            })
-            .to(outputTopic, Produced.with(Serdes.String(), Candlestick.serde()));
+            outputStream
+                .peek((key, value) -> {
+                    ZonedDateTime outputTime = ZonedDateTime.ofInstant(
+                            Instant.ofEpochMilli(value.getWindowEndMillis()), 
+                            ZoneId.of("Asia/Kolkata"));
+                    LOGGER.info("Writing 30m candle for {}: window {}. Timestamp: {}",
+                            key,
+                            value.getFormattedTimeWindow(),
+                            outputTime.format(DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm:ss")));
+                })
+                .to(outputTopic, Produced.with(Serdes.String(), Candlestick.serde()));
         } else {
             // For other timeframes, use standard processing
             candlestickTable.toStream()

@@ -1,6 +1,7 @@
 package com.kotsin.consumer.config;
 
 import com.kotsin.consumer.util.KafkaRecordTimestampExtractor;
+import org.apache.kafka.clients.producer.ProducerConfig;
 import org.apache.kafka.common.serialization.Serdes;
 import org.apache.kafka.streams.StreamsConfig;
 import org.springframework.stereotype.Component;
@@ -34,8 +35,17 @@ public class KafkaConfig {
         props.put(StreamsConfig.DEFAULT_KEY_SERDE_CLASS_CONFIG, Serdes.String().getClass().getName());
         props.put(StreamsConfig.DEFAULT_VALUE_SERDE_CLASS_CONFIG, Serdes.String().getClass().getName());
         props.put(StreamsConfig.COMMIT_INTERVAL_MS_CONFIG, 1000);
+        
+        // Configure producer to preserve record timestamps
+        props.put(StreamsConfig.PRODUCER_PREFIX + ProducerConfig.ENABLE_IDEMPOTENCE_CONFIG, "true");
+        
+        // CRITICAL: Configure timestamp handling for the producer
+        // This ensures the Kafka message's timestamp matches the record's timestamp, not the producer's time
+        props.put("producer.message.timestamp.type", "CreateTime");
+        
         // Disable caching so records are processed & forwarded promptly
         props.put(StreamsConfig.CACHE_MAX_BYTES_BUFFERING_CONFIG, 0);
-         return props;
+        
+        return props;
     }
 }

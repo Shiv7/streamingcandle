@@ -63,13 +63,18 @@ public class RecordTimestampOverrideProcessor implements Processor<Windowed<Stri
         candle.setWindowStartMillis(windowStart);
         candle.setWindowEndMillis(windowEnd);
 
-        // Create a new record with:
-        // 1. The original key (extracted from the Windowed key)
-        // 2. The updated Candlestick with window timestamps
-        // 3. The window end time as the record timestamp
+        // CRITICAL: Get the current timestamp in UTC to verify timestamp handling
+        long currentTimeMillis = System.currentTimeMillis();
+        ZonedDateTime currentTimeIST = ZonedDateTime.ofInstant(
+                Instant.ofEpochMilli(currentTimeMillis), IST_ZONE);
+        
+        LOGGER.info("Current system time: {} IST", currentTimeIST.format(TIME_FORMATTER));
+        LOGGER.info("Window end time (target): {} IST", endTimeIST.format(TIME_FORMATTER));
+        
+        // Force the explicit timestamp by calling withTimestamp() - this is CRITICAL
         Record<String, Candlestick> newRecord = record
                 .withKey(record.key().key())
-                .withTimestamp(windowEnd);
+                .withTimestamp(windowEnd);  // Use window end time as the record timestamp
         
         // Log the output record details
         LOGGER.info("Setting output record timestamp to: {} IST (window end)", 
