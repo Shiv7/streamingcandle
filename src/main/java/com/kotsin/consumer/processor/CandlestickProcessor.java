@@ -119,21 +119,21 @@ public class CandlestickProcessor {
             }
         });
         
-        // Define 1-minute tumbling windows
-        TimeWindows windows = TimeWindows.ofSizeWithNoGrace(Duration.ofMinutes(1))
-                .advanceBy(Duration.ofMinutes(1));
+        // Define proper topology for 1-minute candles
+        // We're now handling this manually through the tick buffer and direct producer
+        LOGGER.info("Configured 1-minute candles using buffered processing");
     }
     
     /**
      * Process buffered ticks into the Kafka Streams topology
      */
     private void processBufferedTicks(String symbol, List<TickData> ticks) {
-        if (ticks == null || ticks.isEmpty() || this.tickDataStream == null) {
+        if (ticks == null || ticks.isEmpty()) {
             return;
         }
         
         // Get or create metrics for this symbol
-        CandleMetrics metrics = metricsMap.computeIfAbsent(symbol, k -> new CandleMetrics(symbol));
+        CandleMetrics metrics = metricsMap.computeIfAbsent(symbol, k -> new CandleMetrics(k));
         
         // Group ticks by minute for 1-minute candles
         Map<Long, Candlestick> minuteCandles = new HashMap<>();
@@ -163,8 +163,14 @@ public class CandlestickProcessor {
         
         // Produce the completed candles to Kafka
         if (!minuteCandles.isEmpty()) {
-            try (KafkaProducer<String, Candlestick> producer = createCandlestickProducer()) {
-                for (Candlestick candle : minuteCandles.values()) {
+            Properties props = new Properties();
+            props.put(ProducerConfig.BOOTSTRAP_SERVERS_CONFIG, kafkaConfig.getBootstrapServers());
+            props.put(ProducerConfig.KEY_SERIALIZER_CLASS_CONFIG, StringSerializer.class.getName());
+            props.put(ProducerConfig.VALUE_SERIALIZER_CLASS_CONFIG, Candlestick.CandlestickSerializer.class.getName());
+            
+            try (KafkaProducer<String, Candlestick> producer = new KafkaProducer<>(props)) {
+                for (Map.Entry<Long, Candlestick> entry : minuteCandles.entrySet()) {
+                    Candlestick candle = entry.getValue();
                     ProducerRecord<String, Candlestick> record = new ProducerRecord<>(
                             "1-minute-candle", // This should match your output topic config
                             symbol,
@@ -176,19 +182,9 @@ public class CandlestickProcessor {
                     logCandleDetails(candle, 1);
                     metrics.incrementProducedCandles();
                 }
+                producer.flush();
             }
         }
-    }
-    
-    /**
-     * Creates a producer for Candlestick records
-     */
-    private KafkaProducer<String, Candlestick> createCandlestickProducer() {
-        Properties props = new Properties();
-        props.put(ProducerConfig.BOOTSTRAP_SERVERS_CONFIG, kafkaConfig.getBootstrapServers());
-        props.put(ProducerConfig.KEY_SERIALIZER_CLASS_CONFIG, StringSerializer.class.getName());
-        props.put(ProducerConfig.VALUE_SERIALIZER_CLASS_CONFIG, "com.kotsin.consumer.model.Candlestick$CandlestickSerializer");
-        return new KafkaProducer<>(props);
     }
     
     /**

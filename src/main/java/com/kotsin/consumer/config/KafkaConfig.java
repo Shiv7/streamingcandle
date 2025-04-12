@@ -24,6 +24,15 @@ public class KafkaConfig {
     private static final String BOOTSTRAP_SERVERS = "172.31.0.121:9092";
 
     /**
+     * Gets the bootstrap servers configuration.
+     *
+     * @return The bootstrap servers string.
+     */
+    public String getBootstrapServers() {
+        return BOOTSTRAP_SERVERS;
+    }
+
+    /**
      * Retrieves Kafka Streams properties with a given application ID.
      *
      * @param appId The application ID for the Kafka Streams instance.
