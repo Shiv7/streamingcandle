@@ -6,22 +6,30 @@ import com.kotsin.consumer.model.TickData;
 import org.apache.kafka.common.serialization.Serdes;
 import org.apache.kafka.streams.*;
 import org.apache.kafka.streams.kstream.*;
+import org.apache.kafka.streams.kstream.Suppressed;
 import org.apache.kafka.streams.processor.ProcessorContext;
 import org.apache.kafka.streams.processor.To;
-import org.apache.kafka.streams.kstream.Suppressed;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.stereotype.Component;
 
 import java.time.Duration;
+import java.time.Instant;
 import java.time.ZoneId;
 import java.time.ZonedDateTime;
 import java.util.Properties;
 
 /**
- * Generic Kafka Streams processor to convert tick data or smaller candles into bigger candlestick windows.
+ * Production-ready Kafka Streams processor to aggregate tick data (or 1-minute candles)
+ * into candlestick windows of various durations (e.g. 1m, 2m, 3m, 5m, 15m, 30m) aligned
+ * to the NSE market open (9:15 AM IST). For multi-minute windows (i.e. windowSize > 1), we
+ * adjust each record’s timestamp such that the day's 9:15 AM maps to time zero.
  */
 @Component
 public class CandlestickProcessor {
+
+    private static final Logger LOGGER = LoggerFactory.getLogger(CandlestickProcessor.class);
 
     @Autowired
     private KafkaConfig kafkaConfig;
@@ -32,39 +40,39 @@ public class CandlestickProcessor {
      * @param appId       Kafka application ID.
      * @param inputTopic  The input Kafka topic.
      * @param outputTopic The output Kafka topic.
-     * @param windowSize  Time window size in minutes (1, 2, 5, 15, 30, etc.).
+     * @param windowSize  Candle duration in minutes (e.g. 1, 2, 3, 5, 15, 30).
      */
     public void process(String appId, String inputTopic, String outputTopic, int windowSize) {
         Properties props = kafkaConfig.getStreamProperties(appId);
         StreamsBuilder builder = new StreamsBuilder();
 
         if (windowSize == 1) {
-            // Directly aggregate raw TickData into 1-minute candles (no alignment offset).
+            // Directly aggregate raw TickData into 1-minute candles (no alignment required)
             processTickData(builder, inputTopic, outputTopic);
         } else {
-            // Aggregate multi-minute candles from smaller candles, aligned to 9:15 AM.
-            processCandlestickAligned(builder, inputTopic, outputTopic, windowSize);
+            // For multi-minute candles (2, 3, 5, 15, 30), adjust record timestamps so that for each day
+            // 9:15 AM becomes the "zero" boundary. Then apply a tumbling window of the given duration.
+            processMultiMinuteCandlestickAligned(builder, inputTopic, outputTopic, windowSize);
         }
 
         KafkaStreams streams = new KafkaStreams(builder.build(), props);
         streams.start();
+        LOGGER.info("Started Kafka Streams application with id: {}", appId);
 
-        // Ensure a graceful shutdown
+        // Ensure a graceful shutdown.
         Runtime.getRuntime().addShutdownHook(new Thread(streams::close));
     }
 
     /**
      * Aggregates raw TickData into **1-minute** candles.
-     * Uses **suppression** with zero grace so each candle is emitted **as soon as the window ends**.
+     * Uses suppression so each candle is emitted immediately after the 1-minute window ends.
      */
     private void processTickData(StreamsBuilder builder, String inputTopic, String outputTopic) {
         KStream<String, TickData> inputStream = builder.stream(
                 inputTopic, Consumed.with(Serdes.String(), TickData.serde())
         );
 
-        // 1-minute window with zero grace => emits final window result at exactly window end
-        TimeWindows timeWindows = TimeWindows.of(Duration.ofMinutes(1))
-                .grace(Duration.ZERO);
+        TimeWindows timeWindows = TimeWindows.ofSizeAndGrace(Duration.ofMinutes(1), Duration.ZERO);
 
         KTable<Windowed<String>, Candlestick> candlestickTable = inputStream
                 .groupBy((key, tick) -> tick.getCompanyName(),
@@ -72,51 +80,48 @@ public class CandlestickProcessor {
                 .windowedBy(timeWindows)
                 .aggregate(
                         Candlestick::new,
-                        (key, tick, candlestick) -> {
-                            candlestick.update(tick);
-                            return candlestick;
+                        (key, tick, candle) -> {
+                            candle.update(tick);
+                            return candle;
                         },
                         Materialized.with(Serdes.String(), Candlestick.serde())
                 )
-                // Only emit the final candle at the end of the 1-minute window
-                .suppress(
-                        Suppressed.untilWindowCloses(Suppressed.BufferConfig.unbounded())
-                );
+                .suppress(Suppressed.untilWindowCloses(Suppressed.BufferConfig.unbounded()));
 
-        candlestickTable
-                .toStream()
-                .map((windowedKey, candleValue) ->
-                        KeyValue.pair(windowedKey.key(), candleValue))
+        candlestickTable.toStream()
+                .map((windowedKey, candle) -> KeyValue.pair(windowedKey.key(), candle))
                 .to(outputTopic, Produced.with(Serdes.String(), Candlestick.serde()));
     }
 
     /**
-     * Aggregates **multi-minute** (2,3,5,15,30, etc.) candles from **1-minute** candles,
-     * with optional alignment to 9:15 AM IST, and emits only the final candle once each window ends.
+     * Aggregates multi-minute candles (e.g. 2m, 3m, 5m, 15m, 30m) from 1-minute candles,
+     * after adjusting record timestamps so that each day's 9:15 AM becomes time zero. This alignment
+     * ensures that windows correctly cover, for example, [9:15 – 9:45] for a 30m window.
+     *
+     * @param builder    Kafka Streams builder.
+     * @param inputTopic Input topic (e.g. "1-min-candle").
+     * @param outputTopic Output topic (e.g. "30-min-candle", "5-min-candle", etc.).
+     * @param windowSize Candle duration in minutes (must be > 1).
      */
-    private void processCandlestickAligned(StreamsBuilder builder,
-                                           String inputTopic,
-                                           String outputTopic,
-                                           int windowSize) {
+    private void processMultiMinuteCandlestickAligned(StreamsBuilder builder,
+                                                      String inputTopic,
+                                                      String outputTopic,
+                                                      int windowSize) {
 
-        // Read smaller candles (e.g. 1-min) from input
-        KStream<String, Candlestick> inputStream =
-                builder.stream(inputTopic, Consumed.with(Serdes.String(), Candlestick.serde()));
-
-        // Calculate how to shift each record's timestamp so that 9:15 AM is effectively "time 0"
-        long offsetTo915 = compute915Offset(windowSize);
-
-        // Transform timestamps
-        KStream<String, Candlestick> shiftedStream = inputStream.transform(() ->
-                new TimestampShifter(offsetTo915)
+        // Read pre-aggregated (1-minute) candlestick records from input.
+        KStream<String, Candlestick> inputStream = builder.stream(
+                inputTopic, Consumed.with(Serdes.String(), Candlestick.serde())
         );
 
-        // Multi-minute windows, zero grace => final candle as soon as the window ends
-        TimeWindows windows = TimeWindows.of(Duration.ofMinutes(windowSize))
-                .advanceBy(Duration.ofMinutes(windowSize))
-                .grace(Duration.ZERO);
+        // Use the new processor API to adjust timestamps.
+        // This will apply our DailyTimestampProcessor to every record.
+        KStream<String, Candlestick> adjustedStream = inputStream.process(() -> new DailyTimestampProcessor());
 
-        KTable<Windowed<String>, Candlestick> candlestickTable = shiftedStream
+        // Define a tumbling window of the desired size with no grace period.
+        TimeWindows windows = TimeWindows.ofSizeAndGrace(Duration.ofMinutes(windowSize), Duration.ZERO);
+
+        // Group, aggregate, and suppress final window records.
+        KTable<Windowed<String>, Candlestick> candlestickTable = adjustedStream
                 .groupByKey(Grouped.with(Serdes.String(), Candlestick.serde()))
                 .windowedBy(windows)
                 .aggregate(
@@ -127,45 +132,22 @@ public class CandlestickProcessor {
                         },
                         Materialized.with(Serdes.String(), Candlestick.serde())
                 )
-                // Only emit final candle once each multi-minute window is closed
-                .suppress(
-                        Suppressed.untilWindowCloses(Suppressed.BufferConfig.unbounded())
-                );
+                .suppress(Suppressed.untilWindowCloses(Suppressed.BufferConfig.unbounded()));
 
-        candlestickTable
-                .toStream()
-                .map((windowedKey, candleValue) ->
-                        KeyValue.pair(windowedKey.key(), candleValue))
+        candlestickTable.toStream()
+                .map((windowedKey, candle) -> KeyValue.pair(windowedKey.key(), candle))
                 .to(outputTopic, Produced.with(Serdes.String(), Candlestick.serde()));
     }
 
     /**
-     * Aligns windows to 9:15 AM by subtracting an offset from each record's timestamp.
+     * A custom Transformer that adjusts each record's timestamp so that for each record's day,
+     * the 9:15 AM time (in Asia/Kolkata) is treated as time zero.
+     *
+     * For example, if a record has an original timestamp corresponding to 9:30 AM IST,
+     * the adjusted timestamp will be 15 minutes (9:30 - 9:15). This facilitates correct windowing.
      */
-    private long compute915Offset(int windowSize) {
-        ZonedDateTime now = ZonedDateTime.now(ZoneId.of("Asia/Kolkata"));
-        ZonedDateTime nineFifteen = now.withHour(9).withMinute(15).withSecond(0).withNano(0);
-
-        long epochMillis = nineFifteen.toInstant().toEpochMilli();
-        long windowMillis = windowSize * 60_000L;
-
-        // remainder so 9:15 sits exactly on a boundary (0-based alignment)
-        return epochMillis % windowMillis;
-    }
-
-    /**
-     * Transformer that subtracts a fixed offset from each record's timestamp
-     * so that 9:15 AM becomes the zero boundary for the time window.
-     */
-    private static class TimestampShifter
-            implements Transformer<String, Candlestick, KeyValue<String, Candlestick>> {
-
-        private final long offset;
+    private static class DailyTimestampShifter implements Transformer<String, Candlestick, KeyValue<String, Candlestick>> {
         private ProcessorContext context;
-
-        public TimestampShifter(long offset) {
-            this.offset = offset;
-        }
 
         @Override
         public void init(ProcessorContext context) {
@@ -174,20 +156,22 @@ public class CandlestickProcessor {
 
         @Override
         public KeyValue<String, Candlestick> transform(String key, Candlestick value) {
-            if (value == null) {
-                return null;
-            }
+            if (value == null) return null;
             long originalTs = context.timestamp();
-            long newTs = originalTs - offset;
-
-            // Forward with the adjusted timestamp
+            // Convert the event timestamp to Asia/Kolkata time.
+            ZonedDateTime recordTime = ZonedDateTime.ofInstant(Instant.ofEpochMilli(originalTs), ZoneId.of("Asia/Kolkata"));
+            // Compute that day's 9:15 AM.
+            ZonedDateTime nineFifteen = recordTime.withHour(9).withMinute(15).withSecond(0).withNano(0);
+            long shift = nineFifteen.toInstant().toEpochMilli();
+            long newTs = originalTs - shift;
+            // Forward the record with the adjusted timestamp.
             context.forward(key, value, To.all().withTimestamp(newTs));
-            return null; // we've already forwarded
+            return null; // Already forwarded.
         }
 
         @Override
         public void close() {
-            // No cleanup needed
+            // No cleanup required.
         }
     }
 }

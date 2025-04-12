@@ -34,13 +34,9 @@
 		<dependency>
 			<groupId>org.apache.kafka</groupId>
 			<artifactId>kafka-streams</artifactId>
+			<version>4.0.0</version>
 		</dependency>
 
-		<!-- Spring Kafka (helpful for config & production apps) -->
-		<dependency>
-			<groupId>org.springframework.kafka</groupId>
-			<artifactId>spring-kafka</artifactId>
-		</dependency>
 
 		<!-- Jackson Databind, version managed by Spring Boot -->
 		<dependency>
