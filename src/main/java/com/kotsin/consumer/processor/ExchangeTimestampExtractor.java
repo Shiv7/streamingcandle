@@ -69,14 +69,21 @@ public class ExchangeTimestampExtractor implements TimestampExtractor {
         // Calculate minutes elapsed since trading open
         long minutesElapsed = (rawTs - tradingOpen.toInstant().toEpochMilli()) / (60 * 1000);
         
+        // For NSE, ensure windows align with 09:15 start time
+        // For example, 13:17 should be in the 13:15-13:17 window for 2m candles
+        if ("N".equals(candle.getExchange())) {
+            // Adjust minutesElapsed to align with NSE trading start
+            minutesElapsed = ((recordTime.getHour() - 9) * 60 + (recordTime.getMinute() - 15));
+        }
+        
         // Determine which window this belongs to
         int windowIndex = (int) (minutesElapsed / windowSizeMinutes);
         
         // Calculate window start time
         ZonedDateTime windowStart = tradingOpen.plusMinutes(windowIndex * windowSizeMinutes);
-        ZonedDateTime windowEnd = windowStart.plusMinutes(windowSizeMinutes);
 
         if (LOGGER.isDebugEnabled()) {
+            ZonedDateTime windowEnd = windowStart.plusMinutes(windowSizeMinutes);
             LOGGER.debug("Exchange: {}, Record time: {}, Window: {}-{}, Size: {}m", 
                     candle.getExchange(),
                     recordTime.format(TIME_FORMAT),
