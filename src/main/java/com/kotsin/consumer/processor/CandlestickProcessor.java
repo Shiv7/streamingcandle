@@ -58,9 +58,7 @@ public class CandlestickProcessor {
             processTickData(builder, inputTopic, outputTopic);
         } else {
             // For multi-minute candles, aggregate from 1-minute candles
-            // Apply special NSE timestamp alignment only for 30-minute candles
-            boolean applyAlignment = (windowSize == 30);
-            processMultiMinuteCandlestickAligned(builder, inputTopic, outputTopic, windowSize, applyAlignment);
+            processMultiMinuteCandlestickAligned(builder, inputTopic, outputTopic, windowSize);
         }
 
         KafkaStreams streams = new KafkaStreams(builder.build(), props);
@@ -77,13 +75,16 @@ public class CandlestickProcessor {
      * @param outputTopic  Topic for 1-minute candles.
      */
     private void processTickData(StreamsBuilder builder, String inputTopic, String outputTopic) {
-        // Create input stream from the raw tick data topic
+        // Create input stream from the raw tick data topic with exchange-specific timestamp alignment
         KStream<String, TickData> inputStream = builder.stream(
-                inputTopic, Consumed.with(Serdes.String(), TickData.serde())
+                inputTopic, 
+                Consumed.with(Serdes.String(), TickData.serde())
+                        .withTimestampExtractor(new ExchangeTimestampExtractor(1))
         );
         
         // Define 1-minute tumbling windows
-        TimeWindows windows = TimeWindows.ofSizeAndGrace(Duration.ofMinutes(1), Duration.ZERO);
+        TimeWindows windows = TimeWindows.ofSizeWithNoGrace(Duration.ofMinutes(1))
+                .advanceBy(Duration.ofMinutes(1));
         
         // Group by company name, window, and aggregate ticks into candles
         KTable<Windowed<String>, Candlestick> candlestickTable = inputStream
@@ -99,55 +100,58 @@ public class CandlestickProcessor {
                 )
                 // Suppress intermediate updates until the window closes
                 .suppress(Suppressed.untilWindowCloses(Suppressed.BufferConfig.unbounded()));
-        
+
         // Stream the finalized candles to the output topic
         candlestickTable.toStream()
-                .map((windowedKey, candle) -> {
-                    // Add window boundary timestamps to all 1-minute candles
-                    candle.setWindowStartMillis(windowedKey.window().start());
-                    candle.setWindowEndMillis(windowedKey.window().end());
-                    LOGGER.debug("1m candle: {} window: {}-{}", 
+            .map((windowedKey, candle) -> {
+                // Add window boundary timestamps
+                candle.setWindowStartMillis(windowedKey.window().start());
+                candle.setWindowEndMillis(windowedKey.window().end());
+                
+                if (LOGGER.isDebugEnabled()) {
+                    ZonedDateTime windowStart = ZonedDateTime.ofInstant(
+                            Instant.ofEpochMilli(candle.getWindowStartMillis()), 
+                            ZoneId.of("Asia/Kolkata"));
+                    ZonedDateTime windowEnd = ZonedDateTime.ofInstant(
+                            Instant.ofEpochMilli(candle.getWindowEndMillis()), 
+                            ZoneId.of("Asia/Kolkata"));
+                    LOGGER.debug("1m candle for {}: {} window: {}-{}", 
                             windowedKey.key(),
-                            windowedKey.window().start(), 
-                            windowedKey.window().end());
-                    return KeyValue.pair(windowedKey.key(), candle);
-                })
-                .to(outputTopic, Produced.with(Serdes.String(), Candlestick.serde()));
+                            candle.getExchange(),
+                            windowStart.format(DateTimeFormatter.ofPattern("HH:mm:ss")),
+                            windowEnd.format(DateTimeFormatter.ofPattern("HH:mm:ss")));
+                }
+                
+                return KeyValue.pair(windowedKey.key(), candle);
+            })
+            .to(outputTopic, Produced.with(Serdes.String(), Candlestick.serde()));
     }
 
     /**
      * Aggregates multi-minute candles (2m, 3m, 5m, 15m, 30m) from 1-minute candles.
      *
-     * @param builder         Kafka Streams builder.
-     * @param inputTopic      Topic with 1-minute candles.
-     * @param outputTopic     Topic for the aggregated candles (e.g., "30-min-candle").
-     * @param windowSize      Target candle duration in minutes (2, 3, 5, 15, or 30).
-     * @param applyAlignment  Whether to use NseTimestampExtractor for NSE market hour alignment.
+     * @param builder      Kafka Streams builder.
+     * @param inputTopic   Topic with 1-minute candles.
+     * @param outputTopic  Topic for the aggregated candles (e.g., "30-min-candle").
+     * @param windowSize   Target candle duration in minutes (2, 3, 5, 15, or 30).
      */
     private void processMultiMinuteCandlestickAligned(StreamsBuilder builder,
                                                       String inputTopic,
                                                       String outputTopic,
-                                                      int windowSize,
-                                                      boolean applyAlignment) {
+                                                      int windowSize) {
         // Create input stream from the 1-minute candle topic
-        KStream<String, Candlestick> inputStream;
-        if (applyAlignment) {
-            // For 30-minute candles, use the special NSE timestamp extractor
-            inputStream = builder.stream(
-                    inputTopic,
-                    Consumed.with(Serdes.String(), Candlestick.serde())
-                            .withTimestampExtractor(new NseTimestampExtractor())
-            );
-        } else {
-            // For other timeframes, use default timestamp extraction
-            inputStream = builder.stream(
-                    inputTopic,
-                    Consumed.with(Serdes.String(), Candlestick.serde())
-            );
-        }
+        KStream<String, Candlestick> inputStream = builder.stream(
+                inputTopic,
+                Consumed.with(Serdes.String(), Candlestick.serde())
+                        .withTimestampExtractor(new ExchangeTimestampExtractor(windowSize))
+        );
         
         // Define tumbling windows of the target size
-        TimeWindows windows = TimeWindows.ofSizeAndGrace(Duration.ofMinutes(windowSize), Duration.ZERO);
+        TimeWindows windows = TimeWindows.ofSizeWithNoGrace(Duration.ofMinutes(windowSize))
+                .advanceBy(Duration.ofMinutes(windowSize));
+        
+        // Log window configuration
+        LOGGER.info("Configured {}-minute windows with exchange-specific alignment", windowSize);
         
         // Group by key (company name), window, and aggregate 1-minute candles into larger timeframe candles
         KTable<Windowed<String>, Candlestick> candlestickTable = inputStream
@@ -164,41 +168,30 @@ public class CandlestickProcessor {
                 // Suppress intermediate updates until the window closes
                 .suppress(Suppressed.untilWindowCloses(Suppressed.BufferConfig.unbounded()));
 
-        if (applyAlignment) {
-            // For 30-minute candles, override the record timestamp with the window's end time (e.g., 09:45)
-            KStream<String, Candlestick> outputStream = candlestickTable.toStream()
-                    .process(() -> new RecordTimestampOverrideProcessor());
-            
-            // Add debug logging to verify the timestamp before writing to Kafka
-            outputStream
-                .peek((key, value) -> {
-                    ZonedDateTime outputTime = ZonedDateTime.ofInstant(
-                            Instant.ofEpochMilli(value.getWindowEndMillis()), 
+        // Stream the finalized candles to the output topic
+        candlestickTable.toStream()
+            .map((windowedKey, candle) -> {
+                // Add window boundary timestamps
+                candle.setWindowStartMillis(windowedKey.window().start());
+                candle.setWindowEndMillis(windowedKey.window().end());
+                
+                if (LOGGER.isDebugEnabled()) {
+                    ZonedDateTime windowStart = ZonedDateTime.ofInstant(
+                            Instant.ofEpochMilli(candle.getWindowStartMillis()), 
                             ZoneId.of("Asia/Kolkata"));
-                    LOGGER.info("Writing 30m candle for {}: window {}. Timestamp: {}",
-                            key,
-                            value.getFormattedTimeWindow(),
-                            outputTime.format(DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm:ss")));
-                })
-                .to(outputTopic, Produced.with(Serdes.String(), Candlestick.serde()));
-        } else {
-            // For other timeframes (2m, 3m, 5m, 15m), use standard processing
-            // but still include window boundary timestamps
-            candlestickTable.toStream()
-                    .map((windowedKey, candle) -> {
-                        // Add window boundary timestamps to all multi-minute candles
-                        candle.setWindowStartMillis(windowedKey.window().start());
-                        candle.setWindowEndMillis(windowedKey.window().end());
-                        
-                        LOGGER.debug("{}m candle: {} window: {}-{}", 
-                                windowSize,
-                                windowedKey.key(),
-                                windowedKey.window().start(), 
-                                windowedKey.window().end());
-                                
-                        return KeyValue.pair(windowedKey.key(), candle);
-                    })
-                    .to(outputTopic, Produced.with(Serdes.String(), Candlestick.serde()));
-        }
+                    ZonedDateTime windowEnd = ZonedDateTime.ofInstant(
+                            Instant.ofEpochMilli(candle.getWindowEndMillis()), 
+                            ZoneId.of("Asia/Kolkata"));
+                    LOGGER.debug("{}m candle for {}: {} window: {}-{}", 
+                            windowSize,
+                            windowedKey.key(),
+                            candle.getExchange(),
+                            windowStart.format(DateTimeFormatter.ofPattern("HH:mm:ss")),
+                            windowEnd.format(DateTimeFormatter.ofPattern("HH:mm:ss")));
+                }
+                
+                return KeyValue.pair(windowedKey.key(), candle);
+            })
+            .to(outputTopic, Produced.with(Serdes.String(), Candlestick.serde()));
     }
 }
