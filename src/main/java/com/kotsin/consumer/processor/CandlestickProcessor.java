@@ -3,7 +3,6 @@ package com.kotsin.consumer.processor;
 import com.kotsin.consumer.config.KafkaConfig;
 import com.kotsin.consumer.model.Candlestick;
 import com.kotsin.consumer.model.TickData;
-import com.kotsin.consumer.util.NseTimestampExtractor;
 import org.apache.kafka.common.serialization.Serdes;
 import org.apache.kafka.streams.*;
 import org.apache.kafka.streams.kstream.*;
