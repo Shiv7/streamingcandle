@@ -14,6 +14,10 @@ import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.stereotype.Component;
 
 import java.time.Duration;
+import java.time.Instant;
+import java.time.ZoneId;
+import java.time.ZonedDateTime;
+import java.time.format.DateTimeFormatter;
 import java.util.Properties;
 
 /**
@@ -153,9 +157,20 @@ public class CandlestickProcessor {
 
         if (applyAlignment) {
             // For 30-minute candles, override the record timestamp with the window's end time (e.g., 09:45)
-            candlestickTable.toStream()
-                    .process(() -> new RecordTimestampOverrideProcessor())
-                    .to(outputTopic, Produced.with(Serdes.String(), Candlestick.serde()));
+            KStream<String, Candlestick> outputStream = candlestickTable.toStream()
+                    .process(() -> new RecordTimestampOverrideProcessor());
+            
+            // Add debug logging to verify the timestamp before writing to Kafka
+            outputStream.peek((key, value) -> {
+                ZonedDateTime outputTime = ZonedDateTime.ofInstant(
+                        Instant.ofEpochMilli(value.getWindowEndMillis()), 
+                        ZoneId.of("Asia/Kolkata"));
+                LOGGER.info("Writing 30m candle for {}: window {}. Timestamp: {}",
+                        key,
+                        value.getFormattedTimeWindow(),
+                        outputTime.format(DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm:ss")));
+            })
+            .to(outputTopic, Produced.with(Serdes.String(), Candlestick.serde()));
         } else {
             // For other timeframes, use standard processing
             candlestickTable.toStream()
