@@ -3,6 +3,7 @@ package com.kotsin.consumer.processor;
 import com.kotsin.consumer.config.KafkaConfig;
 import com.kotsin.consumer.model.Candlestick;
 import com.kotsin.consumer.model.TickData;
+import com.kotsin.consumer.util.NseTimestampExtractor;
 import org.apache.kafka.common.serialization.Serdes;
 import org.apache.kafka.streams.*;
 import org.apache.kafka.streams.kstream.*;
@@ -19,9 +20,9 @@ import java.util.Properties;
  * Production-ready Kafka Streams processor to aggregate raw tick data (or 1-minute candles)
  * into candlestick windows of various durations: 1m, 2m, 3m, 5m, 15m, and 30m.
  *
- * For the 30-minute window only, records are processed with a custom timestamp adjustment
- * so that for each day 09:15 AM IST becomes time zero, thus ensuring that the first window covers
- * 09:15–09:45, the next covers 09:45–10:15, and so on.
+ * For 30-minute candles only, a custom TimestampExtractor (NseTimestampExtractor) is used so that
+ * the effective event time is computed as the number of milliseconds since the NSE trading open (09:15 IST).
+ * This ensures that the 30-minute window [0, 30) corresponds to 09:15–09:45 IST, [30, 60) corresponds to 09:45–10:15, etc.
  */
 @Component
 public class CandlestickProcessor {
@@ -44,12 +45,14 @@ public class CandlestickProcessor {
         StreamsBuilder builder = new StreamsBuilder();
 
         if (windowSize == 1) {
+            // For 1-minute candles, process raw TickData.
             processTickData(builder, inputTopic, outputTopic);
+        } else if (windowSize == 30) {
+            // For 30-minute candles, use the custom NseTimestampExtractor for alignment.
+            processMultiMinuteCandlestickAligned(builder, inputTopic, outputTopic, windowSize, true);
         } else {
-            // For multi-minute windows:
-            // For 30-minute candles, use timestamp adjustment; for others, use raw timestamps.
-            boolean applyShift = (windowSize == 30);
-            processMultiMinuteCandlestickAligned(builder, inputTopic, outputTopic, windowSize, applyShift);
+            // For other multi-minute candles, use the raw event timestamp.
+            processMultiMinuteCandlestickAligned(builder, inputTopic, outputTopic, windowSize, false);
         }
 
         KafkaStreams streams = new KafkaStreams(builder.build(), props);
@@ -65,12 +68,10 @@ public class CandlestickProcessor {
         KStream<String, TickData> inputStream = builder.stream(
                 inputTopic, Consumed.with(Serdes.String(), TickData.serde())
         );
-
-        TimeWindows timeWindows = TimeWindows.ofSizeAndGrace(Duration.ofMinutes(1), Duration.ZERO);
-
+        TimeWindows windows = TimeWindows.ofSizeAndGrace(Duration.ofMinutes(1), Duration.ZERO);
         KTable<Windowed<String>, Candlestick> candlestickTable = inputStream
                 .groupBy((key, tick) -> tick.getCompanyName(), Grouped.with(Serdes.String(), TickData.serde()))
-                .windowedBy(timeWindows)
+                .windowedBy(windows)
                 .aggregate(
                         Candlestick::new,
                         (key, tick, candle) -> {
@@ -80,41 +81,43 @@ public class CandlestickProcessor {
                         Materialized.with(Serdes.String(), Candlestick.serde())
                 )
                 .suppress(Suppressed.untilWindowCloses(Suppressed.BufferConfig.unbounded()));
-
         candlestickTable.toStream()
-                .map((windowKey, candle) -> KeyValue.pair(windowKey.key(), candle))
+                .map((windowedKey, candle) -> KeyValue.pair(windowedKey.key(), candle))
                 .to(outputTopic, Produced.with(Serdes.String(), Candlestick.serde()));
     }
 
     /**
-     * Aggregates multi-minute candles (2m, 3m, 5m, 15m, 30m) from 1-minute candles.
-     * For 30-minute candles (i.e. when applyShift is true), records’ timestamps are adjusted
-     * such that each day’s 09:15 AM becomes time zero.
+     * Aggregates multi-minute candles (for 2m, 3m, 5m, 15m, and 30m).
+     * For the 30-minute case (applyAlignment = true), a custom TimestampExtractor is used.
      *
-     * @param builder    Kafka Streams builder.
-     * @param inputTopic Input topic (e.g. "1-min-candle").
-     * @param outputTopic Output topic (e.g. "30-min-candle", "5-min-candle", etc.).
-     * @param windowSize Candle duration in minutes.
-     * @param applyShift If true, adjust timestamps via DailyTimestampProcessor.
+     * @param builder         Kafka Streams builder.
+     * @param inputTopic      Input topic (typically "1-min-candle").
+     * @param outputTopic     Output topic (e.g., "30-min-candle", "5-min-candle", etc.).
+     * @param windowSize      Candle duration in minutes.
+     * @param applyAlignment  If true, the custom NseTimestampExtractor is used.
      */
     private void processMultiMinuteCandlestickAligned(StreamsBuilder builder,
                                                       String inputTopic,
                                                       String outputTopic,
                                                       int windowSize,
-                                                      boolean applyShift) {
-        KStream<String, Candlestick> inputStream = builder.stream(
-                inputTopic, Consumed.with(Serdes.String(), Candlestick.serde())
-        );
-
-        // Apply timestamp adjustment for 30-minute candles.
-        KStream<String, Candlestick> adjustedStream = applyShift
-                ? inputStream.process(() -> new DailyTimestampProcessor())
-                : inputStream;
-
-        // Define tumbling windows of the desired size.
+                                                      boolean applyAlignment) {
+        KStream<String, Candlestick> inputStream;
+        if (applyAlignment) {
+            // For 30-minute candles, apply the NSE timestamp alignment.
+            inputStream = builder.stream(
+                    inputTopic,
+                    Consumed.with(Serdes.String(), Candlestick.serde())
+                            .withTimestampExtractor(new NseTimestampExtractor())
+            );
+        } else {
+            // For other window sizes, use the default event timestamp.
+            inputStream = builder.stream(
+                    inputTopic,
+                    Consumed.with(Serdes.String(), Candlestick.serde())
+            );
+        }
         TimeWindows windows = TimeWindows.ofSizeAndGrace(Duration.ofMinutes(windowSize), Duration.ZERO);
-
-        KTable<Windowed<String>, Candlestick> candlestickTable = adjustedStream
+        KTable<Windowed<String>, Candlestick> candlestickTable = inputStream
                 .groupByKey(Grouped.with(Serdes.String(), Candlestick.serde()))
                 .windowedBy(windows)
                 .aggregate(
@@ -126,9 +129,8 @@ public class CandlestickProcessor {
                         Materialized.with(Serdes.String(), Candlestick.serde())
                 )
                 .suppress(Suppressed.untilWindowCloses(Suppressed.BufferConfig.unbounded()));
-
         candlestickTable.toStream()
-                .map((windowKey, candle) -> KeyValue.pair(windowKey.key(), candle))
+                .map((windowedKey, candle) -> KeyValue.pair(windowedKey.key(), candle))
                 .to(outputTopic, Produced.with(Serdes.String(), Candlestick.serde()));
     }
 }
