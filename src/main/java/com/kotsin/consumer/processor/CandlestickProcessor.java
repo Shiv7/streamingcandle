@@ -5,14 +5,17 @@ import com.kotsin.consumer.config.RecordTimestampOverrideProcessor;
 import com.kotsin.consumer.model.Candlestick;
 import com.kotsin.consumer.model.TickData;
 import com.kotsin.consumer.util.TickBuffer;
+import jakarta.annotation.PostConstruct;
 import org.apache.kafka.clients.producer.KafkaProducer;
 import org.apache.kafka.clients.producer.ProducerConfig;
 import org.apache.kafka.clients.producer.ProducerRecord;
 import org.apache.kafka.common.serialization.Serdes;
 import org.apache.kafka.common.serialization.StringSerializer;
+import org.apache.kafka.common.utils.Bytes;
 import org.apache.kafka.streams.*;
 import org.apache.kafka.streams.kstream.*;
 import org.apache.kafka.streams.kstream.Suppressed;
+import org.apache.kafka.streams.state.WindowStore;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Autowired;
@@ -119,9 +122,45 @@ public class CandlestickProcessor {
             }
         });
         
-        // Define proper topology for 1-minute candles
-        // We're now handling this manually through the tick buffer and direct producer
-        LOGGER.info("Configured 1-minute candles using buffered processing");
+        // IMPORTANT: Restore the original Kafka Streams processing pipeline
+        // This is needed to ensure data flows to the multi-minute candles
+        TimeWindows windows = TimeWindows.ofSizeWithNoGrace(Duration.ofMinutes(1))
+                .advanceBy(Duration.ofMinutes(1));
+        
+        // Group by company name, window, and aggregate ticks into candles
+        KTable<Windowed<String>, Candlestick> candlestickTable = inputStream
+                // Filter out any ticks outside trading hours
+                .filter((key, tick) -> isWithinTradingHours(tick))
+                .groupBy((key, tick) -> tick.getCompanyName(), Grouped.with(Serdes.String(), TickData.serde()))
+                .windowedBy(windows)
+                .aggregate(
+                        Candlestick::new,  // Initialize a new empty candle
+                        (key, tick, candle) -> {
+                            candle.update(tick);  // Update candle with tick data
+                            return candle;
+                        },
+                        Materialized.<String, Candlestick, WindowStore<Bytes, byte[]>>as("candlestick-store")
+                        .withKeySerde(Serdes.String())
+                        .withValueSerde(Candlestick.serde())
+                )
+                // Suppress intermediate updates until the window closes
+                .suppress(Suppressed.untilWindowCloses(Suppressed.BufferConfig.unbounded()));
+
+        // Stream the finalized candles to the output topic
+        candlestickTable.toStream()
+            .map((windowedKey, candle) -> {
+                // Add window boundary timestamps
+                candle.setWindowStartMillis(windowedKey.window().start());
+                candle.setWindowEndMillis(windowedKey.window().end());
+                
+                // Log candle details for debugging 
+                logCandleDetails(candle, 1);
+                
+                return KeyValue.pair(windowedKey.key(), candle);
+            })
+            .to(outputTopic, Produced.with(Serdes.String(), Candlestick.serde()));
+            
+        LOGGER.info("Configured 1-minute candles with both buffered processing and Kafka Streams pipeline");
     }
     
     /**
@@ -135,9 +174,10 @@ public class CandlestickProcessor {
         // Get or create metrics for this symbol
         CandleMetrics metrics = metricsMap.computeIfAbsent(symbol, k -> new CandleMetrics(k));
         
-        // Group ticks by minute for 1-minute candles
-        Map<Long, Candlestick> minuteCandles = new HashMap<>();
+        // Group ticks by minute for metrics tracking
+        Map<Long, Integer> ticksPerMinute = new HashMap<>();
         
+        // Track all ticks for metrics purposes only (actual processing is done via the Kafka Streams pipeline)
         for (TickData tick : ticks) {
             // Skip ticks outside trading hours
             if (!isWithinTradingHours(tick)) {
@@ -145,45 +185,30 @@ public class CandlestickProcessor {
                 continue;
             }
             
-            // Get window start time for this tick using the ExchangeTimestampExtractor logic
+            // Get window start time for this tick
             long windowStartTime = calculateWindowStartTime(tick, 1);
             
-            // Get or create candlestick for this minute
-            Candlestick candle = minuteCandles.computeIfAbsent(windowStartTime, k -> {
-                Candlestick newCandle = new Candlestick();
-                newCandle.setWindowStartMillis(windowStartTime);
-                newCandle.setWindowEndMillis(windowStartTime + 60_000); // +1 minute
-                return newCandle;
-            });
+            // Count ticks per minute for metrics
+            ticksPerMinute.compute(windowStartTime, (k, v) -> (v == null) ? 1 : v + 1);
             
-            // Update the candle with this tick
-            candle.update(tick);
+            // Update metrics
             metrics.incrementProcessedTicks();
         }
         
-        // Produce the completed candles to Kafka
-        if (!minuteCandles.isEmpty()) {
-            Properties props = new Properties();
-            props.put(ProducerConfig.BOOTSTRAP_SERVERS_CONFIG, kafkaConfig.getBootstrapServers());
-            props.put(ProducerConfig.KEY_SERIALIZER_CLASS_CONFIG, StringSerializer.class.getName());
-            props.put(ProducerConfig.VALUE_SERIALIZER_CLASS_CONFIG, Candlestick.CandlestickSerializer.class.getName());
+        // Log metrics about tick distribution
+        if (!ticksPerMinute.isEmpty() && LOGGER.isDebugEnabled()) {
+            StringBuilder sb = new StringBuilder();
+            sb.append("Tick distribution for ").append(symbol).append(":\n");
             
-            try (KafkaProducer<String, Candlestick> producer = new KafkaProducer<>(props)) {
-                for (Map.Entry<Long, Candlestick> entry : minuteCandles.entrySet()) {
-                    Candlestick candle = entry.getValue();
-                    ProducerRecord<String, Candlestick> record = new ProducerRecord<>(
-                            "1-minute-candle", // This should match your output topic config
-                            symbol,
-                            candle
-                    );
-                    producer.send(record);
-                    
-                    // Log candle details for debugging
-                    logCandleDetails(candle, 1);
-                    metrics.incrementProducedCandles();
-                }
-                producer.flush();
-            }
+            ticksPerMinute.forEach((windowStart, count) -> {
+                ZonedDateTime windowTime = ZonedDateTime.ofInstant(
+                        Instant.ofEpochMilli(windowStart), 
+                        ZoneId.of("Asia/Kolkata"));
+                sb.append("  ").append(windowTime.format(DateTimeFormatter.ofPattern("HH:mm:ss")))
+                  .append(": ").append(count).append(" ticks\n");
+            });
+            
+            LOGGER.debug(sb.toString());
         }
     }
     
@@ -319,7 +344,7 @@ public class CandlestickProcessor {
 
     /**
      * Aggregates multi-minute candles (2m, 3m, 5m, 15m, 30m) from 1-minute candles.
-     *
+     * 
      * @param builder      Kafka Streams builder.
      * @param inputTopic   Topic with 1-minute candles.
      * @param outputTopic  Topic for the aggregated candles (e.g., "30-min-candle").
@@ -329,57 +354,65 @@ public class CandlestickProcessor {
                                                       String inputTopic,
                                                       String outputTopic,
                                                       int windowSize) {
+        LOGGER.info("Configuring multi-minute candles for {} minutes", windowSize);
+        
         // Create input stream from the 1-minute candle topic
         KStream<String, Candlestick> inputStream = builder.stream(
                 inputTopic,
                 Consumed.with(Serdes.String(), Candlestick.serde())
-                        .withTimestampExtractor(new ExchangeTimestampExtractor(windowSize))
         );
         
-        // Define tumbling windows of the target size
+        // Create a window that aligns with trading hours
         TimeWindows windows = TimeWindows.ofSizeWithNoGrace(Duration.ofMinutes(windowSize))
-                .advanceBy(Duration.ofMinutes(windowSize));
+                .advanceBy(Duration.ofMinutes(1)); // Advance by 1 minute for proper alignment
         
-        // Log window configuration
-        LOGGER.info("Configured {}-minute windows with exchange-specific alignment", windowSize);
-        
-        // Group by key (company name), window, and aggregate 1-minute candles into larger timeframe candles
-        KTable<Windowed<String>, Candlestick> candlestickTable = inputStream
-                .peek((key, value) -> {
-                    // Get or create metrics for this symbol
-                    CandleMetrics metrics = metricsMap.computeIfAbsent(key, k -> new CandleMetrics(key));
-                    metrics.incrementProcessedCandles();
-                })
+        // Group by symbol and window, then aggregate candles
+        KTable<Windowed<String>, Candlestick> aggregatedCandles = inputStream
                 .groupByKey(Grouped.with(Serdes.String(), Candlestick.serde()))
                 .windowedBy(windows)
                 .aggregate(
-                        Candlestick::new,  // Initialize a new empty candle
-                        (key, newCandle, aggCandle) -> {
-                            aggCandle.updateCandle(newCandle);  // Merge the new candle into aggregate
+                        Candlestick::new,
+                        (key, candle, aggCandle) -> {
+                            // For the first candle in a window, initialize with its values
+                            if (aggCandle.getOpen() == 0) {
+                                aggCandle.setOpen(candle.getOpen());
+                                aggCandle.setLow(candle.getLow());
+                                aggCandle.setHigh(candle.getHigh());
+                                aggCandle.setVolume(0); // We'll add the volume below
+                            }
+                            
+                            // Update the aggregate candle
+                            aggCandle.setClose(candle.getClose());
+                            aggCandle.setLow(Math.min(aggCandle.getLow(), candle.getLow()));
+                            aggCandle.setHigh(Math.max(aggCandle.getHigh(), candle.getHigh()));
+                            aggCandle.setVolume(aggCandle.getVolume() + candle.getVolume());
+                            aggCandle.setCompanyName(candle.getCompanyName());
+                            aggCandle.setExchange(candle.getExchange());
+                            aggCandle.setScripCode(candle.getScripCode());
+                            
                             return aggCandle;
                         },
-                        Materialized.with(Serdes.String(), Candlestick.serde())
+                        Materialized.<String, Candlestick, WindowStore<Bytes, byte[]>>as("candle-store-" + windowSize + "m")
+                        .withKeySerde(Serdes.String())
+                        .withValueSerde(Candlestick.serde())
                 )
-                // Suppress intermediate updates until the window closes
                 .suppress(Suppressed.untilWindowCloses(Suppressed.BufferConfig.unbounded()));
-
+                
         // Stream the finalized candles to the output topic
-        candlestickTable.toStream()
+        aggregatedCandles.toStream()
             .map((windowedKey, candle) -> {
                 // Add window boundary timestamps
                 candle.setWindowStartMillis(windowedKey.window().start());
                 candle.setWindowEndMillis(windowedKey.window().end());
                 
-                // Get metrics for this symbol
-                CandleMetrics metrics = metricsMap.computeIfAbsent(windowedKey.key(), k -> new CandleMetrics(k));
-                metrics.incrementProducedCandles();
-                
-                // Log detailed candle information
+                // Log candle details for debugging
                 logCandleDetails(candle, windowSize);
                 
                 return KeyValue.pair(windowedKey.key(), candle);
             })
             .to(outputTopic, Produced.with(Serdes.String(), Candlestick.serde()));
+            
+        LOGGER.info("Completed configuration for {}-minute candles", windowSize);
     }
     
     /**
@@ -429,6 +462,31 @@ public class CandlestickProcessor {
                 ZonedDateTime.ofInstant(Instant.ofEpochMilli(lastUpdateTime), ZoneId.of("Asia/Kolkata"))
                     .format(DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm:ss"))
             );
+        }
+    }
+
+    /**
+     * Main method to start the Kafka Streams topology for all timeframes
+     */
+    @PostConstruct
+    public void start() {
+        try {
+            LOGGER.info("Starting Candlestick Processor with bootstrap servers: {}", kafkaConfig.getBootstrapServers());
+            
+            // Process 1-minute candles from tick data
+            process("candlestick-app-1minute", "market-data", "1-minute-candle", 1);
+            
+            // Process multi-minute candles from 1-minute candles
+            process("candlestick-app-2minute", "1-minute-candle", "2-min-candle", 2);
+            process("candlestick-app-3minute", "1-minute-candle", "3-min-candle", 3);
+            process("candlestick-app-5minute", "1-minute-candle", "5-min-candle", 5);
+            process("candlestick-app-15minute", "1-minute-candle", "15-min-candle", 15);
+            process("candlestick-app-30minute", "1-minute-candle", "30-min-candle", 30);
+            
+            LOGGER.info("All Candlestick Processors started successfully");
+            
+        } catch (Exception e) {
+            LOGGER.error("Error starting Candlestick Processors", e);
         }
     }
 }
