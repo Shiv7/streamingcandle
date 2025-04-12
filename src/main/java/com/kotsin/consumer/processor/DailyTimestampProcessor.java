@@ -4,6 +4,8 @@ import com.kotsin.consumer.model.Candlestick;
 import org.apache.kafka.streams.processor.api.Processor;
 import org.apache.kafka.streams.processor.api.ProcessorContext;
 import org.apache.kafka.streams.processor.api.Record;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 import java.time.Instant;
 import java.time.ZoneId;
@@ -12,6 +14,7 @@ import java.time.ZonedDateTime;
 public class DailyTimestampProcessor implements Processor<String, Candlestick, String, Candlestick> {
 
     private ProcessorContext<String, Candlestick> context;
+    private static final Logger LOGGER = LoggerFactory.getLogger(DailyTimestampProcessor.class);
 
     @Override
     public void init(ProcessorContext<String, Candlestick> context) {
@@ -21,25 +24,37 @@ public class DailyTimestampProcessor implements Processor<String, Candlestick, S
     @Override
     public void process(Record<String, Candlestick> record) {
         if (record.value() == null) {
+            LOGGER.warn("Received null value for key: {}", record.key());
             return;
         }
         long originalTs = record.timestamp();
-        // Convert the record's timestamp into Asia/Kolkata time
+
+        // Convert the record's timestamp to Asia/Kolkata time.
         ZonedDateTime recordTime = ZonedDateTime.ofInstant(Instant.ofEpochMilli(originalTs), ZoneId.of("Asia/Kolkata"));
-        // Compute that day's 09:15 AM (if the record time is before 9:15, this will be later than the record)
-        ZonedDateTime nineFifteen = recordTime.withHour(9).withMinute(15).withSecond(0).withNano(0);
-        long shift = nineFifteen.toInstant().toEpochMilli();
+        // Initially assume trading open is at 09:15 on the same day.
+        ZonedDateTime tradingOpen = recordTime.withHour(9).withMinute(15).withSecond(0).withNano(0);
+        boolean usedPreviousDay = false;
+        // If record is before 09:15, assume it belongs to the previous trading day.
+        if (recordTime.isBefore(tradingOpen)) {
+            tradingOpen = tradingOpen.minusDays(1);
+            usedPreviousDay = true;
+        }
+        long shift = tradingOpen.toInstant().toEpochMilli();
         long newTs = originalTs - shift;
-        // Ensure the new timestamp is not negative.
+        // Ensure new timestamp is non-negative.
         if (newTs < 0) {
+            LOGGER.warn("Adjusted timestamp is negative; clamping to 0. Original timestamp: {}, shift: {}, computed newTs: {}",
+                    originalTs, shift, newTs);
             newTs = 0;
         }
-        // Forward the record with the adjusted timestamp.
+        LOGGER.debug("Record key {}: originalTs={}, recordTime={}, tradingOpen={} (usedPreviousDay={}), newTs={}",
+                record.key(), originalTs, recordTime, tradingOpen, usedPreviousDay, newTs);
+        // Forward the record with the new (adjusted) timestamp.
         context.forward(record.withTimestamp(newTs));
     }
 
     @Override
     public void close() {
-        // No cleanup required.
+        // No cleanup necessary.
     }
 }
