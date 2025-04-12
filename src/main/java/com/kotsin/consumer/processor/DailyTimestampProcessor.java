@@ -9,8 +9,7 @@ import java.time.Instant;
 import java.time.ZoneId;
 import java.time.ZonedDateTime;
 
-public class DailyTimestampProcessor
-        implements Processor<String, Candlestick, String, Candlestick> {
+public class DailyTimestampProcessor implements Processor<String, Candlestick, String, Candlestick> {
 
     private ProcessorContext<String, Candlestick> context;
 
@@ -25,13 +24,13 @@ public class DailyTimestampProcessor
             return;
         }
         long originalTs = record.timestamp();
-        // Convert to Asia/Kolkata time
+        // Convert the event timestamp to Asia/Kolkata time
         ZonedDateTime recordTime = ZonedDateTime.ofInstant(Instant.ofEpochMilli(originalTs), ZoneId.of("Asia/Kolkata"));
         // Compute that day’s 09:15 AM
         ZonedDateTime nineFifteen = recordTime.withHour(9).withMinute(15).withSecond(0).withNano(0);
         long shift = nineFifteen.toInstant().toEpochMilli();
         long newTs = originalTs - shift;
-        // Forward the record with the adjusted timestamp (using newTs)
+        // Forward record with the adjusted timestamp
         context.forward(record.withTimestamp(newTs));
     }
 
