@@ -48,57 +48,90 @@ public class ExchangeTimestampExtractor implements TimestampExtractor {
 
         // Convert timestamp to India time zone (IST)
         ZonedDateTime recordTime = ZonedDateTime.ofInstant(Instant.ofEpochMilli(rawTs), INDIA_ZONE);
+        LOGGER.debug("Processing record with timestamp: {} IST", recordTime.format(TIME_FORMAT));
         
-        // Calculate minutes elapsed based on exchange type
-        int minutesElapsed;
-        ZonedDateTime tradingOpen;
-        
+        // Calculate appropriate window based on exchange type
         if ("N".equals(candle.getExchange())) {
             // NSE (National Stock Exchange) - Trading starts at 09:15
-            // Calculate minutes elapsed since 09:15
-            minutesElapsed = ((recordTime.getHour() - 9) * 60 + (recordTime.getMinute() - 15));
-            tradingOpen = recordTime.withHour(9).withMinute(15).withSecond(0).withNano(0);
+            return calculateNseWindow(recordTime);
         } else {
             // MCX and others - Trading starts at 09:00
-            // Calculate minutes elapsed since 09:00
-            minutesElapsed = ((recordTime.getHour() - 9) * 60 + recordTime.getMinute());
-            tradingOpen = recordTime.withHour(9).withMinute(0).withSecond(0).withNano(0);
+            return calculateMcxWindow(recordTime);
         }
+    }
+    
+    /**
+     * Calculates the appropriate window timestamp for NSE data (trading starts at 09:15)
+     */
+    private long calculateNseWindow(ZonedDateTime recordTime) {
+        // Get today's trading open (09:15)
+        ZonedDateTime tradingOpen = recordTime.withHour(9).withMinute(15).withSecond(0).withNano(0);
         
-        // Handle times before market open (use previous day)
-        if (minutesElapsed < 0) {
-            // For next day early morning records, use previous day's trading session
+        // If record is before today's trading open, we need to use previous trading day
+        if (recordTime.isBefore(tradingOpen)) {
             tradingOpen = tradingOpen.minusDays(1);
-            
-            if ("N".equals(candle.getExchange())) {
-                // Recalculate for NSE, adding 24 hours worth of minutes
-                minutesElapsed = ((recordTime.getHour() + 24 - 9) * 60 + (recordTime.getMinute() - 15));
-            } else {
-                // Recalculate for MCX, adding 24 hours worth of minutes
-                minutesElapsed = ((recordTime.getHour() + 24 - 9) * 60 + recordTime.getMinute());
-            }
-            
-            LOGGER.debug("Record time {} is before today's trading open, using previous day", 
+            LOGGER.debug("Record time {} is before today's trading open, using previous day's 09:15", 
                     recordTime.format(TIME_FORMAT));
         }
         
-        // Determine which window this belongs to
-        int windowIndex = (int) (minutesElapsed / windowSizeMinutes);
-        
-        // Calculate window start time directly from trading open time
-        ZonedDateTime windowStart = tradingOpen.plusMinutes(windowIndex * windowSizeMinutes);
-
-        if (LOGGER.isDebugEnabled()) {
-            ZonedDateTime windowEnd = windowStart.plusMinutes(windowSizeMinutes);
-            LOGGER.debug("Exchange: {}, Record time: {}, Window: {}-{}, Size: {}m, Minutes elapsed: {}", 
-                    candle.getExchange(),
-                    recordTime.format(TIME_FORMAT),
-                    windowStart.format(TIME_FORMAT), 
-                    windowEnd.format(TIME_FORMAT),
-                    windowSizeMinutes,
-                    minutesElapsed);
+        // Ensure we never create windows before trading open
+        // This prevents windows like 09:11-09:14 which should not exist for NSE
+        if (recordTime.isBefore(tradingOpen)) {
+            // If the record is before trading opens, assign it to the first window of the day
+            LOGGER.warn("Record time {} is before NSE trading hours (09:15). Assigning to first window.", 
+                    recordTime.format(TIME_FORMAT));
+            return tradingOpen.toInstant().toEpochMilli();
         }
-
+        
+        // Calculate minutes elapsed since 09:15
+        int minutesElapsed = ((recordTime.getHour() - 9) * 60 + (recordTime.getMinute() - 15));
+        
+        // Calculate window index and start time
+        int windowIndex = Math.max(0, minutesElapsed / windowSizeMinutes);
+        ZonedDateTime windowStart = tradingOpen.plusMinutes(windowIndex * windowSizeMinutes);
+        ZonedDateTime windowEnd = windowStart.plusMinutes(windowSizeMinutes);
+        
+        LOGGER.debug("NSE record: {}, Trading open: {}, Window: {}-{}, Size: {}m, Minutes elapsed: {}", 
+                recordTime.format(TIME_FORMAT),
+                tradingOpen.format(TIME_FORMAT),
+                windowStart.format(TIME_FORMAT), 
+                windowEnd.format(TIME_FORMAT),
+                windowSizeMinutes,
+                minutesElapsed);
+        
+        return windowStart.toInstant().toEpochMilli();
+    }
+    
+    /**
+     * Calculates the appropriate window timestamp for MCX data (trading starts at 09:00)
+     */
+    private long calculateMcxWindow(ZonedDateTime recordTime) {
+        // Get today's trading open (09:00)
+        ZonedDateTime tradingOpen = recordTime.withHour(9).withMinute(0).withSecond(0).withNano(0);
+        
+        // If record is before today's trading open, we need to use previous trading day
+        if (recordTime.isBefore(tradingOpen)) {
+            tradingOpen = tradingOpen.minusDays(1);
+            LOGGER.debug("Record time {} is before today's trading open, using previous day's 09:00", 
+                    recordTime.format(TIME_FORMAT));
+        }
+        
+        // Calculate minutes elapsed since 09:00
+        int minutesElapsed = ((recordTime.getHour() - 9) * 60 + recordTime.getMinute());
+        
+        // Calculate window index and start time
+        int windowIndex = Math.max(0, minutesElapsed / windowSizeMinutes);
+        ZonedDateTime windowStart = tradingOpen.plusMinutes(windowIndex * windowSizeMinutes);
+        ZonedDateTime windowEnd = windowStart.plusMinutes(windowSizeMinutes);
+        
+        LOGGER.debug("MCX record: {}, Trading open: {}, Window: {}-{}, Size: {}m, Minutes elapsed: {}", 
+                recordTime.format(TIME_FORMAT),
+                tradingOpen.format(TIME_FORMAT),
+                windowStart.format(TIME_FORMAT), 
+                windowEnd.format(TIME_FORMAT),
+                windowSizeMinutes,
+                minutesElapsed);
+        
         return windowStart.toInstant().toEpochMilli();
     }
 }
