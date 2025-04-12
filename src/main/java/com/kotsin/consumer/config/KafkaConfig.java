@@ -36,8 +36,6 @@ public class KafkaConfig {
         props.put(StreamsConfig.COMMIT_INTERVAL_MS_CONFIG, 1000);
         // Disable caching so records are processed & forwarded promptly
         props.put(StreamsConfig.CACHE_MAX_BYTES_BUFFERING_CONFIG, 0);
-        props.put(StreamsConfig.DEFAULT_TIMESTAMP_EXTRACTOR_CLASS_CONFIG,
-                KafkaRecordTimestampExtractor.class);
-        return props;
+         return props;
     }
 }
