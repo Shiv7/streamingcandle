@@ -87,11 +87,15 @@ public class TickData {
     public void parseTimestamp() {
         if (tickDt != null && tickDt.startsWith("/Date(")) {
             try {
+                // Extract the milliseconds value from the "/Date(1234567890000)/" format
                 this.timestamp = Long.parseLong(tickDt.replaceAll("[^0-9]", ""));
             } catch (NumberFormatException e) {
-                this.timestamp = 0;
-                System.err.println("Failed to parse TickDt: " + tickDt);
+                this.timestamp = System.currentTimeMillis();
+                System.err.println("Failed to parse TickDt: " + tickDt + ". Using current time instead.");
             }
+        } else if (this.timestamp == 0) {
+            // Use current time if no timestamp provided
+            this.timestamp = System.currentTimeMillis();
         }
     }
 
