@@ -55,9 +55,7 @@ public class KafkaConfig {
         
         // Disable caching so records are processed & forwarded promptly
         props.put(StreamsConfig.CACHE_MAX_BYTES_BUFFERING_CONFIG, 0);
-        
-        // CRITICAL: State store and changelog configurations to prevent OffsetOutOfRangeException
-        // Adjust retention period for changelog topics (adjust based on your needs - e.g., 1 day)
+
 
         // Set state directory for persistent state stores
         props.put(StreamsConfig.STATE_DIR_CONFIG, "/tmp/kafka-streams-state");
