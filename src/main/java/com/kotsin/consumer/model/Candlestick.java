@@ -24,6 +24,11 @@ public class Candlestick {
     private String companyName;
     private String scripCode;
 
+    // Optional: fields to hold window boundaries (in epoch millis)
+    private long windowStartMillis;
+    private long windowEndMillis;
+
+
     public Candlestick() {
         this.open = 0;
         this.high = Double.MIN_VALUE;

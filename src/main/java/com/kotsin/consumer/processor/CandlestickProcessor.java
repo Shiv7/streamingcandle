@@ -1,6 +1,7 @@
 package com.kotsin.consumer.processor;
 
 import com.kotsin.consumer.config.KafkaConfig;
+import com.kotsin.consumer.config.RecordTimestampOverrideProcessor;
 import com.kotsin.consumer.model.Candlestick;
 import com.kotsin.consumer.model.TickData;
 import org.apache.kafka.common.serialization.Serdes;
@@ -16,12 +17,11 @@ import java.time.Duration;
 import java.util.Properties;
 
 /**
- * Production-ready Kafka Streams processor to aggregate raw tick data (or 1-minute candles)
- * into candlestick windows of various durations: 1m, 2m, 3m, 5m, 15m, and 30m.
- *
- * For 30-minute candles only, a custom TimestampExtractor (NseTimestampExtractor) is used so that
- * the effective event time is computed as the number of milliseconds since the NSE trading open (09:15 IST).
- * This ensures that the 30-minute window [0, 30) corresponds to 09:15–09:45 IST, [30, 60) corresponds to 09:45–10:15, etc.
+ * Production-ready Kafka Streams processor that aggregates candlestick data for various durations:
+ * 1m, 2m, 3m, 5m, 15m, and 30m. For the 30-minute window, a custom NseTimestampExtractor is applied
+ * so that the effective event time is computed as milliseconds since 09:15 IST. Then, the final record's
+ * timestamp is overridden (using RecordTimestampOverrideProcessor) with the window's end time (e.g. 09:45)
+ * so that the aggregated candle represents the proper window.
  */
 @Component
 public class CandlestickProcessor {
@@ -32,26 +32,23 @@ public class CandlestickProcessor {
     private KafkaConfig kafkaConfig;
 
     /**
-     * Entry method to build and start a Kafka Streams pipeline for candlesticks.
+     * Starts the processing pipeline.
      *
      * @param appId       Kafka application ID.
-     * @param inputTopic  Input Kafka topic.
-     * @param outputTopic Output Kafka topic.
-     * @param windowSize  Candle duration in minutes (e.g. 1, 2, 3, 5, 15, 30).
+     * @param inputTopic  Input topic.
+     * @param outputTopic Output topic.
+     * @param windowSize  Candle duration in minutes.
      */
     public void process(String appId, String inputTopic, String outputTopic, int windowSize) {
         Properties props = kafkaConfig.getStreamProperties(appId);
         StreamsBuilder builder = new StreamsBuilder();
 
         if (windowSize == 1) {
-            // For 1-minute candles, process raw TickData.
             processTickData(builder, inputTopic, outputTopic);
-        } else if (windowSize == 30) {
-            // For 30-minute candles, use the custom NseTimestampExtractor for alignment.
-            processMultiMinuteCandlestickAligned(builder, inputTopic, outputTopic, windowSize, true);
         } else {
-            // For other multi-minute candles, use the raw event timestamp.
-            processMultiMinuteCandlestickAligned(builder, inputTopic, outputTopic, windowSize, false);
+            // For 30-minute candles, apply alignment via custom TimestampExtractor.
+            boolean applyAlignment = (windowSize == 30);
+            processMultiMinuteCandlestickAligned(builder, inputTopic, outputTopic, windowSize, applyAlignment);
         }
 
         KafkaStreams streams = new KafkaStreams(builder.build(), props);
@@ -86,14 +83,13 @@ public class CandlestickProcessor {
     }
 
     /**
-     * Aggregates multi-minute candles (for 2m, 3m, 5m, 15m, and 30m).
-     * For the 30-minute case (applyAlignment = true), a custom TimestampExtractor is used.
+     * Aggregates multi-minute candles (2m, 3m, 5m, 15m, 30m) from 1-minute candles.
      *
      * @param builder         Kafka Streams builder.
-     * @param inputTopic      Input topic (typically "1-min-candle").
-     * @param outputTopic     Output topic (e.g., "30-min-candle", "5-min-candle", etc.).
+     * @param inputTopic      Input topic (e.g. "1-min-candle").
+     * @param outputTopic     Output topic (e.g. "30-min-candle").
      * @param windowSize      Candle duration in minutes.
-     * @param applyAlignment  If true, the custom NseTimestampExtractor is used.
+     * @param applyAlignment  If true, use NseTimestampExtractor (for the 30-minute case).
      */
     private void processMultiMinuteCandlestickAligned(StreamsBuilder builder,
                                                       String inputTopic,
@@ -102,14 +98,12 @@ public class CandlestickProcessor {
                                                       boolean applyAlignment) {
         KStream<String, Candlestick> inputStream;
         if (applyAlignment) {
-            // For 30-minute candles, apply the NSE timestamp alignment.
             inputStream = builder.stream(
                     inputTopic,
                     Consumed.with(Serdes.String(), Candlestick.serde())
-                            .withTimestampExtractor(new NseTimestampExtractor())
+                            .withTimestampExtractor(new com.kotsin.consumer.processor.NseTimestampExtractor())
             );
         } else {
-            // For other window sizes, use the default event timestamp.
             inputStream = builder.stream(
                     inputTopic,
                     Consumed.with(Serdes.String(), Candlestick.serde())
@@ -128,8 +122,16 @@ public class CandlestickProcessor {
                         Materialized.with(Serdes.String(), Candlestick.serde())
                 )
                 .suppress(Suppressed.untilWindowCloses(Suppressed.BufferConfig.unbounded()));
-        candlestickTable.toStream()
-                .map((windowedKey, candle) -> KeyValue.pair(windowedKey.key(), candle))
-                .to(outputTopic, Produced.with(Serdes.String(), Candlestick.serde()));
+
+        if (applyAlignment) {
+            // For the 30-minute case, override the record's timestamp with the window's end.
+            candlestickTable.toStream()
+                    .process(() -> new RecordTimestampOverrideProcessor())
+                    .to(outputTopic, Produced.with(Serdes.String(), Candlestick.serde()));
+        } else {
+            candlestickTable.toStream()
+                    .map((windowedKey, candle) -> KeyValue.pair(windowedKey.key(), candle))
+                    .to(outputTopic, Produced.with(Serdes.String(), Candlestick.serde()));
+        }
     }
 }
