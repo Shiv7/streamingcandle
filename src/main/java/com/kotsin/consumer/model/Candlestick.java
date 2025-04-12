@@ -47,6 +47,10 @@ public class Candlestick {
     // Window timing information (in epoch millis)
     private long windowStartMillis;
     private long windowEndMillis;
+    
+    // Human-readable window timestamps
+    private String humanReadableStartTime;
+    private String humanReadableEndTime;
 
     /**
      * Creates a new empty candlestick with default values.
@@ -136,6 +140,46 @@ public class Candlestick {
         ZonedDateTime end = ZonedDateTime.ofInstant(Instant.ofEpochMilli(windowEndMillis), istZone);
         
         return start.format(formatter) + "-" + end.format(formatter);
+    }
+    
+    /**
+     * Updates the human-readable time representations based on window millisecond values.
+     * Should be called whenever windowStartMillis or windowEndMillis are updated.
+     */
+    public void updateHumanReadableTimes() {
+        if (windowStartMillis > 0) {
+            ZonedDateTime start = ZonedDateTime.ofInstant(
+                    Instant.ofEpochMilli(windowStartMillis), 
+                    ZoneId.of("Asia/Kolkata"));
+            this.humanReadableStartTime = start.format(DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm:ss.SSS"));
+        }
+        
+        if (windowEndMillis > 0) {
+            ZonedDateTime end = ZonedDateTime.ofInstant(
+                    Instant.ofEpochMilli(windowEndMillis), 
+                    ZoneId.of("Asia/Kolkata"));
+            this.humanReadableEndTime = end.format(DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm:ss.SSS"));
+        }
+    }
+    
+    /**
+     * Sets the window start time in milliseconds and updates the human-readable representation.
+     * 
+     * @param windowStartMillis The window start time in epoch milliseconds
+     */
+    public void setWindowStartMillis(long windowStartMillis) {
+        this.windowStartMillis = windowStartMillis;
+        updateHumanReadableTimes();
+    }
+    
+    /**
+     * Sets the window end time in milliseconds and updates the human-readable representation.
+     * 
+     * @param windowEndMillis The window end time in epoch milliseconds
+     */
+    public void setWindowEndMillis(long windowEndMillis) {
+        this.windowEndMillis = windowEndMillis;
+        updateHumanReadableTimes();
     }
 
     /**
