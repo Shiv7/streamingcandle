@@ -12,24 +12,19 @@ import org.apache.kafka.clients.producer.ProducerRecord;
 import org.apache.kafka.common.serialization.Serdes;
 import org.apache.kafka.common.serialization.StringSerializer;
 import org.apache.kafka.common.utils.Bytes;
-import org.apache.kafka.streams.*;
+import org.apache.kafka.streams.KafkaStreams;
+import org.apache.kafka.streams.KeyValue;
+import org.apache.kafka.streams.StreamsBuilder;
 import org.apache.kafka.streams.kstream.*;
-import org.apache.kafka.streams.kstream.Suppressed;
 import org.apache.kafka.streams.state.WindowStore;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.stereotype.Component;
 
-import java.time.Duration;
-import java.time.Instant;
-import java.time.ZoneId;
-import java.time.ZonedDateTime;
+import java.time.*;
 import java.time.format.DateTimeFormatter;
-import java.util.HashMap;
-import java.util.List;
-import java.util.Map;
-import java.util.Properties;
+import java.util.*;
 
 /**
  * Production-ready Kafka Streams processor that aggregates market data into candlesticks of various durations.
@@ -113,7 +108,7 @@ public class CandlestickProcessor {
         );
         
         // Initialize tick buffer for delayed tick handling
-        tickBuffer = new TickBuffer(TICK_BUFFER_DELAY_MS, (symbol, ticks) -> processBufferedTicks(symbol, ticks));
+        tickBuffer = new TickBuffer(TICK_BUFFER_DELAY_MS, this::processBufferedTicks);
         
         // Send ticks to buffer before processing
         inputStream.foreach((key, value) -> {

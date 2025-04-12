@@ -17,7 +17,6 @@ import java.util.concurrent.CopyOnWriteArraySet;
 import java.util.concurrent.Executors;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.TimeUnit;
-import java.util.concurrent.atomic.AtomicLong;
 import java.util.function.BiConsumer;
 
 /**
@@ -70,7 +69,7 @@ public class TickBuffer {
         }
         
         String symbol = tick.getCompanyName();
-        long tickTime = tick.getEpochTimestampMillis();
+        long tickTime = tick.getTime();
         
         // Update metrics
         ticksPerSymbolCount.compute(symbol, (k, v) -> (v == null) ? 1 : v + 1);
@@ -88,13 +87,13 @@ public class TickBuffer {
         // it's included in the correct window
         ZonedDateTime tickDateTime = ZonedDateTime.ofInstant(
                 Instant.ofEpochMilli(tickTime),
-                ZoneId.of("Asia/Kolkata")
+                INDIA_ZONE
         );
         
         if (isBoundaryTick(tickDateTime)) {
             LOGGER.debug("Processing boundary tick immediately: {} at {}", 
                     symbol, 
-                    tickDateTime.format(DateTimeFormatter.ofPattern("HH:mm:ss.SSS")));
+                    tickDateTime.format(TIME_FORMAT));
             processTicks(symbol);
             return;
         }
@@ -133,19 +132,19 @@ public class TickBuffer {
         }
         
         // Sort ticks by timestamp to ensure correct order
-        ticks.sort(Comparator.comparingLong(TickData::getEpochTimestampMillis));
+        ticks.sort(Comparator.comparingLong(TickData::getTime));
         
         // Update last processed time
         if (!ticks.isEmpty()) {
-            lastProcessedTickTime.put(symbol, ticks.get(ticks.size() - 1).getEpochTimestampMillis());
+            lastProcessedTickTime.put(symbol, ticks.get(ticks.size() - 1).getTime());
         }
         
         // Log tick count and time range
         if (LOGGER.isDebugEnabled() && !ticks.isEmpty()) {
             ZonedDateTime firstTickTime = ZonedDateTime.ofInstant(
-                    Instant.ofEpochMilli(ticks.get(0).getEpochTimestampMillis()), INDIA_ZONE);
+                    Instant.ofEpochMilli(ticks.get(0).getTime()), INDIA_ZONE);
             ZonedDateTime lastTickTime = ZonedDateTime.ofInstant(
-                    Instant.ofEpochMilli(ticks.get(ticks.size() - 1).getEpochTimestampMillis()), INDIA_ZONE);
+                    Instant.ofEpochMilli(ticks.get(ticks.size() - 1).getTime()), INDIA_ZONE);
             
             LOGGER.debug("Processing {} ticks for {}, time range: {} to {}", 
                     ticks.size(), symbol, 
@@ -157,7 +156,7 @@ public class TickBuffer {
         boolean hasBoundaryTick = ticks.stream()
                 .anyMatch(tick -> {
                     ZonedDateTime tickTime = ZonedDateTime.ofInstant(
-                            Instant.ofEpochMilli(tick.getEpochTimestampMillis()), 
+                            Instant.ofEpochMilli(tick.getTime()), 
                             INDIA_ZONE);
                     return tickTime.getSecond() >= 59;
                 });
