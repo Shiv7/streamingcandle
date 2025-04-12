@@ -102,7 +102,16 @@ public class CandlestickProcessor {
         
         // Stream the finalized candles to the output topic
         candlestickTable.toStream()
-                .map((windowedKey, candle) -> KeyValue.pair(windowedKey.key(), candle))
+                .map((windowedKey, candle) -> {
+                    // Add window boundary timestamps to all 1-minute candles
+                    candle.setWindowStartMillis(windowedKey.window().start());
+                    candle.setWindowEndMillis(windowedKey.window().end());
+                    LOGGER.debug("1m candle: {} window: {}-{}", 
+                            windowedKey.key(),
+                            windowedKey.window().start(), 
+                            windowedKey.window().end());
+                    return KeyValue.pair(windowedKey.key(), candle);
+                })
                 .to(outputTopic, Produced.with(Serdes.String(), Candlestick.serde()));
     }
 
@@ -173,9 +182,22 @@ public class CandlestickProcessor {
                 })
                 .to(outputTopic, Produced.with(Serdes.String(), Candlestick.serde()));
         } else {
-            // For other timeframes, use standard processing
+            // For other timeframes (2m, 3m, 5m, 15m), use standard processing
+            // but still include window boundary timestamps
             candlestickTable.toStream()
-                    .map((windowedKey, candle) -> KeyValue.pair(windowedKey.key(), candle))
+                    .map((windowedKey, candle) -> {
+                        // Add window boundary timestamps to all multi-minute candles
+                        candle.setWindowStartMillis(windowedKey.window().start());
+                        candle.setWindowEndMillis(windowedKey.window().end());
+                        
+                        LOGGER.debug("{}m candle: {} window: {}-{}", 
+                                windowSize,
+                                windowedKey.key(),
+                                windowedKey.window().start(), 
+                                windowedKey.window().end());
+                                
+                        return KeyValue.pair(windowedKey.key(), candle);
+                    })
                     .to(outputTopic, Produced.with(Serdes.String(), Candlestick.serde()));
         }
     }
