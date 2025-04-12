@@ -1,5 +1,6 @@
 package com.kotsin.consumer.model;
 
+import com.fasterxml.jackson.annotation.JsonIgnore;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import lombok.Data;
 import org.apache.kafka.common.serialization.Deserializer;
@@ -122,6 +123,7 @@ public class Candlestick {
      * 
      * @return String in format "09:15-09:45" (or empty if window times aren't set)
      */
+    @JsonIgnore
     public String getFormattedTimeWindow() {
         if (windowStartMillis == 0 || windowEndMillis == 0) {
             return "";
