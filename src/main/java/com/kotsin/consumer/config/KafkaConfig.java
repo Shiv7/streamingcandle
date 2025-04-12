@@ -58,8 +58,7 @@ public class KafkaConfig {
         
         // CRITICAL: State store and changelog configurations to prevent OffsetOutOfRangeException
         // Adjust retention period for changelog topics (adjust based on your needs - e.g., 1 day)
-        props.put(StreamsConfig.RETENTION_MS_CONFIG, 24 * 60 * 60 * 1000L); // 24 hours retention
-        
+
         // Set state directory for persistent state stores
         props.put(StreamsConfig.STATE_DIR_CONFIG, "/tmp/kafka-streams-state");
         
