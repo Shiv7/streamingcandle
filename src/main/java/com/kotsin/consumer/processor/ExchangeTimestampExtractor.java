@@ -16,17 +16,30 @@ import java.time.format.DateTimeFormatter;
  * 
  * Handles:
  * - NSE (exchange="N"): Trading hours 09:15 IST - 15:30 IST
- * - MCX (exchange="M"): Trading hours 09:00 IST - 23:00 IST
+ * - MCX (exchange="M"): Trading hours 09:00 IST - 23:30 IST
  * 
  * Aligns candle windows based on exchange-specific trading hours:
  * - NSE: Windows start at 09:15 (e.g., 09:15-09:17 for 2m candles)
  * - MCX: Windows start at 09:00 (e.g., 09:00-09:02 for 2m candles)
+ * 
+ * Records outside trading hours are discarded by returning -1 as timestamp.
  */
 public class ExchangeTimestampExtractor implements TimestampExtractor {
     
     private static final Logger LOGGER = LoggerFactory.getLogger(ExchangeTimestampExtractor.class);
     private static final DateTimeFormatter TIME_FORMAT = DateTimeFormatter.ofPattern("HH:mm:ss");
     private static final ZoneId INDIA_ZONE = ZoneId.of("Asia/Kolkata");
+    
+    // Trading hours
+    private static final int NSE_OPEN_HOUR = 9;
+    private static final int NSE_OPEN_MINUTE = 15;
+    private static final int NSE_CLOSE_HOUR = 15;
+    private static final int NSE_CLOSE_MINUTE = 30;
+    
+    private static final int MCX_OPEN_HOUR = 9;
+    private static final int MCX_OPEN_MINUTE = 0;
+    private static final int MCX_CLOSE_HOUR = 23;
+    private static final int MCX_CLOSE_MINUTE = 30;
     
     private final int windowSizeMinutes;
     
@@ -43,21 +56,71 @@ public class ExchangeTimestampExtractor implements TimestampExtractor {
         Candlestick candle = (Candlestick) record.value();
         long rawTs = record.timestamp();
         if (rawTs <= 0) {
-            return System.currentTimeMillis();
+            return -1; // Invalid timestamp
         }
 
         // Convert timestamp to India time zone (IST)
         ZonedDateTime recordTime = ZonedDateTime.ofInstant(Instant.ofEpochMilli(rawTs), INDIA_ZONE);
         LOGGER.debug("Processing record with timestamp: {} IST", recordTime.format(TIME_FORMAT));
         
-        // Calculate appropriate window based on exchange type
+        // Check if within trading hours based on exchange
         if ("N".equals(candle.getExchange())) {
-            // NSE (National Stock Exchange) - Trading starts at 09:15
+            // NSE trading hours: 9:15 AM - 3:30 PM
+            if (!isWithinNseTradingHours(recordTime)) {
+                LOGGER.info("Discarding NSE record outside trading hours: {} IST", 
+                        recordTime.format(DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm:ss")));
+                return -1; // Returning -1 causes Kafka Streams to drop this record
+            }
             return calculateNseWindow(recordTime);
         } else {
-            // MCX and others - Trading starts at 09:00
+            // MCX trading hours: 9:00 AM - 11:30 PM
+            if (!isWithinMcxTradingHours(recordTime)) {
+                LOGGER.info("Discarding MCX record outside trading hours: {} IST", 
+                        recordTime.format(DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm:ss")));
+                return -1; // Returning -1 causes Kafka Streams to drop this record
+            }
             return calculateMcxWindow(recordTime);
         }
+    }
+    
+    /**
+     * Checks if the given time is within NSE trading hours (9:15 AM - 3:30 PM)
+     */
+    private boolean isWithinNseTradingHours(ZonedDateTime time) {
+        int hour = time.getHour();
+        int minute = time.getMinute();
+        
+        // Before open time
+        if (hour < NSE_OPEN_HOUR || (hour == NSE_OPEN_HOUR && minute < NSE_OPEN_MINUTE)) {
+            return false;
+        }
+        
+        // After close time
+        if (hour > NSE_CLOSE_HOUR || (hour == NSE_CLOSE_HOUR && minute >= NSE_CLOSE_MINUTE)) {
+            return false;
+        }
+        
+        return true;
+    }
+    
+    /**
+     * Checks if the given time is within MCX trading hours (9:00 AM - 11:30 PM)
+     */
+    private boolean isWithinMcxTradingHours(ZonedDateTime time) {
+        int hour = time.getHour();
+        int minute = time.getMinute();
+        
+        // Before open time
+        if (hour < MCX_OPEN_HOUR || (hour == MCX_OPEN_HOUR && minute < MCX_OPEN_MINUTE)) {
+            return false;
+        }
+        
+        // After close time
+        if (hour > MCX_CLOSE_HOUR || (hour == MCX_CLOSE_HOUR && minute >= MCX_CLOSE_MINUTE)) {
+            return false;
+        }
+        
+        return true;
     }
     
     /**
@@ -65,7 +128,8 @@ public class ExchangeTimestampExtractor implements TimestampExtractor {
      */
     private long calculateNseWindow(ZonedDateTime recordTime) {
         // Get today's trading open (09:15)
-        ZonedDateTime tradingOpen = recordTime.withHour(9).withMinute(15).withSecond(0).withNano(0);
+        ZonedDateTime tradingOpen = recordTime.withHour(NSE_OPEN_HOUR).withMinute(NSE_OPEN_MINUTE)
+                .withSecond(0).withNano(0);
         
         // If record is before today's trading open, we need to use previous trading day
         if (recordTime.isBefore(tradingOpen)) {
@@ -74,17 +138,9 @@ public class ExchangeTimestampExtractor implements TimestampExtractor {
                     recordTime.format(TIME_FORMAT));
         }
         
-        // Ensure we never create windows before trading open
-        // This prevents windows like 09:11-09:14 which should not exist for NSE
-        if (recordTime.isBefore(tradingOpen)) {
-            // If the record is before trading opens, assign it to the first window of the day
-            LOGGER.warn("Record time {} is before NSE trading hours (09:15). Assigning to first window.", 
-                    recordTime.format(TIME_FORMAT));
-            return tradingOpen.toInstant().toEpochMilli();
-        }
-        
         // Calculate minutes elapsed since 09:15
-        int minutesElapsed = ((recordTime.getHour() - 9) * 60 + (recordTime.getMinute() - 15));
+        int minutesElapsed = ((recordTime.getHour() - NSE_OPEN_HOUR) * 60 + 
+                (recordTime.getMinute() - NSE_OPEN_MINUTE));
         
         // Calculate window index and start time
         int windowIndex = Math.max(0, minutesElapsed / windowSizeMinutes);
@@ -107,7 +163,8 @@ public class ExchangeTimestampExtractor implements TimestampExtractor {
      */
     private long calculateMcxWindow(ZonedDateTime recordTime) {
         // Get today's trading open (09:00)
-        ZonedDateTime tradingOpen = recordTime.withHour(9).withMinute(0).withSecond(0).withNano(0);
+        ZonedDateTime tradingOpen = recordTime.withHour(MCX_OPEN_HOUR).withMinute(MCX_OPEN_MINUTE)
+                .withSecond(0).withNano(0);
         
         // If record is before today's trading open, we need to use previous trading day
         if (recordTime.isBefore(tradingOpen)) {
@@ -117,7 +174,7 @@ public class ExchangeTimestampExtractor implements TimestampExtractor {
         }
         
         // Calculate minutes elapsed since 09:00
-        int minutesElapsed = ((recordTime.getHour() - 9) * 60 + recordTime.getMinute());
+        int minutesElapsed = ((recordTime.getHour() - MCX_OPEN_HOUR) * 60 + recordTime.getMinute());
         
         // Calculate window index and start time
         int windowIndex = Math.max(0, minutesElapsed / windowSizeMinutes);
