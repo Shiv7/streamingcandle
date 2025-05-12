@@ -330,9 +330,9 @@ public class CandlestickProcessor {
         // Get just the time part
         LocalTime localTime = time.toLocalTime();
         
-        // Define MCX market hours: 9:00 AM to 11:30 AM
+        // Define MCX market hours: 9:00 AM to 11:30 PM
         LocalTime marketOpen = LocalTime.of(9, 0);
-        LocalTime marketClose = LocalTime.of(11, 30);
+        LocalTime marketClose = LocalTime.of(23, 30);
         
         // Check if within market hours
         return !localTime.isBefore(marketOpen) && !localTime.isAfter(marketClose);

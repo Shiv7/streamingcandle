@@ -67,7 +67,7 @@ public class HistoricalDataController {
     /**
      * Get status of a historical data processing job.
      */
-    @GetMapping("/status/{jobId}")
+    @GetMapping("/ticks/status/{jobId}")
     public ResponseEntity<JobStatus> getJobStatus(@PathVariable String jobId) {
         JobStatus status = jobStatusMap.get(jobId);
         if (status == null) {
