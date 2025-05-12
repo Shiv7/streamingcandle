@@ -30,7 +30,7 @@ public class HistoricalDataController {
     /**
      * Process historical data for a specific script and date range.
      */
-    @PostMapping("/process")
+    @PostMapping("/ticks/process")
     public ResponseEntity<Map<String, Object>> processHistoricalData(
             @RequestParam String scripCode,
             @RequestParam @DateTimeFormat(iso = DateTimeFormat.ISO.DATE) LocalDate startDate,

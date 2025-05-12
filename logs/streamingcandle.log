@@ -666,3 +666,410 @@ Caused by: com.mongodb.MongoCommandException: Command failed with error 18 (Auth
 	at com.mongodb.internal.connection.SaslAuthenticator.sendSaslStart(SaslAuthenticator.java:224)
 	at com.mongodb.internal.connection.SaslAuthenticator.getNextSaslResponse(SaslAuthenticator.java:131)
 	... 177 common frames omitted
+2025-05-12 16:34:19.511 INFO  [main] c.k.c.ConsumerApplicationTests - Starting ConsumerApplicationTests using Java 17.0.13 with PID 84408 (started by shivendrapratap in /Users/shivendrapratap/Documents/kotsin/streamingcandle)
+2025-05-12 16:34:19.512 INFO  [main] c.k.c.ConsumerApplicationTests - No active profile set, falling back to 1 default profile: "default"
+2025-05-12 16:34:20.128 INFO  [main] c.k.c.p.CandlestickProcessor - Starting Candlestick Processor with bootstrap servers: 172.31.0.121:9092
+2025-05-12 16:34:20.146 INFO  [main] c.kotsin.consumer.util.TickBuffer - Initialized TickBuffer with 500ms delay
+2025-05-12 16:34:20.158 INFO  [main] c.k.c.p.CandlestickProcessor - Configured 1-minute candles with both buffered processing and Kafka Streams pipeline
+2025-05-12 16:34:20.192 WARN  [main] o.a.k.s.i.StreamsConfigUtils - Deprecated config cache.max.bytes.buffering is set, and will be used; we suggest setting the new config statestore.cache.max.bytes instead as deprecated cache.max.bytes.buffering would be removed in the future.
+2025-05-12 16:34:20.393 WARN  [main] o.a.k.s.i.StreamsConfigUtils - Deprecated config cache.max.bytes.buffering is set, and will be used; we suggest setting the new config statestore.cache.max.bytes instead as deprecated cache.max.bytes.buffering would be removed in the future.
+2025-05-12 16:34:20.470 WARN  [main] o.a.kafka.streams.StreamsConfig - Unexpected user-specified producer config 'enable.idempotence' found. 'processing.guarantee' is set to "exactly_once_v2". Hence, user setting (true) will be ignored and the Streams default setting (true) will be used.
+2025-05-12 16:34:20.541 INFO  [main] c.k.c.p.CandlestickProcessor - Started Kafka Streams application with id: candlestick-app-1minute, window size: 1m
+2025-05-12 16:34:20.541 INFO  [main] c.k.c.p.CandlestickProcessor - Configuring multi-minute candles for 2 minutes
+2025-05-12 16:34:20.543 INFO  [main] c.k.c.p.CandlestickProcessor - Completed configuration for 2-minute candles
+2025-05-12 16:34:20.544 WARN  [main] o.a.k.s.i.StreamsConfigUtils - Deprecated config cache.max.bytes.buffering is set, and will be used; we suggest setting the new config statestore.cache.max.bytes instead as deprecated cache.max.bytes.buffering would be removed in the future.
+2025-05-12 16:34:20.549 WARN  [main] o.a.k.s.i.StreamsConfigUtils - Deprecated config cache.max.bytes.buffering is set, and will be used; we suggest setting the new config statestore.cache.max.bytes instead as deprecated cache.max.bytes.buffering would be removed in the future.
+2025-05-12 16:34:20.551 WARN  [main] o.a.kafka.streams.StreamsConfig - Unexpected user-specified producer config 'enable.idempotence' found. 'processing.guarantee' is set to "exactly_once_v2". Hence, user setting (true) will be ignored and the Streams default setting (true) will be used.
+2025-05-12 16:34:20.558 INFO  [main] c.k.c.p.CandlestickProcessor - Started Kafka Streams application with id: candlestick-app-2minute, window size: 2m
+2025-05-12 16:34:20.558 INFO  [main] c.k.c.p.CandlestickProcessor - Configuring multi-minute candles for 3 minutes
+2025-05-12 16:34:20.559 INFO  [main] c.k.c.p.CandlestickProcessor - Completed configuration for 3-minute candles
+2025-05-12 16:34:20.559 WARN  [main] o.a.k.s.i.StreamsConfigUtils - Deprecated config cache.max.bytes.buffering is set, and will be used; we suggest setting the new config statestore.cache.max.bytes instead as deprecated cache.max.bytes.buffering would be removed in the future.
+2025-05-12 16:34:20.562 WARN  [main] o.a.k.s.i.StreamsConfigUtils - Deprecated config cache.max.bytes.buffering is set, and will be used; we suggest setting the new config statestore.cache.max.bytes instead as deprecated cache.max.bytes.buffering would be removed in the future.
+2025-05-12 16:34:20.564 WARN  [main] o.a.kafka.streams.StreamsConfig - Unexpected user-specified producer config 'enable.idempotence' found. 'processing.guarantee' is set to "exactly_once_v2". Hence, user setting (true) will be ignored and the Streams default setting (true) will be used.
+2025-05-12 16:34:20.570 INFO  [main] c.k.c.p.CandlestickProcessor - Started Kafka Streams application with id: candlestick-app-3minute, window size: 3m
+2025-05-12 16:34:20.571 INFO  [main] c.k.c.p.CandlestickProcessor - Configuring multi-minute candles for 5 minutes
+2025-05-12 16:34:20.571 INFO  [main] c.k.c.p.CandlestickProcessor - Completed configuration for 5-minute candles
+2025-05-12 16:34:20.571 WARN  [main] o.a.k.s.i.StreamsConfigUtils - Deprecated config cache.max.bytes.buffering is set, and will be used; we suggest setting the new config statestore.cache.max.bytes instead as deprecated cache.max.bytes.buffering would be removed in the future.
+2025-05-12 16:34:20.575 WARN  [main] o.a.k.s.i.StreamsConfigUtils - Deprecated config cache.max.bytes.buffering is set, and will be used; we suggest setting the new config statestore.cache.max.bytes instead as deprecated cache.max.bytes.buffering would be removed in the future.
+2025-05-12 16:34:20.577 WARN  [main] o.a.kafka.streams.StreamsConfig - Unexpected user-specified producer config 'enable.idempotence' found. 'processing.guarantee' is set to "exactly_once_v2". Hence, user setting (true) will be ignored and the Streams default setting (true) will be used.
+2025-05-12 16:34:20.582 INFO  [main] c.k.c.p.CandlestickProcessor - Started Kafka Streams application with id: candlestick-app-5minute, window size: 5m
+2025-05-12 16:34:20.582 INFO  [main] c.k.c.p.CandlestickProcessor - Configuring multi-minute candles for 15 minutes
+2025-05-12 16:34:20.582 INFO  [main] c.k.c.p.CandlestickProcessor - Completed configuration for 15-minute candles
+2025-05-12 16:34:20.583 WARN  [main] o.a.k.s.i.StreamsConfigUtils - Deprecated config cache.max.bytes.buffering is set, and will be used; we suggest setting the new config statestore.cache.max.bytes instead as deprecated cache.max.bytes.buffering would be removed in the future.
+2025-05-12 16:34:20.585 WARN  [main] o.a.k.s.i.StreamsConfigUtils - Deprecated config cache.max.bytes.buffering is set, and will be used; we suggest setting the new config statestore.cache.max.bytes instead as deprecated cache.max.bytes.buffering would be removed in the future.
+2025-05-12 16:34:20.586 WARN  [main] o.a.kafka.streams.StreamsConfig - Unexpected user-specified producer config 'enable.idempotence' found. 'processing.guarantee' is set to "exactly_once_v2". Hence, user setting (true) will be ignored and the Streams default setting (true) will be used.
+2025-05-12 16:34:20.599 INFO  [main] c.k.c.p.CandlestickProcessor - Started Kafka Streams application with id: candlestick-app-15minute, window size: 15m
+2025-05-12 16:34:20.599 INFO  [main] c.k.c.p.CandlestickProcessor - Configuring multi-minute candles for 30 minutes
+2025-05-12 16:34:20.600 INFO  [main] c.k.c.p.CandlestickProcessor - Completed configuration for 30-minute candles
+2025-05-12 16:34:20.600 WARN  [main] o.a.k.s.i.StreamsConfigUtils - Deprecated config cache.max.bytes.buffering is set, and will be used; we suggest setting the new config statestore.cache.max.bytes instead as deprecated cache.max.bytes.buffering would be removed in the future.
+2025-05-12 16:34:20.603 WARN  [main] o.a.k.s.i.StreamsConfigUtils - Deprecated config cache.max.bytes.buffering is set, and will be used; we suggest setting the new config statestore.cache.max.bytes instead as deprecated cache.max.bytes.buffering would be removed in the future.
+2025-05-12 16:34:20.604 WARN  [main] o.a.kafka.streams.StreamsConfig - Unexpected user-specified producer config 'enable.idempotence' found. 'processing.guarantee' is set to "exactly_once_v2". Hence, user setting (true) will be ignored and the Streams default setting (true) will be used.
+2025-05-12 16:34:20.609 INFO  [main] c.k.c.p.CandlestickProcessor - Started Kafka Streams application with id: candlestick-app-30minute, window size: 30m
+2025-05-12 16:34:20.610 INFO  [main] c.k.c.p.CandlestickProcessor - All Candlestick Processors started successfully
+2025-05-12 16:34:29.306 WARN  [kafka-producer-network-thread | candlestick-app-30minute-e7bbf829-442d-4464-96c4-c903018e7857-StreamThread-1-producer] o.a.kafka.clients.NetworkClient - [Producer clientId=candlestick-app-30minute-e7bbf829-442d-4464-96c4-c903018e7857-StreamThread-1-producer, transactionalId=candlestick-app-30minute-e7bbf829-442d-4464-96c4-c903018e7857-1] Bootstrap broker 172.31.0.121:9092 (id: -1 rack: null isFenced: false) disconnected
+2025-05-12 16:34:29.487 WARN  [candlestick-app-5minute-15584430-64cc-474e-b8fa-1ce5dd014e49-StreamThread-1] o.a.kafka.clients.NetworkClient - [Consumer clientId=candlestick-app-5minute-15584430-64cc-474e-b8fa-1ce5dd014e49-StreamThread-1-consumer, groupId=candlestick-app-5minute] Bootstrap broker 172.31.0.121:9092 (id: -1 rack: null isFenced: false) disconnected
+2025-05-12 16:34:30.066 WARN  [kafka-producer-network-thread | candlestick-app-3minute-4df50f0e-ff9c-4c18-aea4-f15369bf9ef7-StreamThread-1-producer] o.a.kafka.clients.NetworkClient - [Producer clientId=candlestick-app-3minute-4df50f0e-ff9c-4c18-aea4-f15369bf9ef7-StreamThread-1-producer, transactionalId=candlestick-app-3minute-4df50f0e-ff9c-4c18-aea4-f15369bf9ef7-1] Bootstrap broker 172.31.0.121:9092 (id: -1 rack: null isFenced: false) disconnected
+2025-05-12 16:34:30.222 WARN  [kafka-producer-network-thread | candlestick-app-5minute-15584430-64cc-474e-b8fa-1ce5dd014e49-StreamThread-1-producer] o.a.kafka.clients.NetworkClient - [Producer clientId=candlestick-app-5minute-15584430-64cc-474e-b8fa-1ce5dd014e49-StreamThread-1-producer, transactionalId=candlestick-app-5minute-15584430-64cc-474e-b8fa-1ce5dd014e49-1] Bootstrap broker 172.31.0.121:9092 (id: -1 rack: null isFenced: false) disconnected
+2025-05-12 16:34:30.814 WARN  [candlestick-app-30minute-e7bbf829-442d-4464-96c4-c903018e7857-StreamThread-1] o.a.kafka.clients.NetworkClient - [Consumer clientId=candlestick-app-30minute-e7bbf829-442d-4464-96c4-c903018e7857-StreamThread-1-consumer, groupId=candlestick-app-30minute] Bootstrap broker 172.31.0.121:9092 (id: -1 rack: null isFenced: false) disconnected
+2025-05-12 16:34:30.917 WARN  [candlestick-app-3minute-4df50f0e-ff9c-4c18-aea4-f15369bf9ef7-StreamThread-1] o.a.kafka.clients.NetworkClient - [Consumer clientId=candlestick-app-3minute-4df50f0e-ff9c-4c18-aea4-f15369bf9ef7-StreamThread-1-consumer, groupId=candlestick-app-3minute] Bootstrap broker 172.31.0.121:9092 (id: -1 rack: null isFenced: false) disconnected
+2025-05-12 16:34:31.121 WARN  [candlestick-app-1minute-d83a628a-43bf-4a2b-a5ff-8419d12b71af-StreamThread-1] o.a.kafka.clients.NetworkClient - [Consumer clientId=candlestick-app-1minute-d83a628a-43bf-4a2b-a5ff-8419d12b71af-StreamThread-1-consumer, groupId=candlestick-app-1minute] Bootstrap broker 172.31.0.121:9092 (id: -1 rack: null isFenced: false) disconnected
+2025-05-12 16:34:31.168 WARN  [candlestick-app-15minute-8468f7c0-ade6-4896-9e35-cb6f02fa00da-StreamThread-1] o.a.kafka.clients.NetworkClient - [Consumer clientId=candlestick-app-15minute-8468f7c0-ade6-4896-9e35-cb6f02fa00da-StreamThread-1-consumer, groupId=candlestick-app-15minute] Bootstrap broker 172.31.0.121:9092 (id: -1 rack: null isFenced: false) disconnected
+2025-05-12 16:34:31.194 WARN  [kafka-producer-network-thread | candlestick-app-2minute-ae3b8847-9cb5-4dbf-acf1-1ec8e2373eb6-StreamThread-1-producer] o.a.kafka.clients.NetworkClient - [Producer clientId=candlestick-app-2minute-ae3b8847-9cb5-4dbf-acf1-1ec8e2373eb6-StreamThread-1-producer, transactionalId=candlestick-app-2minute-ae3b8847-9cb5-4dbf-acf1-1ec8e2373eb6-1] Bootstrap broker 172.31.0.121:9092 (id: -1 rack: null isFenced: false) disconnected
+2025-05-12 16:34:31.521 WARN  [candlestick-app-2minute-ae3b8847-9cb5-4dbf-acf1-1ec8e2373eb6-StreamThread-1] o.a.kafka.clients.NetworkClient - [Consumer clientId=candlestick-app-2minute-ae3b8847-9cb5-4dbf-acf1-1ec8e2373eb6-StreamThread-1-consumer, groupId=candlestick-app-2minute] Bootstrap broker 172.31.0.121:9092 (id: -1 rack: null isFenced: false) disconnected
+2025-05-12 16:34:31.775 WARN  [kafka-producer-network-thread | candlestick-app-15minute-8468f7c0-ade6-4896-9e35-cb6f02fa00da-StreamThread-1-producer] o.a.kafka.clients.NetworkClient - [Producer clientId=candlestick-app-15minute-8468f7c0-ade6-4896-9e35-cb6f02fa00da-StreamThread-1-producer, transactionalId=candlestick-app-15minute-8468f7c0-ade6-4896-9e35-cb6f02fa00da-1] Bootstrap broker 172.31.0.121:9092 (id: -1 rack: null isFenced: false) disconnected
+2025-05-12 16:34:31.906 WARN  [kafka-producer-network-thread | candlestick-app-1minute-d83a628a-43bf-4a2b-a5ff-8419d12b71af-StreamThread-1-producer] o.a.kafka.clients.NetworkClient - [Producer clientId=candlestick-app-1minute-d83a628a-43bf-4a2b-a5ff-8419d12b71af-StreamThread-1-producer, transactionalId=candlestick-app-1minute-d83a628a-43bf-4a2b-a5ff-8419d12b71af-1] Bootstrap broker 172.31.0.121:9092 (id: -1 rack: null isFenced: false) disconnected
+2025-05-12 16:34:46.491 WARN  [kafka-producer-network-thread | candlestick-app-5minute-15584430-64cc-474e-b8fa-1ce5dd014e49-StreamThread-1-producer] o.a.kafka.clients.NetworkClient - [Producer clientId=candlestick-app-5minute-15584430-64cc-474e-b8fa-1ce5dd014e49-StreamThread-1-producer, transactionalId=candlestick-app-5minute-15584430-64cc-474e-b8fa-1ce5dd014e49-1] Bootstrap broker 172.31.0.121:9092 (id: -1 rack: null isFenced: false) disconnected
+2025-05-12 16:34:46.598 WARN  [kafka-producer-network-thread | candlestick-app-30minute-e7bbf829-442d-4464-96c4-c903018e7857-StreamThread-1-producer] o.a.kafka.clients.NetworkClient - [Producer clientId=candlestick-app-30minute-e7bbf829-442d-4464-96c4-c903018e7857-StreamThread-1-producer, transactionalId=candlestick-app-30minute-e7bbf829-442d-4464-96c4-c903018e7857-1] Bootstrap broker 172.31.0.121:9092 (id: -1 rack: null isFenced: false) disconnected
+2025-05-12 16:34:47.475 WARN  [candlestick-app-3minute-4df50f0e-ff9c-4c18-aea4-f15369bf9ef7-StreamThread-1] o.a.kafka.clients.NetworkClient - [Consumer clientId=candlestick-app-3minute-4df50f0e-ff9c-4c18-aea4-f15369bf9ef7-StreamThread-1-consumer, groupId=candlestick-app-3minute] Bootstrap broker 172.31.0.121:9092 (id: -1 rack: null isFenced: false) disconnected
+2025-05-12 16:34:50.776 WARN  [kafka-producer-network-thread | candlestick-app-2minute-ae3b8847-9cb5-4dbf-acf1-1ec8e2373eb6-StreamThread-1-producer] o.a.kafka.clients.NetworkClient - [Producer clientId=candlestick-app-2minute-ae3b8847-9cb5-4dbf-acf1-1ec8e2373eb6-StreamThread-1-producer, transactionalId=candlestick-app-2minute-ae3b8847-9cb5-4dbf-acf1-1ec8e2373eb6-1] Bootstrap broker 172.31.0.121:9092 (id: -1 rack: null isFenced: false) disconnected
+2025-05-12 16:34:51.369 WARN  [candlestick-app-30minute-e7bbf829-442d-4464-96c4-c903018e7857-StreamThread-1] o.a.kafka.clients.NetworkClient - [Consumer clientId=candlestick-app-30minute-e7bbf829-442d-4464-96c4-c903018e7857-StreamThread-1-consumer, groupId=candlestick-app-30minute] Bootstrap broker 172.31.0.121:9092 (id: -1 rack: null isFenced: false) disconnected
+2025-05-12 16:34:52.113 WARN  [candlestick-app-5minute-15584430-64cc-474e-b8fa-1ce5dd014e49-StreamThread-1] o.a.kafka.clients.NetworkClient - [Consumer clientId=candlestick-app-5minute-15584430-64cc-474e-b8fa-1ce5dd014e49-StreamThread-1-consumer, groupId=candlestick-app-5minute] Bootstrap broker 172.31.0.121:9092 (id: -1 rack: null isFenced: false) disconnected
+2025-05-12 16:34:53.415 WARN  [candlestick-app-2minute-ae3b8847-9cb5-4dbf-acf1-1ec8e2373eb6-StreamThread-1] o.a.kafka.clients.NetworkClient - [Consumer clientId=candlestick-app-2minute-ae3b8847-9cb5-4dbf-acf1-1ec8e2373eb6-StreamThread-1-consumer, groupId=candlestick-app-2minute] Bootstrap broker 172.31.0.121:9092 (id: -1 rack: null isFenced: false) disconnected
+2025-05-12 16:34:53.983 WARN  [kafka-producer-network-thread | candlestick-app-3minute-4df50f0e-ff9c-4c18-aea4-f15369bf9ef7-StreamThread-1-producer] o.a.kafka.clients.NetworkClient - [Producer clientId=candlestick-app-3minute-4df50f0e-ff9c-4c18-aea4-f15369bf9ef7-StreamThread-1-producer, transactionalId=candlestick-app-3minute-4df50f0e-ff9c-4c18-aea4-f15369bf9ef7-1] Bootstrap broker 172.31.0.121:9092 (id: -1 rack: null isFenced: false) disconnected
+2025-05-12 16:34:54.150 WARN  [kafka-producer-network-thread | candlestick-app-15minute-8468f7c0-ade6-4896-9e35-cb6f02fa00da-StreamThread-1-producer] o.a.kafka.clients.NetworkClient - [Producer clientId=candlestick-app-15minute-8468f7c0-ade6-4896-9e35-cb6f02fa00da-StreamThread-1-producer, transactionalId=candlestick-app-15minute-8468f7c0-ade6-4896-9e35-cb6f02fa00da-1] Bootstrap broker 172.31.0.121:9092 (id: -1 rack: null isFenced: false) disconnected
+2025-05-12 16:34:54.579 WARN  [candlestick-app-1minute-d83a628a-43bf-4a2b-a5ff-8419d12b71af-StreamThread-1] o.a.kafka.clients.NetworkClient - [Consumer clientId=candlestick-app-1minute-d83a628a-43bf-4a2b-a5ff-8419d12b71af-StreamThread-1-consumer, groupId=candlestick-app-1minute] Bootstrap broker 172.31.0.121:9092 (id: -1 rack: null isFenced: false) disconnected
+2025-05-12 16:34:54.729 WARN  [candlestick-app-15minute-8468f7c0-ade6-4896-9e35-cb6f02fa00da-StreamThread-1] o.a.kafka.clients.NetworkClient - [Consumer clientId=candlestick-app-15minute-8468f7c0-ade6-4896-9e35-cb6f02fa00da-StreamThread-1-consumer, groupId=candlestick-app-15minute] Bootstrap broker 172.31.0.121:9092 (id: -1 rack: null isFenced: false) disconnected
+2025-05-12 16:34:55.167 WARN  [kafka-producer-network-thread | candlestick-app-1minute-d83a628a-43bf-4a2b-a5ff-8419d12b71af-StreamThread-1-producer] o.a.kafka.clients.NetworkClient - [Producer clientId=candlestick-app-1minute-d83a628a-43bf-4a2b-a5ff-8419d12b71af-StreamThread-1-producer, transactionalId=candlestick-app-1minute-d83a628a-43bf-4a2b-a5ff-8419d12b71af-1] Bootstrap broker 172.31.0.121:9092 (id: -1 rack: null isFenced: false) disconnected
+2025-05-12 16:35:16.608 WARN  [kafka-producer-network-thread | candlestick-app-5minute-15584430-64cc-474e-b8fa-1ce5dd014e49-StreamThread-1-producer] o.a.kafka.clients.NetworkClient - [Producer clientId=candlestick-app-5minute-15584430-64cc-474e-b8fa-1ce5dd014e49-StreamThread-1-producer, transactionalId=candlestick-app-5minute-15584430-64cc-474e-b8fa-1ce5dd014e49-1] Bootstrap broker 172.31.0.121:9092 (id: -1 rack: null isFenced: false) disconnected
+2025-05-12 16:35:16.771 WARN  [kafka-producer-network-thread | candlestick-app-30minute-e7bbf829-442d-4464-96c4-c903018e7857-StreamThread-1-producer] o.a.kafka.clients.NetworkClient - [Producer clientId=candlestick-app-30minute-e7bbf829-442d-4464-96c4-c903018e7857-StreamThread-1-producer, transactionalId=candlestick-app-30minute-e7bbf829-442d-4464-96c4-c903018e7857-1] Bootstrap broker 172.31.0.121:9092 (id: -1 rack: null isFenced: false) disconnected
+2025-05-12 16:35:16.809 WARN  [candlestick-app-3minute-4df50f0e-ff9c-4c18-aea4-f15369bf9ef7-StreamThread-1] o.a.kafka.clients.NetworkClient - [Consumer clientId=candlestick-app-3minute-4df50f0e-ff9c-4c18-aea4-f15369bf9ef7-StreamThread-1-consumer, groupId=candlestick-app-3minute] Bootstrap broker 172.31.0.121:9092 (id: -1 rack: null isFenced: false) disconnected
+2025-05-12 16:35:19.606 WARN  [candlestick-app-1minute-d83a628a-43bf-4a2b-a5ff-8419d12b71af-StreamThread-1] o.a.kafka.clients.NetworkClient - [Consumer clientId=candlestick-app-1minute-d83a628a-43bf-4a2b-a5ff-8419d12b71af-StreamThread-1-consumer, groupId=candlestick-app-1minute] Bootstrap broker 172.31.0.121:9092 (id: -1 rack: null isFenced: false) disconnected
+2025-05-12 16:35:20.944 WARN  [kafka-producer-network-thread | candlestick-app-2minute-ae3b8847-9cb5-4dbf-acf1-1ec8e2373eb6-StreamThread-1-producer] o.a.kafka.clients.NetworkClient - [Producer clientId=candlestick-app-2minute-ae3b8847-9cb5-4dbf-acf1-1ec8e2373eb6-StreamThread-1-producer, transactionalId=candlestick-app-2minute-ae3b8847-9cb5-4dbf-acf1-1ec8e2373eb6-1] Bootstrap broker 172.31.0.121:9092 (id: -1 rack: null isFenced: false) disconnected
+2025-05-12 16:35:21.505 WARN  [candlestick-app-15minute-8468f7c0-ade6-4896-9e35-cb6f02fa00da-StreamThread-1] o.a.kafka.clients.NetworkClient - [Consumer clientId=candlestick-app-15minute-8468f7c0-ade6-4896-9e35-cb6f02fa00da-StreamThread-1-consumer, groupId=candlestick-app-15minute] Bootstrap broker 172.31.0.121:9092 (id: -1 rack: null isFenced: false) disconnected
+2025-05-12 16:35:21.555 WARN  [candlestick-app-30minute-e7bbf829-442d-4464-96c4-c903018e7857-StreamThread-1] o.a.kafka.clients.NetworkClient - [Consumer clientId=candlestick-app-30minute-e7bbf829-442d-4464-96c4-c903018e7857-StreamThread-1-consumer, groupId=candlestick-app-30minute] Bootstrap broker 172.31.0.121:9092 (id: -1 rack: null isFenced: false) disconnected
+2025-05-12 16:35:21.605 WARN  [kafka-producer-network-thread | candlestick-app-1minute-d83a628a-43bf-4a2b-a5ff-8419d12b71af-StreamThread-1-producer] o.a.kafka.clients.NetworkClient - [Producer clientId=candlestick-app-1minute-d83a628a-43bf-4a2b-a5ff-8419d12b71af-StreamThread-1-producer, transactionalId=candlestick-app-1minute-d83a628a-43bf-4a2b-a5ff-8419d12b71af-1] Bootstrap broker 172.31.0.121:9092 (id: -1 rack: null isFenced: false) disconnected
+2025-05-12 16:35:21.607 WARN  [candlestick-app-2minute-ae3b8847-9cb5-4dbf-acf1-1ec8e2373eb6-StreamThread-1] o.a.kafka.clients.NetworkClient - [Consumer clientId=candlestick-app-2minute-ae3b8847-9cb5-4dbf-acf1-1ec8e2373eb6-StreamThread-1-consumer, groupId=candlestick-app-2minute] Bootstrap broker 172.31.0.121:9092 (id: -1 rack: null isFenced: false) disconnected
+2025-05-12 16:35:22.254 INFO  [main] c.k.c.p.CandlestickProcessor - Configuring multi-minute candles for 30 minutes
+2025-05-12 16:35:22.256 INFO  [main] c.k.c.p.CandlestickProcessor - Completed configuration for 30-minute candles
+2025-05-12 16:35:22.257 WARN  [main] o.a.k.s.i.StreamsConfigUtils - Deprecated config cache.max.bytes.buffering is set, and will be used; we suggest setting the new config statestore.cache.max.bytes instead as deprecated cache.max.bytes.buffering would be removed in the future.
+2025-05-12 16:35:22.265 WARN  [main] o.a.k.s.i.StreamsConfigUtils - Deprecated config cache.max.bytes.buffering is set, and will be used; we suggest setting the new config statestore.cache.max.bytes instead as deprecated cache.max.bytes.buffering would be removed in the future.
+2025-05-12 16:35:22.269 WARN  [main] o.a.kafka.streams.StreamsConfig - Unexpected user-specified producer config 'enable.idempotence' found. 'processing.guarantee' is set to "exactly_once_v2". Hence, user setting (true) will be ignored and the Streams default setting (true) will be used.
+2025-05-12 16:35:22.275 INFO  [main] c.k.c.p.CandlestickProcessor - Started Kafka Streams application with id: tickdata-to-candlestick-app-30minute, window size: 30m
+2025-05-12 16:35:22.275 INFO  [main] c.k.c.p.CandlestickProcessor - Configuring multi-minute candles for 15 minutes
+2025-05-12 16:35:22.275 INFO  [main] c.k.c.p.CandlestickProcessor - Completed configuration for 15-minute candles
+2025-05-12 16:35:22.276 WARN  [main] o.a.k.s.i.StreamsConfigUtils - Deprecated config cache.max.bytes.buffering is set, and will be used; we suggest setting the new config statestore.cache.max.bytes instead as deprecated cache.max.bytes.buffering would be removed in the future.
+2025-05-12 16:35:22.279 WARN  [main] o.a.k.s.i.StreamsConfigUtils - Deprecated config cache.max.bytes.buffering is set, and will be used; we suggest setting the new config statestore.cache.max.bytes instead as deprecated cache.max.bytes.buffering would be removed in the future.
+2025-05-12 16:35:22.281 WARN  [main] o.a.kafka.streams.StreamsConfig - Unexpected user-specified producer config 'enable.idempotence' found. 'processing.guarantee' is set to "exactly_once_v2". Hence, user setting (true) will be ignored and the Streams default setting (true) will be used.
+2025-05-12 16:35:22.285 INFO  [main] c.k.c.p.CandlestickProcessor - Started Kafka Streams application with id: tickdata-to-candlestick-app-15minute, window size: 15m
+2025-05-12 16:35:22.285 INFO  [main] c.k.c.p.CandlestickProcessor - Configuring multi-minute candles for 5 minutes
+2025-05-12 16:35:22.285 INFO  [main] c.k.c.p.CandlestickProcessor - Completed configuration for 5-minute candles
+2025-05-12 16:35:22.286 WARN  [main] o.a.k.s.i.StreamsConfigUtils - Deprecated config cache.max.bytes.buffering is set, and will be used; we suggest setting the new config statestore.cache.max.bytes instead as deprecated cache.max.bytes.buffering would be removed in the future.
+2025-05-12 16:35:22.291 WARN  [main] o.a.k.s.i.StreamsConfigUtils - Deprecated config cache.max.bytes.buffering is set, and will be used; we suggest setting the new config statestore.cache.max.bytes instead as deprecated cache.max.bytes.buffering would be removed in the future.
+2025-05-12 16:35:22.293 WARN  [main] o.a.kafka.streams.StreamsConfig - Unexpected user-specified producer config 'enable.idempotence' found. 'processing.guarantee' is set to "exactly_once_v2". Hence, user setting (true) will be ignored and the Streams default setting (true) will be used.
+2025-05-12 16:35:22.298 INFO  [main] c.k.c.p.CandlestickProcessor - Started Kafka Streams application with id: tickdata-to-candlestick-app-5minute, window size: 5m
+2025-05-12 16:35:22.298 INFO  [main] c.k.c.p.CandlestickProcessor - Configuring multi-minute candles for 3 minutes
+2025-05-12 16:35:22.298 INFO  [main] c.k.c.p.CandlestickProcessor - Completed configuration for 3-minute candles
+2025-05-12 16:35:22.299 WARN  [main] o.a.k.s.i.StreamsConfigUtils - Deprecated config cache.max.bytes.buffering is set, and will be used; we suggest setting the new config statestore.cache.max.bytes instead as deprecated cache.max.bytes.buffering would be removed in the future.
+2025-05-12 16:35:22.301 WARN  [main] o.a.k.s.i.StreamsConfigUtils - Deprecated config cache.max.bytes.buffering is set, and will be used; we suggest setting the new config statestore.cache.max.bytes instead as deprecated cache.max.bytes.buffering would be removed in the future.
+2025-05-12 16:35:22.302 WARN  [main] o.a.kafka.streams.StreamsConfig - Unexpected user-specified producer config 'enable.idempotence' found. 'processing.guarantee' is set to "exactly_once_v2". Hence, user setting (true) will be ignored and the Streams default setting (true) will be used.
+2025-05-12 16:35:22.306 INFO  [main] c.k.c.p.CandlestickProcessor - Started Kafka Streams application with id: tickdata-to-candlestick-app-3minute, window size: 3m
+2025-05-12 16:35:22.306 INFO  [main] c.k.c.p.CandlestickProcessor - Configuring multi-minute candles for 2 minutes
+2025-05-12 16:35:22.306 INFO  [main] c.k.c.p.CandlestickProcessor - Completed configuration for 2-minute candles
+2025-05-12 16:35:22.307 WARN  [main] o.a.k.s.i.StreamsConfigUtils - Deprecated config cache.max.bytes.buffering is set, and will be used; we suggest setting the new config statestore.cache.max.bytes instead as deprecated cache.max.bytes.buffering would be removed in the future.
+2025-05-12 16:35:22.308 WARN  [main] o.a.k.s.i.StreamsConfigUtils - Deprecated config cache.max.bytes.buffering is set, and will be used; we suggest setting the new config statestore.cache.max.bytes instead as deprecated cache.max.bytes.buffering would be removed in the future.
+2025-05-12 16:35:22.310 WARN  [main] o.a.kafka.streams.StreamsConfig - Unexpected user-specified producer config 'enable.idempotence' found. 'processing.guarantee' is set to "exactly_once_v2". Hence, user setting (true) will be ignored and the Streams default setting (true) will be used.
+2025-05-12 16:35:22.313 INFO  [main] c.k.c.p.CandlestickProcessor - Started Kafka Streams application with id: tickdata-to-candlestick-app-2minute, window size: 2m
+2025-05-12 16:35:22.313 INFO  [main] c.kotsin.consumer.util.TickBuffer - Initialized TickBuffer with 500ms delay
+2025-05-12 16:35:22.314 INFO  [main] c.k.c.p.CandlestickProcessor - Configured 1-minute candles with both buffered processing and Kafka Streams pipeline
+2025-05-12 16:35:22.314 WARN  [main] o.a.k.s.i.StreamsConfigUtils - Deprecated config cache.max.bytes.buffering is set, and will be used; we suggest setting the new config statestore.cache.max.bytes instead as deprecated cache.max.bytes.buffering would be removed in the future.
+2025-05-12 16:35:22.316 WARN  [main] o.a.k.s.i.StreamsConfigUtils - Deprecated config cache.max.bytes.buffering is set, and will be used; we suggest setting the new config statestore.cache.max.bytes instead as deprecated cache.max.bytes.buffering would be removed in the future.
+2025-05-12 16:35:22.316 WARN  [candlestick-app-5minute-15584430-64cc-474e-b8fa-1ce5dd014e49-StreamThread-1] o.a.kafka.clients.NetworkClient - [Consumer clientId=candlestick-app-5minute-15584430-64cc-474e-b8fa-1ce5dd014e49-StreamThread-1-consumer, groupId=candlestick-app-5minute] Bootstrap broker 172.31.0.121:9092 (id: -1 rack: null isFenced: false) disconnected
+2025-05-12 16:35:22.320 WARN  [main] o.a.kafka.streams.StreamsConfig - Unexpected user-specified producer config 'enable.idempotence' found. 'processing.guarantee' is set to "exactly_once_v2". Hence, user setting (true) will be ignored and the Streams default setting (true) will be used.
+2025-05-12 16:35:22.325 INFO  [main] c.k.c.p.CandlestickProcessor - Started Kafka Streams application with id: tickdata-to-candlestick-app-1minute, window size: 1m
+2025-05-12 16:35:22.977 WARN  [main] o.s.w.c.s.GenericWebApplicationContext - Exception encountered during context initialization - cancelling refresh attempt: org.springframework.beans.factory.BeanCreationException: Error creating bean with name 'requestMappingHandlerMapping' defined in class path resource [org/springframework/boot/autoconfigure/web/servlet/WebMvcAutoConfiguration$EnableWebMvcConfiguration.class]: Ambiguous mapping. Cannot map 'historicalDataController' method 
+com.kotsin.consumer.controller.HistoricalDataController#getJobStatus(String)
+to {GET [/api/historical/status/{jobId}]}: There is already 'historicalCandleController' bean method
+com.kotsin.consumer.controller.HistoricalCandleController#getJobStatus(String) mapped.
+2025-05-12 16:35:22.996 ERROR [main] o.s.boot.SpringApplication - Application run failed
+org.springframework.beans.factory.BeanCreationException: Error creating bean with name 'requestMappingHandlerMapping' defined in class path resource [org/springframework/boot/autoconfigure/web/servlet/WebMvcAutoConfiguration$EnableWebMvcConfiguration.class]: Ambiguous mapping. Cannot map 'historicalDataController' method 
+com.kotsin.consumer.controller.HistoricalDataController#getJobStatus(String)
+to {GET [/api/historical/status/{jobId}]}: There is already 'historicalCandleController' bean method
+com.kotsin.consumer.controller.HistoricalCandleController#getJobStatus(String) mapped.
+	at org.springframework.beans.factory.support.AbstractAutowireCapableBeanFactory.initializeBean(AbstractAutowireCapableBeanFactory.java:1773)
+	at org.springframework.beans.factory.support.AbstractAutowireCapableBeanFactory.doCreateBean(AbstractAutowireCapableBeanFactory.java:599)
+	at org.springframework.beans.factory.support.AbstractAutowireCapableBeanFactory.createBean(AbstractAutowireCapableBeanFactory.java:521)
+	at org.springframework.beans.factory.support.AbstractBeanFactory.lambda$doGetBean$0(AbstractBeanFactory.java:325)
+	at org.springframework.beans.factory.support.DefaultSingletonBeanRegistry.getSingleton(DefaultSingletonBeanRegistry.java:234)
+	at org.springframework.beans.factory.support.AbstractBeanFactory.doGetBean(AbstractBeanFactory.java:323)
+	at org.springframework.beans.factory.support.AbstractBeanFactory.getBean(AbstractBeanFactory.java:199)
+	at org.springframework.beans.factory.support.DefaultListableBeanFactory.preInstantiateSingletons(DefaultListableBeanFactory.java:975)
+	at org.springframework.context.support.AbstractApplicationContext.finishBeanFactoryInitialization(AbstractApplicationContext.java:959)
+	at org.springframework.context.support.AbstractApplicationContext.refresh(AbstractApplicationContext.java:624)
+	at org.springframework.boot.SpringApplication.refresh(SpringApplication.java:754)
+	at org.springframework.boot.SpringApplication.refreshContext(SpringApplication.java:456)
+	at org.springframework.boot.SpringApplication.run(SpringApplication.java:334)
+	at org.springframework.boot.test.context.SpringBootContextLoader.lambda$loadContext$3(SpringBootContextLoader.java:137)
+	at org.springframework.util.function.ThrowingSupplier.get(ThrowingSupplier.java:58)
+	at org.springframework.util.function.ThrowingSupplier.get(ThrowingSupplier.java:46)
+	at org.springframework.boot.SpringApplication.withHook(SpringApplication.java:1454)
+	at org.springframework.boot.test.context.SpringBootContextLoader$ContextLoaderHook.run(SpringBootContextLoader.java:552)
+	at org.springframework.boot.test.context.SpringBootContextLoader.loadContext(SpringBootContextLoader.java:137)
+	at org.springframework.boot.test.context.SpringBootContextLoader.loadContext(SpringBootContextLoader.java:108)
+	at org.springframework.test.context.cache.DefaultCacheAwareContextLoaderDelegate.loadContextInternal(DefaultCacheAwareContextLoaderDelegate.java:225)
+	at org.springframework.test.context.cache.DefaultCacheAwareContextLoaderDelegate.loadContext(DefaultCacheAwareContextLoaderDelegate.java:152)
+	at org.springframework.test.context.support.DefaultTestContext.getApplicationContext(DefaultTestContext.java:130)
+	at org.springframework.test.context.web.ServletTestExecutionListener.setUpRequestContextIfNecessary(ServletTestExecutionListener.java:191)
+	at org.springframework.test.context.web.ServletTestExecutionListener.prepareTestInstance(ServletTestExecutionListener.java:130)
+	at org.springframework.test.context.TestContextManager.prepareTestInstance(TestContextManager.java:260)
+	at org.springframework.test.context.junit.jupiter.SpringExtension.postProcessTestInstance(SpringExtension.java:163)
+	at org.junit.jupiter.engine.descriptor.ClassBasedTestDescriptor.lambda$invokeTestInstancePostProcessors$10(ClassBasedTestDescriptor.java:378)
+	at org.junit.jupiter.engine.descriptor.ClassBasedTestDescriptor.executeAndMaskThrowable(ClassBasedTestDescriptor.java:383)
+	at org.junit.jupiter.engine.descriptor.ClassBasedTestDescriptor.lambda$invokeTestInstancePostProcessors$11(ClassBasedTestDescriptor.java:378)
+	at java.base/java.util.stream.ReferencePipeline$3$1.accept(ReferencePipeline.java:197)
+	at java.base/java.util.stream.ReferencePipeline$2$1.accept(ReferencePipeline.java:179)
+	at java.base/java.util.ArrayList$ArrayListSpliterator.forEachRemaining(ArrayList.java:1625)
+	at java.base/java.util.stream.AbstractPipeline.copyInto(AbstractPipeline.java:509)
+	at java.base/java.util.stream.AbstractPipeline.wrapAndCopyInto(AbstractPipeline.java:499)
+	at java.base/java.util.stream.StreamSpliterators$WrappingSpliterator.forEachRemaining(StreamSpliterators.java:310)
+	at java.base/java.util.stream.Streams$ConcatSpliterator.forEachRemaining(Streams.java:735)
+	at java.base/java.util.stream.Streams$ConcatSpliterator.forEachRemaining(Streams.java:734)
+	at java.base/java.util.stream.ReferencePipeline$Head.forEach(ReferencePipeline.java:762)
+	at org.junit.jupiter.engine.descriptor.ClassBasedTestDescriptor.invokeTestInstancePostProcessors(ClassBasedTestDescriptor.java:377)
+	at org.junit.jupiter.engine.descriptor.ClassBasedTestDescriptor.lambda$instantiateAndPostProcessTestInstance$6(ClassBasedTestDescriptor.java:290)
+	at org.junit.platform.engine.support.hierarchical.ThrowableCollector.execute(ThrowableCollector.java:73)
+	at org.junit.jupiter.engine.descriptor.ClassBasedTestDescriptor.instantiateAndPostProcessTestInstance(ClassBasedTestDescriptor.java:289)
+	at org.junit.jupiter.engine.descriptor.ClassBasedTestDescriptor.lambda$testInstancesProvider$4(ClassBasedTestDescriptor.java:279)
+	at java.base/java.util.Optional.orElseGet(Optional.java:364)
+	at org.junit.jupiter.engine.descriptor.ClassBasedTestDescriptor.lambda$testInstancesProvider$5(ClassBasedTestDescriptor.java:278)
+	at org.junit.jupiter.engine.execution.TestInstancesProvider.getTestInstances(TestInstancesProvider.java:31)
+	at org.junit.jupiter.engine.descriptor.TestMethodTestDescriptor.lambda$prepare$0(TestMethodTestDescriptor.java:106)
+	at org.junit.platform.engine.support.hierarchical.ThrowableCollector.execute(ThrowableCollector.java:73)
+	at org.junit.jupiter.engine.descriptor.TestMethodTestDescriptor.prepare(TestMethodTestDescriptor.java:105)
+	at org.junit.jupiter.engine.descriptor.TestMethodTestDescriptor.prepare(TestMethodTestDescriptor.java:69)
+	at org.junit.platform.engine.support.hierarchical.NodeTestTask.lambda$prepare$2(NodeTestTask.java:123)
+	at org.junit.platform.engine.support.hierarchical.ThrowableCollector.execute(ThrowableCollector.java:73)
+	at org.junit.platform.engine.support.hierarchical.NodeTestTask.prepare(NodeTestTask.java:123)
+	at org.junit.platform.engine.support.hierarchical.NodeTestTask.execute(NodeTestTask.java:90)
+	at java.base/java.util.ArrayList.forEach(ArrayList.java:1511)
+	at org.junit.platform.engine.support.hierarchical.SameThreadHierarchicalTestExecutorService.invokeAll(SameThreadHierarchicalTestExecutorService.java:41)
+	at org.junit.platform.engine.support.hierarchical.NodeTestTask.lambda$executeRecursively$6(NodeTestTask.java:155)
+	at org.junit.platform.engine.support.hierarchical.ThrowableCollector.execute(ThrowableCollector.java:73)
+	at org.junit.platform.engine.support.hierarchical.NodeTestTask.lambda$executeRecursively$8(NodeTestTask.java:141)
+	at org.junit.platform.engine.support.hierarchical.Node.around(Node.java:137)
+	at org.junit.platform.engine.support.hierarchical.NodeTestTask.lambda$executeRecursively$9(NodeTestTask.java:139)
+	at org.junit.platform.engine.support.hierarchical.ThrowableCollector.execute(ThrowableCollector.java:73)
+	at org.junit.platform.engine.support.hierarchical.NodeTestTask.executeRecursively(NodeTestTask.java:138)
+	at org.junit.platform.engine.support.hierarchical.NodeTestTask.execute(NodeTestTask.java:95)
+	at java.base/java.util.ArrayList.forEach(ArrayList.java:1511)
+	at org.junit.platform.engine.support.hierarchical.SameThreadHierarchicalTestExecutorService.invokeAll(SameThreadHierarchicalTestExecutorService.java:41)
+	at org.junit.platform.engine.support.hierarchical.NodeTestTask.lambda$executeRecursively$6(NodeTestTask.java:155)
+	at org.junit.platform.engine.support.hierarchical.ThrowableCollector.execute(ThrowableCollector.java:73)
+	at org.junit.platform.engine.support.hierarchical.NodeTestTask.lambda$executeRecursively$8(NodeTestTask.java:141)
+	at org.junit.platform.engine.support.hierarchical.Node.around(Node.java:137)
+	at org.junit.platform.engine.support.hierarchical.NodeTestTask.lambda$executeRecursively$9(NodeTestTask.java:139)
+	at org.junit.platform.engine.support.hierarchical.ThrowableCollector.execute(ThrowableCollector.java:73)
+	at org.junit.platform.engine.support.hierarchical.NodeTestTask.executeRecursively(NodeTestTask.java:138)
+	at org.junit.platform.engine.support.hierarchical.NodeTestTask.execute(NodeTestTask.java:95)
+	at org.junit.platform.engine.support.hierarchical.SameThreadHierarchicalTestExecutorService.submit(SameThreadHierarchicalTestExecutorService.java:35)
+	at org.junit.platform.engine.support.hierarchical.HierarchicalTestExecutor.execute(HierarchicalTestExecutor.java:57)
+	at org.junit.platform.engine.support.hierarchical.HierarchicalTestEngine.execute(HierarchicalTestEngine.java:54)
+	at org.junit.platform.launcher.core.EngineExecutionOrchestrator.execute(EngineExecutionOrchestrator.java:198)
+	at org.junit.platform.launcher.core.EngineExecutionOrchestrator.execute(EngineExecutionOrchestrator.java:169)
+	at org.junit.platform.launcher.core.EngineExecutionOrchestrator.execute(EngineExecutionOrchestrator.java:93)
+	at org.junit.platform.launcher.core.EngineExecutionOrchestrator.lambda$execute$0(EngineExecutionOrchestrator.java:58)
+	at org.junit.platform.launcher.core.EngineExecutionOrchestrator.withInterceptedStreams(EngineExecutionOrchestrator.java:141)
+	at org.junit.platform.launcher.core.EngineExecutionOrchestrator.execute(EngineExecutionOrchestrator.java:57)
+	at org.junit.platform.launcher.core.DefaultLauncher.execute(DefaultLauncher.java:103)
+	at org.junit.platform.launcher.core.DefaultLauncher.execute(DefaultLauncher.java:85)
+	at org.junit.platform.launcher.core.DelegatingLauncher.execute(DelegatingLauncher.java:47)
+	at org.apache.maven.surefire.junitplatform.LazyLauncher.execute(LazyLauncher.java:56)
+	at org.apache.maven.surefire.junitplatform.JUnitPlatformProvider.execute(JUnitPlatformProvider.java:184)
+	at org.apache.maven.surefire.junitplatform.JUnitPlatformProvider.invokeAllTests(JUnitPlatformProvider.java:148)
+	at org.apache.maven.surefire.junitplatform.JUnitPlatformProvider.invoke(JUnitPlatformProvider.java:122)
+	at org.apache.maven.surefire.booter.ForkedBooter.runSuitesInProcess(ForkedBooter.java:385)
+	at org.apache.maven.surefire.booter.ForkedBooter.execute(ForkedBooter.java:162)
+	at org.apache.maven.surefire.booter.ForkedBooter.run(ForkedBooter.java:507)
+	at org.apache.maven.surefire.booter.ForkedBooter.main(ForkedBooter.java:495)
+Caused by: java.lang.IllegalStateException: Ambiguous mapping. Cannot map 'historicalDataController' method 
+com.kotsin.consumer.controller.HistoricalDataController#getJobStatus(String)
+to {GET [/api/historical/status/{jobId}]}: There is already 'historicalCandleController' bean method
+com.kotsin.consumer.controller.HistoricalCandleController#getJobStatus(String) mapped.
+	at org.springframework.web.servlet.handler.AbstractHandlerMethodMapping$MappingRegistry.validateMethodMapping(AbstractHandlerMethodMapping.java:671)
+	at org.springframework.web.servlet.handler.AbstractHandlerMethodMapping$MappingRegistry.register(AbstractHandlerMethodMapping.java:633)
+	at org.springframework.web.servlet.handler.AbstractHandlerMethodMapping.registerHandlerMethod(AbstractHandlerMethodMapping.java:331)
+	at org.springframework.web.servlet.mvc.method.annotation.RequestMappingHandlerMapping.registerHandlerMethod(RequestMappingHandlerMapping.java:486)
+	at org.springframework.web.servlet.mvc.method.annotation.RequestMappingHandlerMapping.registerHandlerMethod(RequestMappingHandlerMapping.java:79)
+	at org.springframework.web.servlet.handler.AbstractHandlerMethodMapping.lambda$detectHandlerMethods$2(AbstractHandlerMethodMapping.java:298)
+	at java.base/java.util.LinkedHashMap.forEach(LinkedHashMap.java:721)
+	at org.springframework.web.servlet.handler.AbstractHandlerMethodMapping.detectHandlerMethods(AbstractHandlerMethodMapping.java:296)
+	at org.springframework.web.servlet.handler.AbstractHandlerMethodMapping.processCandidateBean(AbstractHandlerMethodMapping.java:265)
+	at org.springframework.web.servlet.handler.AbstractHandlerMethodMapping.initHandlerMethods(AbstractHandlerMethodMapping.java:224)
+	at org.springframework.web.servlet.handler.AbstractHandlerMethodMapping.afterPropertiesSet(AbstractHandlerMethodMapping.java:212)
+	at org.springframework.web.servlet.mvc.method.annotation.RequestMappingHandlerMapping.afterPropertiesSet(RequestMappingHandlerMapping.java:233)
+	at org.springframework.beans.factory.support.AbstractAutowireCapableBeanFactory.invokeInitMethods(AbstractAutowireCapableBeanFactory.java:1820)
+	at org.springframework.beans.factory.support.AbstractAutowireCapableBeanFactory.initializeBean(AbstractAutowireCapableBeanFactory.java:1769)
+	... 94 common frames omitted
+2025-05-12 16:35:23.000 WARN  [main] o.s.test.context.TestContextManager - Caught exception while allowing TestExecutionListener [org.springframework.test.context.web.ServletTestExecutionListener] to prepare test instance [com.kotsin.consumer.ConsumerApplicationTests@303fbc4]
+java.lang.IllegalStateException: Failed to load ApplicationContext for [WebMergedContextConfiguration@774304ca testClass = com.kotsin.consumer.ConsumerApplicationTests, locations = [], classes = [com.kotsin.consumer.ConsumerApplication], contextInitializerClasses = [], activeProfiles = [], propertySourceDescriptors = [], propertySourceProperties = ["org.springframework.boot.test.context.SpringBootTestContextBootstrapper=true"], contextCustomizers = [org.springframework.boot.test.context.filter.ExcludeFilterContextCustomizer@6ce86ce1, org.springframework.boot.test.json.DuplicateJsonObjectContextCustomizerFactory$DuplicateJsonObjectContextCustomizer@32c4e8b2, org.springframework.boot.test.mock.mockito.MockitoContextCustomizer@0, org.springframework.boot.test.web.client.TestRestTemplateContextCustomizer@77102b91, org.springframework.boot.test.autoconfigure.actuate.observability.ObservabilityContextCustomizerFactory$DisableObservabilityContextCustomizer@1f, org.springframework.boot.test.autoconfigure.properties.PropertyMappingContextCustomizer@0, org.springframework.boot.test.autoconfigure.web.servlet.WebDriverContextCustomizer@19e4fcac, org.springframework.boot.test.context.SpringBootTestAnnotation@7a84d3f5], resourceBasePath = "src/main/webapp", contextLoader = org.springframework.boot.test.context.SpringBootContextLoader, parent = null]
+	at org.springframework.test.context.cache.DefaultCacheAwareContextLoaderDelegate.loadContext(DefaultCacheAwareContextLoaderDelegate.java:180)
+	at org.springframework.test.context.support.DefaultTestContext.getApplicationContext(DefaultTestContext.java:130)
+	at org.springframework.test.context.web.ServletTestExecutionListener.setUpRequestContextIfNecessary(ServletTestExecutionListener.java:191)
+	at org.springframework.test.context.web.ServletTestExecutionListener.prepareTestInstance(ServletTestExecutionListener.java:130)
+	at org.springframework.test.context.TestContextManager.prepareTestInstance(TestContextManager.java:260)
+	at org.springframework.test.context.junit.jupiter.SpringExtension.postProcessTestInstance(SpringExtension.java:163)
+	at org.junit.jupiter.engine.descriptor.ClassBasedTestDescriptor.lambda$invokeTestInstancePostProcessors$10(ClassBasedTestDescriptor.java:378)
+	at org.junit.jupiter.engine.descriptor.ClassBasedTestDescriptor.executeAndMaskThrowable(ClassBasedTestDescriptor.java:383)
+	at org.junit.jupiter.engine.descriptor.ClassBasedTestDescriptor.lambda$invokeTestInstancePostProcessors$11(ClassBasedTestDescriptor.java:378)
+	at java.base/java.util.stream.ReferencePipeline$3$1.accept(ReferencePipeline.java:197)
+	at java.base/java.util.stream.ReferencePipeline$2$1.accept(ReferencePipeline.java:179)
+	at java.base/java.util.ArrayList$ArrayListSpliterator.forEachRemaining(ArrayList.java:1625)
+	at java.base/java.util.stream.AbstractPipeline.copyInto(AbstractPipeline.java:509)
+	at java.base/java.util.stream.AbstractPipeline.wrapAndCopyInto(AbstractPipeline.java:499)
+	at java.base/java.util.stream.StreamSpliterators$WrappingSpliterator.forEachRemaining(StreamSpliterators.java:310)
+	at java.base/java.util.stream.Streams$ConcatSpliterator.forEachRemaining(Streams.java:735)
+	at java.base/java.util.stream.Streams$ConcatSpliterator.forEachRemaining(Streams.java:734)
+	at java.base/java.util.stream.ReferencePipeline$Head.forEach(ReferencePipeline.java:762)
+	at org.junit.jupiter.engine.descriptor.ClassBasedTestDescriptor.invokeTestInstancePostProcessors(ClassBasedTestDescriptor.java:377)
+	at org.junit.jupiter.engine.descriptor.ClassBasedTestDescriptor.lambda$instantiateAndPostProcessTestInstance$6(ClassBasedTestDescriptor.java:290)
+	at org.junit.platform.engine.support.hierarchical.ThrowableCollector.execute(ThrowableCollector.java:73)
+	at org.junit.jupiter.engine.descriptor.ClassBasedTestDescriptor.instantiateAndPostProcessTestInstance(ClassBasedTestDescriptor.java:289)
+	at org.junit.jupiter.engine.descriptor.ClassBasedTestDescriptor.lambda$testInstancesProvider$4(ClassBasedTestDescriptor.java:279)
+	at java.base/java.util.Optional.orElseGet(Optional.java:364)
+	at org.junit.jupiter.engine.descriptor.ClassBasedTestDescriptor.lambda$testInstancesProvider$5(ClassBasedTestDescriptor.java:278)
+	at org.junit.jupiter.engine.execution.TestInstancesProvider.getTestInstances(TestInstancesProvider.java:31)
+	at org.junit.jupiter.engine.descriptor.TestMethodTestDescriptor.lambda$prepare$0(TestMethodTestDescriptor.java:106)
+	at org.junit.platform.engine.support.hierarchical.ThrowableCollector.execute(ThrowableCollector.java:73)
+	at org.junit.jupiter.engine.descriptor.TestMethodTestDescriptor.prepare(TestMethodTestDescriptor.java:105)
+	at org.junit.jupiter.engine.descriptor.TestMethodTestDescriptor.prepare(TestMethodTestDescriptor.java:69)
+	at org.junit.platform.engine.support.hierarchical.NodeTestTask.lambda$prepare$2(NodeTestTask.java:123)
+	at org.junit.platform.engine.support.hierarchical.ThrowableCollector.execute(ThrowableCollector.java:73)
+	at org.junit.platform.engine.support.hierarchical.NodeTestTask.prepare(NodeTestTask.java:123)
+	at org.junit.platform.engine.support.hierarchical.NodeTestTask.execute(NodeTestTask.java:90)
+	at java.base/java.util.ArrayList.forEach(ArrayList.java:1511)
+	at org.junit.platform.engine.support.hierarchical.SameThreadHierarchicalTestExecutorService.invokeAll(SameThreadHierarchicalTestExecutorService.java:41)
+	at org.junit.platform.engine.support.hierarchical.NodeTestTask.lambda$executeRecursively$6(NodeTestTask.java:155)
+	at org.junit.platform.engine.support.hierarchical.ThrowableCollector.execute(ThrowableCollector.java:73)
+	at org.junit.platform.engine.support.hierarchical.NodeTestTask.lambda$executeRecursively$8(NodeTestTask.java:141)
+	at org.junit.platform.engine.support.hierarchical.Node.around(Node.java:137)
+	at org.junit.platform.engine.support.hierarchical.NodeTestTask.lambda$executeRecursively$9(NodeTestTask.java:139)
+	at org.junit.platform.engine.support.hierarchical.ThrowableCollector.execute(ThrowableCollector.java:73)
+	at org.junit.platform.engine.support.hierarchical.NodeTestTask.executeRecursively(NodeTestTask.java:138)
+	at org.junit.platform.engine.support.hierarchical.NodeTestTask.execute(NodeTestTask.java:95)
+	at java.base/java.util.ArrayList.forEach(ArrayList.java:1511)
+	at org.junit.platform.engine.support.hierarchical.SameThreadHierarchicalTestExecutorService.invokeAll(SameThreadHierarchicalTestExecutorService.java:41)
+	at org.junit.platform.engine.support.hierarchical.NodeTestTask.lambda$executeRecursively$6(NodeTestTask.java:155)
+	at org.junit.platform.engine.support.hierarchical.ThrowableCollector.execute(ThrowableCollector.java:73)
+	at org.junit.platform.engine.support.hierarchical.NodeTestTask.lambda$executeRecursively$8(NodeTestTask.java:141)
+	at org.junit.platform.engine.support.hierarchical.Node.around(Node.java:137)
+	at org.junit.platform.engine.support.hierarchical.NodeTestTask.lambda$executeRecursively$9(NodeTestTask.java:139)
+	at org.junit.platform.engine.support.hierarchical.ThrowableCollector.execute(ThrowableCollector.java:73)
+	at org.junit.platform.engine.support.hierarchical.NodeTestTask.executeRecursively(NodeTestTask.java:138)
+	at org.junit.platform.engine.support.hierarchical.NodeTestTask.execute(NodeTestTask.java:95)
+	at org.junit.platform.engine.support.hierarchical.SameThreadHierarchicalTestExecutorService.submit(SameThreadHierarchicalTestExecutorService.java:35)
+	at org.junit.platform.engine.support.hierarchical.HierarchicalTestExecutor.execute(HierarchicalTestExecutor.java:57)
+	at org.junit.platform.engine.support.hierarchical.HierarchicalTestEngine.execute(HierarchicalTestEngine.java:54)
+	at org.junit.platform.launcher.core.EngineExecutionOrchestrator.execute(EngineExecutionOrchestrator.java:198)
+	at org.junit.platform.launcher.core.EngineExecutionOrchestrator.execute(EngineExecutionOrchestrator.java:169)
+	at org.junit.platform.launcher.core.EngineExecutionOrchestrator.execute(EngineExecutionOrchestrator.java:93)
+	at org.junit.platform.launcher.core.EngineExecutionOrchestrator.lambda$execute$0(EngineExecutionOrchestrator.java:58)
+	at org.junit.platform.launcher.core.EngineExecutionOrchestrator.withInterceptedStreams(EngineExecutionOrchestrator.java:141)
+	at org.junit.platform.launcher.core.EngineExecutionOrchestrator.execute(EngineExecutionOrchestrator.java:57)
+	at org.junit.platform.launcher.core.DefaultLauncher.execute(DefaultLauncher.java:103)
+	at org.junit.platform.launcher.core.DefaultLauncher.execute(DefaultLauncher.java:85)
+	at org.junit.platform.launcher.core.DelegatingLauncher.execute(DelegatingLauncher.java:47)
+	at org.apache.maven.surefire.junitplatform.LazyLauncher.execute(LazyLauncher.java:56)
+	at org.apache.maven.surefire.junitplatform.JUnitPlatformProvider.execute(JUnitPlatformProvider.java:184)
+	at org.apache.maven.surefire.junitplatform.JUnitPlatformProvider.invokeAllTests(JUnitPlatformProvider.java:148)
+	at org.apache.maven.surefire.junitplatform.JUnitPlatformProvider.invoke(JUnitPlatformProvider.java:122)
+	at org.apache.maven.surefire.booter.ForkedBooter.runSuitesInProcess(ForkedBooter.java:385)
+	at org.apache.maven.surefire.booter.ForkedBooter.execute(ForkedBooter.java:162)
+	at org.apache.maven.surefire.booter.ForkedBooter.run(ForkedBooter.java:507)
+	at org.apache.maven.surefire.booter.ForkedBooter.main(ForkedBooter.java:495)
+Caused by: org.springframework.beans.factory.BeanCreationException: Error creating bean with name 'requestMappingHandlerMapping' defined in class path resource [org/springframework/boot/autoconfigure/web/servlet/WebMvcAutoConfiguration$EnableWebMvcConfiguration.class]: Ambiguous mapping. Cannot map 'historicalDataController' method 
+com.kotsin.consumer.controller.HistoricalDataController#getJobStatus(String)
+to {GET [/api/historical/status/{jobId}]}: There is already 'historicalCandleController' bean method
+com.kotsin.consumer.controller.HistoricalCandleController#getJobStatus(String) mapped.
+	at org.springframework.beans.factory.support.AbstractAutowireCapableBeanFactory.initializeBean(AbstractAutowireCapableBeanFactory.java:1773)
+	at org.springframework.beans.factory.support.AbstractAutowireCapableBeanFactory.doCreateBean(AbstractAutowireCapableBeanFactory.java:599)
+	at org.springframework.beans.factory.support.AbstractAutowireCapableBeanFactory.createBean(AbstractAutowireCapableBeanFactory.java:521)
+	at org.springframework.beans.factory.support.AbstractBeanFactory.lambda$doGetBean$0(AbstractBeanFactory.java:325)
+	at org.springframework.beans.factory.support.DefaultSingletonBeanRegistry.getSingleton(DefaultSingletonBeanRegistry.java:234)
+	at org.springframework.beans.factory.support.AbstractBeanFactory.doGetBean(AbstractBeanFactory.java:323)
+	at org.springframework.beans.factory.support.AbstractBeanFactory.getBean(AbstractBeanFactory.java:199)
+	at org.springframework.beans.factory.support.DefaultListableBeanFactory.preInstantiateSingletons(DefaultListableBeanFactory.java:975)
+	at org.springframework.context.support.AbstractApplicationContext.finishBeanFactoryInitialization(AbstractApplicationContext.java:959)
+	at org.springframework.context.support.AbstractApplicationContext.refresh(AbstractApplicationContext.java:624)
+	at org.springframework.boot.SpringApplication.refresh(SpringApplication.java:754)
+	at org.springframework.boot.SpringApplication.refreshContext(SpringApplication.java:456)
+	at org.springframework.boot.SpringApplication.run(SpringApplication.java:334)
+	at org.springframework.boot.test.context.SpringBootContextLoader.lambda$loadContext$3(SpringBootContextLoader.java:137)
+	at org.springframework.util.function.ThrowingSupplier.get(ThrowingSupplier.java:58)
+	at org.springframework.util.function.ThrowingSupplier.get(ThrowingSupplier.java:46)
+	at org.springframework.boot.SpringApplication.withHook(SpringApplication.java:1454)
+	at org.springframework.boot.test.context.SpringBootContextLoader$ContextLoaderHook.run(SpringBootContextLoader.java:552)
+	at org.springframework.boot.test.context.SpringBootContextLoader.loadContext(SpringBootContextLoader.java:137)
+	at org.springframework.boot.test.context.SpringBootContextLoader.loadContext(SpringBootContextLoader.java:108)
+	at org.springframework.test.context.cache.DefaultCacheAwareContextLoaderDelegate.loadContextInternal(DefaultCacheAwareContextLoaderDelegate.java:225)
+	at org.springframework.test.context.cache.DefaultCacheAwareContextLoaderDelegate.loadContext(DefaultCacheAwareContextLoaderDelegate.java:152)
+	... 73 common frames omitted
+Caused by: java.lang.IllegalStateException: Ambiguous mapping. Cannot map 'historicalDataController' method 
+com.kotsin.consumer.controller.HistoricalDataController#getJobStatus(String)
+to {GET [/api/historical/status/{jobId}]}: There is already 'historicalCandleController' bean method
+com.kotsin.consumer.controller.HistoricalCandleController#getJobStatus(String) mapped.
+	at org.springframework.web.servlet.handler.AbstractHandlerMethodMapping$MappingRegistry.validateMethodMapping(AbstractHandlerMethodMapping.java:671)
+	at org.springframework.web.servlet.handler.AbstractHandlerMethodMapping$MappingRegistry.register(AbstractHandlerMethodMapping.java:633)
+	at org.springframework.web.servlet.handler.AbstractHandlerMethodMapping.registerHandlerMethod(AbstractHandlerMethodMapping.java:331)
+	at org.springframework.web.servlet.mvc.method.annotation.RequestMappingHandlerMapping.registerHandlerMethod(RequestMappingHandlerMapping.java:486)
+	at org.springframework.web.servlet.mvc.method.annotation.RequestMappingHandlerMapping.registerHandlerMethod(RequestMappingHandlerMapping.java:79)
+	at org.springframework.web.servlet.handler.AbstractHandlerMethodMapping.lambda$detectHandlerMethods$2(AbstractHandlerMethodMapping.java:298)
+	at java.base/java.util.LinkedHashMap.forEach(LinkedHashMap.java:721)
+	at org.springframework.web.servlet.handler.AbstractHandlerMethodMapping.detectHandlerMethods(AbstractHandlerMethodMapping.java:296)
+	at org.springframework.web.servlet.handler.AbstractHandlerMethodMapping.processCandidateBean(AbstractHandlerMethodMapping.java:265)
+	at org.springframework.web.servlet.handler.AbstractHandlerMethodMapping.initHandlerMethods(AbstractHandlerMethodMapping.java:224)
+	at org.springframework.web.servlet.handler.AbstractHandlerMethodMapping.afterPropertiesSet(AbstractHandlerMethodMapping.java:212)
+	at org.springframework.web.servlet.mvc.method.annotation.RequestMappingHandlerMapping.afterPropertiesSet(RequestMappingHandlerMapping.java:233)
+	at org.springframework.beans.factory.support.AbstractAutowireCapableBeanFactory.invokeInitMethods(AbstractAutowireCapableBeanFactory.java:1820)
+	at org.springframework.beans.factory.support.AbstractAutowireCapableBeanFactory.initializeBean(AbstractAutowireCapableBeanFactory.java:1769)
+	... 94 common frames omitted
+2025-05-12 16:38:05.816 INFO  [main] c.k.c.ConsumerApplicationTests - Starting ConsumerApplicationTests using Java 17.0.13 with PID 92579 (started by shivendrapratap in /Users/shivendrapratap/Documents/kotsin/streamingcandle)
+2025-05-12 16:38:05.817 INFO  [main] c.k.c.ConsumerApplicationTests - No active profile set, falling back to 1 default profile: "default"
+2025-05-12 16:38:06.272 INFO  [main] c.k.c.p.CandlestickProcessor - Starting Candlestick Processor with bootstrap servers: 172.31.0.121:9092
+2025-05-12 16:38:06.289 INFO  [main] c.kotsin.consumer.util.TickBuffer - Initialized TickBuffer with 500ms delay
+2025-05-12 16:38:06.299 INFO  [main] c.k.c.p.CandlestickProcessor - Configured 1-minute candles with both buffered processing and Kafka Streams pipeline
+2025-05-12 16:38:06.332 WARN  [main] o.a.k.s.i.StreamsConfigUtils - Deprecated config cache.max.bytes.buffering is set, and will be used; we suggest setting the new config statestore.cache.max.bytes instead as deprecated cache.max.bytes.buffering would be removed in the future.
+2025-05-12 16:38:06.498 WARN  [main] o.a.k.s.i.StreamsConfigUtils - Deprecated config cache.max.bytes.buffering is set, and will be used; we suggest setting the new config statestore.cache.max.bytes instead as deprecated cache.max.bytes.buffering would be removed in the future.
+2025-05-12 16:38:06.553 WARN  [main] o.a.kafka.streams.StreamsConfig - Unexpected user-specified producer config 'enable.idempotence' found. 'processing.guarantee' is set to "exactly_once_v2". Hence, user setting (true) will be ignored and the Streams default setting (true) will be used.
+2025-05-12 16:38:06.627 INFO  [main] c.k.c.p.CandlestickProcessor - Started Kafka Streams application with id: candlestick-app-1minute, window size: 1m
+2025-05-12 16:38:06.627 INFO  [main] c.k.c.p.CandlestickProcessor - Configuring multi-minute candles for 2 minutes
+2025-05-12 16:38:06.628 INFO  [main] c.k.c.p.CandlestickProcessor - Completed configuration for 2-minute candles
+2025-05-12 16:38:06.628 WARN  [main] o.a.k.s.i.StreamsConfigUtils - Deprecated config cache.max.bytes.buffering is set, and will be used; we suggest setting the new config statestore.cache.max.bytes instead as deprecated cache.max.bytes.buffering would be removed in the future.
+2025-05-12 16:38:06.632 WARN  [main] o.a.k.s.i.StreamsConfigUtils - Deprecated config cache.max.bytes.buffering is set, and will be used; we suggest setting the new config statestore.cache.max.bytes instead as deprecated cache.max.bytes.buffering would be removed in the future.
+2025-05-12 16:38:06.634 WARN  [main] o.a.kafka.streams.StreamsConfig - Unexpected user-specified producer config 'enable.idempotence' found. 'processing.guarantee' is set to "exactly_once_v2". Hence, user setting (true) will be ignored and the Streams default setting (true) will be used.
+2025-05-12 16:38:06.642 INFO  [main] c.k.c.p.CandlestickProcessor - Started Kafka Streams application with id: candlestick-app-2minute, window size: 2m
+2025-05-12 16:38:06.643 INFO  [main] c.k.c.p.CandlestickProcessor - Configuring multi-minute candles for 3 minutes
+2025-05-12 16:38:06.643 INFO  [main] c.k.c.p.CandlestickProcessor - Completed configuration for 3-minute candles
+2025-05-12 16:38:06.644 WARN  [main] o.a.k.s.i.StreamsConfigUtils - Deprecated config cache.max.bytes.buffering is set, and will be used; we suggest setting the new config statestore.cache.max.bytes instead as deprecated cache.max.bytes.buffering would be removed in the future.
+2025-05-12 16:38:06.649 WARN  [main] o.a.k.s.i.StreamsConfigUtils - Deprecated config cache.max.bytes.buffering is set, and will be used; we suggest setting the new config statestore.cache.max.bytes instead as deprecated cache.max.bytes.buffering would be removed in the future.
+2025-05-12 16:38:06.652 WARN  [main] o.a.kafka.streams.StreamsConfig - Unexpected user-specified producer config 'enable.idempotence' found. 'processing.guarantee' is set to "exactly_once_v2". Hence, user setting (true) will be ignored and the Streams default setting (true) will be used.
+2025-05-12 16:38:06.661 INFO  [main] c.k.c.p.CandlestickProcessor - Started Kafka Streams application with id: candlestick-app-3minute, window size: 3m
+2025-05-12 16:38:06.661 INFO  [main] c.k.c.p.CandlestickProcessor - Configuring multi-minute candles for 5 minutes
+2025-05-12 16:38:06.662 INFO  [main] c.k.c.p.CandlestickProcessor - Completed configuration for 5-minute candles
+2025-05-12 16:38:06.664 WARN  [main] o.a.k.s.i.StreamsConfigUtils - Deprecated config cache.max.bytes.buffering is set, and will be used; we suggest setting the new config statestore.cache.max.bytes instead as deprecated cache.max.bytes.buffering would be removed in the future.
+2025-05-12 16:38:06.667 WARN  [main] o.a.k.s.i.StreamsConfigUtils - Deprecated config cache.max.bytes.buffering is set, and will be used; we suggest setting the new config statestore.cache.max.bytes instead as deprecated cache.max.bytes.buffering would be removed in the future.
+2025-05-12 16:38:06.670 WARN  [main] o.a.kafka.streams.StreamsConfig - Unexpected user-specified producer config 'enable.idempotence' found. 'processing.guarantee' is set to "exactly_once_v2". Hence, user setting (true) will be ignored and the Streams default setting (true) will be used.
+2025-05-12 16:38:06.681 INFO  [main] c.k.c.p.CandlestickProcessor - Started Kafka Streams application with id: candlestick-app-5minute, window size: 5m
+2025-05-12 16:38:06.681 INFO  [main] c.k.c.p.CandlestickProcessor - Configuring multi-minute candles for 15 minutes
+2025-05-12 16:38:06.683 INFO  [main] c.k.c.p.CandlestickProcessor - Completed configuration for 15-minute candles
+2025-05-12 16:38:06.683 WARN  [main] o.a.k.s.i.StreamsConfigUtils - Deprecated config cache.max.bytes.buffering is set, and will be used; we suggest setting the new config statestore.cache.max.bytes instead as deprecated cache.max.bytes.buffering would be removed in the future.
+2025-05-12 16:38:06.687 WARN  [main] o.a.k.s.i.StreamsConfigUtils - Deprecated config cache.max.bytes.buffering is set, and will be used; we suggest setting the new config statestore.cache.max.bytes instead as deprecated cache.max.bytes.buffering would be removed in the future.
+2025-05-12 16:38:06.690 WARN  [main] o.a.kafka.streams.StreamsConfig - Unexpected user-specified producer config 'enable.idempotence' found. 'processing.guarantee' is set to "exactly_once_v2". Hence, user setting (true) will be ignored and the Streams default setting (true) will be used.
+2025-05-12 16:38:06.699 INFO  [main] c.k.c.p.CandlestickProcessor - Started Kafka Streams application with id: candlestick-app-15minute, window size: 15m
+2025-05-12 16:38:06.699 INFO  [main] c.k.c.p.CandlestickProcessor - Configuring multi-minute candles for 30 minutes
+2025-05-12 16:38:06.700 INFO  [main] c.k.c.p.CandlestickProcessor - Completed configuration for 30-minute candles
+2025-05-12 16:38:06.700 WARN  [main] o.a.k.s.i.StreamsConfigUtils - Deprecated config cache.max.bytes.buffering is set, and will be used; we suggest setting the new config statestore.cache.max.bytes instead as deprecated cache.max.bytes.buffering would be removed in the future.
+2025-05-12 16:38:06.703 WARN  [main] o.a.k.s.i.StreamsConfigUtils - Deprecated config cache.max.bytes.buffering is set, and will be used; we suggest setting the new config statestore.cache.max.bytes instead as deprecated cache.max.bytes.buffering would be removed in the future.
+2025-05-12 16:38:06.705 WARN  [main] o.a.kafka.streams.StreamsConfig - Unexpected user-specified producer config 'enable.idempotence' found. 'processing.guarantee' is set to "exactly_once_v2". Hence, user setting (true) will be ignored and the Streams default setting (true) will be used.
+2025-05-12 16:38:06.710 INFO  [main] c.k.c.p.CandlestickProcessor - Started Kafka Streams application with id: candlestick-app-30minute, window size: 30m
+2025-05-12 16:38:06.710 INFO  [main] c.k.c.p.CandlestickProcessor - All Candlestick Processors started successfully
+2025-05-12 16:38:13.454 INFO  [Thread-2] c.kotsin.consumer.util.TickBuffer - Shutting down TickBuffer
+2025-05-12 16:38:13.454 INFO  [Thread-3] c.kotsin.consumer.util.TickBuffer - Shutting down TickBuffer
+2025-05-12 16:38:13.456 INFO  [Thread-3] c.kotsin.consumer.util.TickBuffer - Processed all buffered ticks for 0 symbols
+2025-05-12 16:38:13.456 INFO  [Thread-2] c.kotsin.consumer.util.TickBuffer - Processed all buffered ticks for 0 symbols
+2025-05-12 16:38:13.461 INFO  [Thread-4] c.kotsin.consumer.util.TickBuffer - Shutting down TickBuffer
+2025-05-12 16:38:13.461 INFO  [Thread-4] c.kotsin.consumer.util.TickBuffer - Processed all buffered ticks for 0 symbols
+2025-05-12 16:38:13.477 INFO  [Thread-5] c.kotsin.consumer.util.TickBuffer - Shutting down TickBuffer
+2025-05-12 16:38:13.477 INFO  [Thread-5] c.kotsin.consumer.util.TickBuffer - Processed all buffered ticks for 0 symbols
+2025-05-12 16:38:13.515 INFO  [Thread-6] c.kotsin.consumer.util.TickBuffer - Shutting down TickBuffer
+2025-05-12 16:38:13.516 INFO  [Thread-6] c.kotsin.consumer.util.TickBuffer - Processed all buffered ticks for 0 symbols
+2025-05-12 16:38:13.519 INFO  [Thread-7] c.kotsin.consumer.util.TickBuffer - Shutting down TickBuffer
+2025-05-12 16:38:13.519 INFO  [Thread-7] c.kotsin.consumer.util.TickBuffer - Processed all buffered ticks for 0 symbols

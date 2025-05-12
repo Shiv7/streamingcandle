@@ -275,18 +275,37 @@ public class CandlestickProcessor {
      */
     private boolean isWithinTradingHours(TickData tick) {
         // Parse tick timestamp
-        ZonedDateTime time = ZonedDateTime.parse(tick.getTickDt(), 
-                DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm:ss").withZone(ZoneId.of("Asia/Kolkata")));
+        ZonedDateTime time;
+        String tickDt = tick.getTickDt();
         
-        // Check exchange-specific trading hours
-        if ("N".equals(tick.getExchange())) {
-            return isWithinNseTradingHours(time);
-        } else if ("M".equals(tick.getExchange())) {
-            return isWithinMcxTradingHours(time);
+        try {
+            // Handle Microsoft JSON date format: /Date(1746430676000)/
+            if (tickDt != null && tickDt.startsWith("/Date(") && tickDt.endsWith(")/")) {
+                // Extract the timestamp (milliseconds since epoch)
+                String millisStr = tickDt.substring(6, tickDt.length() - 2);
+                long millis = Long.parseLong(millisStr);
+                time = ZonedDateTime.ofInstant(Instant.ofEpochMilli(millis), ZoneId.of("Asia/Kolkata"));
+            } else {
+                // Standard format
+                time = ZonedDateTime.parse(tickDt, 
+                    DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm:ss").withZone(ZoneId.of("Asia/Kolkata")));
+            }
+            
+            // Check exchange-specific trading hours
+            if ("N".equals(tick.getExchange())) {
+                return isWithinNseTradingHours(time);
+            } else if ("M".equals(tick.getExchange())) {
+                return isWithinMcxTradingHours(time);
+            }
+            
+            // For other exchanges, default to true
+            return true;
+        } catch (Exception e) {
+            LOGGER.warn("Error parsing tick datetime '{}' for {}: {}. Defaulting to allowing the tick.", 
+                     tickDt, tick.getScripCode(), e.getMessage());
+            // In case of parsing error, default to true to allow the tick through
+            return true;
         }
-        
-        // For other exchanges, default to true
-        return true;
     }
     
     /**
