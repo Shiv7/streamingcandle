@@ -513,7 +513,7 @@ public class CandlestickProcessor {
         
         // Create a window that aligns with trading hours
         TimeWindows windows = TimeWindows.ofSizeWithNoGrace(Duration.ofMinutes(windowSize))
-                .advanceBy(Duration.ofMinutes(1)); // Advance by 1 minute for proper alignment
+                .advanceBy(Duration.ofMinutes(windowSize)); // Advance by window size to prevent overlapping windows
         
         // Group by symbol and window, then aggregate candles
         KTable<Windowed<String>, Candlestick> aggregatedCandles = inputStream
