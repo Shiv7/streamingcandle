@@ -401,6 +401,85 @@ public class CandlestickProcessor {
     }
 
     /**
+     * Adjusts the window boundaries for NSE 30-minute candles to align with 9:15 market open
+     * Creates candles like 9:15-9:45, 9:45-10:15 instead of 9:30-10:00
+     */
+    private void adjustNseWindowAlignment(Candlestick candle, int windowSizeMinutes) {
+        // Get the window start time
+        ZonedDateTime startTime = ZonedDateTime.ofInstant(
+                Instant.ofEpochMilli(candle.getWindowStartMillis()), 
+                ZoneId.of("Asia/Kolkata"));
+        
+        // Reference NSE market open (9:15 AM)
+        ZonedDateTime marketOpen = startTime.toLocalDate()
+                .atTime(9, 15, 0)
+                .atZone(ZoneId.of("Asia/Kolkata"));
+        
+        // If the start time is before today's market open, use previous day
+        if (startTime.isBefore(marketOpen)) {
+            marketOpen = marketOpen.minusDays(1);
+        }
+        
+        // Calculate minutes elapsed since market open
+        long minutesElapsed = (startTime.toEpochSecond() - marketOpen.toEpochSecond()) / 60;
+        
+        // Calculate window number (0, 1, 2, etc. for each window)
+        int windowNum = (int) Math.max(0, minutesElapsed / windowSizeMinutes);
+        
+        // Calculate properly aligned window boundaries based on 9:15 AM start
+        ZonedDateTime correctedStart = marketOpen.plusMinutes(windowNum * windowSizeMinutes);
+        ZonedDateTime correctedEnd = correctedStart.plusMinutes(windowSizeMinutes);
+        
+        // Apply the corrected timestamps
+        candle.setWindowStartMillis(correctedStart.toInstant().toEpochMilli());
+        candle.setWindowEndMillis(correctedEnd.toInstant().toEpochMilli());
+        
+        LOGGER.debug("Adjusted NSE window: original=[{}] corrected=[{}-{}]",
+                startTime.format(DateTimeFormatter.ofPattern("HH:mm")),
+                correctedStart.format(DateTimeFormatter.ofPattern("HH:mm")),
+                correctedEnd.format(DateTimeFormatter.ofPattern("HH:mm")));
+    }
+
+    /**
+     * Adjusts the window boundaries for MCX 30-minute candles to align with 9:00 market open
+     */
+    private void adjustMcxWindowAlignment(Candlestick candle, int windowSizeMinutes) {
+        // Get the window start time
+        ZonedDateTime startTime = ZonedDateTime.ofInstant(
+                Instant.ofEpochMilli(candle.getWindowStartMillis()), 
+                ZoneId.of("Asia/Kolkata"));
+        
+        // Reference MCX market open (9:00 AM)
+        ZonedDateTime marketOpen = startTime.toLocalDate()
+                .atTime(9, 0, 0)
+                .atZone(ZoneId.of("Asia/Kolkata"));
+        
+        // If the start time is before today's market open, use previous day
+        if (startTime.isBefore(marketOpen)) {
+            marketOpen = marketOpen.minusDays(1);
+        }
+        
+        // Calculate minutes elapsed since market open
+        long minutesElapsed = (startTime.toEpochSecond() - marketOpen.toEpochSecond()) / 60;
+        
+        // Calculate window number (0, 1, 2, etc. for each window)
+        int windowNum = (int) Math.max(0, minutesElapsed / windowSizeMinutes);
+        
+        // Calculate properly aligned window boundaries based on 9:00 AM start
+        ZonedDateTime correctedStart = marketOpen.plusMinutes(windowNum * windowSizeMinutes);
+        ZonedDateTime correctedEnd = correctedStart.plusMinutes(windowSizeMinutes);
+        
+        // Apply the corrected timestamps
+        candle.setWindowStartMillis(correctedStart.toInstant().toEpochMilli());
+        candle.setWindowEndMillis(correctedEnd.toInstant().toEpochMilli());
+        
+        LOGGER.debug("Adjusted MCX window: original=[{}] corrected=[{}-{}]",
+                startTime.format(DateTimeFormatter.ofPattern("HH:mm")),
+                correctedStart.format(DateTimeFormatter.ofPattern("HH:mm")),
+                correctedEnd.format(DateTimeFormatter.ofPattern("HH:mm")));
+    }
+
+    /**
      * Aggregates multi-minute candles (2m, 3m, 5m, 15m, 30m) from 1-minute candles.
      * 
      * @param builder      Kafka Streams builder.
@@ -418,6 +497,7 @@ public class CandlestickProcessor {
         KStream<String, Candlestick> inputStream = builder.stream(
                 inputTopic,
                 Consumed.with(Serdes.String(), Candlestick.serde())
+                        .withTimestampExtractor(new ExchangeTimestampExtractor(windowSize))
         );
         
         // Create a window that aligns with trading hours
@@ -477,6 +557,16 @@ public class CandlestickProcessor {
                 // Add window boundary timestamps
                 candle.setWindowStartMillis(windowedKey.window().start());
                 candle.setWindowEndMillis(windowedKey.window().end());
+                
+                // Apply NSE/MCX specific window alignment ONLY for 30-minute candles
+                // This keeps existing timeframes unchanged while fixing the 30-minute candles
+                if (windowSize == 30) {
+                    if ("N".equals(candle.getExchange())) {
+                        adjustNseWindowAlignment(candle, windowSize);
+                    } else if ("M".equals(candle.getExchange())) {
+                        adjustMcxWindowAlignment(candle, windowSize);
+                    }
+                }
                 
                 // Log candle details for debugging
                 logCandleDetails(candle, windowSize);
