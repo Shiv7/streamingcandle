@@ -25,6 +25,9 @@ public class TickData {
     @JsonProperty("Token")
     private int token;
 
+    @JsonProperty("ScripCode")
+    private String scripCode;
+
     @JsonProperty("LastRate")
     private double lastRate;
 
@@ -97,6 +100,18 @@ public class TickData {
             // Use current time if no timestamp provided
             this.timestamp = System.currentTimeMillis();
         }
+    }
+
+    /**
+     * Get scrip code, using token as fallback if not available.
+     * This ensures backward compatibility with existing code.
+     */
+    public String getScripCode() {
+        if (scripCode != null && !scripCode.isEmpty()) {
+            return scripCode;
+        }
+        // Fallback to string representation of token
+        return String.valueOf(token);
     }
 
     /**

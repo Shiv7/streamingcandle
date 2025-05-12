@@ -271,60 +271,52 @@ public class CandlestickProcessor {
     }
     
     /**
-     * Checks if a tick is within trading hours for its exchange
+     * Checks if the tick is within valid trading hours for the corresponding exchange
      */
     private boolean isWithinTradingHours(TickData tick) {
-        ZonedDateTime tickTime = ZonedDateTime.ofInstant(
-                Instant.ofEpochMilli(tick.getTimestamp()), 
-                ZoneId.of("Asia/Kolkata"));
+        // Parse tick timestamp
+        ZonedDateTime time = ZonedDateTime.parse(tick.getTickDt(), 
+                DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm:ss").withZone(ZoneId.of("Asia/Kolkata")));
         
+        // Check exchange-specific trading hours
         if ("N".equals(tick.getExchange())) {
-            // NSE: 9:15 AM - 3:30 PM
-            return isWithinNseTradingHours(tickTime);
-        } else {
-            // MCX: 9:00 AM - 11:30 PM
-            return isWithinMcxTradingHours(tickTime);
+            return isWithinNseTradingHours(time);
+        } else if ("M".equals(tick.getExchange())) {
+            return isWithinMcxTradingHours(time);
         }
+        
+        // For other exchanges, default to true
+        return true;
     }
     
     /**
-     * Checks if the given time is within NSE trading hours (9:15 AM - 3:30 PM)
+     * Check if the given time is within NSE trading hours (9:15 AM to 3:30 PM)
      */
     private boolean isWithinNseTradingHours(ZonedDateTime time) {
-        int hour = time.getHour();
-        int minute = time.getMinute();
+        // Get just the time part
+        LocalTime localTime = time.toLocalTime();
         
-        // Before open time
-        if (hour < 9 || (hour == 9 && minute < 15)) {
-            return false;
-        }
+        // Define NSE market hours: 9:15 AM to 3:30 PM
+        LocalTime marketOpen = LocalTime.of(9, 15);
+        LocalTime marketClose = LocalTime.of(15, 30);
         
-        // After close time
-        if (hour > 15 || (hour == 15 && minute >= 30)) {
-            return false;
-        }
-        
-        return true;
+        // Check if within market hours
+        return !localTime.isBefore(marketOpen) && !localTime.isAfter(marketClose);
     }
     
     /**
-     * Checks if the given time is within MCX trading hours (9:00 AM - 11:30 PM)
+     * Check if the given time is within MCX/Commodity trading hours (9:00 AM to 11:30 PM)
      */
     private boolean isWithinMcxTradingHours(ZonedDateTime time) {
-        int hour = time.getHour();
-        int minute = time.getMinute();
+        // Get just the time part
+        LocalTime localTime = time.toLocalTime();
         
-        // Before open time
-        if (hour < 9) {
-            return false;
-        }
+        // Define MCX market hours: 9:00 AM to 11:30 AM
+        LocalTime marketOpen = LocalTime.of(9, 0);
+        LocalTime marketClose = LocalTime.of(11, 30);
         
-        // After close time
-        if (hour > 23 || (hour == 23 && minute >= 30)) {
-            return false;
-        }
-        
-        return true;
+        // Check if within market hours
+        return !localTime.isBefore(marketOpen) && !localTime.isAfter(marketClose);
     }
     
     /**
