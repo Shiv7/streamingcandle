@@ -1,68 +1,45 @@
 package com.kotsin.consumer.repository;
 
 import com.kotsin.consumer.entity.HistoricalTickData;
+import org.springframework.data.domain.Pageable;
 import org.springframework.data.mongodb.repository.MongoRepository;
 import org.springframework.data.mongodb.repository.Query;
 import org.springframework.stereotype.Repository;
 
-import java.time.LocalDateTime;
+import java.time.LocalDate;
+import java.util.Date;
 import java.util.List;
 
 /**
  * Repository for accessing historical tick data from the database.
- * Provides methods for querying tick data by scrip code and time range.
  */
 @Repository
 public interface HistoricalTickDataRepository extends MongoRepository<HistoricalTickData, String> {
     
     /**
-     * Find historical tick data for a specific scrip code within a time range,
-     * ordered by timestamp.
-     *
-     * @param scripCode The scrip code to search for
-     * @param startTime The start time (inclusive)
-     * @param endTime The end time (exclusive)
-     * @return List of matching tick data ordered by timestamp
+     * Find all historical tick data for a specific scrip code between two dates
      */
-    List<HistoricalTickData> findByScripCodeAndTimestampBetweenOrderByTimestamp(
-            String scripCode, 
-            LocalDateTime startTime, 
-            LocalDateTime endTime);
+    List<HistoricalTickData> findByScripCodeAndTradeDateBetweenOrderByTimestamp(
+        String scripCode, LocalDate startDate, LocalDate endDate);
     
     /**
-     * Count the number of ticks for a specific scrip code within a time range.
-     *
-     * @param scripCode The scrip code to search for
-     * @param startTime The start time (inclusive)
-     * @param endTime The end time (exclusive)
-     * @return Count of matching ticks
+     * Find historical ticks for a scrip within a specific time range
      */
-    @Query(value = "{ 'scripCode': ?0, 'timestamp': { $gte: ?1, $lt: ?2 } }", count = true)
-    long countTicksInRange(String scripCode, LocalDateTime startTime, LocalDateTime endTime);
+    @Query("{'scripCode': ?0, 'timestamp': {$gte: ?1, $lte: ?2}}")
+    List<HistoricalTickData> findTicksInTimeRange(String scripCode, Date startTime, Date endTime);
     
     /**
-     * Find distinct scrip codes that have historical data.
-     *
-     * @return List of distinct scrip codes
+     * Count ticks for a specific scrip on a specific date
      */
-    @Query(value = "{}", fields = "{ 'scripCode': 1 }")
-    List<String> findDistinctScripCodes();
+    long countByScripCodeAndTradeDate(String scripCode, LocalDate date);
     
     /**
-     * Find the earliest timestamp for a specific scrip code.
-     *
-     * @param scripCode The scrip code to search for
-     * @return The earliest timestamp
+     * Find historical ticks for a scrip on a specific date, ordered by timestamp
      */
-    @Query(value = "{ 'scripCode': ?0 }", sort = "{ 'timestamp': 1 }", fields = "{ 'timestamp': 1 }")
-    LocalDateTime findEarliestTimestamp(String scripCode);
+    List<HistoricalTickData> findByScripCodeAndTradeDateOrderByTimestamp(String scripCode, LocalDate date);
     
     /**
-     * Find the latest timestamp for a specific scrip code.
-     *
-     * @param scripCode The scrip code to search for
-     * @return The latest timestamp
+     * Find historical ticks for a scrip on a specific date, with pagination
      */
-    @Query(value = "{ 'scripCode': ?0 }", sort = "{ 'timestamp': -1 }", fields = "{ 'timestamp': 1 }")
-    LocalDateTime findLatestTimestamp(String scripCode);
+    List<HistoricalTickData> findByScripCodeAndTradeDate(String scripCode, LocalDate date, Pageable pageable);
 } 

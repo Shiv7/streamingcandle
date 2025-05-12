@@ -28,7 +28,7 @@ public class TickPersistenceService {
     private long lastLogTime = System.currentTimeMillis();
     
     @Autowired
-    private HistoricalTickDataRepository tickDataRepository;
+    private HistoricalTickDataRepository tickRepository;
     
     /**
      * Listens to the market data stream and persists each tick to MongoDB
@@ -39,7 +39,7 @@ public class TickPersistenceService {
         
         try {
             HistoricalTickData historicalTick = convertToHistoricalTickData(tickData);
-            tickDataRepository.save(historicalTick);
+            tickRepository.save(historicalTick);
             savedCounter.incrementAndGet();
             
             // Log progress periodically

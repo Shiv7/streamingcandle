@@ -2,7 +2,7 @@ package com.kotsin.consumer.service;
 
 import com.kotsin.consumer.entity.HistoricalTickData;
 import com.kotsin.consumer.model.TickData;
-import com.kotsin.consumer.repository.HistoricalTickRepository;
+import com.kotsin.consumer.repository.HistoricalTickDataRepository;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Autowired;
@@ -28,7 +28,7 @@ public class HistoricalDataService {
     private static final int BATCH_SIZE = 5000;
     
     @Autowired
-    private HistoricalTickRepository tickRepository;
+    private HistoricalTickDataRepository tickRepository;
     
     @Autowired
     private KafkaTemplate<String, TickData> kafkaTemplate;
