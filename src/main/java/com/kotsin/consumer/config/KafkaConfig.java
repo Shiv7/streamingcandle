@@ -24,7 +24,7 @@ public class KafkaConfig {
             2025, 4, 3, 15, 30, 0, 0, ZoneId.of("Asia/Kolkata")
     );
 
-    private static final String BOOTSTRAP_SERVERS = "172.31.0.121:9092";
+    private static final String BOOTSTRAP_SERVERS = "172.31.12.118:9092";
     
     @Value("${spring.kafka.streams.state-dir:/var/lib/kafka-streams/streamingcandle}")
     private String baseStateDir;
