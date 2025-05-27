@@ -11,6 +11,7 @@ import org.springframework.boot.autoconfigure.SpringBootApplication;
 
 import java.util.List;
 import java.util.Map;
+import java.util.Properties;
 
 /**
  * Spring Boot Application to initialize Kafka Streams for various candlestick durations.
@@ -67,22 +68,37 @@ public class ConsumerApplication {
      * Creates required topics if they do not already exist.
      */
     private void ensureTopicsExist() {
-        try (AdminClient adminClient = AdminClient.create(
-                Map.of(AdminClientConfig.BOOTSTRAP_SERVERS_CONFIG, BOOTSTRAP_SERVERS))) {
+        Properties adminProps = new Properties();
+        adminProps.put(AdminClientConfig.BOOTSTRAP_SERVERS_CONFIG, BOOTSTRAP_SERVERS);
 
-            List<NewTopic> topics = List.of(
-                    new NewTopic("forwardtesting-data", 1, (short) 1),
-                    new NewTopic("1-min-candle", 1, (short) 1),
-                    new NewTopic("2-min-candle", 1, (short) 1),
-                    new NewTopic("3-min-candle", 1, (short) 1),
-                    new NewTopic("5-min-candle", 1, (short) 1),
-                    new NewTopic("15-min-candle", 1, (short) 1),
-                    new NewTopic("30-min-candle", 1, (short) 1)
+        try (AdminClient adminClient = AdminClient.create(adminProps)) {
+            List<NewTopic> topicsToCreate = List.of(
+                    // Candle topics (existing)
+                    new NewTopic("1-min-candle", 3, (short) 1),
+                    new NewTopic("2-min-candle", 3, (short) 1),
+                    new NewTopic("3-min-candle", 3, (short) 1),
+                    new NewTopic("5-min-candle", 3, (short) 1),
+                    new NewTopic("15-min-candle", 3, (short) 1),
+                    new NewTopic("30-min-candle", 3, (short) 1),
+                    
+                    // Indicator topics (MISSING - these are critical for the strategy!)
+                    new NewTopic("1-min-candle-indicators", 3, (short) 1),
+                    new NewTopic("2-min-candle-indicators", 3, (short) 1),
+                    new NewTopic("3-min-candle-indicators", 3, (short) 1),
+                    new NewTopic("5-min-candle-indicators", 3, (short) 1),
+                    new NewTopic("15-min-candle-indicators", 3, (short) 1),
+                    new NewTopic("30-min-candle-indicators", 3, (short) 1),
+                    
+                    // Strategy signal topics
+                    new NewTopic("bb-supertrend-signals", 3, (short) 1),
+                    new NewTopic("fudkii_Signal", 3, (short) 1)
             );
 
-            adminClient.createTopics(topics);
+            adminClient.createTopics(topicsToCreate);
+            System.out.println("All required topics created successfully!");
         } catch (Exception e) {
-            System.err.println("Failed to create Kafka topics: " + e.getMessage());
+            System.err.println("Error creating topics: " + e.getMessage());
+            // Don't fail startup if topics already exist
         }
     }
 

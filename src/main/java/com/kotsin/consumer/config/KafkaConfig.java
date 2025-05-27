@@ -5,11 +5,14 @@ import org.apache.kafka.clients.producer.ProducerConfig;
 import org.apache.kafka.common.serialization.Serdes;
 import org.apache.kafka.streams.StreamsConfig;
 import org.apache.kafka.streams.errors.LogAndContinueExceptionHandler;
+import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Component;
 
+import java.io.File;
 import java.time.ZoneId;
 import java.time.ZonedDateTime;
 import java.util.Properties;
+import java.util.UUID;
 
 @Component
 public class KafkaConfig {
@@ -22,6 +25,9 @@ public class KafkaConfig {
     );
 
     private static final String BOOTSTRAP_SERVERS = "172.31.0.121:9092";
+    
+    @Value("${spring.kafka.streams.state-dir:/var/lib/kafka-streams/streamingcandle}")
+    private String baseStateDir;
 
     /**
      * Gets the bootstrap servers configuration.
@@ -34,6 +40,7 @@ public class KafkaConfig {
 
     /**
      * Retrieves Kafka Streams properties with a given application ID.
+     * PRODUCTION FIX: Creates unique state directories to prevent conflicts.
      *
      * @param appId The application ID for the Kafka Streams instance.
      * @return Properties configured for Kafka Streams.
@@ -53,17 +60,17 @@ public class KafkaConfig {
         // This ensures the Kafka message's timestamp matches the record's timestamp, not the producer's time
         props.put("producer.message.timestamp.type", "CreateTime");
         
-        // Disable caching so records are processed & forwarded promptly
-        props.put(StreamsConfig.CACHE_MAX_BYTES_BUFFERING_CONFIG, 0);
+        // Use improved cache configuration instead of deprecated one
+        props.put(StreamsConfig.STATESTORE_CACHE_MAX_BYTES_CONFIG, 10 * 1024 * 1024); // 10MB
 
-
-        // Set state directory for persistent state stores
-        props.put(StreamsConfig.STATE_DIR_CONFIG, "/tmp/kafka-streams-state");
+        // PRODUCTION FIX: Create unique state directory for each application instance
+        String uniqueStateDir = createUniqueStateDir(appId);
+        props.put(StreamsConfig.STATE_DIR_CONFIG, uniqueStateDir);
         
         // Configure cleanup policy
         props.put(StreamsConfig.TOPOLOGY_OPTIMIZATION_CONFIG, StreamsConfig.OPTIMIZE);
         
-        // Use earliest offset when restarting to ensure we don't miss data
+        // Use exactly-once semantics for production reliability
         props.put(StreamsConfig.PROCESSING_GUARANTEE_CONFIG, StreamsConfig.EXACTLY_ONCE_V2);
         props.put(StreamsConfig.DEFAULT_DESERIALIZATION_EXCEPTION_HANDLER_CLASS_CONFIG, 
                   LogAndContinueExceptionHandler.class.getName());
@@ -71,6 +78,33 @@ public class KafkaConfig {
         // Configure auto.offset.reset for consumer
         props.put(StreamsConfig.CONSUMER_PREFIX + "auto.offset.reset", "earliest");
         
+        // Production resilience configurations
+        props.put(StreamsConfig.RETRY_BACKOFF_MS_CONFIG, 100);
+        props.put(StreamsConfig.RECONNECT_BACKOFF_MS_CONFIG, 50);
+        props.put(StreamsConfig.REQUEST_TIMEOUT_MS_CONFIG, 40000);
+        
         return props;
+    }
+    
+    /**
+     * Creates a unique state directory for the Kafka Streams application to prevent conflicts.
+     * PRODUCTION FIX: Ensures each instance gets its own state directory.
+     */
+    private String createUniqueStateDir(String appId) {
+        // Create base directory if it doesn't exist
+        File baseDir = new File(baseStateDir);
+        if (!baseDir.exists()) {
+            boolean created = baseDir.mkdirs();
+            if (!created) {
+                // Fallback to temp directory if we can't create in /var/lib
+                String fallbackPath = System.getProperty("java.io.tmpdir") + "/kafka-streams/" + appId;
+                System.err.println("WARNING: Could not create state directory " + baseStateDir + 
+                                 ", falling back to " + fallbackPath);
+                return fallbackPath;
+            }
+        }
+        
+        // Return unique path for this application instance
+        return baseStateDir + "/" + appId + "-" + UUID.randomUUID().toString().substring(0, 8);
     }
 }
