@@ -648,7 +648,7 @@ public class CandlestickProcessor {
             LOGGER.info("Starting Candlestick Processor with bootstrap servers: {}", kafkaConfig.getBootstrapServers());
             
             // Process 1-minute candles from tick data
-            process("candlestick-app-1minute", "market-data", "1-minute-candle", 1);
+            process("candlestick-app-1minute", "forwardtesting-data", "1-minute-candle", 1);
             
             // Process multi-minute candles from 1-minute candles
             process("candlestick-app-2minute", "1-minute-candle", "2-min-candle", 2);
