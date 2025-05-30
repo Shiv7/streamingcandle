@@ -43,8 +43,8 @@ public class CandlestickProcessor {
 
     private static final Logger LOGGER = LoggerFactory.getLogger(CandlestickProcessor.class);
     
-    // Buffer ticks for 500ms to handle late-arriving data
-    private static final long TICK_BUFFER_DELAY_MS = 500;
+    // Buffer ticks for minimal delay to handle late-arriving data
+    private static final long TICK_BUFFER_DELAY_MS = 50;
     
     // Track metrics for data quality
     private final Map<String, CandleMetrics> metricsMap = new HashMap<>();
@@ -119,8 +119,10 @@ public class CandlestickProcessor {
         
         // IMPORTANT: Restore the original Kafka Streams processing pipeline
         // This is needed to ensure data flows to the multi-minute candles
-        TimeWindows windows = TimeWindows.ofSizeWithNoGrace(Duration.ofMinutes(1))
-                .advanceBy(Duration.ofMinutes(1));
+        TimeWindows windows = TimeWindows.ofSizeAndGrace(
+            Duration.ofMinutes(1), 
+            Duration.ofSeconds(30)
+        ).advanceBy(Duration.ofMinutes(1));
         
         // Group by company name, window, and aggregate ticks into candles
         KTable<Windowed<String>, Candlestick> candlestickTable = inputStream
@@ -138,8 +140,11 @@ public class CandlestickProcessor {
                         .withKeySerde(Serdes.String())
                         .withValueSerde(Candlestick.serde())
                 )
-                // Suppress intermediate updates until the window closes
-                .suppress(Suppressed.untilWindowCloses(Suppressed.BufferConfig.unbounded()));
+                // CRITICAL FIX: Emit candles immediately instead of waiting for window close
+                .suppress(Suppressed.untilTimeLimit(
+                    Duration.ofMillis(100), 
+                    Suppressed.BufferConfig.maxRecords(1000)
+                ));
 
         // Stream the finalized candles to the output topic
         candlestickTable.toStream()
@@ -526,8 +531,10 @@ public class CandlestickProcessor {
         );
         
         // Create a window that aligns with trading hours
-        TimeWindows windows = TimeWindows.ofSizeWithNoGrace(Duration.ofMinutes(windowSize))
-                .advanceBy(Duration.ofMinutes(windowSize)); // Advance by window size to prevent overlapping windows
+        TimeWindows windows = TimeWindows.ofSizeAndGrace(
+            Duration.ofMinutes(windowSize), 
+            Duration.ofSeconds(30)
+        ).advanceBy(Duration.ofMinutes(windowSize)); // Advance by window size to prevent overlapping windows
         
         // Group by symbol and window, then aggregate candles
         KTable<Windowed<String>, Candlestick> aggregatedCandles = inputStream
@@ -574,8 +581,11 @@ public class CandlestickProcessor {
                         .withKeySerde(Serdes.String())
                         .withValueSerde(Candlestick.serde())
                 )
-                // Suppress intermediate updates until the window closes
-                .suppress(Suppressed.untilWindowCloses(Suppressed.BufferConfig.unbounded()));
+                // CRITICAL FIX: Emit candles immediately instead of waiting for window close
+                .suppress(Suppressed.untilTimeLimit(
+                    Duration.ofMillis(100), 
+                    Suppressed.BufferConfig.maxRecords(1000)
+                ));
                 
         // Stream the finalized candles to the output topic
         aggregatedCandles.toStream()
