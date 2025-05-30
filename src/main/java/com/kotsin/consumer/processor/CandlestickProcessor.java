@@ -670,22 +670,22 @@ public class CandlestickProcessor {
     @PostConstruct
     public void start() {
         try {
-            LOGGER.info("Starting Candlestick Processor with bootstrap servers: {}", kafkaConfig.getBootstrapServers());
+            LOGGER.info("Starting Realtime Candlestick Processor with bootstrap servers: {}", kafkaConfig.getBootstrapServers());
             
             // Process 1-minute candles from tick data
-            process("candlestick-app-1minute", "forwardtesting-data", "1-minute-candle", 1);
+            process("realtime-candle-1min", "forwardtesting-data", "1-minute-candle", 1);
             
             // Process multi-minute candles from 1-minute candles
-            process("candlestick-app-2minute", "1-minute-candle", "2-min-candle", 2);
-            process("candlestick-app-3minute", "1-minute-candle", "3-min-candle", 3);
-            process("candlestick-app-5minute", "1-minute-candle", "5-min-candle", 5);
-            process("candlestick-app-15minute", "1-minute-candle", "15-min-candle", 15);
-            process("candlestick-app-30minute", "1-minute-candle", "30-min-candle", 30);
+            process("realtime-candle-2min", "1-minute-candle", "2-min-candle", 2);
+            process("realtime-candle-3min", "1-minute-candle", "3-min-candle", 3);
+            process("realtime-candle-5min", "1-minute-candle", "5-min-candle", 5);
+            process("realtime-candle-15min", "1-minute-candle", "15-min-candle", 15);
+            process("realtime-candle-30min", "1-minute-candle", "30-min-candle", 30);
             
-            LOGGER.info("All Candlestick Processors started successfully");
+            LOGGER.info("All Realtime Candlestick Processors started successfully");
             
         } catch (Exception e) {
-            LOGGER.error("Error starting Candlestick Processors", e);
+            LOGGER.error("Error starting Realtime Candlestick Processors", e);
         }
     }
 }

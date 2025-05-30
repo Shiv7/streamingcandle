@@ -27,15 +27,15 @@ public class ConsumerApplication {
 
     /**
      * Mapping of unique app IDs to the desired window size, in minutes.
-     * E.g.: "tickdata-to-candlestick-app-1minute" -> 1, etc.
+     * E.g.: "realtime-candle-1min" -> 1, etc.
      */
     private static final Map<String, Integer> CANDLESTICK_WINDOWS = Map.of(
-            "tickdata-to-candlestick-app-1minute", 1,
-            "tickdata-to-candlestick-app-2minute", 2,
-            "tickdata-to-candlestick-app-3minute", 3,
-            "tickdata-to-candlestick-app-5minute", 5,
-            "tickdata-to-candlestick-app-15minute", 15,
-            "tickdata-to-candlestick-app-30minute", 30
+            "realtime-candle-1min", 1,
+            "realtime-candle-2min", 2,
+            "realtime-candle-3min", 3,
+            "realtime-candle-5min", 5,
+            "realtime-candle-15min", 15,
+            "realtime-candle-30min", 30
     );
 
     @PostConstruct
