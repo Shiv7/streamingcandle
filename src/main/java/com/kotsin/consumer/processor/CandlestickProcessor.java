@@ -272,6 +272,8 @@ public class CandlestickProcessor {
     
     /**
      * Checks if the tick is within valid trading hours for the corresponding exchange
+     * NSE: 9:15 AM to 3:30 PM STRICTLY
+     * MCX: 9:00 AM to 11:30 PM
      */
     private boolean isWithinTradingHours(TickData tick) {
         // Parse tick timestamp
@@ -291,18 +293,30 @@ public class CandlestickProcessor {
                     DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm:ss").withZone(ZoneId.of("Asia/Kolkata")));
             }
             
-            // Check exchange-specific trading hours
+            // ENHANCED: Check exchange-specific trading hours with strict filtering
             if ("N".equals(tick.getExchange())) {
-                return isWithinNseTradingHours(time);
+                boolean withinHours = isWithinNseTradingHours(time);
+                if (!withinHours) {
+                    LOGGER.debug("BLOCKED NSE tick outside market hours. Time: {}, Exchange: {}, Token: {}", 
+                            time.format(DateTimeFormatter.ofPattern("HH:mm:ss")), 
+                            tick.getExchange(), tick.getToken());
+                }
+                return withinHours;
             } else if ("M".equals(tick.getExchange())) {
-                return isWithinMcxTradingHours(time);
+                boolean withinHours = isWithinMcxTradingHours(time);
+                if (!withinHours) {
+                    LOGGER.debug("BLOCKED MCX tick outside market hours. Time: {}, Exchange: {}, Token: {}", 
+                            time.format(DateTimeFormatter.ofPattern("HH:mm:ss")), 
+                            tick.getExchange(), tick.getToken());
+                }
+                return withinHours;
             }
             
             // For other exchanges, default to true
             return true;
         } catch (Exception e) {
-            LOGGER.warn("Error parsing tick datetime '{}' for {}: {}. Defaulting to allowing the tick.", 
-                     tickDt, tick.getScripCode(), e.getMessage());
+            LOGGER.warn("Error parsing tick datetime '{}' for token {}: {}. Defaulting to allowing the tick.", 
+                     tickDt, tick.getToken(), e.getMessage());
             // In case of parsing error, default to true to allow the tick through
             return true;
         }
@@ -560,6 +574,7 @@ public class CandlestickProcessor {
                         .withKeySerde(Serdes.String())
                         .withValueSerde(Candlestick.serde())
                 )
+                // Suppress intermediate updates until the window closes
                 .suppress(Suppressed.untilWindowCloses(Suppressed.BufferConfig.unbounded()));
                 
         // Stream the finalized candles to the output topic
