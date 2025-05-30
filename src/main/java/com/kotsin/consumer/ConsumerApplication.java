@@ -52,7 +52,7 @@ public class ConsumerApplication {
             // For all else, consume from "1-min-candle"
             String inputTopic = (windowSize == 1) ? "forwardtesting-data" : "1-min-candle";
 
-            // Output topic is e.g. "2-min-candle", "15-min-candle", etc.
+            // Output topic is e.g. "1-min-candle", "2-min-candle", etc.
             String outputTopic = windowSize + "-min-candle";
 
             System.out.println("Processing window: " + windowSize

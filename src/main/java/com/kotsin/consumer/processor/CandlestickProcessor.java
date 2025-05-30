@@ -673,14 +673,14 @@ public class CandlestickProcessor {
             LOGGER.info("Starting Realtime Candlestick Processor with bootstrap servers: {}", kafkaConfig.getBootstrapServers());
             
             // Process 1-minute candles from tick data
-            process("realtime-candle-1min", "forwardtesting-data", "1-minute-candle", 1);
+            process("realtime-candle-1min", "forwardtesting-data", "1-min-candle", 1);
             
             // Process multi-minute candles from 1-minute candles
-            process("realtime-candle-2min", "1-minute-candle", "2-min-candle", 2);
-            process("realtime-candle-3min", "1-minute-candle", "3-min-candle", 3);
-            process("realtime-candle-5min", "1-minute-candle", "5-min-candle", 5);
-            process("realtime-candle-15min", "1-minute-candle", "15-min-candle", 15);
-            process("realtime-candle-30min", "1-minute-candle", "30-min-candle", 30);
+            process("realtime-candle-2min", "1-min-candle", "2-min-candle", 2);
+            process("realtime-candle-3min", "1-min-candle", "3-min-candle", 3);
+            process("realtime-candle-5min", "1-min-candle", "5-min-candle", 5);
+            process("realtime-candle-15min", "1-min-candle", "15-min-candle", 15);
+            process("realtime-candle-30min", "1-min-candle", "30-min-candle", 30);
             
             LOGGER.info("All Realtime Candlestick Processors started successfully");
             
