@@ -25,6 +25,7 @@ import org.springframework.stereotype.Component;
 import java.time.*;
 import java.time.format.DateTimeFormatter;
 import java.util.*;
+import java.time.temporal.ChronoUnit;
 
 /**
  * Production-ready Kafka Streams processor that aggregates market data into candlesticks of various durations.
@@ -450,10 +451,10 @@ public class CandlestickProcessor {
             marketOpen = marketOpen.minusDays(1);
         }
         
-        // Calculate minutes elapsed since market open
-        long minutesElapsed = (startTime.toEpochSecond() - marketOpen.toEpochSecond()) / 60;
+        // ✅ FIXED: Use ChronoUnit for precise minute calculation
+        long minutesElapsed = ChronoUnit.MINUTES.between(marketOpen, startTime);
         
-        // Calculate window number (0, 1, 2, etc. for each window)
+        // ✅ FIXED: Ensure proper integer window calculation with bounds checking
         int windowNum = (int) Math.max(0, minutesElapsed / windowSizeMinutes);
         
         // Calculate properly aligned window boundaries based on 9:15 AM start
@@ -464,10 +465,11 @@ public class CandlestickProcessor {
         candle.setWindowStartMillis(correctedStart.toInstant().toEpochMilli());
         candle.setWindowEndMillis(correctedEnd.toInstant().toEpochMilli());
         
-        LOGGER.debug("Adjusted NSE window: original=[{}] corrected=[{}-{}]",
+        LOGGER.debug("Adjusted NSE window: original=[{}] corrected=[{}-{}], windowNum={}, minutesElapsed={}",
                 startTime.format(DateTimeFormatter.ofPattern("HH:mm")),
                 correctedStart.format(DateTimeFormatter.ofPattern("HH:mm")),
-                correctedEnd.format(DateTimeFormatter.ofPattern("HH:mm")));
+                correctedEnd.format(DateTimeFormatter.ofPattern("HH:mm")),
+                windowNum, minutesElapsed);
     }
 
     /**
@@ -489,10 +491,10 @@ public class CandlestickProcessor {
             marketOpen = marketOpen.minusDays(1);
         }
         
-        // Calculate minutes elapsed since market open
-        long minutesElapsed = (startTime.toEpochSecond() - marketOpen.toEpochSecond()) / 60;
+        // ✅ FIXED: Use ChronoUnit for precise minute calculation
+        long minutesElapsed = ChronoUnit.MINUTES.between(marketOpen, startTime);
         
-        // Calculate window number (0, 1, 2, etc. for each window)
+        // ✅ FIXED: Ensure proper integer window calculation with bounds checking
         int windowNum = (int) Math.max(0, minutesElapsed / windowSizeMinutes);
         
         // Calculate properly aligned window boundaries based on 9:00 AM start
@@ -503,10 +505,11 @@ public class CandlestickProcessor {
         candle.setWindowStartMillis(correctedStart.toInstant().toEpochMilli());
         candle.setWindowEndMillis(correctedEnd.toInstant().toEpochMilli());
         
-        LOGGER.debug("Adjusted MCX window: original=[{}] corrected=[{}-{}]",
+        LOGGER.debug("Adjusted MCX window: original=[{}] corrected=[{}-{}], windowNum={}, minutesElapsed={}",
                 startTime.format(DateTimeFormatter.ofPattern("HH:mm")),
                 correctedStart.format(DateTimeFormatter.ofPattern("HH:mm")),
-                correctedEnd.format(DateTimeFormatter.ofPattern("HH:mm")));
+                correctedEnd.format(DateTimeFormatter.ofPattern("HH:mm")),
+                windowNum, minutesElapsed);
     }
 
     /**
