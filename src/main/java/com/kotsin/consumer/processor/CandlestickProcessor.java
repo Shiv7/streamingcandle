@@ -166,6 +166,13 @@ public class CandlestickProcessor {
                 // Log candle details for debugging 
                 logCandleDetails(candle, 1);
                 
+                // CRITICAL FIX: Validate candle data quality before publishing
+                if (!candle.isValidCandle()) {
+                    LOGGER.warn("🚨 Invalid candle detected for 1-minute timeframe, symbol: {}, issues: {}", 
+                              windowedKey.key(), candle.getValidationIssues());
+                    // Still publish but with warning - could filter out if needed
+                }
+                
                 return KeyValue.pair(windowedKey.key(), candle);
             })
             .to(outputTopic, Produced.with(Serdes.String(), Candlestick.serde()));
@@ -418,7 +425,10 @@ public class CandlestickProcessor {
                 Instant.ofEpochMilli(candle.getWindowEndMillis()), 
                 ZoneId.of("Asia/Kolkata"));
         
-        LOGGER.debug("{}m candle for {}: {} window: {}-{}, OHLC: {}/{}/{}/{}, Volume: {}", 
+        // ENHANCED: Add volume and data quality information
+        String validationStatus = candle.isValidCandle() ? "✅ VALID" : "❌ INVALID";
+        
+        LOGGER.debug("{}m candle for {}: {} window: {}-{}, OHLC: {}/{}/{}/{}, Volume: {}, Status: {}", 
                 windowSizeMinutes,
                 candle.getCompanyName(),
                 candle.getExchange(),
@@ -428,7 +438,21 @@ public class CandlestickProcessor {
                 candle.getHigh(),
                 candle.getLow(),
                 candle.getClose(),
-                candle.getVolume());
+                candle.getVolume(),
+                validationStatus);
+                
+        // ENHANCED: Log validation issues if any
+        if (!candle.isValidCandle()) {
+            LOGGER.debug("Validation issues for {}: {}", candle.getCompanyName(), candle.getValidationIssues());
+        }
+        
+        // ENHANCED: Log potential data quality warnings
+        if (candle.getOpen() == candle.getClose() && candle.getHigh() == candle.getLow()) {
+            LOGGER.warn("🔄 Flat candle detected (O=H=L=C={}) for {} at {}-{} - possible single tick or data issue", 
+                       candle.getOpen(), candle.getCompanyName(),
+                       windowStart.format(DateTimeFormatter.ofPattern("HH:mm:ss")),
+                       windowEnd.format(DateTimeFormatter.ofPattern("HH:mm:ss")));
+        }
     }
 
     /**
@@ -551,14 +575,21 @@ public class CandlestickProcessor {
                                 aggCandle.setOpen(candle.getOpen());
                                 aggCandle.setLow(candle.getLow());
                                 aggCandle.setHigh(candle.getHigh());
-                                aggCandle.setVolume(0); // We'll add the volume below
+                                // FIXED: Initialize volume to 0 for proper aggregation
+                                aggCandle.setVolume(0);
                             }
                             
                             // Update the aggregate candle
                             aggCandle.setClose(candle.getClose());
                             aggCandle.setLow(Math.min(aggCandle.getLow(), candle.getLow()));
                             aggCandle.setHigh(Math.max(aggCandle.getHigh(), candle.getHigh()));
-                            aggCandle.setVolume(aggCandle.getVolume() + candle.getVolume());
+                            
+                            // CRITICAL FIX: Volume handling for cumulative data
+                            // Since each 1-minute candle contains cumulative volume (getTotalQuantity),
+                            // for multi-timeframe candles we need to take the LATEST cumulative volume
+                            // within the timeframe, not sum them up
+                            aggCandle.setVolume(Math.max(aggCandle.getVolume(), candle.getVolume()));
+                            
                             aggCandle.setCompanyName(candle.getCompanyName());
                             aggCandle.setExchange(candle.getExchange());
                             
@@ -609,6 +640,13 @@ public class CandlestickProcessor {
                 
                 // Log candle details for debugging
                 logCandleDetails(candle, windowSize);
+                
+                // CRITICAL FIX: Validate candle data quality before publishing
+                if (!candle.isValidCandle()) {
+                    LOGGER.warn("🚨 Invalid candle detected for {}-minute timeframe, symbol: {}, issues: {}", 
+                              windowSize, windowedKey.key(), candle.getValidationIssues());
+                    // Still publish but with warning - could filter out if needed
+                }
                 
                 return KeyValue.pair(windowedKey.key(), candle);
             })

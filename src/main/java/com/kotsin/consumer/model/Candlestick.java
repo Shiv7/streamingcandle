@@ -72,8 +72,13 @@ public class Candlestick {
     public void update(TickData tick) {
         double price = tick.getLastRate();
         
-        // Set open price only once (first tick)
-        if (open == 0) open = price;
+        // FIXED: Better initialization logic to handle single tick scenarios
+        if (open == 0) {
+            open = price;
+            // Initialize high and low with first price to prevent MIN/MAX values
+            if (high == Double.MIN_VALUE) high = price;
+            if (low == Double.MAX_VALUE) low = price;
+        }
         
         // Update high/low prices
         high = Math.max(high, price);
@@ -82,8 +87,10 @@ public class Candlestick {
         // Always update close price (last tick)
         close = price;
         
-        // Accumulate volume
-        this.volume += tick.getLastQuantity();
+        // CRITICAL FIX: Use getTotalQuantity() instead of getLastQuantity()
+        // getTotalQuantity() represents cumulative volume for the period
+        // getLastQuantity() is just the individual trade quantity
+        this.volume = tick.getTotalQuantity();
 
         // Update metadata
         exchange = tick.getExchange();
@@ -222,6 +229,78 @@ public class Candlestick {
     public void setWindowEndMillis(long windowEndMillis) {
         this.windowEndMillis = windowEndMillis;
         updateHumanReadableTimestamps();
+    }
+
+    /**
+     * Validates the quality of this candlestick data.
+     * Checks for logical consistency in OHLC values and volume.
+     * 
+     * @return true if the candle data is valid, false otherwise
+     */
+    public boolean isValidCandle() {
+        // Check for basic data integrity
+        if (open <= 0 || close <= 0 || high <= 0 || low <= 0) {
+            return false;
+        }
+        
+        // Check OHLC relationships
+        if (high < Math.max(open, close) || low > Math.min(open, close)) {
+            return false;
+        }
+        
+        // Check for reasonable price ranges (high should be >= low)
+        if (high < low) {
+            return false;
+        }
+        
+        // Volume should be non-negative
+        if (volume < 0) {
+            return false;
+        }
+        
+        // Check for extreme price differences (possible data corruption)
+        double priceRange = high - low;
+        double avgPrice = (high + low) / 2;
+        if (avgPrice > 0 && priceRange / avgPrice > 0.2) { // 20% range seems excessive for 1-minute candles
+            // This is a warning, not a failure
+            // Large ranges can happen during volatile periods
+        }
+        
+        return true;
+    }
+    
+    /**
+     * Returns a summary of candle validation issues for debugging.
+     * 
+     * @return A string describing any validation issues found
+     */
+    public String getValidationIssues() {
+        StringBuilder issues = new StringBuilder();
+        
+        if (open <= 0) issues.append("Invalid open price: ").append(open).append("; ");
+        if (close <= 0) issues.append("Invalid close price: ").append(close).append("; ");
+        if (high <= 0) issues.append("Invalid high price: ").append(high).append("; ");
+        if (low <= 0) issues.append("Invalid low price: ").append(low).append("; ");
+        
+        if (high < Math.max(open, close)) {
+            issues.append("High (").append(high).append(") is less than max(open, close): ")
+                   .append(Math.max(open, close)).append("; ");
+        }
+        
+        if (low > Math.min(open, close)) {
+            issues.append("Low (").append(low).append(") is greater than min(open, close): ")
+                   .append(Math.min(open, close)).append("; ");
+        }
+        
+        if (high < low) {
+            issues.append("High (").append(high).append(") is less than low (").append(low).append("); ");
+        }
+        
+        if (volume < 0) {
+            issues.append("Negative volume: ").append(volume).append("; ");
+        }
+        
+        return issues.length() > 0 ? issues.toString() : "No validation issues found";
     }
 
     /**
