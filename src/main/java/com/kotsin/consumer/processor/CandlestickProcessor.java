@@ -21,6 +21,7 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.stereotype.Component;
+import org.apache.kafka.streams.errors.StreamsUncaughtExceptionHandler;
 
 import java.time.*;
 import java.time.format.DateTimeFormatter;
@@ -65,7 +66,7 @@ public class CandlestickProcessor {
      * @param windowSize  Target candle duration in minutes (1, 2, 3, 5, 15, or 30).
      */
     public void process(String appId, String inputTopic, String outputTopic, int windowSize) {
-        Properties props = kafkaConfig.getStreamProperties(appId);
+        Properties props = kafkaConfig.getStreamProperties(appId + "-" + windowSize + "m");
         StreamsBuilder builder = new StreamsBuilder();
 
         if (windowSize == 1) {
@@ -78,16 +79,31 @@ public class CandlestickProcessor {
 
         KafkaStreams streams = new KafkaStreams(builder.build(), props);
         
+        // Add unique state directory for each timeframe to prevent conflicts
+        streams.cleanUp(); // Clean any stale state
+        
+        streams.setStateListener((newState, oldState) -> {
+            LOGGER.info("Kafka Streams state transition for {}-minute candles: {} -> {}", 
+                       windowSize, oldState, newState);
+        });
+        
+        streams.setUncaughtExceptionHandler((Throwable exception) -> {
+            LOGGER.error("Uncaught exception in {}-minute candle stream: ", windowSize, exception);
+            return StreamsUncaughtExceptionHandler.StreamThreadExceptionResponse.REPLACE_THREAD;
+        });
+        
         // For 1-minute candles from raw ticks, save the stream reference for cleanup
         if (windowSize == 1) {
             this.tickDataStream = streams;
         }
         
         streams.start();
-        LOGGER.info("Started Kafka Streams application with id: {}, window size: {}m", appId, windowSize);
+        LOGGER.info("Started Kafka Streams application with id: {}, window size: {}m", appId + "-" + windowSize + "m", windowSize);
+        
         Runtime.getRuntime().addShutdownHook(new Thread(() -> {
+            LOGGER.info("Shutting down {}-minute candle stream", windowSize);
             streams.close();
-            if (tickBuffer != null) {
+            if (tickBuffer != null && windowSize == 1) {
                 tickBuffer.shutdown();
             }
         }));
@@ -548,7 +564,8 @@ public class CandlestickProcessor {
                                                       String inputTopic,
                                                       String outputTopic,
                                                       int windowSize) {
-        LOGGER.info("Configuring multi-minute candles for {} minutes", windowSize);
+        LOGGER.info("🔧 Configuring multi-minute candles for {} minutes from {} to {}", 
+                   windowSize, inputTopic, outputTopic);
         
         // Create input stream from the 1-minute candle topic
         KStream<String, Candlestick> inputStream = builder.stream(
@@ -556,6 +573,14 @@ public class CandlestickProcessor {
                 Consumed.with(Serdes.String(), Candlestick.serde())
                         .withTimestampExtractor(new ExchangeTimestampExtractor(windowSize))
         );
+        
+        // Add debug logging to see if we're receiving 1-minute candles
+        inputStream.peek((key, candle) -> {
+            if (candle != null) {
+                LOGGER.debug("📥 Received 1-minute candle for {}-minute processor: symbol={}, close={}", 
+                           windowSize, key, candle.getClose());
+            }
+        });
         
         // Create a window that aligns with trading hours
         TimeWindows windows = TimeWindows.ofSizeAndGrace(
@@ -570,6 +595,10 @@ public class CandlestickProcessor {
                 .aggregate(
                         Candlestick::new,
                         (key, candle, aggCandle) -> {
+                            // Debug log for aggregation
+                            LOGGER.debug("🔀 Aggregating candle for {}-minute window: symbol={}, input_close={}, agg_open={}", 
+                                       windowSize, key, candle.getClose(), aggCandle.getOpen());
+                            
                             // For the first candle in a window, initialize with its values
                             if (aggCandle.getOpen() == 0) {
                                 aggCandle.setOpen(candle.getOpen());
@@ -646,13 +675,16 @@ public class CandlestickProcessor {
                     LOGGER.warn("🚨 Invalid candle detected for {}-minute timeframe, symbol: {}, issues: {}", 
                               windowSize, windowedKey.key(), candle.getValidationIssues());
                     // Still publish but with warning - could filter out if needed
+                } else {
+                    LOGGER.info("✅ Publishing {}-minute candle: symbol={}, close={}, volume={}", 
+                              windowSize, windowedKey.key(), candle.getClose(), candle.getVolume());
                 }
                 
                 return KeyValue.pair(windowedKey.key(), candle);
             })
             .to(outputTopic, Produced.with(Serdes.String(), Candlestick.serde()));
             
-        LOGGER.info("Completed configuration for {}-minute candles", windowSize);
+        LOGGER.info("✅ Completed configuration for {}-minute candles", windowSize);
     }
     
     /**
@@ -713,20 +745,40 @@ public class CandlestickProcessor {
         try {
             LOGGER.info("Starting Realtime Candlestick Processor with bootstrap servers: {}", kafkaConfig.getBootstrapServers());
             
-            // Process 1-minute candles from tick data
+            // Step 1: Process 1-minute candles from tick data (MOST IMPORTANT)
+            LOGGER.info("🕯️ Starting 1-minute candle processor...");
             process("realtime-candle-1min", "forwardtesting-data", "1-min-candle", 1);
             
-            // Process multi-minute candles from 1-minute candles
+            // Wait a bit to ensure 1-minute processor is fully started
+            Thread.sleep(5000); // 5 seconds
+            
+            // Step 2: Start all multi-minute processors that depend on 1-minute candles
+            LOGGER.info("🕯️ Starting multi-minute candle processors...");
+            
+            // Start 2-minute candles
             process("realtime-candle-2min", "1-min-candle", "2-min-candle", 2);
+            Thread.sleep(1000); // 1 second between each
+            
+            // Start 3-minute candles  
             process("realtime-candle-3min", "1-min-candle", "3-min-candle", 3);
+            Thread.sleep(1000);
+            
+            // Start 5-minute candles
             process("realtime-candle-5min", "1-min-candle", "5-min-candle", 5);
+            Thread.sleep(1000);
+            
+            // Start 15-minute candles
             process("realtime-candle-15min", "1-min-candle", "15-min-candle", 15);
+            Thread.sleep(1000);
+            
+            // Start 30-minute candles
             process("realtime-candle-30min", "1-min-candle", "30-min-candle", 30);
             
-            LOGGER.info("All Realtime Candlestick Processors started successfully");
+            LOGGER.info("✅ All Realtime Candlestick Processors started successfully");
+            LOGGER.info("📊 Active timeframes: 1m, 2m, 3m, 5m, 15m, 30m");
             
         } catch (Exception e) {
-            LOGGER.error("Error starting Realtime Candlestick Processors", e);
+            LOGGER.error("❌ Error starting Realtime Candlestick Processors", e);
         }
     }
 }
