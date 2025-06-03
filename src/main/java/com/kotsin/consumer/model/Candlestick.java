@@ -51,6 +51,10 @@ public class Candlestick {
     // Human-readable window timestamps
     private String humanReadableStartTime;
     private String humanReadableEndTime;
+    
+    // Validation fields (added to match JSON structure being deserialized)
+    private Boolean validCandle;
+    private String validationIssues;
 
     /**
      * Creates a new empty candlestick with default values.
@@ -61,6 +65,10 @@ public class Candlestick {
         this.low = Double.MAX_VALUE;
         this.close = 0;
         this.volume = 0;
+        
+        // Initialize validation fields
+        this.validCandle = null;
+        this.validationIssues = null;
     }
 
     /**
@@ -70,6 +78,10 @@ public class Candlestick {
      * @param tick The tick data to incorporate into this candle
      */
     public void update(TickData tick) {
+        // Reset validation since data is changing
+        this.validCandle = null;
+        this.validationIssues = null;
+        
         double price = tick.getLastRate();
         
         // FIXED: Better initialization logic to handle single tick scenarios
@@ -120,6 +132,10 @@ public class Candlestick {
      * @param other The candle to merge into this one
      */
     public void updateCandle(Candlestick other) {
+        // Reset validation since data is changing
+        this.validCandle = null;
+        this.validationIssues = null;
+        
         // Set open price only for the first candle in the window
         if (this.open == 0) {
             this.open = other.open;
@@ -234,28 +250,61 @@ public class Candlestick {
     /**
      * Validates the quality of this candlestick data.
      * Checks for logical consistency in OHLC values and volume.
+     * Sets the validCandle field and returns the result.
      * 
      * @return true if the candle data is valid, false otherwise
      */
     public boolean isValidCandle() {
+        // If already computed, return cached result
+        if (validCandle != null) {
+            return validCandle;
+        }
+        
+        // Compute validation
+        boolean isValid = true;
+        StringBuilder issues = new StringBuilder();
+        
         // Check for basic data integrity
-        if (open <= 0 || close <= 0 || high <= 0 || low <= 0) {
-            return false;
+        if (open <= 0) {
+            isValid = false;
+            issues.append("Invalid open price: ").append(open).append("; ");
+        }
+        if (close <= 0) {
+            isValid = false;
+            issues.append("Invalid close price: ").append(close).append("; ");
+        }
+        if (high <= 0) {
+            isValid = false;
+            issues.append("Invalid high price: ").append(high).append("; ");
+        }
+        if (low <= 0) {
+            isValid = false;
+            issues.append("Invalid low price: ").append(low).append("; ");
         }
         
         // Check OHLC relationships
-        if (high < Math.max(open, close) || low > Math.min(open, close)) {
-            return false;
+        if (high < Math.max(open, close)) {
+            isValid = false;
+            issues.append("High (").append(high).append(") is less than max(open, close): ")
+                   .append(Math.max(open, close)).append("; ");
+        }
+        
+        if (low > Math.min(open, close)) {
+            isValid = false;
+            issues.append("Low (").append(low).append(") is greater than min(open, close): ")
+                   .append(Math.min(open, close)).append("; ");
         }
         
         // Check for reasonable price ranges (high should be >= low)
         if (high < low) {
-            return false;
+            isValid = false;
+            issues.append("High (").append(high).append(") is less than low (").append(low).append("); ");
         }
         
         // Volume should be non-negative
         if (volume < 0) {
-            return false;
+            isValid = false;
+            issues.append("Negative volume: ").append(volume).append("; ");
         }
         
         // Check for extreme price differences (possible data corruption)
@@ -264,43 +313,29 @@ public class Candlestick {
         if (avgPrice > 0 && priceRange / avgPrice > 0.2) { // 20% range seems excessive for 1-minute candles
             // This is a warning, not a failure
             // Large ranges can happen during volatile periods
+            issues.append("Warning: Large price range detected (").append(String.format("%.2f%%", (priceRange/avgPrice)*100)).append("); ");
         }
         
-        return true;
+        // Set the cached values
+        this.validCandle = isValid;
+        this.validationIssues = issues.length() > 0 ? issues.toString() : "No validation issues found";
+        
+        return isValid;
     }
     
     /**
      * Returns a summary of candle validation issues for debugging.
+     * If validation hasn't been run, triggers validation first.
      * 
      * @return A string describing any validation issues found
      */
     public String getValidationIssues() {
-        StringBuilder issues = new StringBuilder();
-        
-        if (open <= 0) issues.append("Invalid open price: ").append(open).append("; ");
-        if (close <= 0) issues.append("Invalid close price: ").append(close).append("; ");
-        if (high <= 0) issues.append("Invalid high price: ").append(high).append("; ");
-        if (low <= 0) issues.append("Invalid low price: ").append(low).append("; ");
-        
-        if (high < Math.max(open, close)) {
-            issues.append("High (").append(high).append(") is less than max(open, close): ")
-                   .append(Math.max(open, close)).append("; ");
+        // If not computed yet, trigger validation
+        if (validationIssues == null) {
+            isValidCandle(); // This will set validationIssues
         }
         
-        if (low > Math.min(open, close)) {
-            issues.append("Low (").append(low).append(") is greater than min(open, close): ")
-                   .append(Math.min(open, close)).append("; ");
-        }
-        
-        if (high < low) {
-            issues.append("High (").append(high).append(") is less than low (").append(low).append("); ");
-        }
-        
-        if (volume < 0) {
-            issues.append("Negative volume: ").append(volume).append("; ");
-        }
-        
-        return issues.length() > 0 ? issues.toString() : "No validation issues found";
+        return validationIssues;
     }
 
     /**
