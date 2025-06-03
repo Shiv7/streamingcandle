@@ -90,46 +90,13 @@ spring.kafka.streams.properties.batch.size=1024
 
 ```bash
 # Check 1-minute candle consumer lag (main issue)
-kafka-consumer-groups.sh --bootstrap-server 172.31.0.121:9092 \
-  --group tickdata-to-candlestick-app-1minute --describe
+kafka-consumer-groups.sh --bootstrap-server 172.31.12.118:9092 \
+  --group candle-processor-ticktooneminprocessor --describe
 
-# Check latest 1-minute candle timestamp
-kafka-console-consumer.sh --bootstrap-server 172.31.0.121:9092 \
+# Test real-time output
+kafka-console-consumer.sh --bootstrap-server 172.31.12.118:9092 \
   --topic 1-min-candle --from-beginning --max-messages 1
 
-# Check latest 30-minute candle timestamp  
-kafka-console-consumer.sh --bootstrap-server 172.31.0.121:9092 \
+kafka-console-consumer.sh --bootstrap-server 172.31.12.118:9092 \
   --topic 30-min-candle --from-beginning --max-messages 1
 ```
-
-## **SUCCESS METRICS:**
-
-### **Before Fix:**
-- 1-minute candle lag: 33-36 messages
-- 30-minute candle delay: ~57 minutes
-- Window emission: Only after complete window close
-
-### **After Fix #1:**
-- 1-minute candle lag: <5 messages
-- 30-minute candle delay: ~2-5 minutes  
-- Window emission: Within 100ms of data arrival
-
-### **After All Fixes:**
-- 1-minute candle lag: <2 messages
-- 30-minute candle delay: ~30 seconds - 1 minute
-- Real-time candle processing
-
-## **EXACT LINES TO CHANGE:**
-
-```bash
-# Line 43 - Buffer delay
-sed -i 's/TICK_BUFFER_DELAY_MS = 500/TICK_BUFFER_DELAY_MS = 50/' CandlestickProcessor.java
-
-# Line 126 - Add grace period
-sed -i 's/TimeWindows.ofSizeWithNoGrace/TimeWindows.ofSizeAndGrace/' CandlestickProcessor.java
-
-# Line 142 - Change suppression
-sed -i 's/untilWindowCloses.*unbounded()/untilTimeLimit(Duration.ofMillis(100), Suppressed.BufferConfig.maxRecords(1000))/' CandlestickProcessor.java
-```
-
-**PRIORITY:** 🔴 **URGENT** - Deploy Fix #1 immediately to resolve the 57-minute delay issue! 

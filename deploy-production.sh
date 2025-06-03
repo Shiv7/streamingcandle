@@ -30,10 +30,10 @@ echo "🧹 Cleaning up existing state directories..."
 sudo find "${STATE_DIR}" -name "*.lock" -delete 2>/dev/null || true
 sudo find "${STATE_DIR}" -name "*-StreamThread-*" -type d -exec rm -rf {} + 2>/dev/null || true
 
-# Verify Kafka connectivity
-echo "📡 Verifying Kafka connectivity..."
-timeout 10 bash -c "cat < /dev/null > /dev/tcp/172.31.0.121/9092" || {
-    echo "❌ ERROR: Cannot connect to Kafka broker at 172.31.0.121:9092"
+# Verify Kafka connectivity before starting
+echo "🔍 Checking Kafka connectivity..."
+timeout 10 bash -c "cat < /dev/null > /dev/tcp/172.31.12.118/9092" || {
+    echo "❌ ERROR: Cannot connect to Kafka broker at 172.31.12.118:9092"
     echo "Please ensure Kafka is running and accessible"
     exit 1
 }

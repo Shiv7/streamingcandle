@@ -112,7 +112,7 @@ Contains Kafka-related configuration including:
 - Timestamp validation and correction
 
 ## Deployment
-The system appears to be configured to connect to Kafka at `172.31.0.121:9092` with state storage in `/tmp/kafka-streams-state`.
+The system appears to be configured to connect to Kafka at `172.31.12.118:9092` with state storage in `/tmp/kafka-streams-state`.
 
 ## Future Integration Points
 The additional modules (indiactorCalculator, indicatorAgg, scripFinder) suggest plans for:

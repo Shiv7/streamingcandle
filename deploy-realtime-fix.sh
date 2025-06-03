@@ -54,11 +54,11 @@ for i in {1..5}; do
     sleep 60
     
     echo "1-minute candle consumer lag:"
-    kafka-consumer-groups.sh --bootstrap-server 172.31.0.121:9092 \
+    kafka-consumer-groups.sh --bootstrap-server 172.31.12.118:9092 \
         --group tickdata-to-candlestick-app-1minute --describe | grep -v COORDINATOR
     
     echo "30-minute candle consumer lag:"
-    kafka-consumer-groups.sh --bootstrap-server 172.31.0.121:9092 \
+    kafka-consumer-groups.sh --bootstrap-server 172.31.12.118:9092 \
         --group tickdata-to-candlestick-app-30minute --describe | grep -v COORDINATOR
     echo ""
 done
@@ -68,11 +68,11 @@ echo "🎉 DEPLOYMENT COMPLETE!"
 echo "🔍 Final validation - check latest candle timestamps:"
 
 echo "Latest 1-min candle:"
-kafka-console-consumer.sh --bootstrap-server 172.31.0.121:9092 \
+kafka-console-consumer.sh --bootstrap-server 172.31.12.118:9092 \
     --topic 1-min-candle --from-beginning --max-messages 1 2>/dev/null | tail -1
 
 echo "Latest 30-min candle:"
-kafka-console-consumer.sh --bootstrap-server 172.31.0.121:9092 \
+kafka-console-consumer.sh --bootstrap-server 172.31.12.118:9092 \
     --topic 30-min-candle --from-beginning --max-messages 1 2>/dev/null | tail -1
 
 echo ""
@@ -82,4 +82,20 @@ echo "   - 30-minute candle delay: <2 minutes (was 39 minutes)"
 echo "   - Real-time candle emission within 30 seconds of window close"
 echo ""
 echo "📈 Monitor with: tail -f logs/realtime-fix.log"
-echo "🔧 Service PID: $SERVICE_PID" 
+echo "🔧 Service PID: $SERVICE_PID"
+
+# Monitor Kafka Consumer Groups
+echo "📊 Monitoring consumer groups..."
+kafka-consumer-groups.sh --bootstrap-server 172.31.12.118:9092 \
+  --describe --group tickdata-to-candlestick-app-1minute
+
+kafka-consumer-groups.sh --bootstrap-server 172.31.12.118:9092 \
+  --describe --group tickdata-to-candlestick-app-30minute
+
+# Test candle outputs
+echo "🕯️ Testing 1-minute candles..."
+kafka-console-consumer.sh --bootstrap-server 172.31.12.118:9092 \
+  --topic 1-min-candle --max-messages 3
+
+kafka-console-consumer.sh --bootstrap-server 172.31.12.118:9092 \
+  --topic 30-min-candle --max-messages 3 

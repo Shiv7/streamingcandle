@@ -123,7 +123,7 @@ spring.kafka.streams.properties.buffer.memory=33554432
 ### **Monitor These Metrics:**
 1. **Consumer Lag:**
    ```bash
-   kafka-consumer-groups.sh --bootstrap-server 172.31.0.121:9092 \
+   kafka-consumer-groups.sh --bootstrap-server 172.31.12.118:9092 \
      --group candle-processor-ticktooneminprocessor-30minute --describe
    ```
 

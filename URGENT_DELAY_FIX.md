@@ -75,18 +75,8 @@ spring.kafka.streams.properties.commit.interval.ms=100
 
 ```bash
 # Watch consumer lag improvement
-watch -n 5 "kafka-consumer-groups.sh --bootstrap-server 172.31.0.121:9092 --group tickdata-to-candlestick-app-1minute --describe"
+watch -n 5 "kafka-consumer-groups.sh --bootstrap-server 172.31.12.118:9092 --group tickdata-to-candlestick-app-1minute --describe"
 
 # Check latest candle timestamps
-kafka-console-consumer.sh --bootstrap-server 172.31.0.121:9092 --topic 1-min-candle --from-beginning --max-messages 1
+kafka-console-consumer.sh --bootstrap-server 172.31.12.118:9092 --topic 1-min-candle --from-beginning --max-messages 1
 ```
-
-## **DEPLOYMENT STEPS:**
-
-1. Apply Fix 1 (suppression change)
-2. Restart streaming candle service
-3. Monitor consumer lag for 5 minutes
-4. Verify candle timestamps improve
-5. Apply remaining fixes gradually
-
-**Critical:** The 30-minute candle processing is working fine - the delay comes from slow 1-minute candle generation! 

@@ -48,7 +48,7 @@ org.apache.kafka.streams.errors.StreamsException: Unable to initialize state, th
 
 **Problem:**
 ```
-Bootstrap broker 172.31.0.121:9092 (id: -1 rack: null isFenced: false) disconnected
+Bootstrap broker 172.31.12.118:9092 (id: -1 rack: null isFenced: false) disconnected
 ```
 
 **Root Cause:**
@@ -102,7 +102,7 @@ chmod +x deploy-production.sh
 ls -la /var/lib/kafka-streams/streamingcandle
 
 # Verify Kafka connectivity
-telnet 172.31.0.121 9092
+telnet 172.31.12.118 9092
 
 # Check application logs
 tail -f /var/log/streamingcandle/application.log
@@ -125,7 +125,7 @@ sudo systemctl status streamingcandle
 ### **Health Checks**
 ```bash
 # Check Kafka consumer lag
-kafka-consumer-groups.sh --bootstrap-server 172.31.0.121:9092 --group candle-processor-ticktooneminprocessor --describe
+kafka-consumer-groups.sh --bootstrap-server 172.31.12.118:9092 --group candle-processor-ticktooneminprocessor --describe
 
 # Monitor state directory growth
 du -sh /var/lib/kafka-streams/streamingcandle/*
