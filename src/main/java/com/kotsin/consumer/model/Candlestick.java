@@ -56,6 +56,10 @@ public class Candlestick {
     private Boolean validCandle;
     private String validationIssues;
 
+    // Transient field for processing
+    @JsonIgnore
+    private transient long alignedWindowStart;
+
     /**
      * Creates a new empty candlestick with default values.
      */
