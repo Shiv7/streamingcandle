@@ -144,7 +144,6 @@ public class CandlestickProcessor {
         KStream<String, Candlestick> inputStream = builder.stream(
                 inputTopic,
                 Consumed.with(Serdes.String(), Candlestick.serde())
-                        .withTimestampExtractor(new CandleTimestampExtractor())
         );
 
         // Use the Processor API to perform stateful volume calculation and re-keying with alignment
@@ -173,10 +172,14 @@ public class CandlestickProcessor {
 
         aggregatedCandles.toStream()
                 .map((windowedKey, candle) -> {
-                    // The key is now composite (e.g., "ABB@1668147300000"), extract the original key
-                    String originalKey = windowedKey.key().split("@")[0];
-                    candle.setWindowStartMillis(windowedKey.window().start());
-                    candle.setWindowEndMillis(windowedKey.window().end());
+                    // The key is now composite (e.g., "ABB@1668147300000"), extract the original key and the true start time
+                    String[] parts = windowedKey.key().split("@");
+                    String originalKey = parts[0];
+                    long trueWindowStart = Long.parseLong(parts[1]);
+                    long trueWindowEnd = trueWindowStart + Duration.ofMinutes(windowSize).toMillis();
+
+                    candle.setWindowStartMillis(trueWindowStart);
+                    candle.setWindowEndMillis(trueWindowEnd);
                     logCandleDetails(candle, windowSize);
                     return KeyValue.pair(originalKey, candle);
                 })
