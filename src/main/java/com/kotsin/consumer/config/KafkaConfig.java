@@ -47,7 +47,9 @@ public class KafkaConfig {
      */
     public Properties getStreamProperties(String appId) {
         Properties props = new Properties();
-        props.put(StreamsConfig.APPLICATION_ID_CONFIG, appId);
+        // Append a unique ID to the application ID to force a fresh start every time.
+        // This ensures the 'auto.offset.reset' policy is always applied.
+        props.put(StreamsConfig.APPLICATION_ID_CONFIG, appId + "-" + UUID.randomUUID().toString());
         props.put(StreamsConfig.BOOTSTRAP_SERVERS_CONFIG, BOOTSTRAP_SERVERS);
         props.put(StreamsConfig.DEFAULT_KEY_SERDE_CLASS_CONFIG, Serdes.String().getClass().getName());
         props.put(StreamsConfig.DEFAULT_VALUE_SERDE_CLASS_CONFIG, Serdes.String().getClass().getName());
@@ -104,7 +106,7 @@ public class KafkaConfig {
             }
         }
         
-        // Return unique path for this application instance
-        return baseStateDir + "/" + appId + "-" + UUID.randomUUID().toString().substring(0, 8);
+        // Return path for this application instance
+        return baseStateDir + "/" + appId;
     }
 }
