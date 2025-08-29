@@ -1,6 +1,6 @@
 package com.kotsin.consumer.config;
 
-import com.kotsin.consumer.util.KafkaRecordTimestampExtractor;
+
 import org.apache.kafka.clients.producer.ProducerConfig;
 import org.apache.kafka.common.serialization.Serdes;
 import org.apache.kafka.streams.StreamsConfig;

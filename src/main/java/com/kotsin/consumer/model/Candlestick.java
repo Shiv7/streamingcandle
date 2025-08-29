@@ -175,28 +175,7 @@ public class Candlestick {
         this.companyName = other.companyName;
         this.scripCode = other.scripCode;
     }
-    
-    /**
-     * Returns a formatted string representation of the candle's time window.
-     * Useful for debugging or display.
-     * 
-     * @return String in format "09:15-09:45" (or empty if window times aren't set)
-     */
-    @JsonIgnore
-    public String getFormattedTimeWindow() {
-        if (windowStartMillis == 0 || windowEndMillis == 0) {
-            return "";
-        }
-        
-        DateTimeFormatter formatter = DateTimeFormatter.ofPattern("HH:mm");
-        ZoneId istZone = ZoneId.of("Asia/Kolkata");
-        
-        ZonedDateTime start = ZonedDateTime.ofInstant(Instant.ofEpochMilli(windowStartMillis), istZone);
-        ZonedDateTime end = ZonedDateTime.ofInstant(Instant.ofEpochMilli(windowEndMillis), istZone);
-        
-        return start.format(formatter) + "-" + end.format(formatter);
-    }
-    
+
     /**
      * Updates the human-readable timestamps based on windowStartMillis and windowEndMillis
      * with improved formatting and alignment to ensure exact minute boundaries
@@ -251,96 +230,6 @@ public class Candlestick {
         updateHumanReadableTimestamps();
     }
 
-    /**
-     * Validates the quality of this candlestick data.
-     * Checks for logical consistency in OHLC values and volume.
-     * Sets the validCandle field and returns the result.
-     * 
-     * @return true if the candle data is valid, false otherwise
-     */
-    public boolean isValidCandle() {
-        // If already computed, return cached result
-        if (validCandle != null) {
-            return validCandle;
-        }
-        
-        // Compute validation
-        boolean isValid = true;
-        StringBuilder issues = new StringBuilder();
-        
-        // Check for basic data integrity
-        if (open <= 0) {
-            isValid = false;
-            issues.append("Invalid open price: ").append(open).append("; ");
-        }
-        if (close <= 0) {
-            isValid = false;
-            issues.append("Invalid close price: ").append(close).append("; ");
-        }
-        if (high <= 0) {
-            isValid = false;
-            issues.append("Invalid high price: ").append(high).append("; ");
-        }
-        if (low <= 0) {
-            isValid = false;
-            issues.append("Invalid low price: ").append(low).append("; ");
-        }
-        
-        // Check OHLC relationships
-        if (high < Math.max(open, close)) {
-            isValid = false;
-            issues.append("High (").append(high).append(") is less than max(open, close): ")
-                   .append(Math.max(open, close)).append("; ");
-        }
-        
-        if (low > Math.min(open, close)) {
-            isValid = false;
-            issues.append("Low (").append(low).append(") is greater than min(open, close): ")
-                   .append(Math.min(open, close)).append("; ");
-        }
-        
-        // Check for reasonable price ranges (high should be >= low)
-        if (high < low) {
-            isValid = false;
-            issues.append("High (").append(high).append(") is less than low (").append(low).append("); ");
-        }
-        
-        // Volume should be non-negative
-        if (volume < 0) {
-            isValid = false;
-            issues.append("Negative volume: ").append(volume).append("; ");
-        }
-        
-        // Check for extreme price differences (possible data corruption)
-        double priceRange = high - low;
-        double avgPrice = (high + low) / 2;
-        if (avgPrice > 0 && priceRange / avgPrice > 0.2) { // 20% range seems excessive for 1-minute candles
-            // This is a warning, not a failure
-            // Large ranges can happen during volatile periods
-            issues.append("Warning: Large price range detected (").append(String.format("%.2f%%", (priceRange/avgPrice)*100)).append("); ");
-        }
-        
-        // Set the cached values
-        this.validCandle = isValid;
-        this.validationIssues = issues.length() > 0 ? issues.toString() : "No validation issues found";
-        
-        return isValid;
-    }
-    
-    /**
-     * Returns a summary of candle validation issues for debugging.
-     * If validation hasn't been run, triggers validation first.
-     * 
-     * @return A string describing any validation issues found
-     */
-    public String getValidationIssues() {
-        // If not computed yet, trigger validation
-        if (validationIssues == null) {
-            isValidCandle(); // This will set validationIssues
-        }
-        
-        return validationIssues;
-    }
 
     /**
      * Provides a Kafka Serde for Candlestick.
