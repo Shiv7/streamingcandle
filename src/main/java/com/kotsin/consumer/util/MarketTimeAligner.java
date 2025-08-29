@@ -1,7 +1,6 @@
 package com.kotsin.consumer.util;
 
 import java.time.LocalTime;
-import java.time.ZoneId;
 import java.time.ZonedDateTime;
 import java.time.temporal.ChronoUnit;
 
@@ -12,7 +11,6 @@ import java.time.temporal.ChronoUnit;
  */
 public final class MarketTimeAligner {
 
-    private static final ZoneId INDIA_ZONE = ZoneId.of("Asia/Kolkata");
 
     // NSE Trading Hours
     private static final LocalTime NSE_OPEN_TIME = LocalTime.of(9, 15);
