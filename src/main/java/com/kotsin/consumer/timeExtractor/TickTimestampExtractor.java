@@ -1,4 +1,4 @@
-package com.kotsin.consumer.processor;
+package com.kotsin.consumer.timeExtractor;
 
 import com.kotsin.consumer.model.TickData;
 import org.apache.kafka.clients.consumer.ConsumerRecord;
@@ -6,7 +6,6 @@ import org.apache.kafka.streams.processor.TimestampExtractor;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
-import java.time.Instant;
 import java.time.ZoneId;
 import java.time.ZonedDateTime;
 import java.time.format.DateTimeFormatter;

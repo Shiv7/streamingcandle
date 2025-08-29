@@ -3,8 +3,10 @@ package com.kotsin.consumer.processor;
 import com.kotsin.consumer.config.KafkaConfig;
 import com.kotsin.consumer.model.Candlestick;
 import com.kotsin.consumer.model.TickData;
-import com.kotsin.consumer.timeExtractor.CandleTimestampExtractor;
+import com.kotsin.consumer.timeExtractor.MultiMinuteOffsetTimestampExtractor;
+import com.kotsin.consumer.timeExtractor.TickTimestampExtractor;
 import com.kotsin.consumer.transformers.CumToDeltaTransformer;
+import com.kotsin.consumer.util.MarketTimeAligner;
 
 import jakarta.annotation.PostConstruct;
 import org.apache.kafka.common.serialization.Serdes;
@@ -12,25 +14,23 @@ import org.apache.kafka.common.utils.Bytes;
 import org.apache.kafka.streams.KafkaStreams;
 import org.apache.kafka.streams.KeyValue;
 import org.apache.kafka.streams.StreamsBuilder;
+import org.apache.kafka.streams.errors.StreamsUncaughtExceptionHandler;
 import org.apache.kafka.streams.kstream.*;
 import org.apache.kafka.streams.state.WindowStore;
+import org.apache.kafka.streams.state.Stores;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.stereotype.Component;
-import org.apache.kafka.streams.errors.StreamsUncaughtExceptionHandler;
 
 import java.time.*;
 import java.time.format.DateTimeFormatter;
 import java.util.HashMap;
 import java.util.Map;
 import java.util.Properties;
-import org.apache.kafka.streams.state.Stores;
-
 
 /**
  * Production-ready Kafka Streams processor that aggregates market data into candlesticks of various durations.
- * REFACTORED to use Kafka Streams best practices for time-windowed aggregations and market-hour alignment.
  *
  * Data Flow:
  * 1. Raw websocket tick data → 1-minute candles
@@ -66,7 +66,6 @@ public class CandlestickProcessor {
 
         KafkaStreams streams = new KafkaStreams(builder.build(), props);
         streamsInstances.put(appId + "-" + windowSize + "m", streams);
-
 
         streams.setStateListener((newState, oldState) -> {
             LOGGER.info("Kafka Streams state transition for {}-minute candles: {} -> {}",
@@ -106,7 +105,6 @@ public class CandlestickProcessor {
                 (t.getScripCode() != null && !t.getScripCode().isEmpty()) ?
                         t.getScripCode() : String.valueOf(t.getToken()));
 
-
         // 3) Convert cumulative -> delta (order-safe)
         KStream<String, TickData> ticks = keyed.transform(
                 () -> new CumToDeltaTransformer(DELTA_STORE), DELTA_STORE);
@@ -137,7 +135,6 @@ public class CandlestickProcessor {
                 .to(outputTopic, Produced.with(Serdes.String(), Candlestick.serde()));
     }
 
-
     private boolean withinTradingHours(TickData tick) {
         try {
             long ts = tick.getTimestamp();
@@ -147,9 +144,9 @@ public class CandlestickProcessor {
             LocalTime t = zdt.toLocalTime();
             String exch = tick.getExchange();
 
-            if ("N".equals(exch)) {
+            if ("N".equalsIgnoreCase(exch)) {
                 return !t.isBefore(LocalTime.of(9, 15)) && !t.isAfter(LocalTime.of(15, 30));
-            } else if ("M".equals(exch)) {
+            } else if ("M".equalsIgnoreCase(exch)) {
                 return !t.isBefore(LocalTime.of(9, 0)) && !t.isAfter(LocalTime.of(23, 30));
             } else {
                 // Unknown exchange -> drop (or send to DLQ if you add one)
@@ -161,7 +158,6 @@ public class CandlestickProcessor {
         }
     }
 
-
     /**
      * Aggregates multi-minute candles from 1-minute candles with correct market-hour alignment.
      */
@@ -169,13 +165,17 @@ public class CandlestickProcessor {
                                                String inputTopic,
                                                String outputTopic,
                                                int windowSize) {
+
         KStream<String, Candlestick> mins = builder.stream(
                 inputTopic,
                 Consumed.with(Serdes.String(), Candlestick.serde())
-                        .withTimestampExtractor(new CandleTimestampExtractor())
+                        // Use the offset-based extractor ONLY for multi-minute rollups
+                        .withTimestampExtractor(new MultiMinuteOffsetTimestampExtractor(windowSize))
         );
 
-        TimeWindows windows = TimeWindows.ofSizeAndGrace(Duration.ofMinutes(windowSize), Duration.ofSeconds(5));
+        // Close immediately at window boundary; next record advances stream-time
+        TimeWindows windows = TimeWindows.ofSizeAndGrace(
+                Duration.ofMinutes(windowSize), Duration.ZERO);
 
         KTable<Windowed<String>, Candlestick> aggregated = mins
                 .groupByKey(Grouped.with(Serdes.String(), Candlestick.serde()))
@@ -191,39 +191,16 @@ public class CandlestickProcessor {
 
         aggregated.toStream()
                 .map((wk, c) -> {
-                    c.setWindowStartMillis(wk.window().start());
-                    c.setWindowEndMillis(wk.window().end());
+                    // Remove the alignment shift for display/start-end correctness
+                    int offMin = MarketTimeAligner.getWindowOffsetMinutes(c.getExchange(), windowSize);
+                    long offMs = offMin * 60_000L;
+
+                    c.setWindowStartMillis(wk.window().start() - offMs);
+                    c.setWindowEndMillis(wk.window().end() - offMs);
                     logCandleDetails(c, windowSize);
                     return KeyValue.pair(wk.key(), c); // keep scripCode key
                 })
                 .to(outputTopic, Produced.with(Serdes.String(), Candlestick.serde()));
-    }
-
-
-    private boolean isWithinTradingHours(TickData tick) {
-        try {
-            ZonedDateTime time;
-            String tickDt = tick.getTickDt();
-            if (tickDt != null && tickDt.startsWith("/Date(") && tickDt.endsWith(")/")) {
-                String millisStr = tickDt.substring(6, tickDt.length() - 2);
-                long millis = Long.parseLong(millisStr);
-                time = ZonedDateTime.ofInstant(Instant.ofEpochMilli(millis), ZoneId.of("Asia/Kolkata"));
-            } else {
-                time = ZonedDateTime.parse(tickDt, DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm:ss").withZone(ZoneId.of("Asia/Kolkata")));
-            }
-
-            LocalTime localTime = time.toLocalTime();
-            if ("N".equals(tick.getExchange())) {
-                return !localTime.isBefore(LocalTime.of(9, 15)) && !localTime.isAfter(LocalTime.of(15, 30));
-            } else if ("M".equals(tick.getExchange())) {
-                return !localTime.isBefore(LocalTime.of(9, 0)) && !localTime.isAfter(LocalTime.of(23, 30));
-            }
-            return true;
-        } catch (Exception e) {
-            LOGGER.warn("Error parsing tick datetime '{}' for token {}: {}. Allowing tick.",
-                    tick.getTickDt(), tick.getToken(), e.getMessage());
-            return true;
-        }
     }
 
     private void logCandleDetails(Candlestick candle, int windowSizeMinutes) {
@@ -259,8 +236,4 @@ public class CandlestickProcessor {
             LOGGER.error("❌ Error starting Realtime Candlestick Processors", e);
         }
     }
-
-
 }
-
-
