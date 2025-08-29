@@ -60,6 +60,10 @@ public class Candlestick {
     @JsonIgnore
     private transient long alignedWindowStart;
 
+    @JsonIgnore
+    private long firstTs = Long.MAX_VALUE;
+    @JsonIgnore
+    private long lastTs  = Long.MIN_VALUE;
     /**
      * Creates a new empty candlestick with default values.
      */
@@ -127,6 +131,34 @@ public class Candlestick {
         
         companyName = tick.getCompanyName();
         scripCode = String.valueOf(tick.getToken());
+    }
+
+
+    /**
+     * Update using event-time and delta volume (for raw TickData -> 1m).
+     * Deterministic: open = price at min(event_ts), close = price at max(event_ts).
+     */
+    public void updateWithDelta(TickData tick) {
+        long ts = tick.getTimestamp();
+        double px = tick.getLastRate();
+
+        // Open/Close by event time (not arrival order)
+        if (ts < firstTs) { firstTs = ts; open  = px; }
+        if (ts >= lastTs) { lastTs  = ts; close = px; }
+
+        // High/Low with proper initialization
+        high = (high == Double.MIN_VALUE) ? px : Math.max(high, px);
+        low  = (low  == Double.MAX_VALUE) ? px : Math.min(low,  px);
+
+        // Sum delta volume (0 if null)
+        Integer dv = tick.getDeltaVolume();
+        volume += (dv == null ? 0 : dv);
+
+        // Metadata (idempotent)
+        if (companyName == null) companyName = tick.getCompanyName();
+        if (scripCode   == null) scripCode   = tick.getScripCode();
+        exchange = tick.getExchange();
+        if (exchangeType == null) exchangeType = tick.getExchangeType();
     }
 
     /**

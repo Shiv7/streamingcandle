@@ -3,7 +3,9 @@ package com.kotsin.consumer.processor;
 import com.kotsin.consumer.config.KafkaConfig;
 import com.kotsin.consumer.model.Candlestick;
 import com.kotsin.consumer.model.TickData;
-import com.kotsin.consumer.util.MarketTimeAligner;
+import com.kotsin.consumer.timeExtractor.CandleTimestampExtractor;
+import com.kotsin.consumer.transformers.CumToDeltaTransformer;
+
 import jakarta.annotation.PostConstruct;
 import org.apache.kafka.common.serialization.Serdes;
 import org.apache.kafka.common.utils.Bytes;
@@ -24,7 +26,7 @@ import java.util.HashMap;
 import java.util.Map;
 import java.util.Properties;
 import org.apache.kafka.streams.state.Stores;
-import org.apache.kafka.streams.state.KeyValueStore;
+
 
 /**
  * Production-ready Kafka Streams processor that aggregates market data into candlesticks of various durations.
@@ -56,15 +58,6 @@ public class CandlestickProcessor {
         Properties props = kafkaConfig.getStreamProperties(appId + "-" + windowSize + "m");
         StreamsBuilder builder = new StreamsBuilder();
 
-        if (windowSize > 1) {
-            // State store for the transformer
-            String storeName = "last-volume-store-" + windowSize + "m";
-            builder.addStateStore(Stores.keyValueStoreBuilder(
-                    Stores.persistentKeyValueStore(storeName),
-                    Serdes.String(),
-                    Serdes.Integer()));
-        }
-
         if (windowSize == 1) {
             processTickData(builder, inputTopic, outputTopic);
         } else {
@@ -74,7 +67,6 @@ public class CandlestickProcessor {
         KafkaStreams streams = new KafkaStreams(builder.build(), props);
         streamsInstances.put(appId + "-" + windowSize + "m", streams);
 
-        streams.cleanUp();
 
         streams.setStateListener((newState, oldState) -> {
             LOGGER.info("Kafka Streams state transition for {}-minute candles: {} -> {}",
@@ -95,29 +87,40 @@ public class CandlestickProcessor {
         }));
     }
 
-    /**
-     * Aggregates raw TickData into 1-minute candles.
-     */
     private void processTickData(StreamsBuilder builder, String inputTopic, String outputTopic) {
-        KStream<String, TickData> inputStream = builder.stream(
+        // State store: max cumulative volume per symbol (for delta conversion)
+        final String DELTA_STORE = "max-cum-vol-per-sym";
+        builder.addStateStore(Stores.keyValueStoreBuilder(
+                Stores.persistentKeyValueStore(DELTA_STORE),
+                Serdes.String(), Serdes.Integer()));
+
+        // 1) Read raw ticks with true event time
+        KStream<String, TickData> raw = builder.stream(
                 inputTopic,
                 Consumed.with(Serdes.String(), TickData.serde())
                         .withTimestampExtractor(new TickTimestampExtractor())
         );
 
-        TimeWindows windows = TimeWindows.ofSizeAndGrace(Duration.ofMinutes(1), Duration.ofSeconds(30))
-                .advanceBy(Duration.ofMinutes(1));
+        // 2) Stable key (scripCode or token)
+        KStream<String, TickData> keyed = raw.selectKey((k, t) ->
+                (t.getScripCode() != null && !t.getScripCode().isEmpty()) ?
+                        t.getScripCode() : String.valueOf(t.getToken()));
 
-        KTable<Windowed<String>, Candlestick> candlestickTable = inputStream
-                .filter((key, tick) -> isWithinTradingHours(tick))
-                .groupBy((key, tick) -> tick.getCompanyName(), Grouped.with(Serdes.String(), TickData.serde()))
+
+        // 3) Convert cumulative -> delta (order-safe)
+        KStream<String, TickData> ticks = keyed.transform(
+                () -> new CumToDeltaTransformer(DELTA_STORE), DELTA_STORE);
+
+        // 4) Window & aggregate with deterministic OHLC and summed deltas
+        TimeWindows windows = TimeWindows.ofSizeAndGrace(Duration.ofMinutes(1), Duration.ofSeconds(5));
+
+        KTable<Windowed<String>, Candlestick> candlestickTable = ticks
+                .filter((sym, tick) -> withinTradingHours(tick)) // see method below
+                .groupByKey(Grouped.with(Serdes.String(), TickData.serde()))
                 .windowedBy(windows)
                 .aggregate(
                         Candlestick::new,
-                        (key, tick, candle) -> {
-                            candle.update(tick);
-                            return candle;
-                        },
+                        (sym, tick, candle) -> { candle.updateWithDelta(tick); return candle; },
                         Materialized.<String, Candlestick, WindowStore<Bytes, byte[]>>as("tick-candlestick-store")
                                 .withKeySerde(Serdes.String())
                                 .withValueSerde(Candlestick.serde())
@@ -129,10 +132,35 @@ public class CandlestickProcessor {
                     candle.setWindowStartMillis(windowedKey.window().start());
                     candle.setWindowEndMillis(windowedKey.window().end());
                     logCandleDetails(candle, 1);
-                    return KeyValue.pair(windowedKey.key(), candle);
+                    return KeyValue.pair(windowedKey.key(), candle); // key = scripCode
                 })
                 .to(outputTopic, Produced.with(Serdes.String(), Candlestick.serde()));
     }
+
+
+    private boolean withinTradingHours(TickData tick) {
+        try {
+            long ts = tick.getTimestamp();
+            if (ts <= 0) return false;
+
+            ZonedDateTime zdt = ZonedDateTime.ofInstant(Instant.ofEpochMilli(ts), ZoneId.of("Asia/Kolkata"));
+            LocalTime t = zdt.toLocalTime();
+            String exch = tick.getExchange();
+
+            if ("N".equals(exch)) {
+                return !t.isBefore(LocalTime.of(9, 15)) && !t.isAfter(LocalTime.of(15, 30));
+            } else if ("M".equals(exch)) {
+                return !t.isBefore(LocalTime.of(9, 0)) && !t.isAfter(LocalTime.of(23, 30));
+            } else {
+                // Unknown exchange -> drop (or send to DLQ if you add one)
+                return false;
+            }
+        } catch (Exception e) {
+            LOGGER.warn("Invalid timestamp for token {}: {}", tick.getToken(), e.toString());
+            return false;
+        }
+    }
+
 
     /**
      * Aggregates multi-minute candles from 1-minute candles with correct market-hour alignment.
@@ -141,50 +169,36 @@ public class CandlestickProcessor {
                                                String inputTopic,
                                                String outputTopic,
                                                int windowSize) {
-        KStream<String, Candlestick> inputStream = builder.stream(
+        KStream<String, Candlestick> mins = builder.stream(
                 inputTopic,
                 Consumed.with(Serdes.String(), Candlestick.serde())
+                        .withTimestampExtractor(new CandleTimestampExtractor())
         );
 
-        // Use the Processor API to perform stateful volume calculation and re-keying with alignment
-        KStream<String, Candlestick> alignedStream = inputStream.process(
-                () -> new MarketAlignedVolumeProcessor(windowSize),
-                "last-volume-store-" + windowSize + "m"
-        );
+        TimeWindows windows = TimeWindows.ofSizeAndGrace(Duration.ofMinutes(windowSize), Duration.ofSeconds(5));
 
-        TimeWindows windows = TimeWindows.ofSizeAndGrace(Duration.ofMinutes(windowSize), Duration.ofSeconds(30))
-                .advanceBy(Duration.ofMinutes(windowSize));
-
-        KTable<Windowed<String>, Candlestick> aggregatedCandles = alignedStream
+        KTable<Windowed<String>, Candlestick> aggregated = mins
                 .groupByKey(Grouped.with(Serdes.String(), Candlestick.serde()))
                 .windowedBy(windows)
                 .aggregate(
                         Candlestick::new,
-                        (key, candle, aggCandle) -> {
-                            aggCandle.updateCandle(candle); // Use the correct merge method
-                            return aggCandle;
-                        },
+                        (sym, c, agg) -> { agg.updateCandle(c); return agg; },
                         Materialized.<String, Candlestick, WindowStore<Bytes, byte[]>>as("agg-candle-store-" + windowSize + "m")
                                 .withKeySerde(Serdes.String())
                                 .withValueSerde(Candlestick.serde())
                 )
                 .suppress(Suppressed.untilWindowCloses(Suppressed.BufferConfig.unbounded()));
 
-        aggregatedCandles.toStream()
-                .map((windowedKey, candle) -> {
-                    // The key is now composite (e.g., "ABB@1668147300000"), extract the original key and the true start time
-                    String[] parts = windowedKey.key().split("@");
-                    String originalKey = parts[0];
-                    long trueWindowStart = Long.parseLong(parts[1]);
-                    long trueWindowEnd = trueWindowStart + Duration.ofMinutes(windowSize).toMillis();
-
-                    candle.setWindowStartMillis(trueWindowStart);
-                    candle.setWindowEndMillis(trueWindowEnd);
-                    logCandleDetails(candle, windowSize);
-                    return KeyValue.pair(originalKey, candle);
+        aggregated.toStream()
+                .map((wk, c) -> {
+                    c.setWindowStartMillis(wk.window().start());
+                    c.setWindowEndMillis(wk.window().end());
+                    logCandleDetails(c, windowSize);
+                    return KeyValue.pair(wk.key(), c); // keep scripCode key
                 })
                 .to(outputTopic, Produced.with(Serdes.String(), Candlestick.serde()));
     }
+
 
     private boolean isWithinTradingHours(TickData tick) {
         try {
@@ -245,4 +259,8 @@ public class CandlestickProcessor {
             LOGGER.error("❌ Error starting Realtime Candlestick Processors", e);
         }
     }
+
+
 }
+
+

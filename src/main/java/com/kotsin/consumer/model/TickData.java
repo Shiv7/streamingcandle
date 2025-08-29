@@ -84,6 +84,9 @@ public class TickData {
 
     private long timestamp;
 
+    @JsonProperty("DeltaQty")        // internal field used inside streams topology
+    private Integer deltaVolume;     // null until we compute the delta
+
     /**
      * Parses timestamp from TickDt field.
      */
