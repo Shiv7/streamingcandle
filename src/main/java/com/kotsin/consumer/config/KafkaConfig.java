@@ -54,10 +54,7 @@ public class KafkaConfig {
         props.put(StreamsConfig.DEFAULT_VALUE_SERDE_CLASS_CONFIG, Serdes.String().getClass().getName());
         props.put(StreamsConfig.COMMIT_INTERVAL_MS_CONFIG, 1000);
         
-        // Configure producer to preserve record timestamps
-        props.put(StreamsConfig.PRODUCER_PREFIX + ProducerConfig.ENABLE_IDEMPOTENCE_CONFIG, "true");
-        
-        // CRITICAL: Configure timestamp handling for the producer
+         // CRITICAL: Configure timestamp handling for the producer
         // This ensures the Kafka message's timestamp matches the record's timestamp, not the producer's time
         props.put("producer.message.timestamp.type", "CreateTime");
         

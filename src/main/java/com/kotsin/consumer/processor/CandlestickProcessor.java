@@ -55,6 +55,14 @@ public class CandlestickProcessor {
      * Initializes and starts the candlestick aggregation pipeline.
      */
     public void process(String appId, String inputTopic, String outputTopic, int windowSize) {
+
+        //ensure there will be no duplicate streams
+        String instanceKey = appId + "-" + windowSize + "m";
+        if (streamsInstances.containsKey(instanceKey)) {
+            LOGGER.warn("Streams app {} already running. Skipping duplicate start.", instanceKey);
+            return;
+        }
+
         Properties props = kafkaConfig.getStreamProperties(appId + "-" + windowSize + "m");
         StreamsBuilder builder = new StreamsBuilder();
 
