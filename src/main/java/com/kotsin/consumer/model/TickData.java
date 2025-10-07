@@ -89,6 +89,7 @@ public class TickData {
 
     /**
      * Parses timestamp from TickDt field.
+     * CRITICAL: Never uses System.currentTimeMillis() to handle lag correctly.
      */
     public void parseTimestamp() {
         if (tickDt != null && tickDt.startsWith("/Date(")) {
@@ -96,13 +97,12 @@ public class TickData {
                 // Extract the milliseconds value from the "/Date(1234567890000)/" format
                 this.timestamp = Long.parseLong(tickDt.replaceAll("[^0-9]", ""));
             } catch (NumberFormatException e) {
-                this.timestamp = System.currentTimeMillis();
-                System.err.println("Failed to parse TickDt: " + tickDt + ". Using current time instead.");
+                // CRITICAL: Set to 0 (not current time) and let TimestampExtractor handle it
+                this.timestamp = 0;
+                System.err.println("Failed to parse TickDt: " + tickDt + ". Timestamp set to 0.");
             }
-        } else if (this.timestamp == 0) {
-            // Use current time if no timestamp provided
-            this.timestamp = System.currentTimeMillis();
         }
+        // REMOVED: else clause that was setting System.currentTimeMillis()
     }
 
     /**

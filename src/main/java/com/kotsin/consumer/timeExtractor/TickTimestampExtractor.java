@@ -24,7 +24,7 @@ public class TickTimestampExtractor implements TimestampExtractor {
     public long extract(ConsumerRecord<Object, Object> record, long previousTimestamp) {
         Object value = record.value();
         if (!(value instanceof TickData)) {
-            // Not a TickData record, fall back to stream time
+            // Not a TickData record, fall back to record timestamp
             return record.timestamp();
         }
 
@@ -32,7 +32,7 @@ public class TickTimestampExtractor implements TimestampExtractor {
         String tickDt = tick.getTickDt();
 
         if (tickDt == null || tickDt.isBlank()) {
-            LOGGER.warn("Tick has null or empty timestamp, falling back to stream time for token {}", tick.getToken());
+            LOGGER.warn("Tick has null or empty timestamp, using Kafka record timestamp for token {}", tick.getToken());
             return record.timestamp();
         }
 
@@ -40,13 +40,28 @@ public class TickTimestampExtractor implements TimestampExtractor {
             // Handle the "/Date(1746430676000)/" format
             if (tickDt.startsWith("/Date(") && tickDt.endsWith(")/")) {
                 String millisStr = tickDt.substring(6, tickDt.length() - 2);
-                return Long.parseLong(millisStr);
+                long ts = Long.parseLong(millisStr);
+
+                // CRITICAL: Validate timestamp is reasonable
+                long now = System.currentTimeMillis();
+                if (ts > now + 60000L) { // More than 1 min in future
+                    LOGGER.error("Timestamp {} is in the future for token {}. Using record timestamp.", ts, tick.getToken());
+                    return record.timestamp();
+                }
+                if (ts < now - 365L * 24 * 3600 * 1000) { // More than 1 year old
+                    LOGGER.warn("Timestamp {} is more than 1 year old for token {}. Using as-is (historical data).", ts, tick.getToken());
+                }
+
+                return ts;
             }
+
             // Handle standard format
             ZonedDateTime zdt = ZonedDateTime.parse(tickDt, DT_FORMATTER);
             return zdt.toInstant().toEpochMilli();
+
         } catch (DateTimeParseException | NumberFormatException e) {
-            LOGGER.error("Could not parse timestamp '{}' for token {}. Falling back to stream time.", tickDt, tick.getToken(), e);
+            LOGGER.error("Could not parse timestamp '{}' for token {}. Using Kafka record timestamp.", tickDt, tick.getToken(), e);
+            // CRITICAL: Use record.timestamp(), NEVER System.currentTimeMillis()
             return record.timestamp();
         }
     }
