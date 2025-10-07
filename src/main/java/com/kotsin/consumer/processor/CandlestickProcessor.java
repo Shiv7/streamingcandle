@@ -118,7 +118,7 @@ public class CandlestickProcessor {
                 () -> new CumToDeltaTransformer(DELTA_STORE), DELTA_STORE);
 
         // 4) Window & aggregate with deterministic OHLC and summed deltas
-        TimeWindows windows = TimeWindows.ofSizeAndGrace(Duration.ofMinutes(1), Duration.ofSeconds(5));
+        TimeWindows windows = TimeWindows.ofSizeAndGrace(Duration.ofMinutes(1), Duration.ofSeconds(1));
 
         KTable<Windowed<String>, Candlestick> candlestickTable = ticks
                 .filter((sym, tick) -> withinTradingHours(tick)) // see method below
@@ -229,7 +229,7 @@ public class CandlestickProcessor {
         try {
             LOGGER.info("Starting Realtime Candlestick Processor with bootstrap servers: {}", kafkaConfig.getBootstrapServers());
             process("realtime-candle-1min", "forwardtesting-data", "1-min-candle", 1);
-            Thread.sleep(5000);
+            Thread.sleep(1000);
             process("realtime-candle-2min", "1-min-candle", "2-min-candle", 2);
             Thread.sleep(1000);
             process("realtime-candle-3min", "1-min-candle", "3-min-candle", 3);

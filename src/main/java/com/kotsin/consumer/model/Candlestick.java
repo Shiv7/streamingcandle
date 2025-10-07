@@ -17,13 +17,13 @@ import java.util.Date;
 
 /**
  * Represents a market data candlestick (OHLC + volume) used for technical analysis.
- * 
+ * <p>
  * This class stores:
  * - Price data (open, high, low, close)
  * - Volume data
  * - Metadata (exchange, symbol, etc.)
  * - Window timing information (for debugging and data analysis)
- * 
+ * <p>
  * The candlestick can be built either:
  * - Directly from raw TickData (for 1-minute candles)
  * - By aggregating smaller timeframe candles (for multi-minute candles)
@@ -47,11 +47,11 @@ public class Candlestick {
     // Window timing information (in epoch millis)
     private long windowStartMillis;
     private long windowEndMillis;
-    
+
     // Human-readable window timestamps
     private String humanReadableStartTime;
     private String humanReadableEndTime;
-    
+
     // Validation fields (added to match JSON structure being deserialized)
     private Boolean validCandle;
     private String validationIssues;
@@ -63,7 +63,8 @@ public class Candlestick {
     @JsonIgnore
     private long firstTs = Long.MAX_VALUE;
     @JsonIgnore
-    private long lastTs  = Long.MIN_VALUE;
+    private long lastTs = Long.MIN_VALUE;
+
     /**
      * Creates a new empty candlestick with default values.
      */
@@ -73,64 +74,10 @@ public class Candlestick {
         this.low = Double.MAX_VALUE;
         this.close = 0;
         this.volume = 0;
-        
+
         // Initialize validation fields
         this.validCandle = null;
         this.validationIssues = null;
-    }
-
-    /**
-     * Updates the candlestick with a single TickData entry.
-     * Used when building 1-minute candles from raw tick data.
-     * 
-     * @param tick The tick data to incorporate into this candle
-     */
-    public void update(TickData tick) {
-        // Reset validation since data is changing
-        this.validCandle = null;
-        this.validationIssues = null;
-        
-        double price = tick.getLastRate();
-        
-        // FIXED: Better initialization logic to handle single tick scenarios
-        if (open == 0) {
-            open = price;
-            // Initialize high and low with first price to prevent MIN/MAX values
-            if (high == Double.MIN_VALUE) high = price;
-            if (low == Double.MAX_VALUE) low = price;
-        }
-        
-        // Update high/low prices
-        high = Math.max(high, price);
-        low = Math.min(low, price);
-        
-        // Always update close price (last tick)
-        close = price;
-        
-        // CRITICAL FIX: Use getTotalQuantity() instead of getLastQuantity()
-        // getTotalQuantity() represents cumulative volume for the period
-        // getLastQuantity() is just the individual trade quantity
-        this.volume = tick.getTotalQuantity();
-
-        // Update metadata
-        exchange = tick.getExchange();
-        
-        // Handle exchangeType - derive from exchange if null
-        if (tick.getExchangeType() != null) {
-            exchangeType = tick.getExchangeType();
-        } else {
-            // If exchangeType is not available, set a default based on exchange
-            if ("N".equals(tick.getExchange())) {
-                exchangeType = "EQUITY"; // Default for NSE
-            } else if ("M".equals(tick.getExchange())) {
-                exchangeType = "COMMODITY"; // Default for MCX
-            } else {
-                exchangeType = "UNKNOWN";
-            }
-        }
-        
-        companyName = tick.getCompanyName();
-        scripCode = String.valueOf(tick.getToken());
     }
 
 
@@ -143,12 +90,18 @@ public class Candlestick {
         double px = tick.getLastRate();
 
         // Open/Close by event time (not arrival order)
-        if (ts < firstTs) { firstTs = ts; open  = px; }
-        if (ts >= lastTs) { lastTs  = ts; close = px; }
+        if (ts < firstTs) {
+            firstTs = ts;
+            open = px;
+        }
+        if (ts >= lastTs) {
+            lastTs = ts;
+            close = px;
+        }
 
         // High/Low with proper initialization
         high = (high == Double.MIN_VALUE) ? px : Math.max(high, px);
-        low  = (low  == Double.MAX_VALUE) ? px : Math.min(low,  px);
+        low = (low == Double.MAX_VALUE) ? px : Math.min(low, px);
 
         // Sum delta volume (0 if null)
         Integer dv = tick.getDeltaVolume();
@@ -156,7 +109,7 @@ public class Candlestick {
 
         // Metadata (idempotent)
         if (companyName == null) companyName = tick.getCompanyName();
-        if (scripCode   == null) scripCode   = tick.getScripCode();
+        if (scripCode == null) scripCode = tick.getScripCode();
         exchange = tick.getExchange();
         if (exchangeType == null) exchangeType = tick.getExchangeType();
     }
@@ -164,32 +117,33 @@ public class Candlestick {
     /**
      * Merges another Candlestick into this one.
      * Used when building multi-minute candles from smaller timeframe candles.
-     * 
+     *
      * @param other The candle to merge into this one
      */
+
     public void updateCandle(Candlestick other) {
         // Reset validation since data is changing
         this.validCandle = null;
         this.validationIssues = null;
-        
+
         // Set open price only for the first candle in the window
         if (this.open == 0) {
             this.open = other.open;
         }
-        
+
         // Take highest high and lowest low
         this.high = Math.max(this.high, other.high);
         this.low = Math.min(this.low, other.low);
-        
+
         // Always update close to the latest candle's close
         this.close = other.close;
-        
+
         // Accumulate volume
         this.volume += other.volume;
 
         // Update metadata
         this.exchange = other.exchange;
-        
+
         // Handle exchangeType - ensure it's not null
         if (other.exchangeType != null) {
             this.exchangeType = other.exchangeType;
@@ -203,7 +157,7 @@ public class Candlestick {
                 this.exchangeType = "UNKNOWN";
             }
         }
-        
+
         this.companyName = other.companyName;
         this.scripCode = other.scripCode;
     }
@@ -218,43 +172,43 @@ public class Candlestick {
                     Instant.ofEpochMilli(windowStartMillis),
                     ZoneId.of("Asia/Kolkata")
             );
-            
+
             // Ensure alignment to exact minute boundaries
             startTime = startTime.withSecond(0).withNano(0);
-            
+
             this.humanReadableStartTime = startTime.format(
                     DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm:ss.SSS")
             );
         }
-        
+
         if (windowEndMillis > 0) {
             ZonedDateTime endTime = ZonedDateTime.ofInstant(
                     Instant.ofEpochMilli(windowEndMillis),
                     ZoneId.of("Asia/Kolkata")
             );
-            
+
             // Ensure alignment to exact minute boundaries
             endTime = endTime.withSecond(0).withNano(0);
-            
+
             this.humanReadableEndTime = endTime.format(
                     DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm:ss.SSS")
             );
         }
     }
-    
+
     /**
      * Sets the window start time in milliseconds and updates the human-readable representation.
-     * 
+     *
      * @param windowStartMillis The window start time in epoch milliseconds
      */
     public void setWindowStartMillis(long windowStartMillis) {
         this.windowStartMillis = windowStartMillis;
         updateHumanReadableTimestamps();
     }
-    
+
     /**
      * Sets the window end time in milliseconds and updates the human-readable representation.
-     * 
+     *
      * @param windowEndMillis The window end time in epoch milliseconds
      */
     public void setWindowEndMillis(long windowEndMillis) {

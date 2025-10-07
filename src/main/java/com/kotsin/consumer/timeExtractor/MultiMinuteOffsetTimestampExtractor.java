@@ -5,6 +5,8 @@ import com.kotsin.consumer.util.MarketTimeAligner;
 import org.apache.kafka.clients.consumer.ConsumerRecord;
 import org.apache.kafka.streams.processor.TimestampExtractor;
 
+import java.util.Objects;
+
 /**
  * Timestamp extractor for multi-minute rollups built from 1m candles.
  * Uses the 1m candle END time and applies an exchange/window-size offset
@@ -38,8 +40,13 @@ public final class MultiMinuteOffsetTimestampExtractor implements TimestampExtra
             if (baseTs <= 0L) baseTs = System.currentTimeMillis();
 
             // SHIFT (do not collapse) by per-exchange offset to align boundaries
-            String exch = c.getExchange(); // may be null
-            int offMin = MarketTimeAligner.getWindowOffsetMinutes(exch, windowSizeMinutes);
+            String exch = c.getExchange();
+            int offMin;
+            if (Objects.nonNull(exch)) {
+                offMin = MarketTimeAligner.getWindowOffsetMinutes(exch, windowSizeMinutes);
+            } else {
+                offMin = MarketTimeAligner.getWindowOffsetMinutes("N", windowSizeMinutes);
+            }
             return baseTs + offMin * 60_000L;
         }
 
