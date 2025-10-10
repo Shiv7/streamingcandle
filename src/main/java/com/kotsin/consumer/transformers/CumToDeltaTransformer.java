@@ -23,7 +23,8 @@ public class CumToDeltaTransformer implements Transformer<String, TickData, KeyV
 
         int curr = Math.max(0, tick.getTotalQuantity());   // cumulative day volume
         Integer prevMax = store.get(key);
-        int add = (prevMax == null) ? 0 : Math.max(0, curr - prevMax);
+        // CRITICAL FIX: Include first tick's volume when prevMax is null
+        int add = (prevMax == null) ? curr : Math.max(0, curr - prevMax);
 
         tick.setDeltaVolume(add);
         store.put(key, (prevMax == null) ? curr : Math.max(prevMax, curr));

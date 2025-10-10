@@ -211,10 +211,10 @@ public class CandlestickProcessor {
                 () -> new CumToDeltaTransformer(DELTA_STORE), DELTA_STORE);
 
         // 4) Window & aggregate with deterministic OHLC and summed deltas
-        // FIXED: Increased grace period from 5s to 10s for better lag handling
+        // Optimized: Reduced grace period to 1s for minimal latency
         TimeWindows windows = TimeWindows.ofSizeAndGrace(
                 Duration.ofMinutes(1),
-                Duration.ofSeconds(10)  // Grace period for late ticks
+                Duration.ofSeconds(1)  // Grace period for late ticks
         );
 
         KTable<Windowed<String>, Candlestick> candlestickTable = ticks
@@ -289,9 +289,10 @@ public class CandlestickProcessor {
         );
 
         // CRITICAL FIX: Add grace period to handle lag and out-of-order data
+        // Optimized: Reduced grace period to 1s for minimal latency
         TimeWindows windows = TimeWindows.ofSizeAndGrace(
                 Duration.ofMinutes(windowSize),
-                Duration.ofSeconds(30)  // Grace period for late-arriving 1-min candles
+                Duration.ofSeconds(1)  // Grace period for late-arriving 1-min candles
         );
 
         KTable<Windowed<String>, Candlestick> aggregated = mins

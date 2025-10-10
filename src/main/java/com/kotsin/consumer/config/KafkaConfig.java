@@ -1,7 +1,6 @@
 package com.kotsin.consumer.config;
 
 
-import org.apache.kafka.clients.producer.ProducerConfig;
 import org.apache.kafka.common.serialization.Serdes;
 import org.apache.kafka.streams.StreamsConfig;
 import org.apache.kafka.streams.errors.LogAndContinueExceptionHandler;
@@ -12,7 +11,6 @@ import java.io.File;
 import java.time.ZoneId;
 import java.time.ZonedDateTime;
 import java.util.Properties;
-import java.util.UUID;
 
 @Component
 public class KafkaConfig {
@@ -52,7 +50,8 @@ public class KafkaConfig {
         props.put(StreamsConfig.BOOTSTRAP_SERVERS_CONFIG, BOOTSTRAP_SERVERS);
         props.put(StreamsConfig.DEFAULT_KEY_SERDE_CLASS_CONFIG, Serdes.String().getClass().getName());
         props.put(StreamsConfig.DEFAULT_VALUE_SERDE_CLASS_CONFIG, Serdes.String().getClass().getName());
-        props.put(StreamsConfig.COMMIT_INTERVAL_MS_CONFIG, 1000);
+        // Reduced commit interval from 1000ms to 100ms for faster candle delivery
+        props.put(StreamsConfig.COMMIT_INTERVAL_MS_CONFIG, 100);
         
          // CRITICAL: Configure timestamp handling for the producer
         // This ensures the Kafka message's timestamp matches the record's timestamp, not the producer's time
