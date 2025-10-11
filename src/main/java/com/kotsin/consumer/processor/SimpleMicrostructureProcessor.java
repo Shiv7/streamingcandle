@@ -26,8 +26,7 @@ import java.util.Properties;
 @Component
 public class SimpleMicrostructureProcessor {
     
-    @Autowired
-    private KafkaConfig kafkaConfig;
+    private final KafkaConfig kafkaConfig;
     
     @Value("${microstructure.enabled:false}")
     private boolean enabled;
@@ -39,6 +38,15 @@ public class SimpleMicrostructureProcessor {
     private String outputTopic;
     
     private KafkaStreams streams;
+    
+    /**
+     * Constructor with dependency injection.
+     *
+     * @param kafkaConfig Kafka configuration for streams setup
+     */
+    public SimpleMicrostructureProcessor(KafkaConfig kafkaConfig) {
+        this.kafkaConfig = kafkaConfig;
+    }
     
     @PostConstruct
     public void init() {

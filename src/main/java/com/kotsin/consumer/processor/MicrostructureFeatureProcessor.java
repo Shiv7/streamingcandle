@@ -37,8 +37,7 @@ import java.util.Properties;
 @Component
 public class MicrostructureFeatureProcessor {
     
-    @Autowired
-    private KafkaConfig kafkaConfig;
+    private final KafkaConfig kafkaConfig;
     
     // Configuration
     @Value("${microstructure.enabled:false}")
@@ -60,6 +59,15 @@ public class MicrostructureFeatureProcessor {
     private long emitIntervalMs;
     
     private KafkaStreams streams;
+    
+    /**
+     * Constructor with dependency injection.
+     *
+     * @param kafkaConfig Kafka configuration for streams setup
+     */
+    public MicrostructureFeatureProcessor(KafkaConfig kafkaConfig) {
+        this.kafkaConfig = kafkaConfig;
+    }
     
     @PostConstruct
     public void init() {

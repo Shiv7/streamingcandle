@@ -47,10 +47,17 @@ public class CandlestickProcessor {
 
     private static final Logger LOGGER = LoggerFactory.getLogger(CandlestickProcessor.class);
 
-    @Autowired
-    private KafkaConfig kafkaConfig;
-
+    private final KafkaConfig kafkaConfig;
     private final Map<String, KafkaStreams> streamsInstances = new HashMap<>();
+
+    /**
+     * Constructor with dependency injection.
+     *
+     * @param kafkaConfig Kafka configuration for streams setup
+     */
+    public CandlestickProcessor(KafkaConfig kafkaConfig) {
+        this.kafkaConfig = kafkaConfig;
+    }
 
     /**
      * Initializes and starts the candlestick aggregation pipeline.

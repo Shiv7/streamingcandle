@@ -24,13 +24,21 @@ import java.util.Properties;
 @Component
 public class SimpleOrderBookProcessor {
     
-    @Autowired
-    private KafkaConfig kafkaConfig;
+    private final KafkaConfig kafkaConfig;
     
     @Value("${microstructure.enabled:false}")
     private boolean enabled;
     
     private KafkaStreams streams;
+    
+    /**
+     * Constructor with dependency injection.
+     *
+     * @param kafkaConfig Kafka configuration for streams setup
+     */
+    public SimpleOrderBookProcessor(KafkaConfig kafkaConfig) {
+        this.kafkaConfig = kafkaConfig;
+    }
     
     @PostConstruct
     public void init() {

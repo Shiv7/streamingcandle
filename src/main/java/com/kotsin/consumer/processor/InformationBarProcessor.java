@@ -36,8 +36,7 @@ public class InformationBarProcessor {
     
     private static final String DELTA_STORE_PREFIX = "delta-volume-store-info-bars";
     
-    @Autowired
-    private KafkaConfig kafkaConfig;
+    private final KafkaConfig kafkaConfig;
     
     // Configuration
     @Value("${information.bars.enabled:false}")
@@ -78,6 +77,15 @@ public class InformationBarProcessor {
     
     // Store KafkaStreams instances (like CandlestickProcessor)
     private final Map<String, KafkaStreams> streamsInstances = new HashMap<>();
+    
+    /**
+     * Constructor with dependency injection.
+     *
+     * @param kafkaConfig Kafka configuration for streams setup
+     */
+    public InformationBarProcessor(KafkaConfig kafkaConfig) {
+        this.kafkaConfig = kafkaConfig;
+    }
     
     @PostConstruct
     public void init() {
