@@ -248,6 +248,7 @@ public class ImbalanceBarState implements Serializable {
      * 
      * CRITICAL: Uses threshold multiplier for multi-granularity
      * 1x = sensitive, 2x = medium, 5x = stable (like 1min vs 5min)
+     * FIXED: Clear run fields (not applicable for imbalance bars)
      */
     public boolean shouldEmitVolumeImbalanceBar() {
         // CRITICAL: Min ticks check
@@ -260,8 +261,18 @@ public class ImbalanceBarState implements Serializable {
         double actualImbalance = Math.abs(buyVol - sellVol);
         double expectedImbalance = getExpectedVolumeImbalance() * thresholdMultiplier;  // CRITICAL: Apply multiplier!
         
+        // Set imbalance metrics
         currentBar.setImbalance(actualImbalance);
         currentBar.setExpectedImbalance(expectedImbalance);
+        
+        // CRITICAL FIX: VIB bars are NOT runs bars - clear run fields
+        currentBar.setRunLength(0);
+        currentBar.setRunVolume(0.0);
+        currentBar.setExpectedRunLength(0.0);
+        currentBar.setRunDirection(0);
+        
+        log.debug("[VIB] actual={:.2f}, expected={:.2f}, threshold={:.1f}x, willEmit={}", 
+            actualImbalance, expectedImbalance, thresholdMultiplier, actualImbalance >= expectedImbalance);
         
         return actualImbalance >= expectedImbalance;
     }
@@ -270,6 +281,7 @@ public class ImbalanceBarState implements Serializable {
      * Check if DIB bar should be emitted
      * 
      * CRITICAL: Uses threshold multiplier for multi-granularity
+     * FIXED: Clear run fields (not applicable for imbalance bars)
      */
     public boolean shouldEmitDollarImbalanceBar() {
         if (currentBar.getTickCount() < 10) {
@@ -281,8 +293,18 @@ public class ImbalanceBarState implements Serializable {
         double actualImbalance = Math.abs(buyDollar - sellDollar);
         double expectedImbalance = getExpectedDollarImbalance() * thresholdMultiplier;  // CRITICAL: Apply multiplier!
         
+        // Set imbalance metrics
         currentBar.setImbalance(actualImbalance);
         currentBar.setExpectedImbalance(expectedImbalance);
+        
+        // CRITICAL FIX: DIB bars are NOT runs bars - clear run fields
+        currentBar.setRunLength(0);
+        currentBar.setRunVolume(0.0);
+        currentBar.setExpectedRunLength(0.0);
+        currentBar.setRunDirection(0);
+        
+        log.debug("[DIB] actual={:.2f}, expected={:.2f}, threshold={:.1f}x, willEmit={}", 
+            actualImbalance, expectedImbalance, thresholdMultiplier, actualImbalance >= expectedImbalance);
         
         return actualImbalance >= expectedImbalance;
     }

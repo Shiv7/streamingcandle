@@ -236,6 +236,7 @@ public class RunsBarState implements Serializable {
      * Check if TRB bar should be emitted
      * 
      * CRITICAL: Uses threshold multiplier for multi-granularity
+     * FIXED: Always set expectedRunLength BEFORE checking threshold
      */
     public boolean shouldEmitTickRunsBar() {
         if (currentBar.getTickCount() < 10) {
@@ -245,7 +246,12 @@ public class RunsBarState implements Serializable {
         int actualRunLength = currentBar.getRunLength();
         double expectedRunLength = getExpectedTickRunLength() * thresholdMultiplier;  // CRITICAL: Apply multiplier!
         
+        // CRITICAL FIX: Always set before checking (so it's in emitted bar)
         currentBar.setExpectedRunLength(expectedRunLength);
+        currentBar.setRunDirection(currentRunDirection);  // Also set run direction
+        
+        log.debug("[TRB] actual={}, expected={:.2f}, threshold={:.1f}x, willEmit={}", 
+            actualRunLength, expectedRunLength, thresholdMultiplier, actualRunLength >= expectedRunLength);
         
         return actualRunLength >= expectedRunLength;
     }
@@ -254,6 +260,7 @@ public class RunsBarState implements Serializable {
      * Check if VRB bar should be emitted
      * 
      * CRITICAL: Uses threshold multiplier for multi-granularity
+     * FIXED: Set expectedRunLength (not expectedRunVolume - we reuse the field)
      */
     public boolean shouldEmitVolumeRunsBar() {
         if (currentBar.getTickCount() < 10) {
@@ -263,7 +270,13 @@ public class RunsBarState implements Serializable {
         double actualRunVolume = currentBar.getRunVolume();
         double expectedRunVolume = getExpectedVolumeRunLength() * thresholdMultiplier;  // CRITICAL: Apply multiplier!
         
+        // CRITICAL FIX: Always set before checking (so it's in emitted bar)
+        // Note: We reuse expectedRunLength field for volume runs (stores expected volume)
         currentBar.setExpectedRunLength(expectedRunVolume);
+        currentBar.setRunDirection(currentRunDirection);  // Also set run direction
+        
+        log.debug("[VRB] actual={:.2f}, expected={:.2f}, threshold={:.1f}x, willEmit={}", 
+            actualRunVolume, expectedRunVolume, thresholdMultiplier, actualRunVolume >= expectedRunVolume);
         
         return actualRunVolume >= expectedRunVolume;
     }
