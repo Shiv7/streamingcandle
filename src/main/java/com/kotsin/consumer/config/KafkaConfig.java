@@ -22,7 +22,9 @@ public class KafkaConfig {
             2025, 4, 3, 15, 30, 0, 0, ZoneId.of("Asia/Kolkata")
     );
 
-    private static final String BOOTSTRAP_SERVERS = "localhost:9092";
+    // CRITICAL FIX: Inject bootstrap servers from properties (not hardcoded!)
+    @Value("${spring.kafka.bootstrap-servers:localhost:9092}")
+    private String bootstrapServers;
     
     @Value("${spring.kafka.streams.state-dir:/var/lib/kafka-streams/streamingcandle}")
     private String baseStateDir;
@@ -33,7 +35,7 @@ public class KafkaConfig {
      * @return The bootstrap servers string.
      */
     public String getBootstrapServers() {
-        return BOOTSTRAP_SERVERS;
+        return bootstrapServers;
     }
 
     /**
@@ -47,7 +49,7 @@ public class KafkaConfig {
         Properties props = new Properties();
         // Use a stable application ID to allow for state restoration and prevent topic proliferation.
         props.put(StreamsConfig.APPLICATION_ID_CONFIG, appId);
-        props.put(StreamsConfig.BOOTSTRAP_SERVERS_CONFIG, BOOTSTRAP_SERVERS);
+        props.put(StreamsConfig.BOOTSTRAP_SERVERS_CONFIG, bootstrapServers);  // FIXED: Use injected value
         props.put(StreamsConfig.DEFAULT_KEY_SERDE_CLASS_CONFIG, Serdes.String().getClass().getName());
         props.put(StreamsConfig.DEFAULT_VALUE_SERDE_CLASS_CONFIG, Serdes.String().getClass().getName());
         // Reduced commit interval from 1000ms to 100ms for faster candle delivery
