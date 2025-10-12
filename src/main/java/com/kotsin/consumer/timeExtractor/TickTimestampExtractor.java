@@ -42,6 +42,12 @@ public class TickTimestampExtractor implements TimestampExtractor {
                 String millisStr = tickDt.substring(6, tickDt.length() - 2);
                 long ts = Long.parseLong(millisStr);
 
+                // CRITICAL: Reject negative timestamps (before Unix epoch)
+                if (ts < 0) {
+                    LOGGER.warn("Negative timestamp {} for token {}. Using Kafka record timestamp instead.", ts, tick.getToken());
+                    return record.timestamp();
+                }
+
                 // CRITICAL: Validate timestamp is reasonable
                 long now = System.currentTimeMillis();
                 if (ts > now + 60000L) { // More than 1 min in future
@@ -49,7 +55,8 @@ public class TickTimestampExtractor implements TimestampExtractor {
                     return record.timestamp();
                 }
                 if (ts < now - 365L * 24 * 3600 * 1000) { // More than 1 year old
-                    LOGGER.warn("Timestamp {} is more than 1 year old for token {}. Using as-is (historical data).", ts, tick.getToken());
+                    LOGGER.warn("Timestamp {} is more than 1 year old for token {}. Using record timestamp.", ts, tick.getToken());
+                    return record.timestamp();
                 }
 
                 return ts;

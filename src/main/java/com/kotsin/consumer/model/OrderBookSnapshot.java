@@ -47,7 +47,14 @@ public class OrderBookSnapshot implements Serializable {
     @JsonProperty("Details")
     private List<OrderBookLevel> details = new ArrayList<>();
     
-    // Derived fields (calculated from Details)
+    // Alternative format: separate bids/asks arrays (used by some brokers)
+    @JsonProperty("bids")
+    private List<OrderBookLevel> rawBids;
+    
+    @JsonProperty("asks")
+    private List<OrderBookLevel> rawAsks;
+    
+    // Derived fields (calculated from Details or rawBids/rawAsks)
     private transient List<OrderBookLevel> bids;
     private transient List<OrderBookLevel> asks;
     private transient double bestBid;
@@ -98,32 +105,62 @@ public class OrderBookSnapshot implements Serializable {
     }
     
     /**
-     * Parse and separate bids/asks from details
+     * Parse and separate bids/asks from details or rawBids/rawAsks
+     * SUPPORTS TWO FORMATS:
+     * 1. "Details" array with BbBuySellFlag (66=bid, 83=ask)
+     * 2. Separate "bids" and "asks" arrays
      */
     public void parseDetails() {
-        if (details == null || details.isEmpty()) {
-            bids = new ArrayList<>();
-            asks = new ArrayList<>();
-            return;
-        }
-        
         bids = new ArrayList<>();
         asks = new ArrayList<>();
         
-        for (OrderBookLevel level : details) {
-            double normalizedPrice = level.getNormalizedPrice();
-            OrderBookLevel normalized = new OrderBookLevel(
-                normalizedPrice,
-                level.getQuantity(),
-                level.getNumberOfOrders(),
-                level.getBbBuySellFlag()
-            );
-            
-            if (level.isBid()) {
-                bids.add(normalized);
-            } else if (level.isAsk()) {
-                asks.add(normalized);
+        // PRIORITY 1: Use rawBids/rawAsks if available (newer format)
+        if ((rawBids != null && !rawBids.isEmpty()) || (rawAsks != null && !rawAsks.isEmpty())) {
+            if (rawBids != null) {
+                for (OrderBookLevel level : rawBids) {
+                    double normalizedPrice = level.getNormalizedPrice();
+                    bids.add(new OrderBookLevel(
+                        normalizedPrice,
+                        level.getQuantity(),
+                        level.getNumberOfOrders(),
+                        66  // Bid flag
+                    ));
+                }
             }
+            if (rawAsks != null) {
+                for (OrderBookLevel level : rawAsks) {
+                    double normalizedPrice = level.getNormalizedPrice();
+                    asks.add(new OrderBookLevel(
+                        normalizedPrice,
+                        level.getQuantity(),
+                        level.getNumberOfOrders(),
+                        83  // Ask flag
+                    ));
+                }
+            }
+        }
+        // PRIORITY 2: Fall back to Details array
+        else if (details != null && !details.isEmpty()) {
+            for (OrderBookLevel level : details) {
+                double normalizedPrice = level.getNormalizedPrice();
+                OrderBookLevel normalized = new OrderBookLevel(
+                    normalizedPrice,
+                    level.getQuantity(),
+                    level.getNumberOfOrders(),
+                    level.getBbBuySellFlag()
+                );
+                
+                if (level.isBid()) {
+                    bids.add(normalized);
+                } else if (level.isAsk()) {
+                    asks.add(normalized);
+                }
+            }
+        }
+        // PRIORITY 3: Empty order book
+        else {
+            // Already initialized to empty ArrayLists above
+            return;
         }
         
         // Sort: bids descending (highest first), asks ascending (lowest first)

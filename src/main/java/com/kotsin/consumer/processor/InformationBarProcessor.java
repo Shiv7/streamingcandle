@@ -75,6 +75,23 @@ public class InformationBarProcessor {
     @Value("${information.bars.input.topic:forwardtesting-data}")
     private String inputTopic;
     
+    // Output topics (inject from properties)
+    @Value("${information.bars.vib.output.topic:volume-imbalance-bars}")
+    private String vibOutputTopicBase;
+    
+    @Value("${information.bars.dib.output.topic:dollar-imbalance-bars}")
+    private String dibOutputTopicBase;
+    
+    @Value("${information.bars.trb.output.topic:tick-runs-bars}")
+    private String trbOutputTopicBase;
+    
+    @Value("${information.bars.vrb.output.topic:volume-runs-bars}")
+    private String vrbOutputTopicBase;
+    
+    // Application ID prefix for consumer groups (allows test isolation)
+    @Value("${information.bars.app.id.prefix:information-bars}")
+    private String appIdPrefix;
+    
     // Store KafkaStreams instances (like CandlestickProcessor)
     private final Map<String, KafkaStreams> streamsInstances = new HashMap<>();
     
@@ -154,8 +171,8 @@ public class InformationBarProcessor {
      * Pattern: Follows CandlestickProcessor.process()
      */
     private void startStream(String barType, double thresholdMultiplier) {
-        // Format: information-bars-VIB-1x
-        String instanceKey = String.format("information-bars-%s-%.0fx", barType, thresholdMultiplier);
+        // Format: {prefix}-VIB-1x (e.g., information-bars-FRIDAY-TEST-VIB-1x for test environment)
+        String instanceKey = String.format("%s-%s-%.0fx", appIdPrefix, barType, thresholdMultiplier);
         
         // Check for duplicates
         if (streamsInstances.containsKey(instanceKey)) {
@@ -200,16 +217,18 @@ public class InformationBarProcessor {
     
     /**
      * Get output topic name for bar type and threshold
+     * Uses injected property values (e.g., volume-imbalance-bars-friday)
      */
     private String getOutputTopic(String barType, double threshold) {
         String baseTopic;
         switch (barType) {
-            case "VIB": baseTopic = "volume-imbalance-bars"; break;
-            case "DIB": baseTopic = "dollar-imbalance-bars"; break;
-            case "TRB": baseTopic = "tick-runs-bars"; break;
-            case "VRB": baseTopic = "volume-runs-bars"; break;
+            case "VIB": baseTopic = vibOutputTopicBase; break;
+            case "DIB": baseTopic = dibOutputTopicBase; break;
+            case "TRB": baseTopic = trbOutputTopicBase; break;
+            case "VRB": baseTopic = vrbOutputTopicBase; break;
             default: baseTopic = "information-bars";
         }
+        // Append threshold multiplier (e.g., volume-imbalance-bars-friday-1x)
         return String.format("%s-%.0fx", baseTopic, threshold);
     }
     

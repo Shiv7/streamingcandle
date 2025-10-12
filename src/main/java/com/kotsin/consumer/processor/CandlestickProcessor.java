@@ -50,6 +50,31 @@ public class CandlestickProcessor {
     private final KafkaConfig kafkaConfig;
     private final Map<String, KafkaStreams> streamsInstances = new HashMap<>();
 
+    // BEST PRACTICE: Make all configuration values injectable from properties
+    @org.springframework.beans.factory.annotation.Value("${spring.kafka.streams.application-id:realtime-candle}")
+    private String appIdPrefix;
+    
+    @org.springframework.beans.factory.annotation.Value("${information.bars.input.topic:forwardtesting-data}")
+    private String inputTopic;
+    
+    @org.springframework.beans.factory.annotation.Value("${candle.output.topic.1min:1-min-candle}")
+    private String output1MinTopic;
+    
+    @org.springframework.beans.factory.annotation.Value("${candle.output.topic.2min:2-min-candle}")
+    private String output2MinTopic;
+    
+    @org.springframework.beans.factory.annotation.Value("${candle.output.topic.3min:3-min-candle}")
+    private String output3MinTopic;
+    
+    @org.springframework.beans.factory.annotation.Value("${candle.output.topic.5min:5-min-candle}")
+    private String output5MinTopic;
+    
+    @org.springframework.beans.factory.annotation.Value("${candle.output.topic.15min:}")
+    private String output15MinTopic;
+    
+    @org.springframework.beans.factory.annotation.Value("${candle.output.topic.30min:}")
+    private String output30MinTopic;
+
     /**
      * Constructor with dependency injection.
      *
@@ -359,33 +384,45 @@ public class CandlestickProcessor {
     @PostConstruct
     public void start() {
         try {
-            LOGGER.info("🚀 Starting Realtime Candlestick Processor with bootstrap servers: {}",
-                    kafkaConfig.getBootstrapServers());
+            LOGGER.info("🚀 Starting Candlestick Processor with bootstrap servers: {}, appIdPrefix: {}",
+                    kafkaConfig.getBootstrapServers(), appIdPrefix);
 
-            process("realtime-candle-1min", "forwardtesting-data", "1-min-candle", 1);
+            // BEST PRACTICE: Use configurable values from properties, not hardcoded strings
+            process(appIdPrefix + "-1min", inputTopic, output1MinTopic, 1);
             Thread.sleep(1000);
 
-            process("realtime-candle-2min", "1-min-candle", "2-min-candle", 2);
+            process(appIdPrefix + "-2min", output1MinTopic, output2MinTopic, 2);
             Thread.sleep(1000);
 
-            process("realtime-candle-3min", "1-min-candle", "3-min-candle", 3);
+            process(appIdPrefix + "-3min", output1MinTopic, output3MinTopic, 3);
             Thread.sleep(1000);
 
-            process("realtime-candle-5min", "1-min-candle", "5-min-candle", 5);
+            process(appIdPrefix + "-5min", output1MinTopic, output5MinTopic, 5);
             Thread.sleep(1000);
 
-            process("realtime-candle-15min", "1-min-candle", "15-min-candle", 15);
-            Thread.sleep(1000);
+            // 15-min and 30-min are optional, only create if topics are configured
+            if (output15MinTopic != null && !output15MinTopic.isEmpty()) {
+                process(appIdPrefix + "-15min", output1MinTopic, output15MinTopic, 15);
+                Thread.sleep(1000);
+                LOGGER.info("✅ Started 15-min candlestick processor");
+            } else {
+                LOGGER.info("ℹ️ Skipping 15-min candles (not configured)");
+            }
+            
+            if (output30MinTopic != null && !output30MinTopic.isEmpty()) {
+                process(appIdPrefix + "-30min", output1MinTopic, output30MinTopic, 30);
+                LOGGER.info("✅ Started 30-min candlestick processor");
+            } else {
+                LOGGER.info("ℹ️ Skipping 30-min candles (not configured)");
+            }
 
-            process("realtime-candle-30min", "1-min-candle", "30-min-candle", 30);
-
-            LOGGER.info("✅ All Realtime Candlestick Processors started successfully");
+            LOGGER.info("✅ All Candlestick Processors started successfully with appIdPrefix: {}", appIdPrefix);
 
             // Log initial states
             logStreamStates();
 
         } catch (Exception e) {
-            LOGGER.error("❌ Error starting Realtime Candlestick Processors", e);
+            LOGGER.error("❌ Error starting Candlestick Processors", e);
             throw new RuntimeException("Failed to start candlestick processors", e);
         }
     }
