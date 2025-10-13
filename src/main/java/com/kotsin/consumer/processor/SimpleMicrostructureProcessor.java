@@ -159,10 +159,10 @@ public class SimpleMicrostructureProcessor {
             }
             
             // Multi-level volume
-            feature.setTotalBidVolume5(getTotalVolume(snapshot.getBids(5)));
-            feature.setTotalAskVolume5(getTotalVolume(snapshot.getAsks(5)));
-            feature.setTotalBidVolume20(getTotalVolume(snapshot.getBids(20)));
-            feature.setTotalAskVolume20(getTotalVolume(snapshot.getAsks(20)));
+            feature.setTotalBidVolume5(getTotalVolume(snapshot.getTopBids(5)));
+            feature.setTotalAskVolume5(getTotalVolume(snapshot.getTopAsks(5)));
+            feature.setTotalBidVolume20(getTotalVolume(snapshot.getTopBids(20)));
+            feature.setTotalAskVolume20(getTotalVolume(snapshot.getTopAsks(20)));
             
             // Depth Imbalance (can calculate without history)
             feature.setDepthImbalance1(calculateDepthImbalance(snapshot, 1));
@@ -195,8 +195,8 @@ public class SimpleMicrostructureProcessor {
      */
     private double calculateDepthImbalance(OrderBookSnapshot snapshot, int levels) {
         try {
-            int bidVolume = getTotalVolume(snapshot.getBids(levels));
-            int askVolume = getTotalVolume(snapshot.getAsks(levels));
+            int bidVolume = getTotalVolume(snapshot.getTopBids(levels));
+            int askVolume = getTotalVolume(snapshot.getTopAsks(levels));
             
             if (bidVolume + askVolume == 0) {
                 return 0.0;

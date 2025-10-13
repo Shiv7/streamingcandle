@@ -48,15 +48,15 @@ public class OrderBookSnapshot implements Serializable {
     private List<OrderBookLevel> details = new ArrayList<>();
     
     // Alternative format: separate bids/asks arrays (used by some brokers)
-    @JsonProperty("bids")
-    private List<OrderBookLevel> rawBids;
+    // CRITICAL FIX: Don't use @JsonProperty to avoid getter conflicts with Lombok
+    // Jackson will map "bids" from JSON directly to this field via setter
+    private List<OrderBookLevel> bids;
     
-    @JsonProperty("asks")
-    private List<OrderBookLevel> rawAsks;
+    private List<OrderBookLevel> asks;
     
-    // Derived fields (calculated from Details or rawBids/rawAsks)
-    private transient List<OrderBookLevel> bids;
-    private transient List<OrderBookLevel> asks;
+    // Derived/parsed fields (calculated from Details or bids/asks after parsing)
+    private transient List<OrderBookLevel> parsedBids;
+    private transient List<OrderBookLevel> parsedAsks;
     private transient double bestBid;
     private transient double bestAsk;
     private transient double midPrice;
@@ -105,21 +105,21 @@ public class OrderBookSnapshot implements Serializable {
     }
     
     /**
-     * Parse and separate bids/asks from details or rawBids/rawAsks
+     * Parse and separate bids/asks from details or bids/asks arrays
      * SUPPORTS TWO FORMATS:
      * 1. "Details" array with BbBuySellFlag (66=bid, 83=ask)
-     * 2. Separate "bids" and "asks" arrays
+     * 2. Separate "bids" and "asks" arrays (from JSON directly)
      */
     public void parseDetails() {
-        bids = new ArrayList<>();
-        asks = new ArrayList<>();
+        parsedBids = new ArrayList<>();
+        parsedAsks = new ArrayList<>();
         
-        // PRIORITY 1: Use rawBids/rawAsks if available (newer format)
-        if ((rawBids != null && !rawBids.isEmpty()) || (rawAsks != null && !rawAsks.isEmpty())) {
-            if (rawBids != null) {
-                for (OrderBookLevel level : rawBids) {
+        // PRIORITY 1: Use bids/asks if available (newer format - directly from JSON)
+        if ((bids != null && !bids.isEmpty()) || (asks != null && !asks.isEmpty())) {
+            if (bids != null) {
+                for (OrderBookLevel level : bids) {
                     double normalizedPrice = level.getNormalizedPrice();
-                    bids.add(new OrderBookLevel(
+                    parsedBids.add(new OrderBookLevel(
                         normalizedPrice,
                         level.getQuantity(),
                         level.getNumberOfOrders(),
@@ -127,10 +127,10 @@ public class OrderBookSnapshot implements Serializable {
                     ));
                 }
             }
-            if (rawAsks != null) {
-                for (OrderBookLevel level : rawAsks) {
+            if (asks != null) {
+                for (OrderBookLevel level : asks) {
                     double normalizedPrice = level.getNormalizedPrice();
-                    asks.add(new OrderBookLevel(
+                    parsedAsks.add(new OrderBookLevel(
                         normalizedPrice,
                         level.getQuantity(),
                         level.getNumberOfOrders(),
@@ -151,9 +151,9 @@ public class OrderBookSnapshot implements Serializable {
                 );
                 
                 if (level.isBid()) {
-                    bids.add(normalized);
+                    parsedBids.add(normalized);
                 } else if (level.isAsk()) {
-                    asks.add(normalized);
+                    parsedAsks.add(normalized);
                 }
             }
         }
@@ -164,12 +164,12 @@ public class OrderBookSnapshot implements Serializable {
         }
         
         // Sort: bids descending (highest first), asks ascending (lowest first)
-        bids.sort((a, b) -> Double.compare(b.getPrice(), a.getPrice()));
-        asks.sort((a, b) -> Double.compare(a.getPrice(), b.getPrice()));
+        parsedBids.sort((a, b) -> Double.compare(b.getPrice(), a.getPrice()));
+        parsedAsks.sort((a, b) -> Double.compare(a.getPrice(), b.getPrice()));
         
         // Calculate derived fields
-        bestBid = bids.isEmpty() ? 0.0 : bids.get(0).getPrice();
-        bestAsk = asks.isEmpty() ? Double.MAX_VALUE : asks.get(0).getPrice();
+        bestBid = parsedBids.isEmpty() ? 0.0 : parsedBids.get(0).getPrice();
+        bestAsk = parsedAsks.isEmpty() ? Double.MAX_VALUE : parsedAsks.get(0).getPrice();
         
         if (bestBid > 0 && bestAsk < Double.MAX_VALUE) {
             midPrice = (bestBid + bestAsk) / 2.0;
@@ -183,48 +183,48 @@ public class OrderBookSnapshot implements Serializable {
     /**
      * Get bid levels (top N)
      */
-    public List<OrderBookLevel> getBids(int levels) {
-        if (bids == null) {
+    public List<OrderBookLevel> getTopBids(int levels) {
+        if (parsedBids == null) {
             parseDetails();
         }
-        return bids.subList(0, Math.min(levels, bids.size()));
+        return parsedBids.subList(0, Math.min(levels, parsedBids.size()));
     }
     
     /**
      * Get ask levels (top N)
      */
-    public List<OrderBookLevel> getAsks(int levels) {
-        if (asks == null) {
+    public List<OrderBookLevel> getTopAsks(int levels) {
+        if (parsedAsks == null) {
             parseDetails();
         }
-        return asks.subList(0, Math.min(levels, asks.size()));
+        return parsedAsks.subList(0, Math.min(levels, parsedAsks.size()));
     }
     
     /**
      * Get all bids
      */
     public List<OrderBookLevel> getAllBids() {
-        if (bids == null) {
+        if (parsedBids == null) {
             parseDetails();
         }
-        return bids;
+        return parsedBids;
     }
     
     /**
      * Get all asks
      */
     public List<OrderBookLevel> getAllAsks() {
-        if (asks == null) {
+        if (parsedAsks == null) {
             parseDetails();
         }
-        return asks;
+        return parsedAsks;
     }
     
     /**
      * Get best bid price
      */
     public double getBestBid() {
-        if (bids == null) {
+        if (parsedBids == null) {
             parseDetails();
         }
         return bestBid;
@@ -234,7 +234,7 @@ public class OrderBookSnapshot implements Serializable {
      * Get best ask price
      */
     public double getBestAsk() {
-        if (asks == null) {
+        if (parsedAsks == null) {
             parseDetails();
         }
         return bestAsk;
@@ -244,7 +244,7 @@ public class OrderBookSnapshot implements Serializable {
      * Get mid price
      */
     public double getMidPrice() {
-        if (bids == null) {
+        if (parsedBids == null) {
             parseDetails();
         }
         return midPrice;
@@ -254,7 +254,7 @@ public class OrderBookSnapshot implements Serializable {
      * Get spread
      */
     public double getSpread() {
-        if (bids == null) {
+        if (parsedBids == null) {
             parseDetails();
         }
         return spread;
@@ -264,16 +264,16 @@ public class OrderBookSnapshot implements Serializable {
      * Calculate microprice (volume-weighted mid)
      */
     public double getMicroprice() {
-        if (bids == null) {
+        if (parsedBids == null) {
             parseDetails();
         }
         
-        if (bids.isEmpty() || asks.isEmpty()) {
+        if (parsedBids.isEmpty() || parsedAsks.isEmpty()) {
             return midPrice;
         }
         
-        OrderBookLevel bestBidLevel = bids.get(0);
-        OrderBookLevel bestAskLevel = asks.get(0);
+        OrderBookLevel bestBidLevel = parsedBids.get(0);
+        OrderBookLevel bestAskLevel = parsedAsks.get(0);
         
         int bidQty = bestBidLevel.getQuantity();
         int askQty = bestAskLevel.getQuantity();
@@ -295,11 +295,11 @@ public class OrderBookSnapshot implements Serializable {
             return false;
         }
         
-        if (bids == null) {
+        if (parsedBids == null) {
             parseDetails();
         }
         
-        return !bids.isEmpty() && !asks.isEmpty() && midPrice > 0;
+        return !parsedBids.isEmpty() && !parsedAsks.isEmpty() && midPrice > 0;
     }
     
     /**

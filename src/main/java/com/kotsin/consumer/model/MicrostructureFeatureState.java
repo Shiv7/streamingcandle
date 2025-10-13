@@ -137,10 +137,10 @@ public class MicrostructureFeatureState implements Serializable {
             currentFeature.setAskOrders1(current.getAllAsks().get(0).getNumberOfOrders());
         }
         
-        currentFeature.setTotalBidVolume5(getTotalVolume(current.getBids(5)));
-        currentFeature.setTotalAskVolume5(getTotalVolume(current.getAsks(5)));
-        currentFeature.setTotalBidVolume20(getTotalVolume(current.getBids(20)));
-        currentFeature.setTotalAskVolume20(getTotalVolume(current.getAsks(20)));
+        currentFeature.setTotalBidVolume5(getTotalVolume(current.getTopBids(5)));
+        currentFeature.setTotalAskVolume5(getTotalVolume(current.getTopAsks(5)));
+        currentFeature.setTotalBidVolume20(getTotalVolume(current.getTopBids(20)));
+        currentFeature.setTotalAskVolume20(getTotalVolume(current.getTopAsks(20)));
         
         // OFI (need previous snapshot)
         if (orderBookHistory.size() >= 2) {
@@ -241,8 +241,8 @@ public class MicrostructureFeatureState implements Serializable {
      */
     private double calculateDepthImbalance(OrderBookSnapshot snapshot, int levels) {
         try {
-            int bidQty = getTotalVolume(snapshot.getBids(levels));
-            int askQty = getTotalVolume(snapshot.getAsks(levels));
+            int bidQty = getTotalVolume(snapshot.getTopBids(levels));
+            int askQty = getTotalVolume(snapshot.getTopAsks(levels));
             int totalQty = bidQty + askQty;
             
             if (totalQty == 0) {
