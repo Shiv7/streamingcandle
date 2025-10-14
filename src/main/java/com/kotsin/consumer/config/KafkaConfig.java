@@ -74,8 +74,9 @@ public class KafkaConfig {
         // Configure cleanup policy
         props.put(StreamsConfig.TOPOLOGY_OPTIMIZATION_CONFIG, StreamsConfig.OPTIMIZE);
         
-        // Use exactly-once semantics for production reliability
-        props.put(StreamsConfig.PROCESSING_GUARANTEE_CONFIG, StreamsConfig.EXACTLY_ONCE_V2);
+        // FIXED: Use at-least-once for single-broker setup (exactly-once needs replication ≥ 3)
+        // For production multi-broker cluster, change to: StreamsConfig.EXACTLY_ONCE_V2
+        props.put(StreamsConfig.PROCESSING_GUARANTEE_CONFIG, StreamsConfig.AT_LEAST_ONCE);
         props.put(StreamsConfig.DEFAULT_DESERIALIZATION_EXCEPTION_HANDLER_CLASS_CONFIG, 
                   LogAndContinueExceptionHandler.class.getName());
         
