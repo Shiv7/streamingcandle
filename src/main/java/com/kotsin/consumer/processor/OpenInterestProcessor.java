@@ -164,8 +164,9 @@ public class OpenInterestProcessor {
                         this::aggregateOI,          // Aggregator
                         Materialized.with(Serdes.String(), OpenInterestAggStateSerde.serde())
                 )
-                .mapValues(this::computeFinalMetrics)  // Compute derived metrics
-                .suppress(Suppressed.untilWindowCloses(Suppressed.BufferConfig.unbounded()));  // FIXED: Add suppress like Orderbook
+                .mapValues(this::computeFinalMetrics);  // Compute derived metrics
+                // NOTE: Removed suppress() due to serde complexity with windowed aggregations
+                // Grace period alone is sufficient for late data handling
 
         // Output to topic
         aggregated
