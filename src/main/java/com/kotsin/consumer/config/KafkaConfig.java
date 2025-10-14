@@ -59,8 +59,13 @@ public class KafkaConfig {
         // This ensures the Kafka message's timestamp matches the record's timestamp, not the producer's time
         props.put("producer.message.timestamp.type", "CreateTime");
         
-        // Use improved cache configuration instead of deprecated one
-        props.put(StreamsConfig.STATESTORE_CACHE_MAX_BYTES_CONFIG, 10 * 1024 * 1024); // 10MB
+        // PERFORMANCE TUNING: Increase cache and parallelism for OI processing
+        // 10MB was too small for hundreds of scrips with windowed aggregations
+        props.put(StreamsConfig.STATESTORE_CACHE_MAX_BYTES_CONFIG, 100 * 1024 * 1024); // 100MB (10x increase)
+        
+        // CRITICAL: Add parallelism - use 2 threads to match partition count
+        // This allows both partitions to be processed in parallel
+        props.put(StreamsConfig.NUM_STREAM_THREADS_CONFIG, 2);
 
         // PRODUCTION FIX: Create unique state directory for each application instance
         String uniqueStateDir = createUniqueStateDir(appId);

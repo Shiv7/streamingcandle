@@ -231,31 +231,35 @@ public class OpenInterestProcessor {
             aggState.openInterestHigh = newData.getOpenInterest();
             aggState.openInterestLow = newData.getOpenInterest();
             aggState.windowStartTime = newData.getTimestamp();
-            aggState.oiValues = new ArrayList<>();
         }
 
         // Update metrics
         aggState.updateCount++;
-        aggState.openInterestEnd = newData.getOpenInterest();
+        long currentOI = newData.getOpenInterest();
+        aggState.openInterestEnd = currentOI;
         aggState.windowEndTime = newData.getTimestamp();
         aggState.lastReceivedTimestamp = newData.getReceivedTimestamp();
 
         // Track high/low
-        if (newData.getOpenInterest() > aggState.openInterestHigh) {
-            aggState.openInterestHigh = newData.getOpenInterest();
+        if (currentOI > aggState.openInterestHigh) {
+            aggState.openInterestHigh = currentOI;
         }
-        if (newData.getOpenInterest() < aggState.openInterestLow) {
-            aggState.openInterestLow = newData.getOpenInterest();
+        if (currentOI < aggState.openInterestLow) {
+            aggState.openInterestLow = currentOI;
         }
 
-        // Store OI values for volatility calculation
-        aggState.oiValues.add(newData.getOpenInterest());
+        // OPTIMIZED: Welford's online algorithm for running variance (O(1) space, O(1) time)
+        // https://en.wikipedia.org/wiki/Algorithms_for_calculating_variance#Welford's_online_algorithm
+        double delta = currentOI - aggState.varianceMean;
+        aggState.varianceMean += delta / aggState.updateCount;
+        double delta2 = currentOI - aggState.varianceMean;
+        aggState.varianceM2 += delta * delta2;
 
         // Track cumulative OI changes
         if (aggState.previousOI != null) {
-            aggState.cumulativeOiChange += (newData.getOpenInterest() - aggState.previousOI);
+            aggState.cumulativeOiChange += (currentOI - aggState.previousOI);
         }
-        aggState.previousOI = newData.getOpenInterest();
+        aggState.previousOI = currentOI;
 
         return aggState;
     }
@@ -286,12 +290,16 @@ public class OpenInterestProcessor {
                 ? (double) state.openInterestEnd / state.openInterestStart
                 : 1.0;
 
-        // Calculate OI volatility (standard deviation)
-        double oiVolatility = calculateStdDev(state.oiValues);
+        // Calculate OI volatility (standard deviation) using Welford's algorithm
+        double oiVolatility = 0.0;
+        if (state.updateCount > 1) {
+            double variance = state.varianceM2 / (state.updateCount - 1);  // Sample variance
+            oiVolatility = Math.sqrt(variance);
+        }
 
         // Average OI per update
         double avgOiPerUpdate = state.updateCount > 0
-                ? state.oiValues.stream().mapToLong(Long::longValue).average().orElse(0.0)
+                ? (double) (state.openInterestEnd - state.openInterestStart) / state.updateCount
                 : 0.0;
 
         return OpenInterestAggregation.builder()
@@ -318,22 +326,7 @@ public class OpenInterestProcessor {
                 .build();
     }
 
-    /**
-     * Calculates standard deviation for OI volatility measurement.
-     */
-    private double calculateStdDev(List<Long> values) {
-        if (values == null || values.size() < 2) {
-            return 0.0;
-        }
-
-        double mean = values.stream().mapToLong(Long::longValue).average().orElse(0.0);
-        double variance = values.stream()
-                .mapToDouble(v -> Math.pow(v - mean, 2))
-                .average()
-                .orElse(0.0);
-
-        return Math.sqrt(variance);
-    }
+    // REMOVED: calculateStdDev() - now using Welford's online algorithm in aggregateOI()
 
     /**
      * Cleanup on application shutdown.
@@ -374,13 +367,18 @@ public class OpenInterestProcessor {
         private int updateCount;
         private long cumulativeOiChange;
         private Long previousOI;  // For calculating incremental changes
-        private List<Long> oiValues;  // For volatility calculation
+        
+        // OPTIMIZED: Use Welford's online algorithm for variance (O(1) space instead of O(n))
+        private double varianceM2;  // Sum of squared differences from mean
+        private double varianceMean;  // Running mean for variance calculation
+        
         private long lastReceivedTimestamp;
 
         OpenInterestAggState() {
-            this.oiValues = new ArrayList<>();
             this.updateCount = 0;
             this.cumulativeOiChange = 0;
+            this.varianceM2 = 0.0;
+            this.varianceMean = 0.0;
         }
     }
 
