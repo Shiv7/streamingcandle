@@ -151,8 +151,9 @@ public class OpenInterestProcessor {
                 .filter((key, value) -> value.getOpenInterest() >= 0);  // Filter invalid OI
 
         // Aggregate into time windows with advanced features
+        // FIXED: Add grace period like Orderbook processing to prevent lag
         TimeWindows timeWindows = TimeWindows
-                .ofSizeWithNoGrace(Duration.ofMinutes(windowMinutes))
+                .ofSizeAndGrace(Duration.ofMinutes(windowMinutes), Duration.ofSeconds(5))
                 .advanceBy(Duration.ofMinutes(windowMinutes));
 
         KTable<Windowed<String>, OpenInterestAggregation> aggregated = keyedStream
@@ -163,7 +164,8 @@ public class OpenInterestProcessor {
                         this::aggregateOI,          // Aggregator
                         Materialized.with(Serdes.String(), OpenInterestAggStateSerde.serde())
                 )
-                .mapValues(this::computeFinalMetrics);  // Compute derived metrics
+                .mapValues(this::computeFinalMetrics)  // Compute derived metrics
+                .suppress(Suppressed.untilWindowCloses(Suppressed.BufferConfig.unbounded()));  // FIXED: Add suppress like Orderbook
 
         // Output to topic
         aggregated
