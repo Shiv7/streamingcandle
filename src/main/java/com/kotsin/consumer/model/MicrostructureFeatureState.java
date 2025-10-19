@@ -112,8 +112,14 @@ public class MicrostructureFeatureState implements Serializable {
         currentFeature = new MicrostructureFeature();
         
         // Identity
-        currentFeature.setToken(current.getToken());
-        currentFeature.setScripCode(String.valueOf(current.getToken()));
+        // Convert token from String to int
+        try {
+            currentFeature.setToken(Integer.parseInt(current.getToken()));
+        } catch (NumberFormatException e) {
+            log.warn("Invalid token format: {}", current.getToken());
+            currentFeature.setToken(0);
+        }
+        currentFeature.setScripCode(current.getToken());
         currentFeature.setCompanyName(current.getCompanyName());
         currentFeature.setExchange(current.getExch());
         currentFeature.setExchangeType(current.getExchType());

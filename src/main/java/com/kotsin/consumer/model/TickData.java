@@ -86,6 +86,10 @@ public class TickData {
 
     @JsonProperty("DeltaQty")        // internal field used inside streams topology
     private Integer deltaVolume;     // null until we compute the delta
+    
+    // Additional fields for unified processing
+    private Long openInterest;
+    private Long oiChange;
 
     /**
      * Parses timestamp from TickDt field.
