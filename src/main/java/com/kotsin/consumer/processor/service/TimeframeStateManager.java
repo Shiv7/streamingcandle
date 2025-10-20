@@ -189,24 +189,34 @@ public class TimeframeStateManager {
         // Use last tick time for historical data processing, fallback to system time
         long currentTime = (lastTickTime != null) ? lastTickTime : System.currentTimeMillis();
         
-        log.debug("🔍 forceCompleteWindows: lastTickTime={}, currentTime={}", lastTickTime, currentTime);
-        
+        int completedCount = 0;
         for (Map.Entry<Timeframe, CandleAccumulator> entry : candleAccumulators.entrySet()) {
             Timeframe timeframe = entry.getKey();
             CandleAccumulator accumulator = entry.getValue();
             
-            log.debug("🔍 Checking {}: windowStart={}, windowEnd={}, complete={}", 
-                timeframe.getLabel(), accumulator.getWindowStart(), accumulator.getWindowEnd(), accumulator.isComplete());
-            
+            // Mark window as complete if current tick is AT OR PAST the window end
+            // This handles the case where a tick arrives exactly at or after window boundary
             if (accumulator.getWindowStart() != null && 
                 accumulator.getWindowEnd() != null && 
-                currentTime >= accumulator.getWindowEnd() && 
                 !accumulator.isComplete()) {
                 
-                accumulator.markComplete();
-                log.debug("✅ Forced completion of {} window ending at {} (current: {})", 
-                    timeframe.getLabel(), accumulator.getWindowEnd(), currentTime);
+                // Check if window should be complete
+                // Use >= to include the exact boundary tick
+                if (currentTime >= accumulator.getWindowEnd()) {
+                    accumulator.markComplete();
+                    completedCount++;
+                    log.info("✅ Completed {} window [{}→{}] at tick {} (scripCode={})", 
+                        timeframe.getLabel(), 
+                        accumulator.getWindowStart(), 
+                        accumulator.getWindowEnd(), 
+                        currentTime,
+                        scripCode);
+                }
             }
+        }
+        
+        if (completedCount > 0) {
+            log.info("🎉 Marked {} windows as complete for scripCode={}", completedCount, scripCode);
         }
     }
 }
