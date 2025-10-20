@@ -62,6 +62,14 @@ public class InstrumentCandle {
     private Long processingTimestamp;
     private String timeframe;                    // 1m, 2m, 3m, 5m, 15m, 30m
 
+    // Optional: Per-instrument OI snapshot
+    private Long openInterest;
+    private Long oiChange;
+
+    // Optional: Per-instrument orderbook/microstructure snapshots
+    private OrderbookDepthData orderbookDepth;
+    private MicrostructureData microstructure;
+
     /**
      * Get Kafka Serde for serialization/deserialization
      */
