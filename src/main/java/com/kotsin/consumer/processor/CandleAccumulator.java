@@ -18,18 +18,15 @@ public class CandleAccumulator {
     private int tickCount = 0;
 
     // Extra metrics for advanced candle features
-    private Double volumeSum = 0.0;  // For VWAP
-    private Double priceVolumeSum = 0.0;  // For VWAP
+    private Double priceVolumeSum = 0.0;  // For VWAP (sum of price * volume)
     private Double previousClose = null;  // For log returns
 
-    // Buy/Sell volume separation (NEW)
+    // Buy/Sell volume separation
     private Long buyVolume = 0L;      // Volume from buy-side trades
     private Long sellVolume = 0L;     // Volume from sell-side trades
     private Double lastPrice = null;  // For tick rule classification
 
-    public CandleAccumulator() {
-        this.windowStart = null;
-    }
+    public CandleAccumulator() { this.windowStart = null; }
 
     public CandleAccumulator(Long windowStart, int minutes) {
         this.windowStart = windowStart;
@@ -59,19 +56,16 @@ public class CandleAccumulator {
             low = tick.getLastRate();
         }
 
-        if (tick.getDeltaVolume() != null) {
-            volume += tick.getDeltaVolume();
+        Integer dv = tick.getDeltaVolume();
+        if (dv != null && dv > 0) {
+            volume += dv.longValue();
+            priceVolumeSum += tick.getLastRate() * dv;
 
-            // Track for VWAP calculation
-            volumeSum += tick.getDeltaVolume();
-            priceVolumeSum += tick.getLastRate() * tick.getDeltaVolume();
-
-            // Buy/Sell classification using tick rule
             boolean isBuy = classifyTrade(tick);
             if (isBuy) {
-                buyVolume += tick.getDeltaVolume();
+                buyVolume += dv.longValue();
             } else {
-                sellVolume += tick.getDeltaVolume();
+                sellVolume += dv.longValue();
             }
         }
 
@@ -79,52 +73,44 @@ public class CandleAccumulator {
     }
 
     /**
-     * Classify trade as buy or sell using tick rule
+     * Classify trade as buy or sell using quote-rule, then tick-rule, with tick-size aware threshold.
      */
     private boolean classifyTrade(com.kotsin.consumer.model.TickData tick) {
         double currentPrice = tick.getLastRate();
 
-        // Get bid/ask for more accurate classification
         double bidPrice = tick.getBidRate();
         double askPrice = tick.getOfferRate();
 
-        // Quote rule: trade at ask = buy, trade at bid = sell
+        // Threshold: 1bp of price or 0.01 minimum
+        double threshold = Math.max(0.01, Math.abs(currentPrice) * 0.0001);
+
         if (bidPrice > 0 && askPrice > 0) {
-            if (Math.abs(currentPrice - askPrice) < 0.01) {
-                return true;  // Trade at ask → buy
-            } else if (Math.abs(currentPrice - bidPrice) < 0.01) {
-                return false;  // Trade at bid → sell
+            if (Math.abs(currentPrice - askPrice) <= threshold) {
+                return true;
+            } else if (Math.abs(currentPrice - bidPrice) <= threshold) {
+                return false;
             }
         }
 
-        // Tick rule: if price > last price → buy, else → sell
-        if (lastPrice != null && Math.abs(currentPrice - lastPrice) > 0.01) {
+        // Tick rule
+        if (lastPrice != null && Math.abs(currentPrice - lastPrice) > threshold) {
             return currentPrice > lastPrice;
         }
 
-        // Default: use mid price
-        if (bidPrice > 0 && askPrice > 0) {
-            double midPrice = (bidPrice + askPrice) / 2.0;
-            return currentPrice >= midPrice;
-        }
-
-        return true;  // Default to buy if cannot determine
+        // If we cannot determine (no book and no movement), do not bias: default to false (sell) to avoid buy inflation
+        return false;
     }
 
     public void markComplete() { complete = true; }
     public boolean isComplete() { return complete; }
 
-    private long alignToMinute(long timestamp) {
-        return (timestamp / 60_000) * 60_000;
-    }
+    private long alignToMinute(long timestamp) { return (timestamp / 60_000) * 60_000; }
 
     public CandleData toCandleData(String exchange, String exchangeType) {
-        // Calculate volume delta and percentage
         double volumeDelta = (double) (buyVolume - sellVolume);
         double volumeDeltaPercent = volume > 0 ? (volumeDelta / volume) * 100.0 : 0.0;
 
-        // Calculate VWAP
-        double vwap = volumeSum > 0 ? priceVolumeSum / volumeSum : 0.0;
+        double vwap = volume > 0 ? priceVolumeSum / volume : 0.0;
 
         return CandleData.builder()
             .open(open)
@@ -150,8 +136,6 @@ public class CandleAccumulator {
                                                String exchange, String exchangeType,
                                                boolean includeExtras) {
         Candlestick candle = new Candlestick();
-
-        // Required fields
         candle.setScripCode(scripCode);
         candle.setCompanyName(companyName);
         candle.setExchange(exchange);
@@ -159,33 +143,22 @@ public class CandleAccumulator {
         candle.setWindowStartMillis(windowStart != null ? windowStart : 0);
         candle.setWindowEndMillis(windowEnd != null ? windowEnd : 0);
         candle.setIsComplete(complete);
-
-        // OHLCV
         candle.setOpen(open != null ? open : 0.0);
         candle.setHigh(high != null ? high : 0.0);
         candle.setLow(low != null ? low : 0.0);
         candle.setClose(close != null ? close : 0.0);
         candle.setVolume(volume != null ? volume.intValue() : 0);
-
         if (includeExtras) {
-            if (volumeSum > 0) {
-                candle.setVwap(priceVolumeSum / volumeSum);
-            }
-            if (high != null && low != null && close != null) {
-                candle.setHlc3((high + low + close) / 3.0);
-            }
-            if (previousClose != null && close != null && previousClose > 0) {
-                candle.setLogReturnFromPrevBar(Math.log(close / previousClose));
-            }
+            if (volume > 0) candle.setVwap(priceVolumeSum / volume);
+            if (high != null && low != null && close != null) candle.setHlc3((high + low + close) / 3.0);
+            if (previousClose != null && close != null && previousClose > 0) candle.setLogReturnFromPrevBar(Math.log(close / previousClose));
             candle.setTicksInWindow(tickCount);
             candle.setWindowLatencyMs(System.currentTimeMillis() - windowEnd);
         }
-
         return candle;
     }
 
     public void setPreviousClose(Double prevClose) { this.previousClose = prevClose; }
-
     public Long getWindowStart() { return windowStart; }
 }
 

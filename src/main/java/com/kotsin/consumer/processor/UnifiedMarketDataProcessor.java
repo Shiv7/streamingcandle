@@ -16,6 +16,7 @@ import jakarta.annotation.PreDestroy;
 import java.time.Duration;
 import java.util.*;
 import java.util.concurrent.ConcurrentHashMap;
+import com.kotsin.consumer.metrics.StreamMetrics;
 
 /**
  * Unified Market Data Processor
@@ -29,6 +30,7 @@ public class UnifiedMarketDataProcessor {
     private final com.kotsin.consumer.processor.service.MarketDataMergeService mergeService;
     private final com.kotsin.consumer.processor.service.TradingHoursValidationService tradingHoursService;
     private final com.kotsin.consumer.processor.service.InstrumentKeyResolver keyResolver;
+    private final StreamMetrics metrics;
 
     private final Map<String, KafkaStreams> streamsInstances = new ConcurrentHashMap<>();
     
@@ -272,7 +274,7 @@ public class UnifiedMarketDataProcessor {
                 if (oi != null) {
                     candle.setOpenInterest(oi.getOpenInterest());
                     candle.setOiChange(oi.getOiChange());
-                }
+                } else { metrics.incOiJoinMiss(); }
                 return candle;
             })
             .leftJoin(orderbookTable, (candle, ob) -> {
@@ -287,7 +289,7 @@ public class UnifiedMarketDataProcessor {
                         .isComplete(true)
                         .build();
                     candle.setOrderbookDepth(depth);
-                }
+                } else { metrics.incOrderbookJoinMiss(); }
                 return candle;
             });
 
@@ -667,19 +669,22 @@ public class UnifiedMarketDataProcessor {
             KStream<String, InstrumentCandle> valid = branches[0];
             KStream<String, InstrumentCandle> invalid = branches[1];
 
-            invalid.peek((k, c) -> log.warn("drop candle tf={} scrip={} reason={} vol={} open={} high={} low={} close={}", tfLabel,
-                c != null ? c.getScripCode() : null,
-                c == null ? "null" : (c.getVolume() == null || c.getVolume() <= 0 ? "volume" : "fields"),
-                c != null ? c.getVolume() : null,
-                c != null ? c.getOpen() : null,
-                c != null ? c.getHigh() : null,
-                c != null ? c.getLow() : null,
-                c != null ? c.getClose() : null));
+            invalid.peek((k, c) -> {
+                log.warn("drop candle tf={} scrip={} reason={} vol={} open={} high={} low={} close={}", tfLabel,
+                    c != null ? c.getScripCode() : null,
+                    c == null ? "null" : (c.getVolume() == null || c.getVolume() <= 0 ? "volume" : "fields"),
+                    c != null ? c.getVolume() : null,
+                    c != null ? c.getOpen() : null,
+                    c != null ? c.getHigh() : null,
+                    c != null ? c.getLow() : null,
+                    c != null ? c.getClose() : null);
+                metrics.incCandleDrop(tfLabel);
+            });
 
             String topic = getCandleTopicForTimeframe(tfLabel);
             if (topic != null) {
                 valid
-                    .peek((k, c) -> log.info("📤 candle emit tf={} scrip={} vol={} → {}", tfLabel, c.getScripCode(), c.getVolume(), topic))
+                    .peek((k, c) -> { log.info("📤 candle emit tf={} scrip={} vol={} → {}", tfLabel, c.getScripCode(), c.getVolume(), topic); metrics.incCandleEmit(tfLabel); })
                     .to(topic, Produced.with(
                         Serdes.String(),
                         InstrumentCandle.serde()

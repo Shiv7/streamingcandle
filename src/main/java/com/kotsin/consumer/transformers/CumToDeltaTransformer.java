@@ -24,7 +24,6 @@ public class CumToDeltaTransformer implements Transformer<String, TickData, KeyV
         // Ensure a stable per-instrument key for the delta store
         String stateKey = (key != null && !key.isEmpty()) ? key : tick.getScripCode();
         if (stateKey == null || stateKey.isEmpty()) {
-            // Cannot compute without a stable key; pass through with zero delta
             tick.setDeltaVolume(0);
             return KeyValue.pair(key, tick);
         }
@@ -34,13 +33,16 @@ public class CumToDeltaTransformer implements Transformer<String, TickData, KeyV
 
         int add;
         if (prevMax == null) {
-            // First tick after startup: include observed cumulative to seed state
+            // First observation in our store
             add = curr;
+            store.put(stateKey, curr);
         } else if (curr < prevMax) {
-            // Day rollover or producer reset: treat as reset and start fresh
+            // Day rollover or producer reset: reset baseline to curr immediately
             add = curr;
+            store.put(stateKey, curr);
         } else {
             add = Math.max(0, curr - prevMax);
+            store.put(stateKey, curr);
         }
 
         // Fallback: if cumulative delta is zero but we have a last trade size, use it
@@ -49,10 +51,6 @@ public class CumToDeltaTransformer implements Transformer<String, TickData, KeyV
         }
 
         tick.setDeltaVolume(add);
-        // Track the highest observed cumulative to remain monotonic across glitches
-        int newMax = (prevMax == null) ? curr : Math.max(prevMax, curr);
-        store.put(stateKey, newMax);
-
         return KeyValue.pair(key, tick);
     }
 
