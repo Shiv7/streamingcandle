@@ -225,8 +225,10 @@ public class UnifiedMarketDataProcessor {
             .selectKey((windowedKey, state) -> windowedKey.key())
             .peek((key, state) -> log.debug("📤 Emitting state for {}: messageCount={}", key, state.getMessageCount()));
 
-        // Stream 1: ENRICHED updates (partial, every 1-min window close)
+        // Stream 1: ENRICHED updates (DEPRECATED)
         if (enrichedOutputEnabled) {
+            log.warn("⚠️ enriched-market-data emission is DEPRECATED and disabled by default. Enable only for debugging.");
+            // If explicitly enabled via properties, emit as before
             stateStream
                 .mapValues(enrichmentService::buildEnrichedMessage)
                 .to(outputTopic, Produced.with(
@@ -235,6 +237,8 @@ public class UnifiedMarketDataProcessor {
                 ));
 
             log.info("✅ Enriched emission enabled → topic: {}", outputTopic);
+        } else {
+            log.info("🛑 Enriched emission disabled (deprecated). Only finalized candle topics are active.");
         }
 
         // Stream 2: FINALIZED candles (only complete windows, per timeframe)
@@ -312,7 +316,7 @@ public class UnifiedMarketDataProcessor {
             CandleData candleData = allCandles.get(timeframe);
 
             if (candleData != null && candleData.getIsComplete()) {
-                CandleAccumulator accumulator = state.getCandleAccumulators().get(timeframe);
+                CandleAccumulator accumulator = state.getCandleAccumulators().get(Timeframe.fromLabel(timeframe));
 
                 if (accumulator != null) {
                     Candlestick finalizedCandle = accumulator.toFinalizedCandlestick(
