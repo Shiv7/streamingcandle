@@ -2,7 +2,7 @@ package com.kotsin.consumer.processor;
 
 import com.kotsin.consumer.config.KafkaConfig;
 import com.kotsin.consumer.model.*;
-import com.kotsin.consumer.service.InstrumentFamilyCacheService;
+import com.kotsin.consumer.service.MongoInstrumentFamilyService;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.apache.kafka.common.serialization.Serdes;
@@ -38,7 +38,7 @@ import java.util.concurrent.ConcurrentHashMap;
 public class UnifiedMarketDataProcessor {
     
     private final KafkaConfig kafkaConfig;
-    private final InstrumentFamilyCacheService cacheService;
+    private final MongoInstrumentFamilyService cacheService;
     private final Map<String, KafkaStreams> streamsInstances = new ConcurrentHashMap<>();
     
     @Value("${spring.kafka.streams.application-id:unified-market-processor}")
@@ -212,7 +212,11 @@ public class UnifiedMarketDataProcessor {
     private EnrichedMarketData buildEnrichedMessage(MultiTimeframeState state) {
         try {
             // Get instrument family from cache
-            InstrumentFamily family = cacheService.getFamily(state.getScripCode());
+            InstrumentFamily family = cacheService.resolveFamily(
+                state.getScripCode(),
+                state.getExchangeType(),
+                state.getCompanyName()
+            );
             
             if (family == null) {
                 log.warn("⚠️ No instrument family found for scripCode: {}", state.getScripCode());

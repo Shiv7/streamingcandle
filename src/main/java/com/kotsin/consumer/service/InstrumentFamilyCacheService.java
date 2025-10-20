@@ -309,6 +309,47 @@ public class InstrumentFamilyCacheService {
 
         return family;
     }
+
+    /**
+     * Resolve instrument family taking into account derivatives.
+     * If exchangeType == "D" (derivative), try to map the derivative to its underlying
+     * equity family using the companyName root (e.g., "LT 28 OCT 2025 CE 3850.00" → root "LT").
+     * Falls back to direct scripCode lookup.
+     */
+    public InstrumentFamily resolveFamily(String scripCode, String exchangeType, String companyName) {
+        try {
+            // Non-derivative: normal path
+            if (exchangeType == null || !"D".equalsIgnoreCase(exchangeType)) {
+                return getFamily(scripCode);
+            }
+
+            // Try parse root from derivative description
+            String root = null;
+            if (companyName != null && !companyName.isBlank()) {
+                // Root is first token (letters/&/digits) before space
+                String[] parts = companyName.split("\\s+");
+                if (parts.length > 0) {
+                    root = parts[0].replaceAll("[^A-Za-z0-9&]", "");
+                }
+            }
+
+            if (root != null && !root.isBlank()) {
+                // Search local cache by companyName prefix match
+                Optional<InstrumentFamily> byPrefix = localCache.values().stream()
+                    .filter(f -> f.getCompanyName() != null && f.getCompanyName().toUpperCase().startsWith(root.toUpperCase()))
+                    .findFirst();
+                if (byPrefix.isPresent()) {
+                    return byPrefix.get();
+                }
+            }
+
+            // Fallback to direct
+            return getFamily(scripCode);
+        } catch (Exception e) {
+            log.warn("Derivative resolution fallback for scripCode {}: {}", scripCode, e.toString());
+            return getFamily(scripCode);
+        }
+    }
     
     /**
      * Get all cached families
