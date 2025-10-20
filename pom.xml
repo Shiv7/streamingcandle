@@ -43,11 +43,7 @@
          <artifactId>spring-boot-starter-data-mongodb</artifactId>
        </dependency>
        
-       <!-- Redis for instrument family cache -->
-       <dependency>
-           <groupId>org.springframework.boot</groupId>
-           <artifactId>spring-boot-starter-data-redis</artifactId>
-       </dependency>
+      <!-- Redis removed: using in-memory cache only -->
 		<!-- H2 Database (for development/testing) -->
 		<dependency>
 			<groupId>com.h2database</groupId>

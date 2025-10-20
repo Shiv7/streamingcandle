@@ -7,7 +7,6 @@ import com.kotsin.consumer.model.InstrumentInfo;
 import com.kotsin.consumer.repository.ScripGroupRepository;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
-import org.springframework.data.redis.core.RedisTemplate;
 import org.springframework.scheduling.annotation.Scheduled;
 import org.springframework.stereotype.Service;
 
@@ -19,7 +18,7 @@ import java.util.stream.Collectors;
 
 /**
  * MongoDB-based service to cache instrument families (equity + future + options)
- * Fetches from MongoDB ScripGroup collection and caches in Redis + LocalHashMap
+ * Fetches from MongoDB ScripGroup collection and caches in in-memory LocalHashMap
  */
 @Service
 @RequiredArgsConstructor
@@ -27,11 +26,8 @@ import java.util.stream.Collectors;
 public class MongoInstrumentFamilyService {
     
     private final ScripGroupRepository scripGroupRepository;
-    private final RedisTemplate<String, Object> redisTemplate;
     private final Map<String, InstrumentFamily> localCache = new ConcurrentHashMap<>();
     
-    private static final String CACHE_KEY_PREFIX = "instrument:family:";
-    private static final String CACHE_KEY_ALL = "instrument:families:all";
     private static final Duration CACHE_TTL = Duration.ofDays(1);
     
     @PostConstruct
@@ -87,10 +83,7 @@ public class MongoInstrumentFamilyService {
             // 2. Convert ScripGroups to InstrumentFamilies
             Map<String, InstrumentFamily> families = convertScripGroupsToFamilies(scripGroups);
             
-            // 3. Store in Redis
-            storeInRedis(families);
-            
-            // 4. Update local cache
+            // 3. Update local cache (in-memory only)
             localCache.clear();
             localCache.putAll(families);
             
@@ -184,30 +177,7 @@ public class MongoInstrumentFamilyService {
             .build();
     }
     
-    private void storeInRedis(Map<String, InstrumentFamily> families) {
-        try {
-            // Store individual families
-            families.forEach((scripCode, family) -> {
-                redisTemplate.opsForValue().set(
-                    CACHE_KEY_PREFIX + scripCode,
-                    family,
-                    CACHE_TTL
-                );
-            });
-            
-            // Store all families list
-            redisTemplate.opsForValue().set(
-                CACHE_KEY_ALL,
-                new ArrayList<>(families.keySet()),
-                CACHE_TTL
-            );
-            
-            log.info("💾 Stored {} families in Redis", families.size());
-            
-        } catch (Exception e) {
-            log.error("❌ Failed to store families in Redis", e);
-        }
-    }
+    // Redis removed; in-memory only
     
     /**
      * Get instrument family by scripCode (equity lookup)
@@ -221,17 +191,6 @@ public class MongoInstrumentFamilyService {
         InstrumentFamily family = localCache.get(scripCode);
         if (family != null) {
             return family;
-        }
-        
-        // Fallback to Redis
-        try {
-            family = (InstrumentFamily) redisTemplate.opsForValue().get(CACHE_KEY_PREFIX + scripCode);
-            if (family != null) {
-                localCache.put(scripCode, family);
-                return family;
-            }
-        } catch (Exception e) {
-            log.error("❌ Redis read error for scripCode: {}", scripCode, e);
         }
         
         return null;

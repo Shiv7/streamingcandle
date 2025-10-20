@@ -25,6 +25,16 @@ public class CandleData {
     private Boolean isComplete;
     private String exchange;
     private String exchangeType;
+
+    // Buy/Sell volume separation (NEW)
+    private Long buyVolume;              // Volume from buy-side trades
+    private Long sellVolume;             // Volume from sell-side trades
+    private Double volumeDelta;          // buyVolume - sellVolume
+    private Double volumeDeltaPercent;   // (buyVolume - sellVolume) / totalVolume * 100
+
+    // Volume profile (NEW)
+    private Double vwap;                 // Volume-weighted average price
+    private Integer tickCount;           // Number of ticks in this candle
     
     /**
      * Calculate price change
@@ -107,11 +117,49 @@ public class CandleData {
     }
     
     /**
+     * Check if there's buying pressure (buy volume > sell volume)
+     */
+    public Boolean hasBuyingPressure() {
+        if (buyVolume == null || sellVolume == null) return null;
+        return buyVolume > sellVolume;
+    }
+
+    /**
+     * Check if there's selling pressure (sell volume > buy volume)
+     */
+    public Boolean hasSellingPressure() {
+        if (buyVolume == null || sellVolume == null) return null;
+        return sellVolume > buyVolume;
+    }
+
+    /**
+     * Check for volume delta divergence (price up but volume delta down)
+     */
+    public Boolean hasVolumeDeltaDivergence() {
+        if (isBullish() == null || volumeDelta == null) return null;
+        return isBullish() && volumeDelta < 0;  // Price up but sells dominate
+    }
+
+    /**
+     * Get buy/sell volume ratio
+     */
+    public Double getBuySellRatio() {
+        if (buyVolume == null || sellVolume == null || sellVolume == 0) return null;
+        return (double) buyVolume / sellVolume;
+    }
+
+    /**
      * Get display string for logging
      */
     public String getDisplayString() {
-        return String.format("OHLCV[%.2f,%.2f,%.2f,%.2f,%d] %s", 
-            open, high, low, close, volume, 
+        if (buyVolume != null && sellVolume != null) {
+            return String.format("OHLCV[%.2f,%.2f,%.2f,%.2f,%d] BuyVol:%d SellVol:%d Delta:%.1f%% %s",
+                open, high, low, close, volume,
+                buyVolume, sellVolume, volumeDeltaPercent,
+                isComplete ? "COMPLETE" : "PARTIAL");
+        }
+        return String.format("OHLCV[%.2f,%.2f,%.2f,%.2f,%d] %s",
+            open, high, low, close, volume,
             isComplete ? "COMPLETE" : "PARTIAL");
     }
 }

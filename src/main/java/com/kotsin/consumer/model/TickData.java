@@ -91,6 +91,9 @@ public class TickData {
     private Long openInterest;
     private Long oiChange;
 
+    // Transient field for full orderbook (not serialized, used during processing)
+    private transient OrderBookSnapshot fullOrderbook;
+
     /**
      * Parses timestamp from TickDt field.
      * CRITICAL: Never uses System.currentTimeMillis() to handle lag correctly.

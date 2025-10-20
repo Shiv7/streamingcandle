@@ -2,7 +2,6 @@ package com.kotsin.consumer.processor;
 
 import com.kotsin.consumer.config.KafkaConfig;
 import com.kotsin.consumer.model.*;
-import com.kotsin.consumer.service.MongoInstrumentFamilyService;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.apache.kafka.common.serialization.Serdes;
@@ -19,9 +18,6 @@ import org.springframework.kafka.support.serializer.JsonSerde;
 import jakarta.annotation.PostConstruct;
 import jakarta.annotation.PreDestroy;
 import java.time.Duration;
-import java.time.Instant;
-import java.time.ZoneId;
-import java.time.ZonedDateTime;
 import java.util.*;
 import java.util.concurrent.ConcurrentHashMap;
 
@@ -34,9 +30,14 @@ import java.util.concurrent.ConcurrentHashMap;
 @RequiredArgsConstructor
 @Slf4j
 public class UnifiedMarketDataProcessor {
-    
+
+    // Spring-injected dependencies (Dependency Injection Pattern)
     private final KafkaConfig kafkaConfig;
-    private final MongoInstrumentFamilyService cacheService;
+    private final com.kotsin.consumer.processor.service.MarketDataEnrichmentService enrichmentService;
+    private final com.kotsin.consumer.processor.service.MarketDataMergeService mergeService;
+    private final com.kotsin.consumer.processor.service.TradingHoursValidationService tradingHoursService;
+    private final com.kotsin.consumer.processor.service.InstrumentKeyResolver keyResolver;
+
     private final Map<String, KafkaStreams> streamsInstances = new ConcurrentHashMap<>();
     
     @Value("${spring.kafka.streams.application-id:unified-market-processor1}")
@@ -139,42 +140,47 @@ public class UnifiedMarketDataProcessor {
                 deltaVolumeStoreName
             )
             .filter((key, tick) -> tick != null && tick.getDeltaVolume() != null);
-        
-        KStream<String, OpenInterest> oiStream = builder.stream(
+
+        // OPTIMIZATION: Convert OI and Orderbook streams to TABLES
+        // This ensures we always join with the LATEST value, not all values in a time window
+        // Critical for millisecond-level data to prevent Cartesian product explosion
+
+        KTable<String, OpenInterest> oiTable = builder.table(
             oiTopic,
-            Consumed.with(Serdes.String(), OpenInterest.serde())
+            Consumed.with(Serdes.String(), OpenInterest.serde()),
+            org.apache.kafka.streams.kstream.Materialized.<String, OpenInterest, org.apache.kafka.streams.state.KeyValueStore<Bytes, byte[]>>as("oi-table-store")
+                .withKeySerde(Serdes.String())
+                .withValueSerde(OpenInterest.serde())
         );
-        
-        KStream<String, OrderBookSnapshot> orderbookStream = builder.stream(
+
+        KTable<String, OrderBookSnapshot> orderbookTable = builder.table(
             orderbookTopic,
-            Consumed.with(Serdes.String(), OrderBookSnapshot.serde())
+            Consumed.with(Serdes.String(), OrderBookSnapshot.serde()),
+            org.apache.kafka.streams.kstream.Materialized.<String, OrderBookSnapshot, org.apache.kafka.streams.state.KeyValueStore<Bytes, byte[]>>as("orderbook-table-store")
+                .withKeySerde(Serdes.String())
+                .withValueSerde(OrderBookSnapshot.serde())
         );
-        
+
         log.info("📥 Created input streams for topics: {}, {}, {}", ticksTopic, oiTopic, orderbookTopic);
+        log.info("🔧 Using STREAM-TABLE joins (not STREAM-STREAM) for millisecond-level data efficiency");
 
-        // FIX #2: Increase join windows to accommodate actual data arrival rates
-        // OI arrives every 10 seconds, so join window must be >= 15s to ensure capture
-        // Orderbook arrives every 4 seconds, 15s window is sufficient
-
-        // Join ticks with OI data
+        // Join ticks with LATEST OI data (stream-table join, no window needed)
         KStream<String, TickData> ticksWithOi = ticks.leftJoin(
-            oiStream,
-            this::mergeOiIntoTick,
-            JoinWindows.ofTimeDifferenceAndGrace(Duration.ofSeconds(15), Duration.ofSeconds(5)),
-            StreamJoined.with(Serdes.String(), TickData.serde(), OpenInterest.serde())
+            oiTable,
+            mergeService::mergeOiIntoTick,
+            Joined.with(Serdes.String(), TickData.serde(), OpenInterest.serde())
         );
 
-        // Join with orderbook data
+        // Join with LATEST orderbook data (stream-table join, no window needed)
         KStream<String, TickData> enrichedTicks = ticksWithOi.leftJoin(
-            orderbookStream,
-            this::mergeOrderbookIntoTick,
-            JoinWindows.ofTimeDifferenceAndGrace(Duration.ofSeconds(15), Duration.ofSeconds(5)),
-            StreamJoined.with(Serdes.String(), TickData.serde(), OrderBookSnapshot.serde())
+            orderbookTable,
+            mergeService::mergeOrderbookIntoTick,
+            Joined.with(Serdes.String(), TickData.serde(), OrderBookSnapshot.serde())
         );
-        
+
         // Key by underlying equity scripCode (map derivatives to their underlying)
         KStream<String, TickData> keyed = enrichedTicks.selectKey(
-            (k, v) -> getUnderlyingEquityScripCode(v)
+            (k, v) -> keyResolver.getUnderlyingEquityScripCode(v)
         );
 
         // FIX #3: Use 1-minute windows instead of 30-minute to enable real-time emission
@@ -188,7 +194,7 @@ public class UnifiedMarketDataProcessor {
 
         // Aggregate into multi-timeframe state
         KTable<Windowed<String>, MultiTimeframeState> aggregated = keyed
-            .filter((scripCode, tick) -> withinTradingHours(tick))
+            .filter((scripCode, tick) -> tradingHoursService.withinTradingHours(tick))
             .groupByKey(Grouped.with(Serdes.String(), TickData.serde()))
             .windowedBy(windows)
             .aggregate(
@@ -211,7 +217,7 @@ public class UnifiedMarketDataProcessor {
         // Stream 1: ENRICHED updates (partial, every 1-min window close)
         if (enrichedOutputEnabled) {
             stateStream
-                .mapValues(this::buildEnrichedMessage)
+                .mapValues(enrichmentService::buildEnrichedMessage)
                 .to(outputTopic, Produced.with(
                     Serdes.String(),
                     new JsonSerde<>(EnrichedMarketData.class)
@@ -335,146 +341,21 @@ public class UnifiedMarketDataProcessor {
         }
     }
 
-    private EnrichedMarketData buildEnrichedMessage(MultiTimeframeState state) {
-        try {
-            // Get instrument family from cache
-            InstrumentFamily family = cacheService.resolveFamily(
-                state.getScripCode(),
-                state.getExchangeType(),
-                state.getCompanyName()
-            );
-            
-            if (family == null) {
-                log.warn("⚠️ No instrument family found for scripCode: {}", state.getScripCode());
-                family = InstrumentFamily.builder()
-                    .equityScripCode(state.getScripCode())
-                    .companyName(state.getCompanyName())
-                    .dataSource("CACHE_MISS")
-                    .build();
-            }
-            
-            EnrichedMarketData enrichedData = EnrichedMarketData.builder()
-                .scripCode(state.getScripCode())
-                .companyName(state.getCompanyName())
-                .exchange(state.getExchange())
-                .exchangeType(state.getExchangeType())
-                .timestamp(state.getLastTickTime())
-                .instrumentFamily(family)
-                .multiTimeframeCandles(state.getMultiTimeframeCandles())
-                .openInterest(state.getOpenInterest())
-                .imbalanceBars(state.getImbalanceBars())
-                .microstructure(state.getMicrostructure())
-                .metadata(MessageMetadata.builder()
-                    .messageVersion("2.0")
-                    .producedAt(System.currentTimeMillis())
-                    .dataQuality(state.getDataQuality())
-                    .completeWindows(state.getCompleteWindows())
-                    .processingLatency((int) state.getProcessingLatency())
-                    .source("unified-processor")
-                    .sequenceNumber(state.getMessageCount())
-                    .build())
-                .build();
-            
-            log.debug("📤 Built enriched message for {} with {} complete timeframes", 
-                state.getScripCode(), state.getCompleteWindows().size());
-            
-            return enrichedData;
-            
-        } catch (Exception e) {
-            log.error("❌ Failed to build enriched message for scripCode: {}", state.getScripCode(), e);
-            
-            // Return minimal message to prevent data loss
-            return EnrichedMarketData.builder()
-                .scripCode(state.getScripCode())
-                .companyName(state.getCompanyName())
-                .exchange(state.getExchange())
-                .exchangeType(state.getExchangeType())
-                .timestamp(state.getLastTickTime())
-                .metadata(MessageMetadata.builder()
-                    .messageVersion("2.0")
-                    .producedAt(System.currentTimeMillis())
-                    .dataQuality("ERROR")
-                    .source("unified-processor")
-                    .build())
-                .build();
-        }
-    }
-    
-    private boolean withinTradingHours(TickData tick) {
-        try {
-            long ts = tick.getTimestamp();
-            if (ts <= 0) {
-                log.warn("⚠️ Invalid timestamp (<=0) for token {}", tick.getToken());
-                return false;
-            }
-            
-            ZonedDateTime zdt = ZonedDateTime.ofInstant(Instant.ofEpochMilli(ts), ZoneId.of("Asia/Kolkata"));
-            String exch = tick.getExchange();
-            
-            if ("N".equalsIgnoreCase(exch)) {
-                // NSE: 9:15 AM - 3:30 PM
-                return !zdt.toLocalTime().isBefore(java.time.LocalTime.of(9, 15)) && 
-                       !zdt.toLocalTime().isAfter(java.time.LocalTime.of(15, 30));
-            } else if ("M".equalsIgnoreCase(exch)) {
-                // MCX: 9:00 AM - 11:30 PM
-                return !zdt.toLocalTime().isBefore(java.time.LocalTime.of(9, 0)) && 
-                       !zdt.toLocalTime().isAfter(java.time.LocalTime.of(23, 30));
-            } else {
-                // Unknown exchange -> drop
-                log.debug("Unknown exchange '{}' for token {}, dropping", exch, tick.getToken());
-                return false;
-            }
-        } catch (Exception e) {
-            log.warn("⚠️ Invalid timestamp for token {}: {}", tick.getToken(), e.toString());
-            return false;
-        }
-    }
-    
     /**
-     * Get underlying equity scripCode for a tick.
-     * If it's a derivative (ExchType=D), resolve to underlying equity.
-     * Otherwise, return the tick's own scripCode.
+     * SOLID Principle: Single Responsibility
+     *
+     * The following methods have been extracted to specialized services:
+     * - buildEnrichedMessage() → MarketDataEnrichmentService
+     * - mergeOiIntoTick() → MarketDataMergeService
+     * - mergeOrderbookIntoTick() → MarketDataMergeService
+     * - withinTradingHours() → TradingHoursValidationService
+     * - getUnderlyingEquityScripCode() → InstrumentKeyResolver
+     *
+     * This follows Spring Boot best practices:
+     * - Dependency Injection via constructor
+     * - Business logic in @Service classes
+     * - Processor focuses only on Kafka Streams topology
      */
-    private String getUnderlyingEquityScripCode(TickData tick) {
-        if (tick == null) {
-            return null;
-        }
-        
-        // If it's a derivative, resolve to underlying equity
-        if ("D".equalsIgnoreCase(tick.getExchangeType())) {
-            InstrumentFamily family = cacheService.resolveFamily(
-                tick.getScripCode(),
-                tick.getExchangeType(),
-                tick.getCompanyName()
-            );
-            
-            if (family != null && family.getEquityScripCode() != null) {
-                log.debug("📍 Mapped derivative {} to underlying equity {}", 
-                    tick.getScripCode(), family.getEquityScripCode());
-                return family.getEquityScripCode();
-            }
-        }
-        
-        // For equities or if resolution fails, use the tick's own scripCode
-        return tick.getScripCode();
-    }
-    
-    private TickData mergeOiIntoTick(TickData tick, OpenInterest oi) {
-        if (oi != null) {
-            tick.setOpenInterest(oi.getOpenInterest());
-            tick.setOiChange(oi.getOiChange());
-        }
-        return tick;
-    }
-    
-    private TickData mergeOrderbookIntoTick(TickData tick, OrderBookSnapshot orderbook) {
-        if (orderbook != null) {
-            // Merge orderbook data into tick
-            // Implementation depends on your OrderBookSnapshot structure
-            // For now, just return the tick as-is
-        }
-        return tick;
-    }
     
     /**
      * Get current states of all streams

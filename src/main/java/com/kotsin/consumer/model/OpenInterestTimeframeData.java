@@ -18,10 +18,22 @@ public class OpenInterestTimeframeData {
     private Long oiChange;
     private Double oiChangePercent;
     private Double oiMomentum;
-    private Double oiConcentration;
+    private Double oiConcentration;          // HHI index of OI distribution
     private Boolean isComplete;
     private Long windowStart;
     private Long windowEnd;
+
+    // Put/Call analytics (NEW - for options)
+    private Long putOi;                      // Total Put OI
+    private Long callOi;                     // Total Call OI
+    private Double putCallRatio;             // putOi / callOi
+    private Long putOiChange;                // Put OI delta in window
+    private Long callOiChange;               // Call OI delta in window
+    private Double putCallRatioChange;       // Change in put/call ratio
+
+    // OI vs Volume correlation (NEW)
+    private Long volumeInWindow;             // Total volume during this OI window
+    private Double oiVolumeCorrelation;      // Correlation between OI change and volume
     
     /**
      * Calculate OI momentum (change per minute)
@@ -54,11 +66,45 @@ public class OpenInterestTimeframeData {
     }
     
     /**
+     * Check if put/call ratio indicates bearish sentiment (PCR > 1.2)
+     */
+    public Boolean isBearishSentiment() {
+        return putCallRatio != null && putCallRatio > 1.2;
+    }
+
+    /**
+     * Check if put/call ratio indicates bullish sentiment (PCR < 0.8)
+     */
+    public Boolean isBullishSentiment() {
+        return putCallRatio != null && putCallRatio < 0.8;
+    }
+
+    /**
+     * Check if OI and volume are correlated (both increasing/decreasing)
+     */
+    public Boolean isOiVolumeCorrelated() {
+        return oiVolumeCorrelation != null && Math.abs(oiVolumeCorrelation) > 0.5;
+    }
+
+    /**
+     * Check if OI is increasing but volume is low (weak signal)
+     */
+    public Boolean isOiIncreaseLowVolume() {
+        if (oiChange == null || volumeInWindow == null) return null;
+        return oiChange > 0 && volumeInWindow < 10000;  // Threshold adjustable
+    }
+
+    /**
      * Get display string for logging
      */
     public String getDisplayString() {
-        return String.format("OI[%d,%+d,%.2f%%] %s", 
-            oi, oiChange, oiChangePercent, 
+        if (putCallRatio != null) {
+            return String.format("OI[%d,%+d,%.2f%%] PCR:%.2f Put:%d Call:%d %s",
+                oi, oiChange, oiChangePercent, putCallRatio, putOi, callOi,
+                isComplete ? "COMPLETE" : "PARTIAL");
+        }
+        return String.format("OI[%d,%+d,%.2f%%] %s",
+            oi, oiChange, oiChangePercent,
             isComplete ? "COMPLETE" : "PARTIAL");
     }
 }

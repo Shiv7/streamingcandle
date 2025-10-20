@@ -38,7 +38,10 @@ public class EnrichedMarketData {
     
     // Microstructure features
     private MicrostructureData microstructure;
-    
+
+    // Orderbook depth analytics (NEW)
+    private OrderbookDepthData orderbookDepth;
+
     // Metadata
     private MessageMetadata metadata;
     
