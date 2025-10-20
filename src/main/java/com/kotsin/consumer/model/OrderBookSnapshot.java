@@ -1,5 +1,7 @@
 package com.kotsin.consumer.model;
 
+import com.fasterxml.jackson.annotation.JsonIgnoreProperties;
+import com.fasterxml.jackson.annotation.JsonProperty;
 import lombok.AllArgsConstructor;
 import lombok.Builder;
 import lombok.Data;
@@ -16,18 +18,34 @@ import java.util.stream.Collectors;
 @Builder
 @NoArgsConstructor
 @AllArgsConstructor
+@JsonIgnoreProperties(ignoreUnknown = true)
 public class OrderBookSnapshot {
 
+    @JsonProperty("Exch")
     private String exchange;
+
+    @JsonProperty("ExchType")
     private String exchangeType;
+
+    @JsonProperty("Token")
     private String token;
+
+    // Backward-compat arrays (may be absent)
     private List<Double> bidRate;
     private List<Long> bidQty;
     private List<Double> offRate;
     private List<Long> offQty;
+
+    @JsonProperty("TBidQ")
     private Long totalBidQty;
+
+    @JsonProperty("TOffQ")
     private Long totalOffQty;
+
+    @JsonProperty("companyName")
     private String companyName;
+
+    @JsonProperty("receivedTimestamp")
     private Long receivedTimestamp;
 
     // Parsed details
@@ -42,16 +60,20 @@ public class OrderBookSnapshot {
     @NoArgsConstructor
     @AllArgsConstructor
     public static class OrderBookLevel {
+        @JsonProperty("Price")
         private double price;
+        @JsonProperty("Quantity")
         private int quantity;
+        @JsonProperty("NumberOfOrders")
         private int numberOfOrders;
+        // Flags in producer (ignored for now): bid/ask booleans
     }
 
     /**
      * Parse raw bid/ask data into OrderBookLevel objects
      */
     public void parseDetails() {
-        if (bidRate != null && bidQty != null) {
+        if (allBids == null && bidRate != null && bidQty != null) {
             allBids = new ArrayList<>();
             int minSize = Math.min(bidRate.size(), bidQty.size());
             for (int i = 0; i < minSize; i++) {
@@ -62,8 +84,8 @@ public class OrderBookSnapshot {
                     .build());
             }
         }
-
-        if (offRate != null && offQty != null) {
+        
+        if (allAsks == null && offRate != null && offQty != null) {
             allAsks = new ArrayList<>();
             int minSize = Math.min(offRate.size(), offQty.size());
             for (int i = 0; i < minSize; i++) {
