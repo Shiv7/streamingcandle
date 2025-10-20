@@ -2,7 +2,9 @@ package com.kotsin.consumer.processor;
 
 import com.kotsin.consumer.model.OpenInterestTimeframeData;
 import com.kotsin.consumer.model.TickData;
+import lombok.Data;
 
+@Data
 public class OiAccumulator {
     private Long windowStart;
     private Long windowEnd;

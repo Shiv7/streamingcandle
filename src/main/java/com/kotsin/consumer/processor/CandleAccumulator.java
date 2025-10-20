@@ -2,7 +2,9 @@ package com.kotsin.consumer.processor;
 
 import com.kotsin.consumer.model.Candlestick;
 import com.kotsin.consumer.model.CandleData;
+import lombok.Data;
 
+@Data
 public class CandleAccumulator {
     private Long windowStart;
     private Double open;

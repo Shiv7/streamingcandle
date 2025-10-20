@@ -2,11 +2,13 @@ package com.kotsin.consumer.processor;
 
 import com.kotsin.consumer.model.ImbalanceBarData;
 import com.kotsin.consumer.model.TickData;
+import lombok.Data;
 
 /**
  * Accumulator for imbalance bars (VIB, DIB, TRB, VRB)
  * Implements adaptive thresholds using EWMA
  */
+@Data
 public class ImbalanceBarAccumulator {
     // Current imbalance accumulators
     private Long volumeImbalance = 0L;

@@ -2,6 +2,7 @@ package com.kotsin.consumer.processor;
 
 import com.kotsin.consumer.model.MicrostructureData;
 import com.kotsin.consumer.model.TickData;
+import lombok.Data;
 
 import java.util.ArrayList;
 import java.util.List;
@@ -10,6 +11,7 @@ import java.util.List;
  * Accumulator for market microstructure metrics
  * Implements OFI, VPIN, Kyle's Lambda, and other microstructure indicators
  */
+@Data
 public class MicrostructureAccumulator {
     // Order Flow Imbalance (OFI)
     private Double ofi = 0.0;

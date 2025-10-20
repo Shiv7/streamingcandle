@@ -88,14 +88,23 @@ public class UnifiedMarketDataProcessor {
     public void start() {
         try {
             log.info("🚀 Starting Unified Market Data Processor...");
+            log.info("📊 Application ID: {}", appIdPrefix);
             log.info("📊 Input topics: {}, {}, {}", ticksTopic, oiTopic, orderbookTopic);
             log.info("📤 Output topic: {}", outputTopic);
-            
+
+            // CRITICAL: Ensure only ONE instance per application ID
+            if (!streamsInstances.isEmpty()) {
+                log.warn("⚠️ Streams already initialized. Skipping duplicate start.");
+                log.warn("⚠️ Existing streams: {}", streamsInstances.keySet());
+                return;
+            }
+
             // Create unified pipeline
             processUnifiedMarketData();
-            
+
             log.info("✅ Unified Market Data Processor started successfully");
-            
+            log.info("✅ Consumer Group: {}", appIdPrefix);
+
         } catch (Exception e) {
             log.error("❌ Error starting Unified Market Data Processor", e);
             throw new RuntimeException("Failed to start unified processor", e);
