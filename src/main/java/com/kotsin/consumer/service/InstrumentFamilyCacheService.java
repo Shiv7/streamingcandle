@@ -143,22 +143,40 @@ public class InstrumentFamilyCacheService {
     
     private InstrumentFamily buildInstrumentFamily(String scripCode) {
         try {
+            log.debug("🔍 Building instrument family for scripCode: {}", scripCode);
+
             // Get future
             FutureResponse futureResp = getFutureData(scripCode);
-            
+            boolean futureSuccess = futureResp != null && futureResp.isSuccess() && futureResp.getEquity() != null;
+
             // Get options
             OptionsResponse optionsResp = getOptionsData(scripCode);
-            
+            boolean optionsSuccess = optionsResp != null && optionsResp.isSuccess();
+
+            // Determine data source based on API success
+            String dataSource;
+            if (futureSuccess && optionsSuccess) {
+                dataSource = "API";
+                log.info("✅ Successfully fetched full family for scripCode: {}", scripCode);
+            } else if (futureSuccess || optionsSuccess) {
+                dataSource = "API_PARTIAL";
+                log.warn("⚠️ Partial data for scripCode: {} (future: {}, options: {})",
+                    scripCode, futureSuccess, optionsSuccess);
+            } else {
+                dataSource = "API_FAILED";
+                log.warn("⚠️ Both Future and Options API failed for scripCode: {} (likely not an equity stock)", scripCode);
+            }
+
             return InstrumentFamily.builder()
                 .equityScripCode(scripCode)
-                .companyName(futureResp.getEquity() != null ? futureResp.getEquity().getName() : "Unknown")
-                .equity(futureResp.getEquity())
-                .future(futureResp.getFuture())
-                .options(optionsResp.getOptions())
+                .companyName(futureResp != null && futureResp.getEquity() != null ? futureResp.getEquity().getName() : "Unknown")
+                .equity(futureResp != null && futureSuccess ? futureResp.getEquity() : null)
+                .future(futureResp != null && futureSuccess ? futureResp.getFuture() : null)
+                .options(optionsResp != null && optionsSuccess ? optionsResp.getOptions() : null)
                 .lastUpdated(System.currentTimeMillis())
-                .dataSource("API")
+                .dataSource(dataSource)
                 .build();
-                
+
         } catch (Exception e) {
             log.error("❌ Failed to build family for scripCode: {}", scripCode, e);
             return InstrumentFamily.builder()
@@ -204,7 +222,7 @@ public class InstrumentFamilyCacheService {
                 return OptionsResponse.builder()
                     .status(500)
                     .message("API call failed")
-                    .options(Collections.emptyList())
+                    .response(Collections.emptyList())
                     .build();
             }
             return response;
@@ -213,7 +231,7 @@ public class InstrumentFamilyCacheService {
             return OptionsResponse.builder()
                 .status(500)
                 .message("API call failed: " + e.getMessage())
-                .options(Collections.emptyList())
+                .response(Collections.emptyList())
                 .build();
         }
     }
@@ -268,12 +286,27 @@ public class InstrumentFamilyCacheService {
             log.error("❌ Redis read error for scripCode: {}", scripCode, e);
         }
         
-        // Last resort: build on demand
-        log.warn("⚠️ Building family on demand for: {}", scripCode);
+        // Last resort: build on demand (with negative caching)
+        log.warn("⚠️ Cache miss for scripCode: {}, fetching from API...", scripCode);
         family = buildInstrumentFamily(scripCode);
+
+        // CRITICAL: Cache even if API failed (negative caching)
+        // This prevents repeated API calls for non-existent scripCodes (e.g., indices)
         if (family != null) {
             localCache.put(scripCode, family);
+
+            // Also store in Redis for persistence
+            try {
+                redisTemplate.opsForValue().set(
+                    CACHE_KEY_PREFIX + scripCode,
+                    family,
+                    CACHE_TTL
+                );
+            } catch (Exception ex) {
+                log.error("❌ Failed to store on-demand family in Redis: {}", scripCode, ex);
+            }
         }
+
         return family;
     }
     
