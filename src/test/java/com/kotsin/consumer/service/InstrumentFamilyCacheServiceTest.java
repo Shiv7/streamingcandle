@@ -16,7 +16,7 @@ import static org.junit.jupiter.api.Assertions.*;
 class InstrumentFamilyCacheServiceTest {
     
     @Autowired
-    private InstrumentFamilyCacheService cacheService;
+    private MongoInstrumentFamilyService cacheService;
     
     @Test
     void testCacheInitialization() {

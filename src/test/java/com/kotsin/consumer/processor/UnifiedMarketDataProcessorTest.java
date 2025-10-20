@@ -1,7 +1,7 @@
 package com.kotsin.consumer.processor;
 
 import com.kotsin.consumer.model.*;
-import com.kotsin.consumer.service.InstrumentFamilyCacheService;
+import com.kotsin.consumer.service.MongoInstrumentFamilyService;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.context.SpringBootTest;
@@ -21,7 +21,7 @@ class UnifiedMarketDataProcessorTest {
     private UnifiedMarketDataProcessor processor;
     
     @MockBean
-    private InstrumentFamilyCacheService cacheService;
+    private MongoInstrumentFamilyService cacheService;
     
     @Test
     void testProcessorInitialization() {

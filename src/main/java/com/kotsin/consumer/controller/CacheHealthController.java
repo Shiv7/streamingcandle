@@ -1,7 +1,7 @@
 package com.kotsin.consumer.controller;
 
 import com.kotsin.consumer.model.InstrumentFamily;
-import com.kotsin.consumer.service.InstrumentFamilyCacheService;
+import com.kotsin.consumer.service.MongoInstrumentFamilyService;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.http.ResponseEntity;
@@ -19,7 +19,7 @@ import java.util.Map;
 @Slf4j
 public class CacheHealthController {
     
-    private final InstrumentFamilyCacheService cacheService;
+    private final MongoInstrumentFamilyService cacheService;
     
     /**
      * Get cache health status

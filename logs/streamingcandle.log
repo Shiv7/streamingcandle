@@ -1,0 +1,21 @@
+2025-10-20 15:08:46.049 INFO  [main] c.k.consumer.ConsumerApplication - Starting ConsumerApplication using Java 17.0.15 with PID 65127 (/Users/shivendrapratap/Documents/kotsin/streamingcandle/target/classes started by shivendrapratap in /Users/shivendrapratap/Documents/kotsin/streamingcandle)
+2025-10-20 15:08:46.052 INFO  [main] c.k.consumer.ConsumerApplication - The following 1 profile is active: "production"
+2025-10-20 15:08:47.494 INFO  [main] o.a.coyote.http11.Http11NioProtocol - Initializing ProtocolHandler ["http-nio-8081"]
+2025-10-20 15:08:47.499 INFO  [main] o.a.catalina.core.StandardService - Starting service [Tomcat]
+2025-10-20 15:08:47.500 INFO  [main] o.a.catalina.core.StandardEngine - Starting Servlet engine: [Apache Tomcat/10.1.18]
+2025-10-20 15:08:47.811 INFO  [main] o.a.c.c.C.[Tomcat].[localhost].[/] - Initializing Spring embedded WebApplicationContext
+2025-10-20 15:08:48.542 INFO  [main] c.k.c.s.MongoInstrumentFamilyService - 🚀 Initializing MongoDB-based instrument family cache...
+2025-10-20 15:08:48.634 INFO  [main] c.k.c.s.MongoInstrumentFamilyService - 📊 Found 0 ScripGroups from MongoDB
+2025-10-20 15:08:48.635 WARN  [main] c.k.c.s.MongoInstrumentFamilyService - ⚠️ No ScripGroups found in MongoDB, skipping cache refresh
+2025-10-20 15:08:48.635 INFO  [main] c.k.c.s.MongoInstrumentFamilyService - ✅ MongoDB instrument family cache initialized successfully
+2025-10-20 15:08:48.654 INFO  [main] c.k.c.p.UnifiedMarketDataProcessor - 🚀 Starting Unified Market Data Processor...
+2025-10-20 15:08:48.654 INFO  [main] c.k.c.p.UnifiedMarketDataProcessor - 📊 Input topics: forwardtesting-data, OpenInterest, Orderbook
+2025-10-20 15:08:48.654 INFO  [main] c.k.c.p.UnifiedMarketDataProcessor - 📤 Output topic: enriched-market-data
+2025-10-20 15:08:48.934 INFO  [main] c.k.c.p.UnifiedMarketDataProcessor - 📥 Created input streams for topics: forwardtesting-data, OpenInterest, Orderbook
+2025-10-20 15:08:48.962 INFO  [main] c.k.c.p.UnifiedMarketDataProcessor - ⏰ Using 1-minute tumbling windows with 10-second grace period
+2025-10-20 15:08:49.112 WARN  [main] o.a.k.s.p.internals.StateDirectory - Using an OS temp directory in the state.dir property can cause failures with writing the checkpoint file due to the fact that this directory can be cleared by the OS. Resolved state.dir: [/var/folders/q0/9zn8w7w12x76gfpt845612hm0000gn/T//kafka-streams/unified-market-processor]
+2025-10-20 15:08:49.393 INFO  [main] c.k.c.p.UnifiedMarketDataProcessor - 🔄 Unified processor state transition: CREATED -> REBALANCING
+2025-10-20 15:08:49.395 INFO  [main] c.k.c.p.UnifiedMarketDataProcessor - ✅ Started unified market data processor
+2025-10-20 15:08:49.395 INFO  [main] c.k.c.p.UnifiedMarketDataProcessor - ✅ Unified Market Data Processor started successfully
+2025-10-20 15:08:49.810 INFO  [main] o.a.coyote.http11.Http11NioProtocol - Starting ProtocolHandler ["http-nio-8081"]
+2025-10-20 15:08:49.828 INFO  [main] c.k.consumer.ConsumerApplication - Started ConsumerApplication in 4.187 seconds (process running for 4.824)
