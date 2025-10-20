@@ -9,6 +9,7 @@ import org.apache.kafka.streams.KafkaStreams;
 import org.apache.kafka.streams.StreamsBuilder;
 import org.apache.kafka.streams.kstream.*;
 import org.apache.kafka.streams.kstream.Repartitioned;
+import org.apache.kafka.streams.KeyValue;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Component;
 
@@ -261,14 +262,22 @@ public class UnifiedMarketDataProcessor {
         })
         .repartition(Repartitioned.with(Serdes.String(), InstrumentCandle.serde()));
 
-        KTable<String, OpenInterest> oiTable = builder.table(
+        // Token-keyed OI and Orderbook materialized tables (derive key from payload token)
+        KTable<String, OpenInterest> oiTable = builder.stream(
             oiTopic,
             Consumed.with(Serdes.String(), OpenInterest.serde())
-        );
-        KTable<String, OrderBookSnapshot> orderbookTable = builder.table(
+        )
+        .map((k, v) -> new KeyValue<>(v != null ? String.valueOf(v.getToken()) : null, v))
+        .groupByKey(Grouped.with(Serdes.String(), OpenInterest.serde()))
+        .reduce((prev, curr) -> curr);
+
+        KTable<String, OrderBookSnapshot> orderbookTable = builder.stream(
             orderbookTopic,
             Consumed.with(Serdes.String(), OrderBookSnapshot.serde())
-        );
+        )
+        .map((k, v) -> new KeyValue<>(v != null ? String.valueOf(v.getToken()) : null, v))
+        .groupByKey(Grouped.with(Serdes.String(), OrderBookSnapshot.serde()))
+        .reduce((prev, curr) -> curr);
 
         // Join by token (or original key if token not found)
         KStream<String, InstrumentCandle> enrichedCandles = rekeyedByToken
