@@ -85,10 +85,22 @@ public class UnifiedMarketDataProcessor {
         Properties props = kafkaConfig.getStreamProperties(appIdPrefix);
         StreamsBuilder builder = new StreamsBuilder();
         
-        // Input streams
-        KStream<String, TickData> ticks = builder.stream(ticksTopic);
-        KStream<String, OpenInterest> oiStream = builder.stream(oiTopic);
-        KStream<String, OrderBookSnapshot> orderbookStream = builder.stream(orderbookTopic);
+        // Input streams with explicit Consumed serdes
+        // CRITICAL: Must specify serdes to properly deserialize from optionProducerJava
+        KStream<String, TickData> ticks = builder.stream(
+            ticksTopic,
+            Consumed.with(Serdes.String(), TickData.serde())
+        );
+        
+        KStream<String, OpenInterest> oiStream = builder.stream(
+            oiTopic,
+            Consumed.with(Serdes.String(), OpenInterest.serde())
+        );
+        
+        KStream<String, OrderBookSnapshot> orderbookStream = builder.stream(
+            orderbookTopic,
+            Consumed.with(Serdes.String(), OrderBookSnapshot.serde())
+        );
         
         log.info("📥 Created input streams for topics: {}, {}, {}", ticksTopic, oiTopic, orderbookTopic);
         

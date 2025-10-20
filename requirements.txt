@@ -1,0 +1,5 @@
+# Python dependencies for StreamingCandle test data producer
+# Install with: pip install -r requirements.txt
+
+kafka-python==2.0.2
+
