@@ -222,12 +222,16 @@ public class UnifiedMarketDataProcessor {
 
         // DUAL EMISSION STRATEGY
         KStream<String, MultiTimeframeState> stateStream = aggregated.toStream()
-            .selectKey((windowedKey, state) -> windowedKey.key())
-            .peek((key, state) -> {
-                log.debug("📤 Emitting state for {}: messageCount={}", key, state.getMessageCount());
-                // Force window completion for finalized candles
-                state.forceCompleteWindows();
-            });
+            .peek((windowedKey, state) -> {
+                // Use the Kafka window's end time to force completion of inner timeframes
+                long kafkaWindowEnd = windowedKey.window().end();
+                log.debug("📤 Emitting state for {} from Kafka window ending at {}: messageCount={}", 
+                    windowedKey.key(), kafkaWindowEnd, state.getMessageCount());
+                
+                // Force window completion using Kafka window boundary as reference
+                state.forceCompleteWindows(kafkaWindowEnd);
+            })
+            .selectKey((windowedKey, state) -> windowedKey.key());
 
         // Stream 1: ENRICHED updates (DEPRECATED)
         if (enrichedOutputEnabled) {

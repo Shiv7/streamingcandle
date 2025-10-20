@@ -90,9 +90,11 @@ public class MultiTimeframeState {
 
     /**
      * Force completion of all windows for finalized candle emission
-     * This is needed when suppression is removed
+     * Uses the Kafka window end time as the reference point
+     * 
+     * @param kafkaWindowEnd The end time of the Kafka tumbling window (1m)
      */
-    public void forceCompleteWindows() {
-        stateManager.forceCompleteWindows();
+    public void forceCompleteWindows(long kafkaWindowEnd) {
+        stateManager.forceCompleteWindows(kafkaWindowEnd);
     }
 }

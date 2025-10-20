@@ -182,41 +182,41 @@ public class TimeframeStateManager {
 
     /**
      * Force completion of all windows for finalized candle emission
-     * This is needed when suppression is removed and windows don't naturally close
-     * Uses tick timestamp for historical data processing
+     * Uses the Kafka Streams window end time as the reference point
+     * 
+     * When a Kafka 1m window closes (e.g., at 09:35:00), we check if any inner
+     * multi-timeframe windows (1m, 2m, 3m, etc.) should also be marked complete.
+     * 
+     * @param kafkaWindowEnd The end time of the Kafka 1m tumbling window
      */
-    public void forceCompleteWindows() {
-        // Use last tick time for historical data processing, fallback to system time
-        long currentTime = (lastTickTime != null) ? lastTickTime : System.currentTimeMillis();
-        
+    public void forceCompleteWindows(long kafkaWindowEnd) {
         int completedCount = 0;
+        
         for (Map.Entry<Timeframe, CandleAccumulator> entry : candleAccumulators.entrySet()) {
             Timeframe timeframe = entry.getKey();
             CandleAccumulator accumulator = entry.getValue();
             
-            // Mark window as complete if current tick is AT OR PAST the window end
-            // This handles the case where a tick arrives exactly at or after window boundary
+            // Mark window as complete if Kafka window end time is >= accumulator's window end
+            // This means the accumulator's window has fully elapsed
             if (accumulator.getWindowStart() != null && 
                 accumulator.getWindowEnd() != null && 
-                !accumulator.isComplete()) {
+                !accumulator.isComplete() &&
+                kafkaWindowEnd >= accumulator.getWindowEnd()) {
                 
-                // Check if window should be complete
-                // Use >= to include the exact boundary tick
-                if (currentTime >= accumulator.getWindowEnd()) {
-                    accumulator.markComplete();
-                    completedCount++;
-                    log.info("✅ Completed {} window [{}→{}] at tick {} (scripCode={})", 
-                        timeframe.getLabel(), 
-                        accumulator.getWindowStart(), 
-                        accumulator.getWindowEnd(), 
-                        currentTime,
-                        scripCode);
-                }
+                accumulator.markComplete();
+                completedCount++;
+                log.info("✅ Completed {} window [{}→{}] at Kafka window {} (scripCode={})", 
+                    timeframe.getLabel(), 
+                    accumulator.getWindowStart(), 
+                    accumulator.getWindowEnd(), 
+                    kafkaWindowEnd,
+                    scripCode);
             }
         }
         
         if (completedCount > 0) {
-            log.info("🎉 Marked {} windows as complete for scripCode={}", completedCount, scripCode);
+            log.info("🎉 Marked {} windows as complete for scripCode={} at Kafka window end {}", 
+                completedCount, scripCode, kafkaWindowEnd);
         }
     }
 }
