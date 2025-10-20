@@ -61,18 +61,29 @@ class UnifiedMarketDataProcessorTest {
     void testCandleAccumulator() {
         // Test CandleAccumulator
         CandleAccumulator accumulator = new CandleAccumulator();
-        
+
         TickData tick = new TickData();
         tick.setLastRate(2500.0);
         tick.setTimestamp(System.currentTimeMillis());
         tick.setDeltaVolume(100);
-        
+        tick.setBidRate(2499.0);
+        tick.setOfferRate(2501.0);
+
         accumulator.addTick(tick);
-        
-        assertNotNull(accumulator.getOpen());
-        assertNotNull(accumulator.getClose());
-        assertNotNull(accumulator.getHigh());
-        assertNotNull(accumulator.getLow());
-        assertNotNull(accumulator.getVolume());
+
+        // Use toCandleData() to access accumulated values
+        CandleData candleData = accumulator.toCandleData("N", "C");
+
+        assertNotNull(candleData.getOpen());
+        assertNotNull(candleData.getClose());
+        assertNotNull(candleData.getHigh());
+        assertNotNull(candleData.getLow());
+        assertNotNull(candleData.getVolume());
+
+        assertEquals(2500.0, candleData.getOpen());
+        assertEquals(2500.0, candleData.getClose());
+        assertEquals(2500.0, candleData.getHigh());
+        assertEquals(2500.0, candleData.getLow());
+        assertEquals(100L, candleData.getVolume());
     }
 }
