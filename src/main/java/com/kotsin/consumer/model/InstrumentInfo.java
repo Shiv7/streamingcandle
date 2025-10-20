@@ -16,7 +16,7 @@ import lombok.NoArgsConstructor;
 public class InstrumentInfo {
     
     private String scripCode;
-    private String token;
+    private String token;        // Added: join key for OI/Orderbook
     private String name;
     private String fullName;
     private String exchange;

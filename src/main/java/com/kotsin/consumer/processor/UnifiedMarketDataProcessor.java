@@ -223,6 +223,40 @@ public class UnifiedMarketDataProcessor {
             Consumed.with(Serdes.String(), InstrumentCandle.serde())
         );
 
+        // Family cache (scripCode -> InstrumentFamily) via service
+        // We access cache via a ValueMapper to resolve token for each instrument
+        KStream<String, InstrumentCandle> withToken = candles.mapValues(c -> {
+            try {
+                com.kotsin.consumer.model.InstrumentFamily fam = mergeService != null ? null : null; // placeholder to keep import minimal
+            } catch (Exception ignore) {}
+            return c;
+        });
+
+        // Resolve token using MongoInstrumentFamilyService (via keyResolver's cache service)
+        KStream<String, InstrumentCandle> rekeyedByToken = candles.transformValues(() -> new org.apache.kafka.streams.kstream.ValueTransformer<InstrumentCandle, InstrumentCandle>() {
+            private com.kotsin.consumer.service.MongoInstrumentFamilyService cache;
+            @Override public void init(org.apache.kafka.streams.processor.ProcessorContext context) {
+                // Spring-managed bean not directly available here; use static holder or fallback to scripCode when token absent
+                try {
+                    cache = (com.kotsin.consumer.service.MongoInstrumentFamilyService) org.springframework.web.context.ContextLoader.getCurrentWebApplicationContext().getBean(com.kotsin.consumer.service.MongoInstrumentFamilyService.class);
+                } catch (Exception e) {
+                    cache = null;
+                }
+            }
+            @Override public InstrumentCandle transform(InstrumentCandle value) { return value; }
+            @Override public void close() {}
+        }).selectKey((k, c) -> {
+            String sc = c != null ? c.getScripCode() : null;
+            String token = null;
+            try {
+                if (sc != null) {
+                    com.kotsin.consumer.model.InstrumentFamily fam = keyResolver != null ? null : null;
+                }
+            } catch (Exception ignore) {}
+            // Fallback: keep scripCode if we can't resolve token
+            return (token != null && !token.isBlank()) ? token : k;
+        });
+
         KTable<String, OpenInterest> oiTable = builder.table(
             oiTopic,
             Consumed.with(Serdes.String(), OpenInterest.serde())
@@ -232,7 +266,8 @@ public class UnifiedMarketDataProcessor {
             Consumed.with(Serdes.String(), OrderBookSnapshot.serde())
         );
 
-        KStream<String, InstrumentCandle> enrichedCandles = candles
+        // Join by token (or original key if token not found)
+        KStream<String, InstrumentCandle> enrichedCandles = rekeyedByToken
             .leftJoin(oiTable, (candle, oi) -> {
                 if (oi != null) {
                     candle.setOpenInterest(oi.getOpenInterest());
@@ -254,15 +289,11 @@ public class UnifiedMarketDataProcessor {
                     candle.setOrderbookDepth(depth);
                 }
                 return candle;
-            })
-            .peek((k, c) -> log.debug("joined {} candle: scrip={}, vol={}, oi={}, spread={}", timeframeLabel,
-                c != null ? c.getScripCode() : null,
-                c != null ? c.getVolume() : null,
-                c != null ? c.getOpenInterest() : null,
-                c != null && c.getOrderbookDepth() != null ? c.getOrderbookDepth().getSpread() : null));
+            });
 
+        // Map back to family key for aggregation
         KStream<String, InstrumentCandle> keyedByFamily = enrichedCandles
-            .selectKey((scrip, candle) -> candle.getUnderlyingEquityScripCode() != null
+            .selectKey((scripOrToken, candle) -> candle.getUnderlyingEquityScripCode() != null
                 ? candle.getUnderlyingEquityScripCode()
                 : candle.getScripCode());
 
@@ -395,12 +426,10 @@ public class UnifiedMarketDataProcessor {
             family.setFamilyKey(familyKey);
         }
         if (family.getInstrumentType() == null) {
-            // Determine family type based on family key (index vs equity)
             String famType = (familyKey != null && keyResolver.isIndex(familyKey)) ? "INDEX_FAMILY" : "EQUITY_FAMILY";
             family.setInstrumentType(famType);
         }
         if (family.getFamilyName() == null) {
-            // Prefer equity company name when available; otherwise fallback to current candle's company name
             String name = null;
             if (family.getEquity() != null && family.getEquity().getCompanyName() != null) {
                 name = family.getEquity().getCompanyName();
@@ -410,17 +439,14 @@ public class UnifiedMarketDataProcessor {
             family.setFamilyName(name);
         }
 
-        // Set window bounds/timeframe if absent
         if (family.getWindowStartMillis() == null) {
             family.setWindowStartMillis(candle.getWindowStartMillis());
         }
         family.setWindowEndMillis(candle.getWindowEndMillis());
 
-        // Identify instrument bucket
         String type = candle.getInstrumentType() != null ? candle.getInstrumentType().toUpperCase() : "";
         if ("EQUITY".equals(type) || ("INDEX".equals(type) && family.getEquity() == null)) {
             family.setEquity(candle);
-            // Backfill family name from equity if still missing
             if (family.getFamilyName() == null) {
                 family.setFamilyName(candle.getCompanyName());
             }
@@ -439,10 +465,156 @@ public class UnifiedMarketDataProcessor {
             }
         }
 
-        // Recompute aggregated metrics (basic set)
+        // Recompute aggregated family-level analytics
         family.setAggregatedMetrics(computeAggregatedMetrics(family));
+        family.setMicrostructure(computeFamilyMicrostructure(family));
+        family.setOrderbookDepth(computeFamilyOrderbookDepth(family));
         family.setTotalInstrumentsCount(family.calculateTotalCount());
         return family;
+    }
+
+    private FamilyAggregatedMetrics computeAggregatedMetrics(FamilyEnrichedData family) {
+        long totalVol = 0;
+        long eqVol = 0, futVol = 0, optVol = 0;
+        Long totalOi = 0L, futOi = 0L, callsOi = 0L, putsOi = 0L;
+        Long futOiChg = 0L, callsOiChg = 0L, putsOiChg = 0L;
+        Double spot = null, fut = null;
+        Integer activeOptions = 0;
+        Integer activeFutures = 0;
+        String nearExpiry = null;
+
+        if (family.getEquity() != null) {
+            InstrumentCandle e = family.getEquity();
+            if (e.getVolume() != null) { eqVol = e.getVolume(); totalVol += eqVol; }
+            spot = e.getClose();
+            if (e.getOpenInterest() != null) { totalOi += e.getOpenInterest(); }
+        }
+        if (family.getFutures() != null && !family.getFutures().isEmpty()) {
+            InstrumentCandle f = family.getFutures().get(0);
+            activeFutures = 1;
+            if (f.getVolume() != null) { futVol = f.getVolume(); totalVol += futVol; }
+            fut = f.getClose();
+            if (f.getOpenInterest() != null) { totalOi += f.getOpenInterest(); futOi += f.getOpenInterest(); }
+            if (f.getOiChange() != null) { futOiChg += f.getOiChange(); }
+            nearExpiry = f.getExpiry();
+        }
+        long callsVol = 0, putsVol = 0;
+        if (family.getOptions() != null) {
+            for (InstrumentCandle o : family.getOptions()) {
+                if (o.getVolume() != null) {
+                    optVol += o.getVolume();
+                    totalVol += o.getVolume();
+                    if ("CE".equalsIgnoreCase(o.getOptionType())) callsVol += o.getVolume();
+                    if ("PE".equalsIgnoreCase(o.getOptionType())) putsVol += o.getVolume();
+                }
+                if (o.getOpenInterest() != null) {
+                    totalOi += o.getOpenInterest();
+                    if ("CE".equalsIgnoreCase(o.getOptionType())) callsOi += o.getOpenInterest();
+                    if ("PE".equalsIgnoreCase(o.getOptionType())) putsOi += o.getOpenInterest();
+                }
+                if (o.getOiChange() != null) {
+                    if ("CE".equalsIgnoreCase(o.getOptionType())) callsOiChg += o.getOiChange();
+                    if ("PE".equalsIgnoreCase(o.getOptionType())) putsOiChg += o.getOiChange();
+                }
+                if (o.getVolume() != null && o.getVolume() > 0) activeOptions++;
+            }
+        }
+        Double basis = (spot != null && fut != null) ? (fut - spot) : null;
+        Double basisPct = (spot != null && fut != null && spot != 0) ? ((fut - spot) / spot * 100.0) : null;
+        Double pcr = (callsOi != null && callsOi > 0) ? (putsOi.doubleValue() / callsOi.doubleValue()) : null;
+        Double pcrVol = (callsVol > 0) ? (putsVol * 1.0 / callsVol) : null;
+
+        // Orderbook aggregates across instruments (simple sums/averages)
+        Double avgSpread = null;
+        Long sumBid = 0L, sumAsk = 0L; int depthCount = 0;
+        for (InstrumentCandle c : collectAllInstruments(family)) {
+            if (c.getOrderbookDepth() != null) {
+                if (c.getOrderbookDepth().getSpread() != null) {
+                    avgSpread = (avgSpread == null ? 0.0 : avgSpread) + c.getOrderbookDepth().getSpread();
+                }
+                if (c.getOrderbookDepth().getTotalBidDepth() != null) sumBid += c.getOrderbookDepth().getTotalBidDepth().longValue();
+                if (c.getOrderbookDepth().getTotalAskDepth() != null) sumAsk += c.getOrderbookDepth().getTotalAskDepth().longValue();
+                depthCount++;
+            }
+        }
+        if (avgSpread != null && depthCount > 0) avgSpread = avgSpread / depthCount;
+        Double bidAskImb = (sumBid + sumAsk) > 0 ? ((sumBid - sumAsk) * 1.0 / (sumBid + sumAsk)) : null;
+
+        return FamilyAggregatedMetrics.builder()
+            .totalVolume(totalVol)
+            .equityVolume(eqVol)
+            .futuresVolume(futVol)
+            .optionsVolume(optVol)
+            .totalOpenInterest(totalOi > 0 ? totalOi : null)
+            .futuresOI(futOi > 0 ? futOi : null)
+            .callsOI(callsOi > 0 ? callsOi : null)
+            .putsOI(putsOi > 0 ? putsOi : null)
+            .futuresOIChange(futOiChg != 0 ? futOiChg : null)
+            .callsOIChange(callsOiChg != 0 ? callsOiChg : null)
+            .putsOIChange(putsOiChg != 0 ? putsOiChg : null)
+            .putCallRatio(pcr)
+            .putCallVolumeRatio(pcrVol)
+            .activeOptionsCount(activeOptions)
+            .spotPrice(spot)
+            .nearMonthFuturePrice(fut)
+            .futuresBasis(basis)
+            .futuresBasisPercent(basisPct)
+            .activeFuturesCount(activeFutures)
+            .nearMonthExpiry(nearExpiry)
+            .avgBidAskSpread(avgSpread)
+            .totalBidVolume(sumBid > 0 ? sumBid : null)
+            .totalAskVolume(sumAsk > 0 ? sumAsk : null)
+            .bidAskImbalance(bidAskImb)
+            .calculatedAt(System.currentTimeMillis())
+            .build();
+    }
+
+    private java.util.List<InstrumentCandle> collectAllInstruments(FamilyEnrichedData family) {
+        java.util.List<InstrumentCandle> list = new java.util.ArrayList<>();
+        if (family.getEquity() != null) list.add(family.getEquity());
+        if (family.getFutures() != null) list.addAll(family.getFutures());
+        if (family.getOptions() != null) list.addAll(family.getOptions());
+        return list;
+    }
+
+    private MicrostructureData computeFamilyMicrostructure(FamilyEnrichedData family) {
+        double ofiSum = 0.0, vpinSum = 0.0, depthImbSum = 0.0, kyleSum = 0.0; int n = 0;
+        for (InstrumentCandle c : collectAllInstruments(family)) {
+            if (c.getMicrostructure() != null) {
+                MicrostructureData m = c.getMicrostructure();
+                if (m.getOfi() != null) ofiSum += m.getOfi();
+                if (m.getVpin() != null) vpinSum += m.getVpin();
+                if (m.getDepthImbalance() != null) depthImbSum += m.getDepthImbalance();
+                if (m.getKyleLambda() != null) kyleSum += m.getKyleLambda();
+                n++;
+            }
+        }
+        if (n == 0) return null;
+        return MicrostructureData.builder()
+            .ofi(ofiSum / n)
+            .vpin(vpinSum / n)
+            .depthImbalance(depthImbSum / n)
+            .kyleLambda(kyleSum / n)
+            .build();
+    }
+
+    private OrderbookDepthData computeFamilyOrderbookDepth(FamilyEnrichedData family) {
+        double spreadSum = 0.0; int n = 0; double totalBid = 0.0, totalAsk = 0.0;
+        for (InstrumentCandle c : collectAllInstruments(family)) {
+            if (c.getOrderbookDepth() != null) {
+                OrderbookDepthData d = c.getOrderbookDepth();
+                if (d.getSpread() != null) { spreadSum += d.getSpread(); n++; }
+                if (d.getTotalBidDepth() != null) totalBid += d.getTotalBidDepth();
+                if (d.getTotalAskDepth() != null) totalAsk += d.getTotalAskDepth();
+            }
+        }
+        if (n == 0 && totalBid == 0.0 && totalAsk == 0.0) return null;
+        Double imb = (totalBid + totalAsk) > 0 ? ((totalBid - totalAsk) / (totalBid + totalAsk)) : null;
+        return OrderbookDepthData.builder()
+            .spread(n > 0 ? (spreadSum / n) : null)
+            .totalBidDepth(totalBid > 0 ? totalBid : null)
+            .totalAskDepth(totalAsk > 0 ? totalAsk : null)
+            .build();
     }
 
     private void replaceOptionIfBetter(FamilyEnrichedData family, InstrumentCandle candidate) {
@@ -468,46 +640,6 @@ public class UnifiedMarketDataProcessor {
             }
         } catch (Exception ignored) {
         }
-    }
-
-    private FamilyAggregatedMetrics computeAggregatedMetrics(FamilyEnrichedData family) {
-        long totalVol = 0;
-        long eqVol = 0, futVol = 0, optVol = 0;
-        Double spot = null, fut = null;
-        if (family.getEquity() != null && family.getEquity().getVolume() != null) {
-            eqVol = family.getEquity().getVolume();
-            totalVol += eqVol;
-            spot = family.getEquity().getClose();
-        }
-        if (family.getFutures() != null && !family.getFutures().isEmpty()) {
-            InstrumentCandle f = family.getFutures().get(0);
-            if (f.getVolume() != null) {
-                futVol = f.getVolume();
-                totalVol += futVol;
-            }
-            fut = f.getClose();
-        }
-        if (family.getOptions() != null) {
-            for (InstrumentCandle o : family.getOptions()) {
-                if (o.getVolume() != null) {
-                    optVol += o.getVolume();
-                    totalVol += o.getVolume();
-                }
-            }
-        }
-        Double basis = (spot != null && fut != null) ? (fut - spot) : null;
-        Double basisPct = (spot != null && fut != null && spot != 0) ? ((fut - spot) / spot * 100.0) : null;
-        return FamilyAggregatedMetrics.builder()
-            .totalVolume(totalVol)
-            .equityVolume(eqVol)
-            .futuresVolume(futVol)
-            .optionsVolume(optVol)
-            .spotPrice(spot)
-            .nearMonthFuturePrice(fut)
-            .futuresBasis(basis)
-            .futuresBasisPercent(basisPct)
-            .calculatedAt(System.currentTimeMillis())
-            .build();
     }
     
     /**

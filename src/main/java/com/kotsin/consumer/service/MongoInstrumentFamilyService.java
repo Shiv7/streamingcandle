@@ -154,8 +154,22 @@ public class MongoInstrumentFamilyService {
     }
     
     private InstrumentInfo convertScripToInstrumentInfo(Scrip scrip) {
+        // Attempt to extract token from scripData JSON if present (non-fatal if absent)
+        String token = null;
+        try {
+            if (scrip.getScripData() != null && !scrip.getScripData().isBlank()) {
+                String data = scrip.getScripData();
+                // naive extract: "Token": 12345 or "token":"12345"
+                java.util.regex.Matcher m = java.util.regex.Pattern.compile("\"[Tt]oken\"\s*:\s*\"?(\\d+)\"?").matcher(data);
+                if (m.find()) {
+                    token = m.group(1);
+                }
+            }
+        } catch (Exception ignore) {}
+
         return InstrumentInfo.builder()
             .scripCode(scrip.getScripCode())
+            .token(token)
             .name(scrip.getName())
             .fullName(scrip.getFullName())
             .exchange(scrip.getExch())
@@ -171,6 +185,7 @@ public class MongoInstrumentFamilyService {
             .bocoallowed(scrip.getBOCOAllowed())
             .id(scrip.getId())
             .scriptTypeKotsin(scrip.getScriptTypeKotsin())
+            .insertionDate(scrip.getInsertionDate() != null ? scrip.getInsertionDate().toString() : null)
             .multiplier(scrip.getMultiplier())
             .qtyLimit(scrip.getQtyLimit())
             .scripData(scrip.getScripData())
