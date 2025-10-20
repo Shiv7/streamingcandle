@@ -94,23 +94,36 @@ public class TimeframeStateManager {
 
     private void updateAllTimeframes(TickData tick) {
         long tickTime = tick.getTimestamp();
+        boolean isNse = "N".equalsIgnoreCase(exchange);
 
         for (Map.Entry<Timeframe, CandleAccumulator> entry : candleAccumulators.entrySet()) {
             Timeframe timeframe = entry.getKey();
             CandleAccumulator acc = entry.getValue();
             int minutes = timeframe.getMinutes();
-            acc = WindowRotationService.rotateCandleIfNeeded(acc, tickTime, minutes);
+
+            // Use offset alignment for 30m on NSE to start from 09:15 (offset 15 min)
+            if (isNse && timeframe == Timeframe.THIRTY_MIN) {
+                acc = WindowRotationService.rotateCandleIfNeeded(acc, tickTime, minutes, 15);
+            } else {
+                acc = WindowRotationService.rotateCandleIfNeeded(acc, tickTime, minutes);
+            }
             candleAccumulators.put(timeframe, acc);
             acc.addTick(tick);
         }
     }
 
     private void updateAllOiTimeframes(TickData tick) {
+        boolean isNse = "N".equalsIgnoreCase(exchange);
         for (Map.Entry<Timeframe, OiAccumulator> entry : oiAccumulators.entrySet()) {
             Timeframe timeframe = entry.getKey();
             OiAccumulator acc = entry.getValue();
             int minutes = timeframe.getMinutes();
-            acc = WindowRotationService.rotateOiIfNeeded(acc, tick.getTimestamp(), minutes);
+
+            if (isNse && timeframe == Timeframe.THIRTY_MIN) {
+                acc = WindowRotationService.rotateOiIfNeeded(acc, tick.getTimestamp(), minutes, 15);
+            } else {
+                acc = WindowRotationService.rotateOiIfNeeded(acc, tick.getTimestamp(), minutes);
+            }
             oiAccumulators.put(timeframe, acc);
             acc.addOiData(tick);
         }

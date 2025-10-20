@@ -81,6 +81,12 @@ public class UnifiedMarketDataProcessor {
     @Value("${stream.outputs.familyStructured.5m:family-structured-5m}")
     private String familyStructured5mTopic;
 
+    @Value("${stream.outputs.familyStructured.15m:family-structured-15m}")
+    private String familyStructured15mTopic;
+
+    @Value("${stream.outputs.familyStructured.30m:family-structured-30m}")
+    private String familyStructured30mTopic;
+
     @Value("${stream.outputs.familyStructured.all:family-structured-all}")
     private String familyStructuredAllTopic;
     
@@ -91,7 +97,7 @@ public class UnifiedMarketDataProcessor {
             log.info("Flags: candlesOutputEnabled={}, familyStructuredEnabled={}", candlesOutputEnabled, familyStructuredEnabled);
             log.info("Input topics: ticks={}, oi={}, orderbook={}", ticksTopic, oiTopic, orderbookTopic);
             log.info("Candle topics: 1m={}, 2m={}, 3m={}, 5m={}, 15m={}, 30m={}", candle1mTopic, candle2mTopic, candle3mTopic, candle5mTopic, candle15mTopic, candle30mTopic);
-            log.info("Family topics: 1m={}, 2m={}, 5m={}, all={}", familyStructured1mTopic, familyStructured2mTopic, familyStructured5mTopic, familyStructuredAllTopic);
+            log.info("Family topics: 1m={}, 2m={}, 5m={}, 15m={}, 30m={}, all={}", familyStructured1mTopic, familyStructured2mTopic, familyStructured5mTopic, familyStructured15mTopic, familyStructured30mTopic, familyStructuredAllTopic);
 
             if (!streamsInstances.isEmpty()) {
                 log.warn("⚠️ Streams already initialized. Skipping duplicate start.");
@@ -103,6 +109,8 @@ public class UnifiedMarketDataProcessor {
                 buildFamilyStructuredStream("1m", candle1mTopic, familyStructured1mTopic, Duration.ofMinutes(1));
                 buildFamilyStructuredStream("2m", candle2mTopic, familyStructured2mTopic, Duration.ofMinutes(2));
                 buildFamilyStructuredStream("5m", candle5mTopic, familyStructured5mTopic, Duration.ofMinutes(5));
+                buildFamilyStructuredStream("15m", candle15mTopic, familyStructured15mTopic, Duration.ofMinutes(15));
+                buildFamilyStructuredStream("30m", candle30mTopic, familyStructured30mTopic, Duration.ofMinutes(30));
                 processFamilyStructuredAll();
             }
 
@@ -312,23 +320,31 @@ public class UnifiedMarketDataProcessor {
         props.put("auto.offset.reset", "earliest");
         StreamsBuilder builder = new StreamsBuilder();
 
-        // Consume the three family-structured topics and merge into a single message per family
+        // Consume the family-structured topics and merge into a single message per family
         KStream<String, FamilyEnrichedData> f1 = builder.stream(
             familyStructured1mTopic, Consumed.with(Serdes.String(), FamilyEnrichedData.serde()));
         KStream<String, FamilyEnrichedData> f2 = builder.stream(
             familyStructured2mTopic, Consumed.with(Serdes.String(), FamilyEnrichedData.serde()));
         KStream<String, FamilyEnrichedData> f5 = builder.stream(
             familyStructured5mTopic, Consumed.with(Serdes.String(), FamilyEnrichedData.serde()));
+        KStream<String, FamilyEnrichedData> f15 = builder.stream(
+            familyStructured15mTopic, Consumed.with(Serdes.String(), FamilyEnrichedData.serde()));
+        KStream<String, FamilyEnrichedData> f30 = builder.stream(
+            familyStructured30mTopic, Consumed.with(Serdes.String(), FamilyEnrichedData.serde()));
 
         // Convert each into partial FamilyStructuredAll keyed by family
         KStream<String, FamilyStructuredAll> p1 = f1.mapValues(this::toAllPartial);
         KStream<String, FamilyStructuredAll> p2 = f2.mapValues(this::toAllPartial);
         KStream<String, FamilyStructuredAll> p5 = f5.mapValues(this::toAllPartial);
+        KStream<String, FamilyStructuredAll> p15 = f15.mapValues(this::toAllPartial);
+        KStream<String, FamilyStructuredAll> p30 = f30.mapValues(this::toAllPartial);
 
         // Merge using reduce by key
         KStream<String, FamilyStructuredAll> merged = p1
             .merge(p2)
             .merge(p5)
+            .merge(p15)
+            .merge(p30)
             .groupByKey(Grouped.with(Serdes.String(), FamilyStructuredAll.serde()))
             .reduce(this::mergeAll)
             .toStream()
@@ -372,8 +388,28 @@ public class UnifiedMarketDataProcessor {
 
     private FamilyEnrichedData assembleFamily(String familyKey, InstrumentCandle candle, FamilyEnrichedData family) {
         if (family == null) {
-            family = FamilyEnrichedData.builder().familyKey(familyKey).build();
+            family = FamilyEnrichedData.builder().build();
         }
+        // Ensure identity fields are populated
+        if (family.getFamilyKey() == null) {
+            family.setFamilyKey(familyKey);
+        }
+        if (family.getInstrumentType() == null) {
+            // Determine family type based on family key (index vs equity)
+            String famType = (familyKey != null && keyResolver.isIndex(familyKey)) ? "INDEX_FAMILY" : "EQUITY_FAMILY";
+            family.setInstrumentType(famType);
+        }
+        if (family.getFamilyName() == null) {
+            // Prefer equity company name when available; otherwise fallback to current candle's company name
+            String name = null;
+            if (family.getEquity() != null && family.getEquity().getCompanyName() != null) {
+                name = family.getEquity().getCompanyName();
+            } else if (candle != null) {
+                name = candle.getCompanyName();
+            }
+            family.setFamilyName(name);
+        }
+
         // Set window bounds/timeframe if absent
         if (family.getWindowStartMillis() == null) {
             family.setWindowStartMillis(candle.getWindowStartMillis());
@@ -384,8 +420,11 @@ public class UnifiedMarketDataProcessor {
         String type = candle.getInstrumentType() != null ? candle.getInstrumentType().toUpperCase() : "";
         if ("EQUITY".equals(type) || ("INDEX".equals(type) && family.getEquity() == null)) {
             family.setEquity(candle);
+            // Backfill family name from equity if still missing
+            if (family.getFamilyName() == null) {
+                family.setFamilyName(candle.getCompanyName());
+            }
         } else if ("FUTURE".equals(type)) {
-            // Only one future (nearest) kept; replace if expiry earlier
             InstrumentCandle existing = family.getFutures() != null && !family.getFutures().isEmpty() ? family.getFutures().get(0) : null;
             if (existing == null) {
                 family.getFutures().add(candle);
@@ -393,11 +432,9 @@ public class UnifiedMarketDataProcessor {
                 family.getFutures().set(0, candle);
             }
         } else if ("OPTION".equals(type)) {
-            // Cap at 4 options
             if (family.getOptions().size() < 4) {
                 family.getOptions().add(candle);
             } else {
-                // Replace worst-fit (e.g., farthest strike from equity close)
                 replaceOptionIfBetter(family, candle);
             }
         }
