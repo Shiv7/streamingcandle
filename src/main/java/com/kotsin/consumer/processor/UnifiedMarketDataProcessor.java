@@ -88,6 +88,10 @@ public class UnifiedMarketDataProcessor {
     public void start() {
         try {
             log.info("🚀 Starting Unified Market Data Processor...");
+            log.info("Flags: candlesOutputEnabled={}, familyStructuredEnabled={}", candlesOutputEnabled, familyStructuredEnabled);
+            log.info("Input topics: ticks={}, oi={}, orderbook={}", ticksTopic, oiTopic, orderbookTopic);
+            log.info("Candle topics: 1m={}, 2m={}, 3m={}, 5m={}, 15m={}, 30m={}", candle1mTopic, candle2mTopic, candle3mTopic, candle5mTopic, candle15mTopic, candle30mTopic);
+            log.info("Family topics: 1m={}, 2m={}, 5m={}, all={}", familyStructured1mTopic, familyStructured2mTopic, familyStructured5mTopic, familyStructuredAllTopic);
 
             if (!streamsInstances.isEmpty()) {
                 log.warn("⚠️ Streams already initialized. Skipping duplicate start.");
@@ -204,6 +208,8 @@ public class UnifiedMarketDataProcessor {
         props.put("auto.offset.reset", "earliest");
         StreamsBuilder builder = new StreamsBuilder();
 
+        log.info("⏳ Building {} from source topic {} → sink {}", timeframeLabel, sourceTopic, sinkTopic);
+
         KStream<String, InstrumentCandle> candles = builder.stream(
             sourceTopic,
             Consumed.with(Serdes.String(), InstrumentCandle.serde())
@@ -240,7 +246,12 @@ public class UnifiedMarketDataProcessor {
                     candle.setOrderbookDepth(depth);
                 }
                 return candle;
-            });
+            })
+            .peek((k, c) -> log.debug("joined {} candle: scrip={}, vol={}, oi={}, spread={}", timeframeLabel,
+                c != null ? c.getScripCode() : null,
+                c != null ? c.getVolume() : null,
+                c != null ? c.getOpenInterest() : null,
+                c != null && c.getOrderbookDepth() != null ? c.getOrderbookDepth().getSpread() : null));
 
         KStream<String, InstrumentCandle> keyedByFamily = enrichedCandles
             .selectKey((scrip, candle) -> candle.getUnderlyingEquityScripCode() != null
@@ -269,6 +280,14 @@ public class UnifiedMarketDataProcessor {
                 if (family != null) {
                     family.setProcessingTimestamp(System.currentTimeMillis());
                     family.setTimeframe(timeframeLabel);
+                    log.info("📤 family emit tf={} key={} eq={} futs={} opts={} volTotal={} basis={}",
+                        timeframeLabel,
+                        key,
+                        family.getEquity() != null,
+                        family.getFutures() != null ? family.getFutures().size() : 0,
+                        family.getOptions() != null ? family.getOptions().size() : 0,
+                        family.getAggregatedMetrics() != null ? family.getAggregatedMetrics().getTotalVolume() : null,
+                        family.getAggregatedMetrics() != null ? family.getAggregatedMetrics().getFuturesBasis() : null);
                 }
             });
 
@@ -459,25 +478,43 @@ public class UnifiedMarketDataProcessor {
      * NEW: Uses InstrumentCandle instead of Candlestick
      */
     private void emitPerInstrumentCandles(KStream<String, InstrumentState> stateStream) {
-        // Filter states that have at least one complete window
         KStream<String, InstrumentState> completeStates = stateStream
             .filter((key, state) -> state.hasAnyCompleteWindow());
 
-        // Create streams for each timeframe
         for (Timeframe timeframe : new Timeframe[]{Timeframe.ONE_MIN, Timeframe.TWO_MIN, Timeframe.THREE_MIN,
                                                      Timeframe.FIVE_MIN, Timeframe.FIFTEEN_MIN, Timeframe.THIRTY_MIN}) {
-            KStream<String, InstrumentCandle> candleStream = completeStates
+            final String tfLabel = timeframe.getLabel();
+            KStream<String, InstrumentCandle> built = completeStates
                 .mapValues((readOnlyKey, state) -> state.extractFinalizedCandle(timeframe))
-                .filter((key, candle) -> candle != null && candle.isValid());
+                .peek((k, c) -> log.debug("built candle tf={} scrip={} vol={} valid={}", tfLabel,
+                    c != null ? c.getScripCode() : null,
+                    c != null ? c.getVolume() : null,
+                    c != null && c.isValid()));
 
-            String topic = getCandleTopicForTimeframe(timeframe.getLabel());
+            KStream<String, InstrumentCandle>[] branches = built.branch(
+                (k, c) -> c != null && c.isValid(),
+                (k, c) -> true
+            );
+            KStream<String, InstrumentCandle> valid = branches[0];
+            KStream<String, InstrumentCandle> invalid = branches[1];
+
+            invalid.peek((k, c) -> log.warn("drop candle tf={} scrip={} reason={} vol={} open={} high={} low={} close={}", tfLabel,
+                c != null ? c.getScripCode() : null,
+                c == null ? "null" : (c.getVolume() == null || c.getVolume() <= 0 ? "volume" : "fields"),
+                c != null ? c.getVolume() : null,
+                c != null ? c.getOpen() : null,
+                c != null ? c.getHigh() : null,
+                c != null ? c.getLow() : null,
+                c != null ? c.getClose() : null));
+
+            String topic = getCandleTopicForTimeframe(tfLabel);
             if (topic != null) {
-                candleStream.to(topic, Produced.with(
-                    Serdes.String(),
-                    InstrumentCandle.serde()
-                ));
-
-                log.debug("✅ [INSTRUMENT] Configured finalized candle stream: {} → {}", timeframe.getLabel(), topic);
+                valid
+                    .peek((k, c) -> log.info("📤 candle emit tf={} scrip={} vol={} → {}", tfLabel, c.getScripCode(), c.getVolume(), topic))
+                    .to(topic, Produced.with(
+                        Serdes.String(),
+                        InstrumentCandle.serde()
+                    ));
             }
         }
     }
