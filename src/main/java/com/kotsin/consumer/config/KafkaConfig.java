@@ -22,12 +22,45 @@ public class KafkaConfig {
             2025, 4, 3, 15, 30, 0, 0, ZoneId.of("Asia/Kolkata")
     );
 
-    // CRITICAL FIX: Inject bootstrap servers from properties (not hardcoded!)
+    // All configuration injected from application.properties
     @Value("${spring.kafka.bootstrap-servers:localhost:9092}")
     private String bootstrapServers;
-    
-    @Value("${spring.kafka.streams.state-dir:/var/lib/kafka-streams/streamingcandle}")
+
+    @Value("${spring.kafka.streams.state-dir:/tmp/kafka-streams/streamingcandle}")
     private String baseStateDir;
+
+    @Value("${spring.kafka.streams.properties.commit.interval.ms:100}")
+    private int commitIntervalMs;
+
+    @Value("${spring.kafka.streams.properties.statestore.cache.max.bytes:104857600}")
+    private long statestoreCacheMaxBytes;
+
+    @Value("${spring.kafka.streams.properties.num.stream.threads:2}")
+    private int numStreamThreads;
+
+    @Value("${spring.kafka.streams.properties.processing.guarantee:at_least_once}")
+    private String processingGuarantee;
+
+    @Value("${spring.kafka.streams.properties.auto.offset.reset:earliest}")
+    private String autoOffsetReset;
+
+    @Value("${spring.kafka.streams.properties.retry.backoff.ms:100}")
+    private long retryBackoffMs;
+
+    @Value("${spring.kafka.streams.properties.reconnect.backoff.ms:50}")
+    private long reconnectBackoffMs;
+
+    @Value("${spring.kafka.streams.properties.request.timeout.ms:40000}")
+    private int requestTimeoutMs;
+
+    @Value("${spring.kafka.streams.properties.topology.optimization:all}")
+    private String topologyOptimization;
+
+    @Value("${spring.kafka.streams.properties.default.deserialization.exception.handler:org.apache.kafka.streams.errors.LogAndContinueExceptionHandler}")
+    private String deserializationExceptionHandler;
+
+    @Value("${spring.kafka.streams.properties.producer.message.timestamp.type:CreateTime}")
+    private String producerTimestampType;
 
     /**
      * Gets the bootstrap servers configuration.
@@ -40,54 +73,50 @@ public class KafkaConfig {
 
     /**
      * Retrieves Kafka Streams properties with a given application ID.
-     * PRODUCTION FIX: Creates unique state directories to prevent conflicts.
+     * All settings are now configurable via application.properties.
      *
      * @param appId The application ID for the Kafka Streams instance.
      * @return Properties configured for Kafka Streams.
      */
     public Properties getStreamProperties(String appId) {
         Properties props = new Properties();
-        // Use a stable application ID to allow for state restoration and prevent topic proliferation.
+
+        // Core configuration
         props.put(StreamsConfig.APPLICATION_ID_CONFIG, appId);
-        props.put(StreamsConfig.BOOTSTRAP_SERVERS_CONFIG, bootstrapServers);  // FIXED: Use injected value
+        props.put(StreamsConfig.BOOTSTRAP_SERVERS_CONFIG, bootstrapServers);
         props.put(StreamsConfig.DEFAULT_KEY_SERDE_CLASS_CONFIG, Serdes.String().getClass().getName());
         props.put(StreamsConfig.DEFAULT_VALUE_SERDE_CLASS_CONFIG, Serdes.String().getClass().getName());
-        // Reduced commit interval from 1000ms to 100ms for faster candle delivery
-        props.put(StreamsConfig.COMMIT_INTERVAL_MS_CONFIG, 100);
-        
-         // CRITICAL: Configure timestamp handling for the producer
-        // This ensures the Kafka message's timestamp matches the record's timestamp, not the producer's time
-        props.put("producer.message.timestamp.type", "CreateTime");
-        
-        // PERFORMANCE TUNING: Increase cache and parallelism for OI processing
-        // 10MB was too small for hundreds of scrips with windowed aggregations
-        props.put(StreamsConfig.STATESTORE_CACHE_MAX_BYTES_CONFIG, 100 * 1024 * 1024); // 100MB (10x increase)
-        
-        // CRITICAL: Add parallelism - use 2 threads to match partition count
-        // This allows both partitions to be processed in parallel
-        props.put(StreamsConfig.NUM_STREAM_THREADS_CONFIG, 2);
 
-        // PRODUCTION FIX: Create unique state directory for each application instance
+        // State directory (unique per application instance)
         String uniqueStateDir = createUniqueStateDir(appId);
         props.put(StreamsConfig.STATE_DIR_CONFIG, uniqueStateDir);
-        
-        // Configure cleanup policy
-        props.put(StreamsConfig.TOPOLOGY_OPTIMIZATION_CONFIG, StreamsConfig.OPTIMIZE);
-        
-        // FIXED: Use at-least-once for single-broker setup (exactly-once needs replication ≥ 3)
-        // For production multi-broker cluster, change to: StreamsConfig.EXACTLY_ONCE_V2
-        props.put(StreamsConfig.PROCESSING_GUARANTEE_CONFIG, StreamsConfig.AT_LEAST_ONCE);
-        props.put(StreamsConfig.DEFAULT_DESERIALIZATION_EXCEPTION_HANDLER_CLASS_CONFIG, 
-                  LogAndContinueExceptionHandler.class.getName());
-        
-        // Configure auto.offset.reset for consumer
-        props.put(StreamsConfig.CONSUMER_PREFIX + "auto.offset.reset", "earliest");
-        
-        // Production resilience configurations
-        props.put(StreamsConfig.RETRY_BACKOFF_MS_CONFIG, 100);
-        props.put(StreamsConfig.RECONNECT_BACKOFF_MS_CONFIG, 50);
-        props.put(StreamsConfig.REQUEST_TIMEOUT_MS_CONFIG, 40000);
-        
+
+        // Performance tuning (all configurable from properties)
+        props.put(StreamsConfig.COMMIT_INTERVAL_MS_CONFIG, commitIntervalMs);
+        props.put(StreamsConfig.STATESTORE_CACHE_MAX_BYTES_CONFIG, statestoreCacheMaxBytes);
+        props.put(StreamsConfig.NUM_STREAM_THREADS_CONFIG, numStreamThreads);
+
+        // Processing guarantee (at_least_once or exactly_once_v2)
+        props.put(StreamsConfig.PROCESSING_GUARANTEE_CONFIG, processingGuarantee);
+
+        // Topology optimization
+        props.put(StreamsConfig.TOPOLOGY_OPTIMIZATION_CONFIG, topologyOptimization);
+
+        // Exception handling
+        props.put(StreamsConfig.DEFAULT_DESERIALIZATION_EXCEPTION_HANDLER_CLASS_CONFIG,
+                deserializationExceptionHandler);
+
+        // Consumer configuration
+        props.put(StreamsConfig.CONSUMER_PREFIX + "auto.offset.reset", autoOffsetReset);
+
+        // Producer configuration
+        props.put("producer.message.timestamp.type", producerTimestampType);
+
+        // Resilience configuration
+        props.put(StreamsConfig.RETRY_BACKOFF_MS_CONFIG, retryBackoffMs);
+        props.put(StreamsConfig.RECONNECT_BACKOFF_MS_CONFIG, reconnectBackoffMs);
+        props.put(StreamsConfig.REQUEST_TIMEOUT_MS_CONFIG, requestTimeoutMs);
+
         return props;
     }
     
