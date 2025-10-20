@@ -41,7 +41,7 @@ public class UnifiedMarketDataProcessor {
     private final MongoInstrumentFamilyService cacheService;
     private final Map<String, KafkaStreams> streamsInstances = new ConcurrentHashMap<>();
     
-    @Value("${spring.kafka.streams.application-id:unified-market-processor}")
+    @Value("${spring.kafka.streams.application-id:unified-market-processor1}")
     private String appIdPrefix;
     
     @Value("${unified.output.topic:enriched-market-data}")
