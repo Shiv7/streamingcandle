@@ -210,18 +210,20 @@ public class UnifiedMarketDataProcessor {
                 MultiTimeframeState::new,
                 (scripCode, tick, state) -> {
                     state.addTick(tick);
+                    log.debug("🔄 Updated state for {}: messageCount={}", scripCode, state.getMessageCount());
                     return state;
                 },
                 Materialized.<String, MultiTimeframeState, WindowStore<Bytes, byte[]>>as("multi-timeframe-store")
                     .withKeySerde(Serdes.String())
                     .withValueSerde(new JsonSerde<>(MultiTimeframeState.class))
-            )
-            // Emit once per key when the 1-minute window closes
-            .suppress(Suppressed.untilWindowCloses(Suppressed.BufferConfig.unbounded()));
+            );
+            // REMOVED SUPPRESSION: Allow immediate emission for debugging
+            // .suppress(Suppressed.untilWindowCloses(Suppressed.BufferConfig.unbounded()));
 
         // DUAL EMISSION STRATEGY
         KStream<String, MultiTimeframeState> stateStream = aggregated.toStream()
-            .selectKey((windowedKey, state) -> windowedKey.key());
+            .selectKey((windowedKey, state) -> windowedKey.key())
+            .peek((key, state) -> log.debug("📤 Emitting state for {}: messageCount={}", key, state.getMessageCount()));
 
         // Stream 1: ENRICHED updates (partial, every 1-min window close)
         if (enrichedOutputEnabled) {
