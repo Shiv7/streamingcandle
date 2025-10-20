@@ -83,6 +83,8 @@ public class UnifiedMarketDataProcessor {
         }
 
         Properties props = kafkaConfig.getStreamProperties(appIdPrefix);
+        // Force consume from earliest
+        props.put("auto.offset.reset", "earliest");
         StreamsBuilder builder = new StreamsBuilder();
 
         // CRITICAL: Add state store for delta volume transformer
