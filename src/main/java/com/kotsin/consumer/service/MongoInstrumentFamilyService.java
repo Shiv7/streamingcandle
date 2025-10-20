@@ -3,6 +3,7 @@ package com.kotsin.consumer.service;
 import com.kotsin.consumer.entity.Scrip;
 import com.kotsin.consumer.entity.ScripGroup;
 import com.kotsin.consumer.model.InstrumentFamily;
+import com.kotsin.consumer.model.InstrumentInfo;
 import com.kotsin.consumer.repository.ScripGroupRepository;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
