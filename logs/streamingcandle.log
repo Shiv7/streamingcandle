@@ -72,3 +72,6 @@
 2025-10-20 15:17:35.763 INFO  [main] c.k.consumer.ConsumerApplication - Started ConsumerApplication in 3.984 seconds (process running for 4.716)
 2025-10-20 15:18:19.827 INFO  [unified-market-processor-3c05c1f4-184d-4583-b9dd-940dc883b837-StreamThread-1] c.k.c.p.UnifiedMarketDataProcessor - 🔄 Unified processor state transition: REBALANCING -> RUNNING
 2025-10-20 15:18:19.828 INFO  [unified-market-processor-3c05c1f4-184d-4583-b9dd-940dc883b837-StreamThread-1] c.k.c.p.UnifiedMarketDataProcessor - ✅ Unified processor is now RUNNING
+2025-10-20 15:22:23.978 INFO  [unified-market-processor-3c05c1f4-184d-4583-b9dd-940dc883b837-StreamThread-1] c.k.c.p.UnifiedMarketDataProcessor - 🔄 Unified processor state transition: RUNNING -> REBALANCING
+2025-10-20 15:22:24.061 INFO  [unified-market-processor-3c05c1f4-184d-4583-b9dd-940dc883b837-StreamThread-1] c.k.c.p.UnifiedMarketDataProcessor - 🔄 Unified processor state transition: REBALANCING -> RUNNING
+2025-10-20 15:22:24.061 INFO  [unified-market-processor-3c05c1f4-184d-4583-b9dd-940dc883b837-StreamThread-1] c.k.c.p.UnifiedMarketDataProcessor - ✅ Unified processor is now RUNNING

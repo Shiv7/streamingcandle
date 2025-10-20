@@ -74,7 +74,7 @@ public class MongoInstrumentFamilyService {
                     first.getTradingType(), first.getEquityScripCode(), first.getCompanyName());
             } else {
                 log.warn("⚠️ No ScripGroups found in database at all! Check database name and collection name.");
-                log.warn("⚠️ Current MongoDB URI: mongodb://localhost:27017/scripFinder");
+                log.warn("⚠️ Current MongoDB URI: mongodb://localhost:27017/tradeIngestion");
                 log.warn("⚠️ Expected collection: ScripGroup");
                 log.warn("⚠️ Expected tradingType values: EQUITY, FUTURE, OPTION");
             }
