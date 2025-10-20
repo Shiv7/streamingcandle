@@ -195,8 +195,12 @@ public class UnifiedMarketDataProcessor {
                     .withValueSerde(new org.springframework.kafka.support.serializer.JsonSerde<>(InstrumentState.class))
             );
 
-        // Convert to stream and force window completion
-        KStream<String, InstrumentState> stateStream = aggregated.toStream()
+        // CRITICAL: Suppress intermediate updates - only emit when window closes
+        KStream<String, InstrumentState> stateStream = aggregated
+            .suppress(org.apache.kafka.streams.kstream.Suppressed.untilWindowCloses(
+                org.apache.kafka.streams.kstream.Suppressed.BufferConfig.unbounded()
+            ))
+            .toStream()
             .peek((windowedKey, state) -> {
                 long kafkaWindowEnd = windowedKey.window().end();
                 log.debug("📤 [INSTRUMENT] Emitting state for {} at Kafka window {}: messageCount={}",
@@ -328,8 +332,12 @@ public class UnifiedMarketDataProcessor {
                     .withValueSerde(new org.springframework.kafka.support.serializer.JsonSerde<>(MultiTimeframeState.class))
             );
 
-        // Convert to stream and force window completion
-        KStream<String, MultiTimeframeState> stateStream = aggregated.toStream()
+        // CRITICAL: Suppress intermediate updates - only emit when window closes
+        KStream<String, MultiTimeframeState> stateStream = aggregated
+            .suppress(org.apache.kafka.streams.kstream.Suppressed.untilWindowCloses(
+                org.apache.kafka.streams.kstream.Suppressed.BufferConfig.unbounded()
+            ))
+            .toStream()
             .peek((windowedKey, state) -> {
                 long kafkaWindowEnd = windowedKey.window().end();
                 log.debug("📤 [FAMILY] Emitting state for {} at Kafka window {}: messageCount={}",
