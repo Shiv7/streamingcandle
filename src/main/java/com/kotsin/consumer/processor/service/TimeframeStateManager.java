@@ -189,9 +189,14 @@ public class TimeframeStateManager {
         // Use last tick time for historical data processing, fallback to system time
         long currentTime = (lastTickTime != null) ? lastTickTime : System.currentTimeMillis();
         
+        log.debug("🔍 forceCompleteWindows: lastTickTime={}, currentTime={}", lastTickTime, currentTime);
+        
         for (Map.Entry<Timeframe, CandleAccumulator> entry : candleAccumulators.entrySet()) {
             Timeframe timeframe = entry.getKey();
             CandleAccumulator accumulator = entry.getValue();
+            
+            log.debug("🔍 Checking {}: windowStart={}, windowEnd={}, complete={}", 
+                timeframe.getLabel(), accumulator.getWindowStart(), accumulator.getWindowEnd(), accumulator.isComplete());
             
             if (accumulator.getWindowStart() != null && 
                 accumulator.getWindowEnd() != null && 
