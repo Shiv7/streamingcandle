@@ -63,7 +63,21 @@ public class MongoInstrumentFamilyService {
             
             // 1. Get all ScripGroups from MongoDB
             List<ScripGroup> scripGroups = scripGroupRepository.findByTradingType("EQUITY");
-            log.info("📊 Found {} ScripGroups from MongoDB", scripGroups.size());
+            log.info("📊 Found {} ScripGroups from MongoDB for tradingType=EQUITY", scripGroups.size());
+            
+            // Debug: Try to get all ScripGroups to see what's in the database
+            List<ScripGroup> allScripGroups = scripGroupRepository.findAll();
+            log.info("📊 Total ScripGroups in database: {}", allScripGroups.size());
+            if (!allScripGroups.isEmpty()) {
+                ScripGroup first = allScripGroups.get(0);
+                log.info("📊 Sample ScripGroup - tradingType: '{}', equityScripCode: '{}', companyName: '{}'", 
+                    first.getTradingType(), first.getEquityScripCode(), first.getCompanyName());
+            } else {
+                log.warn("⚠️ No ScripGroups found in database at all! Check database name and collection name.");
+                log.warn("⚠️ Current MongoDB URI: mongodb://localhost:27017/scripFinder");
+                log.warn("⚠️ Expected collection: ScripGroup");
+                log.warn("⚠️ Expected tradingType values: EQUITY, FUTURE, OPTION");
+            }
             
             if (scripGroups.isEmpty()) {
                 log.warn("⚠️ No ScripGroups found in MongoDB, skipping cache refresh");

@@ -19,3 +19,56 @@
 2025-10-20 15:08:49.395 INFO  [main] c.k.c.p.UnifiedMarketDataProcessor - ✅ Unified Market Data Processor started successfully
 2025-10-20 15:08:49.810 INFO  [main] o.a.coyote.http11.Http11NioProtocol - Starting ProtocolHandler ["http-nio-8081"]
 2025-10-20 15:08:49.828 INFO  [main] c.k.consumer.ConsumerApplication - Started ConsumerApplication in 4.187 seconds (process running for 4.824)
+2025-10-20 15:16:48.038 INFO  [main] c.k.consumer.ConsumerApplication - Starting ConsumerApplication using Java 17.0.15 with PID 82046 (/Users/shivendrapratap/Documents/kotsin/streamingcandle/target/classes started by shivendrapratap in /Users/shivendrapratap/Documents/kotsin/streamingcandle)
+2025-10-20 15:16:48.040 INFO  [main] c.k.consumer.ConsumerApplication - The following 1 profile is active: "production"
+2025-10-20 15:16:49.299 INFO  [main] o.a.coyote.http11.Http11NioProtocol - Initializing ProtocolHandler ["http-nio-8081"]
+2025-10-20 15:16:49.305 INFO  [main] o.a.catalina.core.StandardService - Starting service [Tomcat]
+2025-10-20 15:16:49.305 INFO  [main] o.a.catalina.core.StandardEngine - Starting Servlet engine: [Apache Tomcat/10.1.18]
+2025-10-20 15:16:49.367 INFO  [main] o.a.c.c.C.[Tomcat].[localhost].[/] - Initializing Spring embedded WebApplicationContext
+2025-10-20 15:16:50.076 INFO  [main] c.k.c.s.MongoInstrumentFamilyService - 🚀 Initializing MongoDB-based instrument family cache...
+2025-10-20 15:16:50.178 INFO  [main] c.k.c.s.MongoInstrumentFamilyService - 📊 Found 0 ScripGroups from MongoDB for tradingType=EQUITY
+2025-10-20 15:16:50.185 INFO  [main] c.k.c.s.MongoInstrumentFamilyService - 📊 Total ScripGroups in database: 0
+2025-10-20 15:16:50.186 WARN  [main] c.k.c.s.MongoInstrumentFamilyService - ⚠️ No ScripGroups found in MongoDB, skipping cache refresh
+2025-10-20 15:16:50.186 INFO  [main] c.k.c.s.MongoInstrumentFamilyService - ✅ MongoDB instrument family cache initialized successfully
+2025-10-20 15:16:50.205 INFO  [main] c.k.c.p.UnifiedMarketDataProcessor - 🚀 Starting Unified Market Data Processor...
+2025-10-20 15:16:50.206 INFO  [main] c.k.c.p.UnifiedMarketDataProcessor - 📊 Input topics: forwardtesting-data, OpenInterest, Orderbook
+2025-10-20 15:16:50.206 INFO  [main] c.k.c.p.UnifiedMarketDataProcessor - 📤 Output topic: enriched-market-data
+2025-10-20 15:16:50.469 INFO  [main] c.k.c.p.UnifiedMarketDataProcessor - 📥 Created input streams for topics: forwardtesting-data, OpenInterest, Orderbook
+2025-10-20 15:16:50.494 INFO  [main] c.k.c.p.UnifiedMarketDataProcessor - ⏰ Using 1-minute tumbling windows with 10-second grace period
+2025-10-20 15:16:50.660 WARN  [main] o.a.k.s.p.internals.StateDirectory - Using an OS temp directory in the state.dir property can cause failures with writing the checkpoint file due to the fact that this directory can be cleared by the OS. Resolved state.dir: [/var/folders/q0/9zn8w7w12x76gfpt845612hm0000gn/T//kafka-streams/unified-market-processor]
+2025-10-20 15:16:50.890 INFO  [main] c.k.c.p.UnifiedMarketDataProcessor - 🔄 Unified processor state transition: CREATED -> REBALANCING
+2025-10-20 15:16:50.892 INFO  [main] c.k.c.p.UnifiedMarketDataProcessor - ✅ Started unified market data processor
+2025-10-20 15:16:50.893 INFO  [main] c.k.c.p.UnifiedMarketDataProcessor - ✅ Unified Market Data Processor started successfully
+2025-10-20 15:16:51.324 INFO  [main] o.a.coyote.http11.Http11NioProtocol - Starting ProtocolHandler ["http-nio-8081"]
+2025-10-20 15:16:51.340 INFO  [main] c.k.consumer.ConsumerApplication - Started ConsumerApplication in 3.691 seconds (process running for 4.266)
+2025-10-20 15:17:08.429 INFO  [http-nio-8081-exec-1] o.a.c.c.C.[Tomcat].[localhost].[/] - Initializing Spring DispatcherServlet 'dispatcherServlet'
+2025-10-20 15:17:31.225 INFO  [SpringApplicationShutdownHook] c.k.c.p.UnifiedMarketDataProcessor - 🛑 Stopping all unified processor streams
+2025-10-20 15:17:31.232 INFO  [SpringApplicationShutdownHook] c.k.c.p.UnifiedMarketDataProcessor - 🛑 Stopping unified processor stream: unified-processor
+2025-10-20 15:17:31.234 INFO  [SpringApplicationShutdownHook] c.k.c.p.UnifiedMarketDataProcessor - 🔄 Unified processor state transition: REBALANCING -> PENDING_SHUTDOWN
+2025-10-20 15:17:32.470 INFO  [main] c.k.consumer.ConsumerApplication - Starting ConsumerApplication using Java 17.0.15 with PID 83607 (/Users/shivendrapratap/Documents/kotsin/streamingcandle/target/classes started by shivendrapratap in /Users/shivendrapratap/Documents/kotsin/streamingcandle)
+2025-10-20 15:17:32.471 INFO  [main] c.k.consumer.ConsumerApplication - The following 1 profile is active: "production"
+2025-10-20 15:17:33.093 INFO  [SpringApplicationShutdownHook] c.k.c.p.UnifiedMarketDataProcessor - ✅ Successfully stopped unified processor stream: unified-processor
+2025-10-20 15:17:33.093 INFO  [unified-market-processor-3c05c1f4-184d-4583-b9dd-940dc883b837-CloseThread] c.k.c.p.UnifiedMarketDataProcessor - 🔄 Unified processor state transition: PENDING_SHUTDOWN -> NOT_RUNNING
+2025-10-20 15:17:33.094 INFO  [SpringApplicationShutdownHook] c.k.c.p.UnifiedMarketDataProcessor - ✅ All unified processor streams stopped
+2025-10-20 15:17:33.809 INFO  [main] o.a.coyote.http11.Http11NioProtocol - Initializing ProtocolHandler ["http-nio-8081"]
+2025-10-20 15:17:33.814 INFO  [main] o.a.catalina.core.StandardService - Starting service [Tomcat]
+2025-10-20 15:17:33.814 INFO  [main] o.a.catalina.core.StandardEngine - Starting Servlet engine: [Apache Tomcat/10.1.18]
+2025-10-20 15:17:33.860 INFO  [main] o.a.c.c.C.[Tomcat].[localhost].[/] - Initializing Spring embedded WebApplicationContext
+2025-10-20 15:17:34.505 INFO  [main] c.k.c.s.MongoInstrumentFamilyService - 🚀 Initializing MongoDB-based instrument family cache...
+2025-10-20 15:17:34.559 INFO  [main] c.k.c.s.MongoInstrumentFamilyService - 📊 Found 0 ScripGroups from MongoDB for tradingType=EQUITY
+2025-10-20 15:17:34.566 INFO  [main] c.k.c.s.MongoInstrumentFamilyService - 📊 Total ScripGroups in database: 0
+2025-10-20 15:17:34.566 WARN  [main] c.k.c.s.MongoInstrumentFamilyService - ⚠️ No ScripGroups found in MongoDB, skipping cache refresh
+2025-10-20 15:17:34.566 INFO  [main] c.k.c.s.MongoInstrumentFamilyService - ✅ MongoDB instrument family cache initialized successfully
+2025-10-20 15:17:34.586 INFO  [main] c.k.c.p.UnifiedMarketDataProcessor - 🚀 Starting Unified Market Data Processor...
+2025-10-20 15:17:34.587 INFO  [main] c.k.c.p.UnifiedMarketDataProcessor - 📊 Input topics: forwardtesting-data, OpenInterest, Orderbook
+2025-10-20 15:17:34.587 INFO  [main] c.k.c.p.UnifiedMarketDataProcessor - 📤 Output topic: enriched-market-data
+2025-10-20 15:17:34.875 INFO  [main] c.k.c.p.UnifiedMarketDataProcessor - 📥 Created input streams for topics: forwardtesting-data, OpenInterest, Orderbook
+2025-10-20 15:17:34.910 INFO  [main] c.k.c.p.UnifiedMarketDataProcessor - ⏰ Using 1-minute tumbling windows with 10-second grace period
+2025-10-20 15:17:35.093 WARN  [main] o.a.k.s.p.internals.StateDirectory - Using an OS temp directory in the state.dir property can cause failures with writing the checkpoint file due to the fact that this directory can be cleared by the OS. Resolved state.dir: [/var/folders/q0/9zn8w7w12x76gfpt845612hm0000gn/T//kafka-streams/unified-market-processor]
+2025-10-20 15:17:35.343 INFO  [main] c.k.c.p.UnifiedMarketDataProcessor - 🔄 Unified processor state transition: CREATED -> REBALANCING
+2025-10-20 15:17:35.345 INFO  [main] c.k.c.p.UnifiedMarketDataProcessor - ✅ Started unified market data processor
+2025-10-20 15:17:35.345 INFO  [main] c.k.c.p.UnifiedMarketDataProcessor - ✅ Unified Market Data Processor started successfully
+2025-10-20 15:17:35.747 INFO  [main] o.a.coyote.http11.Http11NioProtocol - Starting ProtocolHandler ["http-nio-8081"]
+2025-10-20 15:17:35.763 INFO  [main] c.k.consumer.ConsumerApplication - Started ConsumerApplication in 3.984 seconds (process running for 4.716)
+2025-10-20 15:18:19.827 INFO  [unified-market-processor-3c05c1f4-184d-4583-b9dd-940dc883b837-StreamThread-1] c.k.c.p.UnifiedMarketDataProcessor - 🔄 Unified processor state transition: REBALANCING -> RUNNING
+2025-10-20 15:18:19.828 INFO  [unified-market-processor-3c05c1f4-184d-4583-b9dd-940dc883b837-StreamThread-1] c.k.c.p.UnifiedMarketDataProcessor - ✅ Unified processor is now RUNNING
