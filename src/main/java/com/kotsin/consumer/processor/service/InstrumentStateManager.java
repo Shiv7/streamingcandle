@@ -2,6 +2,8 @@ package com.kotsin.consumer.processor.service;
 
 import com.kotsin.consumer.model.*;
 import com.kotsin.consumer.processor.CandleAccumulator;
+import com.kotsin.consumer.processor.MicrostructureAccumulator;
+import com.kotsin.consumer.processor.ImbalanceBarAccumulator;
 import com.kotsin.consumer.processor.Timeframe;
 import com.kotsin.consumer.processor.WindowRotationService;
 import lombok.Data;
@@ -22,6 +24,11 @@ public class InstrumentStateManager {
 
     // Candle accumulators for each timeframe
     private final EnumMap<Timeframe, CandleAccumulator> candleAccumulators = new EnumMap<>(Timeframe.class);
+
+    // Microstructure accumulators per timeframe (reset on window rotation)
+    private final EnumMap<Timeframe, MicrostructureAccumulator> microAccumulators = new EnumMap<>(Timeframe.class);
+    // Imbalance bar accumulators per timeframe
+    private final EnumMap<Timeframe, ImbalanceBarAccumulator> imbAccumulators = new EnumMap<>(Timeframe.class);
 
     // Basic instrument info
     private String scripCode;
@@ -56,6 +63,8 @@ public class InstrumentStateManager {
     private void initializeAccumulators() {
         for (Timeframe timeframe : TIMEFRAMES) {
             candleAccumulators.put(timeframe, new CandleAccumulator());
+            microAccumulators.put(timeframe, new MicrostructureAccumulator());
+            imbAccumulators.put(timeframe, new ImbalanceBarAccumulator());
         }
     }
 
@@ -174,9 +183,23 @@ public class InstrumentStateManager {
             Timeframe timeframe = entry.getKey();
             CandleAccumulator acc = entry.getValue();
             int minutes = timeframe.getMinutes();
+
+            // Detect window rotation to reset per-timeframe microstructure accumulator
+            Long prevWindowStart = acc.getWindowStart();
             acc = WindowRotationService.rotateCandleIfNeeded(acc, tickTime, minutes);
             candleAccumulators.put(timeframe, acc);
+            if (prevWindowStart == null || !prevWindowStart.equals(acc.getWindowStart())) {
+                // New window started → reset per-timeframe accumulators
+                microAccumulators.put(timeframe, new MicrostructureAccumulator());
+                imbAccumulators.put(timeframe, new ImbalanceBarAccumulator());
+            }
+
+            // Update accumulators
             acc.addTick(tick);
+            MicrostructureAccumulator microAcc = microAccumulators.get(timeframe);
+            if (microAcc != null) { microAcc.addTick(tick); }
+            ImbalanceBarAccumulator imbAcc = imbAccumulators.get(timeframe);
+            if (imbAcc != null) { imbAcc.addTick(tick); }
         }
     }
 
@@ -199,6 +222,12 @@ public class InstrumentStateManager {
         }
 
         CandleData candleData = accumulator.toCandleData(exchange, exchangeType);
+
+        // Get microstructure data for this timeframe window
+        MicrostructureAccumulator microAcc = microAccumulators.get(timeframe);
+        MicrostructureData microstructure = microAcc != null ? microAcc.toMicrostructureData() : null;
+        ImbalanceBarAccumulator imbAcc = imbAccumulators.get(timeframe);
+        ImbalanceBarData imbalanceBars = imbAcc != null ? imbAcc.toImbalanceBarData() : null;
 
         return InstrumentCandle.builder()
             .scripCode(scripCode)
@@ -228,6 +257,8 @@ public class InstrumentStateManager {
             .humanReadableEndTime(formatTimestamp(candleData.getWindowEnd()))
             .processingTimestamp(System.currentTimeMillis())
             .timeframe(timeframe.getLabel())
+            .microstructure(microstructure != null && microstructure.isValid() ? microstructure : null)
+            .imbalanceBars(imbalanceBars)
             .build();
     }
 

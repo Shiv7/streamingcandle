@@ -69,6 +69,7 @@ public class InstrumentCandle {
     // Optional: Per-instrument orderbook/microstructure snapshots
     private OrderbookDepthData orderbookDepth;
     private MicrostructureData microstructure;
+    private ImbalanceBarData imbalanceBars;
 
     /**
      * Get Kafka Serde for serialization/deserialization

@@ -227,39 +227,9 @@ public class UnifiedMarketDataProcessor {
             Consumed.with(Serdes.String(), InstrumentCandle.serde())
         );
 
-        // Family cache (scripCode -> InstrumentFamily) via service
-        // We access cache via a ValueMapper to resolve token for each instrument
-        KStream<String, InstrumentCandle> withToken = candles.mapValues(c -> {
-            try {
-                com.kotsin.consumer.model.InstrumentFamily fam = mergeService != null ? null : null; // placeholder to keep import minimal
-            } catch (Exception ignore) {}
-            return c;
-        });
-
-        // Resolve token using MongoInstrumentFamilyService (via keyResolver's cache service)
-        KStream<String, InstrumentCandle> rekeyedByToken = candles.transformValues(() -> new org.apache.kafka.streams.kstream.ValueTransformer<InstrumentCandle, InstrumentCandle>() {
-            private com.kotsin.consumer.service.MongoInstrumentFamilyService cache;
-            @Override public void init(org.apache.kafka.streams.processor.ProcessorContext context) {
-                // Spring-managed bean not directly available here; use static holder or fallback to scripCode when token absent
-                try {
-                    cache = (com.kotsin.consumer.service.MongoInstrumentFamilyService) org.springframework.web.context.ContextLoader.getCurrentWebApplicationContext().getBean(com.kotsin.consumer.service.MongoInstrumentFamilyService.class);
-                } catch (Exception e) {
-                    cache = null;
-                }
-            }
-            @Override public InstrumentCandle transform(InstrumentCandle value) { return value; }
-            @Override public void close() {}
-        }).selectKey((k, c) -> {
-            String sc = c != null ? c.getScripCode() : null;
-            String token = null;
-            try {
-                if (sc != null) {
-                    com.kotsin.consumer.model.InstrumentFamily fam = keyResolver != null ? null : null;
-                }
-            } catch (Exception ignore) {}
-            // Fallback: keep scripCode if we can't resolve token
-            return (token != null && !token.isBlank()) ? token : k;
-        })
+        // Re-key by scripCode (token = scripCode in our system, no lookup needed)
+        KStream<String, InstrumentCandle> rekeyedByToken = candles
+        .selectKey((k, c) -> c != null ? c.getScripCode() : k)
         .repartition(Repartitioned.with(Serdes.String(), InstrumentCandle.serde()));
 
         // Token-keyed OI and Orderbook materialized tables (derive key from payload token)
@@ -308,26 +278,29 @@ public class UnifiedMarketDataProcessor {
                 orderbookTopic,
                 Consumed.with(Serdes.String(), OrderBookSnapshot.serde())
             )
-            .map((k, v) -> new KeyValue<>(v != null ? String.valueOf(v.getToken()) : null, v))
+            .peek((k, v) -> {
+                if (v != null) {
+                    log.debug("📊 Orderbook received: originalKey={} token={} valid={} totalBid={} totalAsk={}", 
+                        k, v.getToken(), v.isValid(), v.getTotalBidQty(), v.getTotalOffQty());
+                }
+            })
+            .selectKey((k, v) -> v != null && v.getToken() != null ? v.getToken() : k)
+            .peek((k, v) -> log.debug("📊 Orderbook re-keyed: newKey={} companyName={}", k, v != null ? v.getCompanyName() : null))
             .groupByKey(Grouped.with(Serdes.String(), OrderBookSnapshot.serde()))
             .reduce((prev, curr) -> curr);
 
-        // Optional: Microstructure features table (if produced elsewhere), join by token/scripCode
-        KTable<String, MicrostructureData> microTable = null;
-        try {
-            microTable = builder.table(
-                "microstructure-features",
-                Consumed.with(Serdes.String(), new org.springframework.kafka.support.serializer.JsonSerde<>(MicrostructureData.class))
-            );
-        } catch (Exception ignore) {}
-
-        // Join by token (or original key if token not found)
+        // Join by scripCode (token = scripCode)
+        // NOTE: Microstructure is now calculated per-candle in InstrumentStateManager, no join needed
         KStream<String, InstrumentCandle> enrichedCandles = rekeyedByToken
             .leftJoin(oiTable, (candle, oi) -> {
                 if (oi != null) {
                     candle.setOpenInterest(oi.getOpenInterest());
                     candle.setOiChange(oi.getOiChange());
-                } else { metrics.incOiJoinMiss(); }
+                    log.debug("✅ OI join success: scripCode={} oi={} oiChange={}", candle.getScripCode(), oi.getOpenInterest(), oi.getOiChange());
+                } else {
+                    metrics.incOiJoinMiss();
+                    log.debug("❌ OI join miss: scripCode={}", candle.getScripCode());
+                }
                 return candle;
             })
             .leftJoin(orderbookTable, (candle, ob) -> {
@@ -342,24 +315,15 @@ public class UnifiedMarketDataProcessor {
                         .isComplete(true)
                         .build();
                     candle.setOrderbookDepth(depth);
-                } else { metrics.incOrderbookJoinMiss(); }
-                return candle;
-            })
-            .transformValues(() -> new org.apache.kafka.streams.kstream.ValueTransformer<InstrumentCandle, InstrumentCandle>() {
-                private org.apache.kafka.streams.state.KeyValueStore<String, InstrumentCandle> noop;
-                @Override public void init(org.apache.kafka.streams.processor.ProcessorContext context) {}
-                @Override public InstrumentCandle transform(InstrumentCandle value) { return value; }
-                @Override public void close() {}
-            });
-
-        if (microTable != null) {
-            enrichedCandles = enrichedCandles.leftJoin(microTable, (candle, micro) -> {
-                if (micro != null && micro.isValid()) {
-                    candle.setMicrostructure(micro);
+                    log.debug("✅ Orderbook join success: scripCode={} spread={} totalBid={} totalAsk={}", 
+                        candle.getScripCode(), depth.getSpread(), depth.getTotalBidDepth(), depth.getTotalAskDepth());
+                } else {
+                    metrics.incOrderbookJoinMiss();
+                    log.debug("❌ Orderbook join miss: scripCode={} obNull={} obValid={}", 
+                        candle.getScripCode(), (ob == null), (ob != null && ob.isValid()));
                 }
                 return candle;
             });
-        }
 
         // Map back to family key for aggregation
         KStream<String, InstrumentCandle> keyedByFamily = enrichedCandles
@@ -540,6 +504,7 @@ public class UnifiedMarketDataProcessor {
         family.setAggregatedMetrics(computeAggregatedMetrics(family));
         family.setMicrostructure(computeFamilyMicrostructure(family));
         family.setOrderbookDepth(computeFamilyOrderbookDepth(family));
+        family.setImbalanceBars(computeFamilyImbalanceBars(family));
         family.setTotalInstrumentsCount(family.calculateTotalCount());
         return family;
     }
@@ -686,6 +651,25 @@ public class UnifiedMarketDataProcessor {
             .totalBidDepth(totalBid > 0 ? totalBid : null)
             .totalAskDepth(totalAsk > 0 ? totalAsk : null)
             .build();
+    }
+
+    private ImbalanceBarData computeFamilyImbalanceBars(FamilyEnrichedData family) {
+        // Simple aggregation: pick the most complete bars across instruments; if multiple complete, prefer futures > equity > options
+        ImbalanceBarData best = null;
+        java.util.List<InstrumentCandle> ordered = new java.util.ArrayList<>();
+        if (family.getFutures() != null) ordered.addAll(family.getFutures());
+        if (family.getEquity() != null) ordered.add(family.getEquity());
+        if (family.getOptions() != null) ordered.addAll(family.getOptions());
+        for (InstrumentCandle c : ordered) {
+            if (c.getImbalanceBars() != null) {
+                if (best == null) {
+                    best = c.getImbalanceBars();
+                } else if (!best.hasAnyCompleteBar() && c.getImbalanceBars().hasAnyCompleteBar()) {
+                    best = c.getImbalanceBars();
+                }
+            }
+        }
+        return best;
     }
 
     private void replaceOptionIfBetter(FamilyEnrichedData family, InstrumentCandle candidate) {
