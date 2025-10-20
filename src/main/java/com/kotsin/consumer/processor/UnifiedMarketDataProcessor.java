@@ -99,8 +99,9 @@ public class UnifiedMarketDataProcessor {
                 return;
             }
 
-            // Create unified pipeline
-            processUnifiedMarketData();
+            // Create DUAL pipelines: per-instrument AND family-level
+            processPerInstrumentStream();
+            processFamilyLevelStream();
 
             log.info("✅ Unified Market Data Processor started successfully");
             log.info("✅ Consumer Group: {}", appIdPrefix);
@@ -110,8 +111,262 @@ public class UnifiedMarketDataProcessor {
             throw new RuntimeException("Failed to start unified processor", e);
         }
     }
-    
-    private void processUnifiedMarketData() {
+
+    /**
+     * STREAM 1: Per-Instrument Candle Generation
+     * Generates individual candles for EACH instrument (no grouping)
+     * Key: scripCode (each instrument separate)
+     */
+    private void processPerInstrumentStream() {
+        String instanceKey = "instrument-stream";
+
+        if (streamsInstances.containsKey(instanceKey)) {
+            log.warn("⚠️ Instrument stream already running. Skipping duplicate start.");
+            return;
+        }
+
+        Properties props = kafkaConfig.getStreamProperties(appIdPrefix + "-instrument");
+        props.put("auto.offset.reset", "earliest");
+        StreamsBuilder builder = new StreamsBuilder();
+
+        // Add delta volume state store
+        String deltaVolumeStoreName = "instrument-delta-volume-store";
+        builder.addStateStore(
+            org.apache.kafka.streams.state.Stores.keyValueStoreBuilder(
+                org.apache.kafka.streams.state.Stores.persistentKeyValueStore(deltaVolumeStoreName),
+                Serdes.String(),
+                Serdes.Integer()
+            )
+        );
+
+        // Input streams
+        KStream<String, TickData> ticksRaw = builder.stream(
+            ticksTopic,
+            Consumed.with(Serdes.String(), TickData.serde())
+        );
+
+        // Calculate delta volumes
+        KStream<String, TickData> ticks = ticksRaw
+            .transform(
+                () -> new com.kotsin.consumer.transformers.CumToDeltaTransformer(deltaVolumeStoreName),
+                deltaVolumeStoreName
+            )
+            .filter((key, tick) -> tick != null && tick.getDeltaVolume() != null);
+
+        // Key by INSTRUMENT scripCode (no mapping to underlying)
+        KStream<String, TickData> instrumentKeyed = ticks
+            .selectKey((k, v) -> keyResolver.getInstrumentKey(v))
+            .peek((key, tick) -> {
+                // Determine instrument type and set on the tick
+                String instrumentType = keyResolver.getInstrumentType(tick);
+                log.debug("🔑 Instrument key: {} (type: {})", key, instrumentType);
+            });
+
+        // 1-minute tumbling windows
+        TimeWindows windows = TimeWindows.ofSizeAndGrace(
+            Duration.ofMinutes(1),
+            Duration.ofSeconds(10)
+        );
+
+        log.info("⏰ [INSTRUMENT STREAM] Using 1-minute tumbling windows");
+
+        // Aggregate by instrument scripCode
+        KTable<Windowed<String>, InstrumentState> aggregated = instrumentKeyed
+            .filter((scripCode, tick) -> tradingHoursService.withinTradingHours(tick))
+            .groupByKey(Grouped.with(Serdes.String(), TickData.serde()))
+            .windowedBy(windows)
+            .aggregate(
+                InstrumentState::new,
+                (scripCode, tick, state) -> {
+                    // Set instrument type and family key on first tick
+                    if (state.getScripCode() == null) {
+                        String instrumentType = keyResolver.getInstrumentType(tick);
+                        String familyKey = keyResolver.getFamilyKey(tick);
+                        state.setInstrumentType(instrumentType);
+                        state.setUnderlyingEquityScripCode(familyKey);
+                    }
+                    state.addTick(tick);
+                    log.debug("🔄 [INSTRUMENT] Updated state for {}: messageCount={}",
+                        scripCode, state.getMessageCount());
+                    return state;
+                },
+                Materialized.<String, InstrumentState, org.apache.kafka.streams.state.WindowStore<Bytes, byte[]>>as("instrument-state-store")
+                    .withKeySerde(Serdes.String())
+                    .withValueSerde(new org.springframework.kafka.support.serializer.JsonSerde<>(InstrumentState.class))
+            );
+
+        // Convert to stream and force window completion
+        KStream<String, InstrumentState> stateStream = aggregated.toStream()
+            .peek((windowedKey, state) -> {
+                long kafkaWindowEnd = windowedKey.window().end();
+                log.debug("📤 [INSTRUMENT] Emitting state for {} at Kafka window {}: messageCount={}",
+                    windowedKey.key(), kafkaWindowEnd, state.getMessageCount());
+                state.forceCompleteWindows(kafkaWindowEnd);
+            })
+            .selectKey((windowedKey, state) -> windowedKey.key());
+
+        // Emit finalized candles to timeframe-specific topics
+        if (candlesOutputEnabled) {
+            emitPerInstrumentCandles(stateStream);
+            log.info("✅ [INSTRUMENT STREAM] Finalized per-instrument candles enabled → 6 topics");
+        }
+
+        // Create and start streams
+        KafkaStreams streams = new KafkaStreams(builder.build(), props);
+        streamsInstances.put(instanceKey, streams);
+
+        streams.setUncaughtExceptionHandler((Throwable exception) -> {
+            log.error("❌ [INSTRUMENT STREAM] Uncaught exception: ", exception);
+            return org.apache.kafka.streams.errors.StreamsUncaughtExceptionHandler.StreamThreadExceptionResponse.REPLACE_THREAD;
+        });
+
+        streams.setStateListener((newState, oldState) -> {
+            log.info("🔄 [INSTRUMENT STREAM] State transition: {} -> {}", oldState, newState);
+        });
+
+        streams.start();
+        log.info("✅ Started per-instrument candle stream");
+    }
+
+    /**
+     * STREAM 2: Family-Level Aggregation
+     * Aggregates ALL instruments in a family together
+     * Key: underlyingEquityScripCode (derivatives mapped to equity)
+     */
+    private void processFamilyLevelStream() {
+        String instanceKey = "family-stream";
+
+        if (streamsInstances.containsKey(instanceKey)) {
+            log.warn("⚠️ Family stream already running. Skipping duplicate start.");
+            return;
+        }
+
+        Properties props = kafkaConfig.getStreamProperties(appIdPrefix + "-family");
+        props.put("auto.offset.reset", "earliest");
+        StreamsBuilder builder = new StreamsBuilder();
+
+        // Add delta volume state store
+        String deltaVolumeStoreName = "family-delta-volume-store";
+        builder.addStateStore(
+            org.apache.kafka.streams.state.Stores.keyValueStoreBuilder(
+                org.apache.kafka.streams.state.Stores.persistentKeyValueStore(deltaVolumeStoreName),
+                Serdes.String(),
+                Serdes.Integer()
+            )
+        );
+
+        // Input streams
+        KStream<String, TickData> ticksRaw = builder.stream(
+            ticksTopic,
+            Consumed.with(Serdes.String(), TickData.serde())
+        );
+
+        // Calculate delta volumes
+        KStream<String, TickData> ticks = ticksRaw
+            .transform(
+                () -> new com.kotsin.consumer.transformers.CumToDeltaTransformer(deltaVolumeStoreName),
+                deltaVolumeStoreName
+            )
+            .filter((key, tick) -> tick != null && tick.getDeltaVolume() != null);
+
+        // Join with OI and Orderbook tables
+        KTable<String, OpenInterest> oiTable = builder.table(
+            oiTopic,
+            Consumed.with(Serdes.String(), OpenInterest.serde()),
+            org.apache.kafka.streams.kstream.Materialized.<String, OpenInterest, org.apache.kafka.streams.state.KeyValueStore<Bytes, byte[]>>as("family-oi-table-store")
+                .withKeySerde(Serdes.String())
+                .withValueSerde(OpenInterest.serde())
+        );
+
+        KTable<String, OrderBookSnapshot> orderbookTable = builder.table(
+            orderbookTopic,
+            Consumed.with(Serdes.String(), OrderBookSnapshot.serde()),
+            org.apache.kafka.streams.kstream.Materialized.<String, OrderBookSnapshot, org.apache.kafka.streams.state.KeyValueStore<Bytes, byte[]>>as("family-orderbook-table-store")
+                .withKeySerde(Serdes.String())
+                .withValueSerde(OrderBookSnapshot.serde())
+        );
+
+        KStream<String, TickData> ticksWithOi = ticks.leftJoin(
+            oiTable,
+            mergeService::mergeOiIntoTick,
+            Joined.with(Serdes.String(), TickData.serde(), OpenInterest.serde())
+        );
+
+        KStream<String, TickData> enrichedTicks = ticksWithOi.leftJoin(
+            orderbookTable,
+            mergeService::mergeOrderbookIntoTick,
+            Joined.with(Serdes.String(), TickData.serde(), OrderBookSnapshot.serde())
+        );
+
+        // Key by FAMILY key (map derivatives to underlying equity)
+        KStream<String, TickData> familyKeyed = enrichedTicks
+            .selectKey((k, v) -> keyResolver.getFamilyKey(v));
+
+        // 1-minute tumbling windows
+        TimeWindows windows = TimeWindows.ofSizeAndGrace(
+            Duration.ofMinutes(1),
+            Duration.ofSeconds(10)
+        );
+
+        log.info("⏰ [FAMILY STREAM] Using 1-minute tumbling windows");
+
+        // Aggregate by family key
+        KTable<Windowed<String>, MultiTimeframeState> aggregated = familyKeyed
+            .filter((familyKey, tick) -> tradingHoursService.withinTradingHours(tick))
+            .groupByKey(Grouped.with(Serdes.String(), TickData.serde()))
+            .windowedBy(windows)
+            .aggregate(
+                MultiTimeframeState::new,
+                (familyKey, tick, state) -> {
+                    state.addTick(tick);
+                    log.debug("🔄 [FAMILY] Updated state for {}: messageCount={}",
+                        familyKey, state.getMessageCount());
+                    return state;
+                },
+                Materialized.<String, MultiTimeframeState, org.apache.kafka.streams.state.WindowStore<Bytes, byte[]>>as("family-state-store")
+                    .withKeySerde(Serdes.String())
+                    .withValueSerde(new org.springframework.kafka.support.serializer.JsonSerde<>(MultiTimeframeState.class))
+            );
+
+        // Convert to stream and force window completion
+        KStream<String, MultiTimeframeState> stateStream = aggregated.toStream()
+            .peek((windowedKey, state) -> {
+                long kafkaWindowEnd = windowedKey.window().end();
+                log.debug("📤 [FAMILY] Emitting state for {} at Kafka window {}: messageCount={}",
+                    windowedKey.key(), kafkaWindowEnd, state.getMessageCount());
+                state.forceCompleteWindows(kafkaWindowEnd);
+            })
+            .selectKey((windowedKey, state) -> windowedKey.key());
+
+        // Emit enriched family data (DEPRECATED, disabled by default)
+        if (enrichedOutputEnabled) {
+            stateStream
+                .mapValues(enrichmentService::buildEnrichedMessage)
+                .to(outputTopic, Produced.with(
+                    Serdes.String(),
+                    new org.springframework.kafka.support.serializer.JsonSerde<>(EnrichedMarketData.class)
+                ));
+            log.info("✅ [FAMILY STREAM] Enriched data emission enabled → topic: {}", outputTopic);
+        }
+
+        // Create and start streams
+        KafkaStreams streams = new KafkaStreams(builder.build(), props);
+        streamsInstances.put(instanceKey, streams);
+
+        streams.setUncaughtExceptionHandler((Throwable exception) -> {
+            log.error("❌ [FAMILY STREAM] Uncaught exception: ", exception);
+            return org.apache.kafka.streams.errors.StreamsUncaughtExceptionHandler.StreamThreadExceptionResponse.REPLACE_THREAD;
+        });
+
+        streams.setStateListener((newState, oldState) -> {
+            log.info("🔄 [FAMILY STREAM] State transition: {} -> {}", oldState, newState);
+        });
+
+        streams.start();
+        log.info("✅ Started family-level aggregation stream");
+    }
+
+    private void processUnifiedMarketDataOLD_DEPRECATED() {
         String instanceKey = "unified-processor";
 
         if (streamsInstances.containsKey(instanceKey)) {
@@ -283,9 +538,39 @@ public class UnifiedMarketDataProcessor {
     }
     
     /**
+     * Emit per-instrument candles to timeframe-specific topics
+     * NEW: Uses InstrumentCandle instead of Candlestick
+     */
+    private void emitPerInstrumentCandles(KStream<String, InstrumentState> stateStream) {
+        // Filter states that have at least one complete window
+        KStream<String, InstrumentState> completeStates = stateStream
+            .filter((key, state) -> state.hasAnyCompleteWindow());
+
+        // Create streams for each timeframe
+        for (Timeframe timeframe : new Timeframe[]{Timeframe.ONE_MIN, Timeframe.TWO_MIN, Timeframe.THREE_MIN,
+                                                     Timeframe.FIVE_MIN, Timeframe.FIFTEEN_MIN, Timeframe.THIRTY_MIN}) {
+            KStream<String, InstrumentCandle> candleStream = completeStates
+                .mapValues((readOnlyKey, state) -> state.extractFinalizedCandle(timeframe))
+                .filter((key, candle) -> candle != null && candle.isValid());
+
+            String topic = getCandleTopicForTimeframe(timeframe.getLabel());
+            if (topic != null) {
+                candleStream.to(topic, Produced.with(
+                    Serdes.String(),
+                    InstrumentCandle.serde()
+                ));
+
+                log.debug("✅ [INSTRUMENT] Configured finalized candle stream: {} → {}", timeframe.getLabel(), topic);
+            }
+        }
+    }
+
+    /**
      * Emit finalized candles to timeframe-specific topics using Kafka Streams
      * This uses flatMapValues to convert one state into multiple candles
+     * DEPRECATED: Use emitPerInstrumentCandles() instead
      */
+    @Deprecated
     private void emitFinalizedCandlesStreams(KStream<String, MultiTimeframeState> stateStream) {
         // Filter states that have at least one complete window
         KStream<String, MultiTimeframeState> completeStates = stateStream
