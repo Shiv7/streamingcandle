@@ -8,6 +8,7 @@ import org.apache.kafka.common.serialization.Serdes;
 import org.apache.kafka.streams.KafkaStreams;
 import org.apache.kafka.streams.StreamsBuilder;
 import org.apache.kafka.streams.kstream.*;
+import org.apache.kafka.streams.kstream.Repartitioned;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Component;
 
@@ -257,7 +258,8 @@ public class UnifiedMarketDataProcessor {
             } catch (Exception ignore) {}
             // Fallback: keep scripCode if we can't resolve token
             return (token != null && !token.isBlank()) ? token : k;
-        });
+        })
+        .repartition(Repartitioned.with(Serdes.String(), InstrumentCandle.serde()));
 
         KTable<String, OpenInterest> oiTable = builder.table(
             oiTopic,
@@ -297,7 +299,8 @@ public class UnifiedMarketDataProcessor {
         KStream<String, InstrumentCandle> keyedByFamily = enrichedCandles
             .selectKey((scripOrToken, candle) -> candle.getUnderlyingEquityScripCode() != null
                 ? candle.getUnderlyingEquityScripCode()
-                : candle.getScripCode());
+                : candle.getScripCode())
+            .repartition(Repartitioned.with(Serdes.String(), InstrumentCandle.serde()));
 
         TimeWindows windows = TimeWindows.ofSizeAndGrace(
             windowSize,
@@ -686,9 +689,9 @@ public class UnifiedMarketDataProcessor {
                 valid
                     .peek((k, c) -> { log.info("📤 candle emit tf={} scrip={} vol={} → {}", tfLabel, c.getScripCode(), c.getVolume(), topic); metrics.incCandleEmit(tfLabel); })
                     .to(topic, Produced.with(
-                        Serdes.String(),
-                        InstrumentCandle.serde()
-                    ));
+                    Serdes.String(),
+                    InstrumentCandle.serde()
+                ));
             }
         }
     }
