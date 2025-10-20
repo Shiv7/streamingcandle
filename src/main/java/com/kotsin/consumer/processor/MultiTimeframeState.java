@@ -205,6 +205,11 @@ class CandleAccumulator {
     private int windowMinutes = 1;
     private boolean complete = false;
     private int tickCount = 0;
+
+    // Extra metrics for advanced candle features
+    private Double volumeSum = 0.0;  // For VWAP
+    private Double priceVolumeSum = 0.0;  // For VWAP
+    private Double previousClose = null;  // For log returns
     
     public CandleAccumulator() {
         this.windowStart = null;
@@ -221,25 +226,29 @@ class CandleAccumulator {
             windowStart = alignToMinute(tick.getTimestamp());
             windowEnd = windowStart + (windowMinutes * 60L * 1000L);
         }
-        
+
         tickCount++;
-        
+
         if (open == null) {
             open = tick.getLastRate();
         }
-        
+
         close = tick.getLastRate();
-        
+
         if (high == null || tick.getLastRate() > high) {
             high = tick.getLastRate();
         }
-        
+
         if (low == null || tick.getLastRate() < low) {
             low = tick.getLastRate();
         }
-        
+
         if (tick.getDeltaVolume() != null) {
             volume += tick.getDeltaVolume();
+
+            // Track for VWAP calculation
+            volumeSum += tick.getDeltaVolume();
+            priceVolumeSum += tick.getLastRate() * tick.getDeltaVolume();
         }
     }
     
@@ -268,6 +277,62 @@ class CandleAccumulator {
             .exchange(exchange)
             .exchangeType(exchangeType)
             .build();
+    }
+
+    /**
+     * Convert to finalized Candlestick (for candle-complete-{tf} topics)
+     * Includes optional extras based on feature flags
+     */
+    public Candlestick toFinalizedCandlestick(String scripCode, String companyName,
+                                               String exchange, String exchangeType,
+                                               boolean includeExtras) {
+        Candlestick candle = new Candlestick();
+
+        // Required fields
+        candle.setScripCode(scripCode);
+        candle.setCompanyName(companyName);
+        candle.setExchange(exchange);
+        candle.setExchangeType(exchangeType);
+        candle.setWindowStartMillis(windowStart != null ? windowStart : 0);
+        candle.setWindowEndMillis(windowEnd != null ? windowEnd : 0);
+        candle.setIsComplete(complete);
+
+        // OHLCV
+        candle.setOpen(open != null ? open : 0.0);
+        candle.setHigh(high != null ? high : 0.0);
+        candle.setLow(low != null ? low : 0.0);
+        candle.setClose(close != null ? close : 0.0);
+        candle.setVolume(volume != null ? volume.intValue() : 0);
+
+        // Optional extras (if enabled)
+        if (includeExtras) {
+            // VWAP
+            if (volumeSum > 0) {
+                candle.setVwap(priceVolumeSum / volumeSum);
+            }
+
+            // HLC3
+            if (high != null && low != null && close != null) {
+                candle.setHlc3((high + low + close) / 3.0);
+            }
+
+            // Log return from previous bar
+            if (previousClose != null && close != null && previousClose > 0) {
+                candle.setLogReturnFromPrevBar(Math.log(close / previousClose));
+            }
+
+            // Ticks in window
+            candle.setTicksInWindow(tickCount);
+
+            // Window latency
+            candle.setWindowLatencyMs(System.currentTimeMillis() - windowEnd);
+        }
+
+        return candle;
+    }
+
+    public void setPreviousClose(Double prevClose) {
+        this.previousClose = prevClose;
     }
 }
 

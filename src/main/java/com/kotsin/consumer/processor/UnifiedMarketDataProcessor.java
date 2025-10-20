@@ -22,9 +22,7 @@ import java.time.Duration;
 import java.time.Instant;
 import java.time.ZoneId;
 import java.time.ZonedDateTime;
-import java.util.HashMap;
-import java.util.Map;
-import java.util.Properties;
+import java.util.*;
 import java.util.concurrent.ConcurrentHashMap;
 
 /**
@@ -55,6 +53,35 @@ public class UnifiedMarketDataProcessor {
     
     @Value("${unified.input.topic.orderbook:Orderbook}")
     private String orderbookTopic;
+
+    // Dual emission feature flags
+    @Value("${stream.outputs.enriched.enabled:true}")
+    private boolean enrichedOutputEnabled;
+
+    @Value("${stream.outputs.candles.enabled:true}")
+    private boolean candlesOutputEnabled;
+
+    @Value("${stream.outputs.candles.include-extras:false}")
+    private boolean includeCandleExtras;
+
+    // Finalized candle topics
+    @Value("${stream.outputs.candles.1m:candle-complete-1m}")
+    private String candle1mTopic;
+
+    @Value("${stream.outputs.candles.2m:candle-complete-2m}")
+    private String candle2mTopic;
+
+    @Value("${stream.outputs.candles.3m:candle-complete-3m}")
+    private String candle3mTopic;
+
+    @Value("${stream.outputs.candles.5m:candle-complete-5m}")
+    private String candle5mTopic;
+
+    @Value("${stream.outputs.candles.15m:candle-complete-15m}")
+    private String candle15mTopic;
+
+    @Value("${stream.outputs.candles.30m:candle-complete-30m}")
+    private String candle30mTopic;
     
     @PostConstruct
     public void start() {
@@ -177,14 +204,29 @@ public class UnifiedMarketDataProcessor {
             // Emit once per key when the 1-minute window closes
             .suppress(Suppressed.untilWindowCloses(Suppressed.BufferConfig.unbounded()));
 
-        // Deterministic: one emission per symbol per minute (on window close)
-        aggregated.toStream()
-            .mapValues(this::buildEnrichedMessage)
-            .selectKey((windowedKey, enrichedData) -> windowedKey.key())
-            .to(outputTopic, Produced.with(
-                Serdes.String(),
-                new JsonSerde<>(EnrichedMarketData.class)
-            ));
+        // DUAL EMISSION STRATEGY
+        KStream<String, MultiTimeframeState> stateStream = aggregated.toStream()
+            .selectKey((windowedKey, state) -> windowedKey.key());
+
+        // Stream 1: ENRICHED updates (partial, every 1-min window close)
+        if (enrichedOutputEnabled) {
+            stateStream
+                .mapValues(this::buildEnrichedMessage)
+                .to(outputTopic, Produced.with(
+                    Serdes.String(),
+                    new JsonSerde<>(EnrichedMarketData.class)
+                ));
+
+            log.info("✅ Enriched emission enabled → topic: {}", outputTopic);
+        }
+
+        // Stream 2: FINALIZED candles (only complete windows, per timeframe)
+        if (candlesOutputEnabled) {
+            // Branch out finalized candles to 6 topics
+            emitFinalizedCandlesStreams(stateStream);
+
+            log.info("✅ Finalized candles enabled → 6 topics (1m, 2m, 3m, 5m, 15m, 30m)");
+        }
         
         // Create and start streams
         KafkaStreams streams = new KafkaStreams(builder.build(), props);
@@ -211,6 +253,88 @@ public class UnifiedMarketDataProcessor {
         log.info("✅ Started unified market data processor");
     }
     
+    /**
+     * Emit finalized candles to timeframe-specific topics using Kafka Streams
+     * This uses flatMapValues to convert one state into multiple candles
+     */
+    private void emitFinalizedCandlesStreams(KStream<String, MultiTimeframeState> stateStream) {
+        // Filter states that have at least one complete window
+        KStream<String, MultiTimeframeState> completeStates = stateStream
+            .filter((key, state) -> state.hasAnyCompleteWindow());
+
+        // FlatMap to extract all complete candles per timeframe
+        Map<String, KStream<String, Candlestick>> timeframeStreams = new HashMap<>();
+
+        // Create streams for each timeframe
+        for (String timeframe : Arrays.asList("1m", "2m", "3m", "5m", "15m", "30m")) {
+            KStream<String, Candlestick> candleStream = completeStates
+                .flatMapValues((readOnlyKey, state) -> extractFinalizedCandles(state, timeframe))
+                .filter((key, candle) -> candle != null);
+
+            String topic = getCandleTopicForTimeframe(timeframe);
+            if (topic != null) {
+                candleStream.to(topic, Produced.with(
+                    Serdes.String(),
+                    Candlestick.serde()
+                ));
+
+                log.debug("✅ Configured finalized candle stream: {} → {}", timeframe, topic);
+            }
+        }
+    }
+
+    /**
+     * Extract finalized candles for a specific timeframe
+     * Returns a list (possibly empty) to support flatMapValues
+     */
+    private List<Candlestick> extractFinalizedCandles(MultiTimeframeState state, String timeframe) {
+        List<Candlestick> candles = new ArrayList<>();
+
+        try {
+            Map<String, CandleData> allCandles = state.getMultiTimeframeCandles();
+            CandleData candleData = allCandles.get(timeframe);
+
+            if (candleData != null && candleData.getIsComplete()) {
+                CandleAccumulator accumulator = state.getCandleAccumulators().get(timeframe);
+
+                if (accumulator != null) {
+                    Candlestick finalizedCandle = accumulator.toFinalizedCandlestick(
+                        state.getScripCode(),
+                        state.getCompanyName(),
+                        state.getExchange(),
+                        state.getExchangeType(),
+                        includeCandleExtras
+                    );
+
+                    candles.add(finalizedCandle);
+
+                    log.debug("✅ Extracted finalized {} candle for {}",
+                        timeframe, state.getScripCode());
+                }
+            }
+        } catch (Exception e) {
+            log.error("❌ Failed to extract finalized {} candle for {}: {}",
+                timeframe, state.getScripCode(), e.getMessage());
+        }
+
+        return candles;
+    }
+
+    /**
+     * Get Kafka topic name for a given timeframe
+     */
+    private String getCandleTopicForTimeframe(String timeframe) {
+        switch (timeframe) {
+            case "1m": return candle1mTopic;
+            case "2m": return candle2mTopic;
+            case "3m": return candle3mTopic;
+            case "5m": return candle5mTopic;
+            case "15m": return candle15mTopic;
+            case "30m": return candle30mTopic;
+            default: return null;
+        }
+    }
+
     private EnrichedMarketData buildEnrichedMessage(MultiTimeframeState state) {
         try {
             // Get instrument family from cache

@@ -56,6 +56,16 @@ public class Candlestick {
     private Boolean validCandle;
     private String validationIssues;
 
+    // Completeness flag (CRITICAL for finalized candles)
+    private Boolean isComplete = false;
+
+    // Optional extra fields (enabled via feature flag)
+    private Double vwap;          // Volume-weighted average price
+    private Double hlc3;          // (High + Low + Close) / 3
+    private Double logReturnFromPrevBar;  // Log return from previous candle
+    private Integer ticksInWindow;  // Number of ticks in this window
+    private Long windowLatencyMs;   // Processing latency
+
     // Transient field for processing
     @JsonIgnore
     private transient long alignedWindowStart;
