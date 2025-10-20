@@ -108,64 +108,32 @@ public class MongoInstrumentFamilyService {
     
     private InstrumentFamily convertScripGroupToFamily(ScripGroup scripGroup) {
         try {
-            // Convert equity Scrip to EquityData
-            InstrumentFamily.EquityData equityData = null;
+            // Convert equity Scrip to InstrumentInfo
+            InstrumentInfo equityInfo = null;
             if (scripGroup.getEquity() != null) {
-                Scrip equity = scripGroup.getEquity();
-                equityData = InstrumentFamily.EquityData.builder()
-                    .scripCode(equity.getScripCode())
-                    .name(equity.getName())
-                    .exchange(equity.getExch())
-                    .exchangeType(equity.getExchType())
-                    .symbolRoot(equity.getSymbolRoot())
-                    .isin(equity.getISIN())
-                    .lotSize(equity.getLotSize())
-                    .tickSize(equity.getTickSize())
-                    .build();
+                equityInfo = convertScripToInstrumentInfo(scripGroup.getEquity());
             }
             
             // Convert futures
-            List<InstrumentFamily.FutureData> futures = new ArrayList<>();
-            if (scripGroup.getFutures() != null) {
-                for (Scrip future : scripGroup.getFutures()) {
-                    futures.add(InstrumentFamily.FutureData.builder()
-                        .scripCode(future.getScripCode())
-                        .name(future.getName())
-                        .exchange(future.getExch())
-                        .exchangeType(future.getExchType())
-                        .expiry(future.getExpiry())
-                        .symbolRoot(future.getSymbolRoot())
-                        .lotSize(future.getLotSize())
-                        .tickSize(future.getTickSize())
-                        .build());
-                }
+            InstrumentInfo futureInfo = null;
+            if (scripGroup.getFutures() != null && !scripGroup.getFutures().isEmpty()) {
+                futureInfo = convertScripToInstrumentInfo(scripGroup.getFutures().get(0));
             }
             
             // Convert options
-            List<InstrumentFamily.OptionData> options = new ArrayList<>();
+            List<InstrumentInfo> optionsInfo = new ArrayList<>();
             if (scripGroup.getOptions() != null) {
                 for (Scrip option : scripGroup.getOptions()) {
-                    options.add(InstrumentFamily.OptionData.builder()
-                        .scripCode(option.getScripCode())
-                        .name(option.getName())
-                        .exchange(option.getExch())
-                        .exchangeType(option.getExchType())
-                        .expiry(option.getExpiry())
-                        .strikeRate(option.getStrikeRate())
-                        .scripType(option.getScripType())
-                        .symbolRoot(option.getSymbolRoot())
-                        .lotSize(option.getLotSize())
-                        .tickSize(option.getTickSize())
-                        .build());
+                    optionsInfo.add(convertScripToInstrumentInfo(option));
                 }
             }
             
             return InstrumentFamily.builder()
                 .equityScripCode(scripGroup.getEquityScripCode())
                 .companyName(scripGroup.getCompanyName())
-                .equity(equityData)
-                .future(futures.isEmpty() ? null : futures.get(0)) // Take first future if any
-                .options(options)
+                .equity(equityInfo)
+                .future(futureInfo)
+                .options(optionsInfo)
                 .lastUpdated(System.currentTimeMillis())
                 .dataSource("MONGODB")
                 .build();
@@ -175,6 +143,30 @@ public class MongoInstrumentFamilyService {
                 scripGroup.getEquityScripCode(), e);
             return null;
         }
+    }
+    
+    private InstrumentInfo convertScripToInstrumentInfo(Scrip scrip) {
+        return InstrumentInfo.builder()
+            .scripCode(scrip.getScripCode())
+            .name(scrip.getName())
+            .fullName(scrip.getFullName())
+            .exchange(scrip.getExch())
+            .exchangeType(scrip.getExchType())
+            .series(scrip.getSeries())
+            .expiry(scrip.getExpiry())
+            .scripType(scrip.getScripType())
+            .strikeRate(scrip.getStrikeRate() != null ? Double.parseDouble(scrip.getStrikeRate()) : null)
+            .tickSize(scrip.getTickSize() != null ? Double.parseDouble(scrip.getTickSize()) : null)
+            .lotSize(scrip.getLotSize() != null ? Integer.parseInt(scrip.getLotSize()) : null)
+            .isin(scrip.getISIN())
+            .symbolRoot(scrip.getSymbolRoot())
+            .bocoallowed(scrip.getBOCOAllowed())
+            .id(scrip.getId())
+            .scriptTypeKotsin(scrip.getScriptTypeKotsin())
+            .multiplier(scrip.getMultiplier())
+            .qtyLimit(scrip.getQtyLimit())
+            .scripData(scrip.getScripData())
+            .build();
     }
     
     private void storeInRedis(Map<String, InstrumentFamily> families) {
