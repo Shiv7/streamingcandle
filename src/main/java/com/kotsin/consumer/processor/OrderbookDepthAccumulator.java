@@ -1,5 +1,6 @@
 package com.kotsin.consumer.processor;
 
+import com.fasterxml.jackson.annotation.JsonIgnore;
 import com.kotsin.consumer.model.OrderBookSnapshot;
 import com.kotsin.consumer.model.OrderbookDepthData;
 import com.kotsin.consumer.processor.service.IcebergDetectionService;
@@ -16,20 +17,53 @@ import java.util.List;
  *
  * Design Pattern: Facade + Composition
  * Purpose: Coordinate multiple services without complex logic
+ * 
+ * Serialization Note: Service fields are marked @JsonIgnore and lazily initialized
+ * to avoid Jackson serialization errors in Kafka Streams state stores.
  */
 @Data
 @Slf4j
 public class OrderbookDepthAccumulator {
 
-    // Composed services (Dependency Injection ready)
-    private final IcebergDetectionService icebergDetectionService = new IcebergDetectionService();
-    private final SpoofingDetectionService spoofingDetectionService = new SpoofingDetectionService();
-    private final OrderbookDepthCalculator depthCalculator = new OrderbookDepthCalculator();
+    // Composed services (marked transient for Kafka Streams serialization)
+    // These are lazily initialized on first access after deserialization
+    @JsonIgnore
+    private transient IcebergDetectionService icebergDetectionService;
+    
+    @JsonIgnore
+    private transient SpoofingDetectionService spoofingDetectionService;
+    
+    @JsonIgnore
+    private transient OrderbookDepthCalculator depthCalculator;
 
     // Current orderbook state
     private OrderBookSnapshot currentOrderbook;
     private OrderBookSnapshot previousOrderbook;
     private Long lastUpdateTimestamp;
+
+    /**
+     * Lazy initialization for services (called after deserialization)
+     */
+    private IcebergDetectionService getIcebergService() {
+        if (icebergDetectionService == null) {
+            icebergDetectionService = new IcebergDetectionService();
+        }
+        return icebergDetectionService;
+    }
+
+    private SpoofingDetectionService getSpoofingService() {
+        if (spoofingDetectionService == null) {
+            spoofingDetectionService = new SpoofingDetectionService();
+        }
+        return spoofingDetectionService;
+    }
+
+    private OrderbookDepthCalculator getDepthCalculator() {
+        if (depthCalculator == null) {
+            depthCalculator = new OrderbookDepthCalculator();
+        }
+        return depthCalculator;
+    }
 
     public void addOrderbook(OrderBookSnapshot orderbook) {
         if (orderbook == null || !orderbook.isValid()) {
@@ -41,22 +75,22 @@ public class OrderbookDepthAccumulator {
         currentOrderbook = orderbook;
         lastUpdateTimestamp = orderbook.getTimestamp();
 
-        // Delegate to specialized services
+        // Delegate to specialized services (using lazy getters)
         if (previousOrderbook != null) {
-            spoofingDetectionService.detectSpoofing(previousOrderbook, currentOrderbook);
+            getSpoofingService().detectSpoofing(previousOrderbook, currentOrderbook);
         }
 
         trackIcebergPatterns(orderbook);
     }
 
     private void trackIcebergPatterns(OrderBookSnapshot orderbook) {
-        // Delegate to iceberg detection service
+        // Delegate to iceberg detection service (using lazy getter)
         if (orderbook.getAllBids() != null && !orderbook.getAllBids().isEmpty()) {
-            icebergDetectionService.trackBidQuantity(orderbook.getAllBids().get(0).getQuantity());
+            getIcebergService().trackBidQuantity(orderbook.getAllBids().get(0).getQuantity());
         }
 
         if (orderbook.getAllAsks() != null && !orderbook.getAllAsks().isEmpty()) {
-            icebergDetectionService.trackAskQuantity(orderbook.getAllAsks().get(0).getQuantity());
+            getIcebergService().trackAskQuantity(orderbook.getAllAsks().get(0).getQuantity());
         }
     }
 
@@ -70,44 +104,44 @@ public class OrderbookDepthAccumulator {
         try {
             double midPrice = currentOrderbook.getMidPrice();
 
-            // Delegate profile building to calculator
+            // Delegate profile building to calculator (using lazy getter)
             List<OrderbookDepthData.DepthLevel> bidProfile =
-                depthCalculator.buildDepthProfile(currentOrderbook.getAllBids(), "BID", midPrice);
+                getDepthCalculator().buildDepthProfile(currentOrderbook.getAllBids(), "BID", midPrice);
             List<OrderbookDepthData.DepthLevel> askProfile =
-                depthCalculator.buildDepthProfile(currentOrderbook.getAllAsks(), "ASK", midPrice);
+                getDepthCalculator().buildDepthProfile(currentOrderbook.getAllAsks(), "ASK", midPrice);
 
-            // Delegate calculations to calculator
-            List<Double> cumulativeBidDepth = depthCalculator.calculateCumulativeDepth(bidProfile);
-            List<Double> cumulativeAskDepth = depthCalculator.calculateCumulativeDepth(askProfile);
+            // Delegate calculations to calculator (using lazy getter)
+            List<Double> cumulativeBidDepth = getDepthCalculator().calculateCumulativeDepth(bidProfile);
+            List<Double> cumulativeAskDepth = getDepthCalculator().calculateCumulativeDepth(askProfile);
 
             double totalBidDepth = cumulativeBidDepth.isEmpty() ? 0.0 :
                 cumulativeBidDepth.get(cumulativeBidDepth.size() - 1);
             double totalAskDepth = cumulativeAskDepth.isEmpty() ? 0.0 :
                 cumulativeAskDepth.get(cumulativeAskDepth.size() - 1);
 
-            double bidVWAP = depthCalculator.calculateSideVWAP(bidProfile);
-            double askVWAP = depthCalculator.calculateSideVWAP(askProfile);
+            double bidVWAP = getDepthCalculator().calculateSideVWAP(bidProfile);
+            double askVWAP = getDepthCalculator().calculateSideVWAP(askProfile);
             double depthPressure = midPrice > 0 ? (bidVWAP - askVWAP) / midPrice : 0.0;
 
-            double weightedImbalance = depthCalculator.calculateWeightedDepthImbalance(bidProfile, askProfile);
+            double weightedImbalance = getDepthCalculator().calculateWeightedDepthImbalance(bidProfile, askProfile);
 
-            double bidSlope = depthCalculator.calculateSlope(bidProfile);
-            double askSlope = depthCalculator.calculateSlope(askProfile);
+            double bidSlope = getDepthCalculator().calculateSlope(bidProfile);
+            double askSlope = getDepthCalculator().calculateSlope(askProfile);
             double slopeRatio = askSlope != 0 ? bidSlope / askSlope : 0.0;
 
-            // Get results from detection services
-            boolean icebergBid = icebergDetectionService.detectIcebergBid();
-            boolean icebergAsk = icebergDetectionService.detectIcebergAsk();
-            double icebergProbBid = icebergDetectionService.calculateIcebergProbabilityBid();
-            double icebergProbAsk = icebergDetectionService.calculateIcebergProbabilityAsk();
+            // Get results from detection services (using lazy getters)
+            boolean icebergBid = getIcebergService().detectIcebergBid();
+            boolean icebergAsk = getIcebergService().detectIcebergAsk();
+            double icebergProbBid = getIcebergService().calculateIcebergProbabilityBid();
+            double icebergProbAsk = getIcebergService().calculateIcebergProbabilityAsk();
 
-            double level1Imb = depthCalculator.calculateLevelImbalance(bidProfile, askProfile, 1, 1);
-            double level2to5Imb = depthCalculator.calculateLevelImbalance(bidProfile, askProfile, 2, 5);
-            double level6to10Imb = depthCalculator.calculateLevelImbalance(bidProfile, askProfile, 6, 10);
+            double level1Imb = getDepthCalculator().calculateLevelImbalance(bidProfile, askProfile, 1, 1);
+            double level2to5Imb = getDepthCalculator().calculateLevelImbalance(bidProfile, askProfile, 2, 5);
+            double level6to10Imb = getDepthCalculator().calculateLevelImbalance(bidProfile, askProfile, 6, 10);
 
-            int spoofCount = spoofingDetectionService.getSpoofingCount();
-            boolean activeSpoofBid = spoofingDetectionService.isActiveSpoofingBid();
-            boolean activeSpoofAsk = spoofingDetectionService.isActiveSpoofingAsk();
+            int spoofCount = getSpoofingService().getSpoofingCount();
+            boolean activeSpoofBid = getSpoofingService().isActiveSpoofingBid();
+            boolean activeSpoofAsk = getSpoofingService().isActiveSpoofingAsk();
 
             return OrderbookDepthData.builder()
                 .bidProfile(bidProfile)
@@ -130,7 +164,7 @@ public class OrderbookDepthAccumulator {
                 .icebergDetectedAsk(icebergAsk)
                 .icebergProbabilityBid(icebergProbBid)
                 .icebergProbabilityAsk(icebergProbAsk)
-                .spoofingEvents(spoofingDetectionService.getSpoofingEvents())
+                .spoofingEvents(getSpoofingService().getSpoofingEvents())
                 .spoofingCountLast1Min(spoofCount)
                 .activeSpoofingBid(activeSpoofBid)
                 .activeSpoofingAsk(activeSpoofAsk)
