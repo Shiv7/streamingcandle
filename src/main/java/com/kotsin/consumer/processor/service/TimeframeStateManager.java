@@ -183,18 +183,24 @@ public class TimeframeStateManager {
     /**
      * Force completion of all windows for finalized candle emission
      * This is needed when suppression is removed and windows don't naturally close
+     * Uses tick timestamp for historical data processing
      */
     public void forceCompleteWindows() {
-        long currentTime = System.currentTimeMillis();
+        // Use last tick time for historical data processing, fallback to system time
+        long currentTime = (lastTickTime != null) ? lastTickTime : System.currentTimeMillis();
         
-        for (CandleAccumulator accumulator : candleAccumulators.values()) {
+        for (Map.Entry<Timeframe, CandleAccumulator> entry : candleAccumulators.entrySet()) {
+            Timeframe timeframe = entry.getKey();
+            CandleAccumulator accumulator = entry.getValue();
+            
             if (accumulator.getWindowStart() != null && 
                 accumulator.getWindowEnd() != null && 
                 currentTime >= accumulator.getWindowEnd() && 
                 !accumulator.isComplete()) {
                 
                 accumulator.markComplete();
-                log.debug("✅ Forced completion of window ending at {}", accumulator.getWindowEnd());
+                log.debug("✅ Forced completion of {} window ending at {} (current: {})", 
+                    timeframe.getLabel(), accumulator.getWindowEnd(), currentTime);
             }
         }
     }
