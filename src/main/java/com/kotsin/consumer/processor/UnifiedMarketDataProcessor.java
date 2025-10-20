@@ -76,21 +76,40 @@ public class UnifiedMarketDataProcessor {
     
     private void processUnifiedMarketData() {
         String instanceKey = "unified-processor";
-        
+
         if (streamsInstances.containsKey(instanceKey)) {
             log.warn("⚠️ Unified processor already running. Skipping duplicate start.");
             return;
         }
-        
+
         Properties props = kafkaConfig.getStreamProperties(appIdPrefix);
         StreamsBuilder builder = new StreamsBuilder();
-        
+
+        // CRITICAL: Add state store for delta volume transformer
+        String deltaVolumeStoreName = "delta-volume-store";
+        builder.addStateStore(
+            org.apache.kafka.streams.state.Stores.keyValueStoreBuilder(
+                org.apache.kafka.streams.state.Stores.persistentKeyValueStore(deltaVolumeStoreName),
+                Serdes.String(),
+                Serdes.Integer()
+            )
+        );
+
         // Input streams with explicit Consumed serdes
         // CRITICAL: Must specify serdes to properly deserialize from optionProducerJava
-        KStream<String, TickData> ticks = builder.stream(
+        KStream<String, TickData> ticksRaw = builder.stream(
             ticksTopic,
             Consumed.with(Serdes.String(), TickData.serde())
         );
+
+        // FIX #1: Add CumToDeltaTransformer to calculate volume deltas
+        // The transformer returns KeyValue<String, TickData>, which Kafka Streams automatically unpacks
+        KStream<String, TickData> ticks = ticksRaw
+            .transform(
+                () -> new com.kotsin.consumer.transformers.CumToDeltaTransformer(deltaVolumeStoreName),
+                deltaVolumeStoreName
+            )
+            .filter((key, tick) -> tick != null && tick.getDeltaVolume() != null);
         
         KStream<String, OpenInterest> oiStream = builder.stream(
             oiTopic,
@@ -103,20 +122,24 @@ public class UnifiedMarketDataProcessor {
         );
         
         log.info("📥 Created input streams for topics: {}, {}, {}", ticksTopic, oiTopic, orderbookTopic);
-        
+
+        // FIX #2: Increase join windows to accommodate actual data arrival rates
+        // OI arrives every 10 seconds, so join window must be >= 15s to ensure capture
+        // Orderbook arrives every 4 seconds, 15s window is sufficient
+
         // Join ticks with OI data
         KStream<String, TickData> ticksWithOi = ticks.leftJoin(
             oiStream,
             this::mergeOiIntoTick,
-            JoinWindows.ofTimeDifferenceAndGrace(Duration.ofSeconds(5), Duration.ofSeconds(1)),
+            JoinWindows.ofTimeDifferenceAndGrace(Duration.ofSeconds(15), Duration.ofSeconds(5)),
             StreamJoined.with(Serdes.String(), TickData.serde(), OpenInterest.serde())
         );
-        
+
         // Join with orderbook data
         KStream<String, TickData> enrichedTicks = ticksWithOi.leftJoin(
             orderbookStream,
             this::mergeOrderbookIntoTick,
-            JoinWindows.ofTimeDifferenceAndGrace(Duration.ofSeconds(5), Duration.ofSeconds(1)),
+            JoinWindows.ofTimeDifferenceAndGrace(Duration.ofSeconds(15), Duration.ofSeconds(5)),
             StreamJoined.with(Serdes.String(), TickData.serde(), OrderBookSnapshot.serde())
         );
         
@@ -124,15 +147,16 @@ public class UnifiedMarketDataProcessor {
         KStream<String, TickData> keyed = enrichedTicks.selectKey(
             (k, v) -> v.getScripCode()
         );
-        
-        // Window into 30-minute windows (longest timeframe)
+
+        // FIX #3: Use 1-minute windows instead of 30-minute to enable real-time emission
+        // We'll maintain multi-timeframe state within the aggregator
         TimeWindows windows = TimeWindows.ofSizeAndGrace(
-            Duration.ofMinutes(30),
+            Duration.ofMinutes(1),  // Changed from 30 to 1 minute
             Duration.ofSeconds(10)  // Grace period for late data
         );
-        
-        log.info("⏰ Using 30-minute windows with 10-second grace period");
-        
+
+        log.info("⏰ Using 1-minute tumbling windows with 10-second grace period");
+
         // Aggregate into multi-timeframe state
         KTable<Windowed<String>, MultiTimeframeState> aggregated = keyed
             .filter((scripCode, tick) -> withinTradingHours(tick))
@@ -147,12 +171,12 @@ public class UnifiedMarketDataProcessor {
                 Materialized.<String, MultiTimeframeState, WindowStore<Bytes, byte[]>>as("multi-timeframe-store")
                     .withKeySerde(Serdes.String())
                     .withValueSerde(new JsonSerde<>(MultiTimeframeState.class))
-            )
-            .suppress(Suppressed.untilWindowCloses(Suppressed.BufferConfig.unbounded()));
-        
-        // Emit enriched messages
+            );
+
+        // FIX #3: Remove suppress - emit immediately when windows complete
+        // This allows real-time emission instead of 30-minute delays
         aggregated.toStream()
-            .filter((windowedKey, state) -> state.hasAnyCompleteWindow())
+            .filter((windowedKey, state) -> state != null && state.getMessageCount() > 0)
             .mapValues(this::buildEnrichedMessage)
             .selectKey((windowedKey, enrichedData) -> windowedKey.key())
             .to(outputTopic, Produced.with(

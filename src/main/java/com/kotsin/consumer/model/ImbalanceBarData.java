@@ -41,6 +41,54 @@ public class ImbalanceBarData {
         if (volumeRuns != null && volumeRuns.getIsComplete()) count++;
         return count;
     }
+
+    /**
+     * Factory method to create ImbalanceBarData from raw values
+     */
+    public static ImbalanceBarData create(
+        long volumeImb, long dollarImb, int tickRuns, long volumeRuns,
+        String direction, double expVolImb, double expDollarImb,
+        double expTickRuns, double expVolRuns
+    ) {
+        VolumeImbalanceData vib = VolumeImbalanceData.builder()
+            .cumulative(volumeImb)
+            .direction(direction)
+            .threshold((long)expVolImb)
+            .progress(Math.abs(volumeImb) / expVolImb)
+            .isComplete(Math.abs(volumeImb) >= expVolImb)
+            .build();
+
+        DollarImbalanceData dib = DollarImbalanceData.builder()
+            .cumulative(dollarImb)
+            .direction(direction)
+            .threshold((long)expDollarImb)
+            .progress(Math.abs(dollarImb) / expDollarImb)
+            .isComplete(Math.abs(dollarImb) >= expDollarImb)
+            .build();
+
+        TickRunsData trb = TickRunsData.builder()
+            .currentRun(tickRuns)
+            .direction(direction)
+            .threshold((int)expTickRuns)
+            .progress(Math.abs(tickRuns) / expTickRuns)
+            .isComplete(Math.abs(tickRuns) >= expTickRuns)
+            .build();
+
+        VolumeRunsData vrb = VolumeRunsData.builder()
+            .currentRun(volumeRuns)
+            .direction(direction)
+            .threshold((long)expVolRuns)
+            .progress(Math.abs(volumeRuns) / expVolRuns)
+            .isComplete(Math.abs(volumeRuns) >= expVolRuns)
+            .build();
+
+        return ImbalanceBarData.builder()
+            .volumeImbalance(vib)
+            .dollarImbalance(dib)
+            .tickRuns(trb)
+            .volumeRuns(vrb)
+            .build();
+    }
 }
 
 @Data
@@ -53,7 +101,7 @@ class VolumeImbalanceData {
     private Long threshold;
     private Double progress;
     private Boolean isComplete;
-    
+
     public Double getProgressPercent() {
         return progress != null ? progress * 100 : null;
     }
@@ -69,7 +117,7 @@ class DollarImbalanceData {
     private Long threshold;
     private Double progress;
     private Boolean isComplete;
-    
+
     public Double getProgressPercent() {
         return progress != null ? progress * 100 : null;
     }
@@ -85,7 +133,7 @@ class TickRunsData {
     private Integer threshold;
     private Double progress;
     private Boolean isComplete;
-    
+
     public Double getProgressPercent() {
         return progress != null ? progress * 100 : null;
     }
@@ -101,7 +149,7 @@ class VolumeRunsData {
     private Long threshold;
     private Double progress;
     private Boolean isComplete;
-    
+
     public Double getProgressPercent() {
         return progress != null ? progress * 100 : null;
     }

@@ -7,6 +7,7 @@ import lombok.extern.slf4j.Slf4j;
 import java.util.*;
 import java.util.stream.Collectors;
 
+
 /**
  * Multi-timeframe state aggregator
  * Maintains state for all timeframes (1m, 2m, 3m, 5m, 15m, 30m)
@@ -342,57 +343,350 @@ class OiAccumulator {
 
 /**
  * Imbalance bar accumulator
+ * Implements AFML Chapter 2 - Information-Driven Bars
  */
 @Data
 class ImbalanceBarAccumulator {
+    // Current imbalance accumulators
     private Long volumeImbalance = 0L;
     private Long dollarImbalance = 0L;
     private Integer tickRuns = 0;
     private Long volumeRuns = 0L;
+
+    // Direction tracking
     private String currentDirection = "NEUTRAL";
-    
+    private Double lastPrice = null;
+
+    // Expected thresholds (EWMA-based)
+    private Double expectedVolumeImbalance = 1000.0;  // Initial estimate
+    private Double expectedDollarImbalance = 100000.0;  // Initial estimate
+    private Double expectedTickRuns = 10.0;  // Initial estimate
+    private Double expectedVolumeRuns = 5000.0;  // Initial estimate
+
+    // EWMA alpha for threshold adaptation
+    private static final double EWMA_ALPHA = 0.1;
+
+    // Counters for bar completions
+    private int vibCount = 0;
+    private int dibCount = 0;
+    private int trbCount = 0;
+    private int vrbCount = 0;
+
     public void addTick(TickData tick) {
-        // Simplified implementation
-        // In real implementation, this would calculate VIB, DIB, TRB, VRB
-        if (tick.getDeltaVolume() != null) {
-            volumeImbalance += tick.getDeltaVolume();
+        if (tick.getDeltaVolume() == null || tick.getDeltaVolume() == 0) {
+            return;
+        }
+
+        // Determine tick direction using tick rule
+        String direction = determineDirection(tick);
+        int directionSign = "BUY".equals(direction) ? 1 : -1;
+
+        // Volume Imbalance (VIB)
+        long signedVolume = tick.getDeltaVolume() * directionSign;
+        volumeImbalance += signedVolume;
+
+        // Dollar Imbalance (DIB)
+        long dollarVolume = (long)(tick.getDeltaVolume() * tick.getLastRate());
+        dollarImbalance += dollarVolume * directionSign;
+
+        // Tick Runs (TRB)
+        if (direction.equals(currentDirection)) {
+            tickRuns++;
+        } else {
+            tickRuns = 1;
+            currentDirection = direction;
+        }
+
+        // Volume Runs (VRB)
+        if (direction.equals(currentDirection)) {
+            volumeRuns += tick.getDeltaVolume().longValue();
+        } else {
+            volumeRuns = tick.getDeltaVolume().longValue();
+        }
+
+        lastPrice = tick.getLastRate();
+
+        // Check thresholds and update EWMA estimates
+        checkAndUpdateThresholds();
+    }
+
+    private String determineDirection(TickData tick) {
+        if (lastPrice == null) {
+            return "NEUTRAL";
+        }
+
+        double currentPrice = tick.getLastRate();
+        if (currentPrice > lastPrice) {
+            return "BUY";
+        } else if (currentPrice < lastPrice) {
+            return "SELL";
+        } else {
+            return currentDirection;  // No change, keep current direction
         }
     }
-    
+
+    private void checkAndUpdateThresholds() {
+        // Volume Imbalance Bar threshold
+        if (Math.abs(volumeImbalance) >= expectedVolumeImbalance) {
+            // Update EWMA estimate
+            expectedVolumeImbalance = EWMA_ALPHA * Math.abs(volumeImbalance)
+                                    + (1 - EWMA_ALPHA) * expectedVolumeImbalance;
+            vibCount++;
+            volumeImbalance = 0L;  // Reset after bar emission
+        }
+
+        // Dollar Imbalance Bar threshold
+        if (Math.abs(dollarImbalance) >= expectedDollarImbalance) {
+            expectedDollarImbalance = EWMA_ALPHA * Math.abs(dollarImbalance)
+                                    + (1 - EWMA_ALPHA) * expectedDollarImbalance;
+            dibCount++;
+            dollarImbalance = 0L;
+        }
+
+        // Tick Runs Bar threshold
+        if (Math.abs(tickRuns) >= expectedTickRuns) {
+            expectedTickRuns = EWMA_ALPHA * Math.abs(tickRuns)
+                             + (1 - EWMA_ALPHA) * expectedTickRuns;
+            trbCount++;
+            tickRuns = 0;
+        }
+
+        // Volume Runs Bar threshold
+        if (Math.abs(volumeRuns) >= expectedVolumeRuns) {
+            expectedVolumeRuns = EWMA_ALPHA * Math.abs(volumeRuns)
+                               + (1 - EWMA_ALPHA) * expectedVolumeRuns;
+            vrbCount++;
+            volumeRuns = 0L;
+        }
+    }
+
     public ImbalanceBarData toImbalanceBarData() {
-        // Create ImbalanceBarData with only the volumeImbalance field set
-        // Note: VolumeImbalanceData is package-private in model package, so we can't use it directly here
-        // This is a simplified version that returns basic ImbalanceBarData
-        return ImbalanceBarData.builder()
-            .build();
+        return ImbalanceBarData.create(
+            volumeImbalance, dollarImbalance, tickRuns, volumeRuns,
+            currentDirection, expectedVolumeImbalance, expectedDollarImbalance,
+            expectedTickRuns, expectedVolumeRuns
+        );
     }
 }
 
 /**
  * Microstructure accumulator
+ * Implements AFML Chapter 19 - Microstructure Features
  */
 @Data
 class MicrostructureAccumulator {
+    // Order Flow Imbalance (OFI)
     private Double ofi = 0.0;
-    private Double vpin = 0.0;
+    private Double prevBidQty = 0.0;
+    private Double prevAskQty = 0.0;
+    private Double prevBidPrice = 0.0;
+    private Double prevAskPrice = 0.0;
+
+    // VPIN calculation
+    private List<Double> volumeBuckets = new ArrayList<>();
+    private List<Double> buyVolumeInBuckets = new ArrayList<>();
+    private double currentBucketVolume = 0.0;
+    private double currentBucketBuyVolume = 0.0;
+    private Double vpin = 0.0;  // VPIN value
+    private static final double BUCKET_SIZE = 10000.0;  // Volume per bucket
+    private static final int VPIN_WINDOW = 50;  // Number of buckets for VPIN
+
+    // Depth imbalance
     private Double depthImbalance = 0.0;
+    private Double totalBidQty = 0.0;
+    private Double totalAskQty = 0.0;
+
+    // Kyle's Lambda (price impact)
+    private List<Double> priceChanges = new ArrayList<>();
+    private List<Double> volumes = new ArrayList<>();
     private Double kyleLambda = 0.0;
+
+    // Effective spread
     private Double effectiveSpread = 0.0;
+    private Double midPrice = 0.0;
+
+    // Microprice
     private Double microprice = 0.0;
+
     private boolean complete = false;
-    
+    private int updateCount = 0;
+
     public void addTick(TickData tick) {
-        // Simplified implementation
-        // In real implementation, this would calculate actual microstructure features
-        if (tick.getLastRate() > 0) {
-            microprice = tick.getLastRate();
+        if (tick.getLastRate() <= 0 || tick.getDeltaVolume() == null) {
+            return;
+        }
+
+        updateCount++;
+
+        // Update bid/ask from tick data
+        double bidPrice = tick.getBidRate();
+        double askPrice = tick.getOfferRate();
+        double bidQty = (double) tick.getBidQuantity();
+        double askQty = (double) tick.getOfferQuantity();
+
+        // Calculate mid price
+        if (bidPrice > 0 && askPrice > 0) {
+            midPrice = (bidPrice + askPrice) / 2.0;
+
+            // Calculate microprice (weighted by depth)
+            if (bidQty + askQty > 0) {
+                microprice = (bidPrice * askQty + askPrice * bidQty) / (bidQty + askQty);
+            }
+
+            // Calculate effective spread
+            double tradePrice = tick.getLastRate();
+            effectiveSpread = 2.0 * Math.abs(tradePrice - midPrice);
+        }
+
+        // Update depth imbalance
+        totalBidQty = (double) tick.getTotalBidQuantity();
+        totalAskQty = (double) tick.getTotalOfferQuantity();
+        if (totalBidQty + totalAskQty > 0) {
+            depthImbalance = (totalBidQty - totalAskQty) / (totalBidQty + totalAskQty);
+        }
+
+        // Calculate OFI (Order Flow Imbalance)
+        // OFI = ΔBid - ΔAsk
+        if (prevBidPrice > 0 && prevAskPrice > 0) {
+            double deltaBid = 0.0;
+            double deltaAsk = 0.0;
+
+            // If bid price increased, add bid quantity
+            if (bidPrice >= prevBidPrice) {
+                deltaBid = bidQty - (bidPrice == prevBidPrice ? prevBidQty : 0);
+            } else {
+                deltaBid = -prevBidQty;  // Bid was removed
+            }
+
+            // If ask price decreased, add ask quantity
+            if (askPrice <= prevAskPrice) {
+                deltaAsk = askQty - (askPrice == prevAskPrice ? prevAskQty : 0);
+            } else {
+                deltaAsk = -prevAskQty;  // Ask was removed
+            }
+
+            ofi = deltaBid - deltaAsk;
+        }
+
+        // Update previous values for OFI
+        prevBidPrice = bidPrice;
+        prevAskPrice = askPrice;
+        prevBidQty = bidQty;
+        prevAskQty = askQty;
+
+        // VPIN calculation (volume bucketing)
+        updateVPIN(tick);
+
+        // Kyle's Lambda (price impact estimation)
+        updateKyleLambda(tick);
+
+        if (updateCount >= 10) {
+            complete = true;
         }
     }
-    
+
+    private void updateVPIN(TickData tick) {
+        // Classify trade direction using tick rule
+        boolean isBuy = determineIsBuy(tick);
+        double volume = tick.getDeltaVolume();
+
+        currentBucketVolume += volume;
+        if (isBuy) {
+            currentBucketBuyVolume += volume;
+        }
+
+        // If bucket is full, close it and start new one
+        if (currentBucketVolume >= BUCKET_SIZE) {
+            volumeBuckets.add(currentBucketVolume);
+            buyVolumeInBuckets.add(currentBucketBuyVolume);
+
+            // Keep only last VPIN_WINDOW buckets
+            if (volumeBuckets.size() > VPIN_WINDOW) {
+                volumeBuckets.remove(0);
+                buyVolumeInBuckets.remove(0);
+            }
+
+            // Reset current bucket
+            currentBucketVolume = 0.0;
+            currentBucketBuyVolume = 0.0;
+
+            // Calculate VPIN
+            calculateVPIN();
+        }
+    }
+
+    private void calculateVPIN() {
+        if (volumeBuckets.isEmpty()) {
+            return;
+        }
+
+        double totalVolume = 0.0;
+        double totalAbsImbalance = 0.0;
+
+        for (int i = 0; i < volumeBuckets.size(); i++) {
+            double bucketVol = volumeBuckets.get(i);
+            double buyVol = buyVolumeInBuckets.get(i);
+            double sellVol = bucketVol - buyVol;
+
+            totalVolume += bucketVol;
+            totalAbsImbalance += Math.abs(buyVol - sellVol);
+        }
+
+        if (totalVolume > 0) {
+            this.vpin = totalAbsImbalance / totalVolume;
+        }
+    }
+
+    private boolean determineIsBuy(TickData tick) {
+        // Use tick rule: if trade price >= mid, it's a buy
+        if (midPrice > 0) {
+            return tick.getLastRate() >= midPrice;
+        }
+        // Fallback: if price went up, assume buy
+        return tick.getLastRate() > (prevBidPrice + prevAskPrice) / 2.0;
+    }
+
+    private void updateKyleLambda(TickData tick) {
+        // Kyle's Lambda: λ = Cov(ΔP, V) / Var(V)
+        // Simplified: track price changes and volumes for regression
+
+        double priceChange = tick.getLastRate() - (prevBidPrice + prevAskPrice) / 2.0;
+        double volume = tick.getDeltaVolume();
+
+        priceChanges.add(priceChange);
+        volumes.add(volume);
+
+        // Keep only last 100 observations
+        if (priceChanges.size() > 100) {
+            priceChanges.remove(0);
+            volumes.remove(0);
+        }
+
+        // Calculate Kyle's Lambda (simple covariance / variance)
+        if (priceChanges.size() >= 20) {
+            double meanPriceChange = priceChanges.stream().mapToDouble(d -> d).average().orElse(0.0);
+            double meanVolume = volumes.stream().mapToDouble(d -> d).average().orElse(0.0);
+
+            double covariance = 0.0;
+            double varianceVolume = 0.0;
+
+            for (int i = 0; i < priceChanges.size(); i++) {
+                double pDev = priceChanges.get(i) - meanPriceChange;
+                double vDev = volumes.get(i) - meanVolume;
+                covariance += pDev * vDev;
+                varianceVolume += vDev * vDev;
+            }
+
+            if (varianceVolume > 0) {
+                kyleLambda = covariance / varianceVolume;
+            }
+        }
+    }
+
     public void markComplete() {
         complete = true;
     }
-    
+
     public MicrostructureData toMicrostructureData() {
         return MicrostructureData.builder()
             .ofi(ofi)
