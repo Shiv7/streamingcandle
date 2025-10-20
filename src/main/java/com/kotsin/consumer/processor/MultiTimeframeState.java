@@ -92,8 +92,12 @@ public class MultiTimeframeState {
             int minutes = TIMEFRAME_MINUTES.get(timeframe);
             long windowStart = alignToTimeframe(tickTime, minutes);
             
-            if (accumulator.getWindowStart() != windowStart) {
-                // New window started, mark previous as complete
+            // Initialize accumulator window if not set yet
+            if (accumulator.getWindowStart() == null) {
+                accumulator = new CandleAccumulator(windowStart);
+                candleAccumulators.put(timeframe, accumulator);
+            } else if (!accumulator.getWindowStart().equals(windowStart)) {
+                // New window started, mark previous as complete and rotate
                 accumulator.markComplete();
                 accumulator = new CandleAccumulator(windowStart);
                 candleAccumulators.put(timeframe, accumulator);
@@ -111,7 +115,10 @@ public class MultiTimeframeState {
             int minutes = TIMEFRAME_MINUTES.get(timeframe);
             long windowStart = alignToTimeframe(tick.getTimestamp(), minutes);
             
-            if (accumulator.getWindowStart() != windowStart) {
+            if (accumulator.getWindowStart() == null) {
+                accumulator = new OiAccumulator(windowStart);
+                oiAccumulators.put(timeframe, accumulator);
+            } else if (!accumulator.getWindowStart().equals(windowStart)) {
                 accumulator.markComplete();
                 accumulator = new OiAccumulator(windowStart);
                 oiAccumulators.put(timeframe, accumulator);
