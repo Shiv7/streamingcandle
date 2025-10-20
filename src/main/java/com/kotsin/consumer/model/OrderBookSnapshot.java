@@ -224,9 +224,20 @@ public class OrderBookSnapshot {
         }
         boolean hasBids = bidRate != null && !bidRate.isEmpty() && bidQty != null && !bidQty.isEmpty();
         boolean hasAsks = offRate != null && !offRate.isEmpty() && offQty != null && !offQty.isEmpty();
-        if (!hasBids && !hasAsks) { return false; }
+        boolean hasLevels = hasBids || hasAsks;
+        boolean hasTotals = (totalBidQty != null && totalBidQty > 0) || (totalOffQty != null && totalOffQty > 0);
+        if (!hasLevels && !hasTotals) { return false; }
         if (receivedTimestamp == null || receivedTimestamp <= 0) { return false; }
         return true;
+    }
+
+    /**
+     * True if we have any bid/ask price levels present
+     */
+    public boolean hasBookLevels() {
+        boolean hasBids = bidRate != null && !bidRate.isEmpty() && bidQty != null && !bidQty.isEmpty();
+        boolean hasAsks = offRate != null && !offRate.isEmpty() && offQty != null && !offQty.isEmpty();
+        return hasBids || hasAsks;
     }
 
     /**
