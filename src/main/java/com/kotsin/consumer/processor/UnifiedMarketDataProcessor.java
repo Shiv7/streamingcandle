@@ -143,9 +143,9 @@ public class UnifiedMarketDataProcessor {
             StreamJoined.with(Serdes.String(), TickData.serde(), OrderBookSnapshot.serde())
         );
         
-        // Key by scripCode
+        // Key by underlying equity scripCode (map derivatives to their underlying)
         KStream<String, TickData> keyed = enrichedTicks.selectKey(
-            (k, v) -> v.getScripCode()
+            (k, v) -> getUnderlyingEquityScripCode(v)
         );
 
         // FIX #3: Use 1-minute windows instead of 30-minute to enable real-time emission
@@ -302,6 +302,35 @@ public class UnifiedMarketDataProcessor {
             log.warn("⚠️ Invalid timestamp for token {}: {}", tick.getToken(), e.toString());
             return false;
         }
+    }
+    
+    /**
+     * Get underlying equity scripCode for a tick.
+     * If it's a derivative (ExchType=D), resolve to underlying equity.
+     * Otherwise, return the tick's own scripCode.
+     */
+    private String getUnderlyingEquityScripCode(TickData tick) {
+        if (tick == null) {
+            return null;
+        }
+        
+        // If it's a derivative, resolve to underlying equity
+        if ("D".equalsIgnoreCase(tick.getExchangeType())) {
+            InstrumentFamily family = cacheService.resolveFamily(
+                tick.getScripCode(),
+                tick.getExchangeType(),
+                tick.getCompanyName()
+            );
+            
+            if (family != null && family.getEquityScripCode() != null) {
+                log.debug("📍 Mapped derivative {} to underlying equity {}", 
+                    tick.getScripCode(), family.getEquityScripCode());
+                return family.getEquityScripCode();
+            }
+        }
+        
+        // For equities or if resolution fails, use the tick's own scripCode
+        return tick.getScripCode();
     }
     
     private TickData mergeOiIntoTick(TickData tick, OpenInterest oi) {
