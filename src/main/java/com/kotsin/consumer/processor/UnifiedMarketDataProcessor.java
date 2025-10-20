@@ -171,12 +171,12 @@ public class UnifiedMarketDataProcessor {
                 Materialized.<String, MultiTimeframeState, WindowStore<Bytes, byte[]>>as("multi-timeframe-store")
                     .withKeySerde(Serdes.String())
                     .withValueSerde(new JsonSerde<>(MultiTimeframeState.class))
-            );
+            )
+            // Emit once per key when the 1-minute window closes
+            .suppress(Suppressed.untilWindowCloses(Suppressed.BufferConfig.unbounded()));
 
-        // FIX #3: Remove suppress - emit immediately when windows complete
-        // This allows real-time emission instead of 30-minute delays
+        // Deterministic: one emission per symbol per minute (on window close)
         aggregated.toStream()
-            .filter((windowedKey, state) -> state != null && state.getMessageCount() > 0)
             .mapValues(this::buildEnrichedMessage)
             .selectKey((windowedKey, enrichedData) -> windowedKey.key())
             .to(outputTopic, Produced.with(

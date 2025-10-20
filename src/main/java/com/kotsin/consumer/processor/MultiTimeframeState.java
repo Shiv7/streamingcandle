@@ -95,12 +95,12 @@ public class MultiTimeframeState {
             
             // Initialize accumulator window if not set yet
             if (accumulator.getWindowStart() == null) {
-                accumulator = new CandleAccumulator(windowStart);
+                accumulator = new CandleAccumulator(windowStart, minutes);
                 candleAccumulators.put(timeframe, accumulator);
             } else if (!accumulator.getWindowStart().equals(windowStart)) {
                 // New window started, mark previous as complete and rotate
                 accumulator.markComplete();
-                accumulator = new CandleAccumulator(windowStart);
+                accumulator = new CandleAccumulator(windowStart, minutes);
                 candleAccumulators.put(timeframe, accumulator);
             }
             
@@ -117,11 +117,11 @@ public class MultiTimeframeState {
             long windowStart = alignToTimeframe(tick.getTimestamp(), minutes);
             
             if (accumulator.getWindowStart() == null) {
-                accumulator = new OiAccumulator(windowStart);
+                accumulator = new OiAccumulator(windowStart, minutes);
                 oiAccumulators.put(timeframe, accumulator);
             } else if (!accumulator.getWindowStart().equals(windowStart)) {
                 accumulator.markComplete();
-                accumulator = new OiAccumulator(windowStart);
+                accumulator = new OiAccumulator(windowStart, minutes);
                 oiAccumulators.put(timeframe, accumulator);
             }
             
@@ -202,6 +202,7 @@ class CandleAccumulator {
     private Double close;
     private Long volume = 0L;
     private Long windowEnd;
+    private int windowMinutes = 1;
     private boolean complete = false;
     private int tickCount = 0;
     
@@ -209,15 +210,16 @@ class CandleAccumulator {
         this.windowStart = null;
     }
     
-    public CandleAccumulator(Long windowStart) {
+    public CandleAccumulator(Long windowStart, int minutes) {
         this.windowStart = windowStart;
-        this.windowEnd = windowStart + (60 * 1000); // Default 1 minute
+        this.windowMinutes = Math.max(1, minutes);
+        this.windowEnd = windowStart + (windowMinutes * 60L * 1000L);
     }
     
     public void addTick(TickData tick) {
         if (windowStart == null) {
             windowStart = alignToMinute(tick.getTimestamp());
-            windowEnd = windowStart + (60 * 1000);
+            windowEnd = windowStart + (windowMinutes * 60L * 1000L);
         }
         
         tickCount++;
@@ -284,19 +286,22 @@ class OiAccumulator {
     private Double oiConcentration;
     private boolean complete = false;
     
+    private int windowMinutes = 1;
+    
     public OiAccumulator() {
         this.windowStart = null;
     }
     
-    public OiAccumulator(Long windowStart) {
+    public OiAccumulator(Long windowStart, int minutes) {
         this.windowStart = windowStart;
-        this.windowEnd = windowStart + (60 * 1000);
+        this.windowMinutes = Math.max(1, minutes);
+        this.windowEnd = windowStart + (windowMinutes * 60L * 1000L);
     }
     
     public void addOiData(TickData tick) {
         if (windowStart == null) {
             windowStart = alignToMinute(tick.getTimestamp());
-            windowEnd = windowStart + (60 * 1000);
+            windowEnd = windowStart + (windowMinutes * 60L * 1000L);
         }
         
         if (oiStart == null) {
