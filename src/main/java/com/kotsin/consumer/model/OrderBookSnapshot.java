@@ -2,6 +2,7 @@ package com.kotsin.consumer.model;
 
 import com.fasterxml.jackson.annotation.JsonIgnoreProperties;
 import com.fasterxml.jackson.annotation.JsonProperty;
+import com.fasterxml.jackson.annotation.JsonAlias;
 import lombok.AllArgsConstructor;
 import lombok.Builder;
 import lombok.Data;
@@ -22,24 +23,33 @@ import java.util.stream.Collectors;
 public class OrderBookSnapshot {
 
     @JsonProperty("Exch")
+    @JsonAlias({"exchange"})
     private String exchange;
 
     @JsonProperty("ExchType")
+    @JsonAlias({"exchangeType"})
     private String exchangeType;
 
     @JsonProperty("Token")
+    @JsonAlias({"token"})
     private String token;
 
     // Backward-compat arrays (may be absent)
+    @JsonAlias({"bidRate"})
     private List<Double> bidRate;
+    @JsonAlias({"bidQty"})
     private List<Long> bidQty;
+    @JsonAlias({"offRate","askRate"})
     private List<Double> offRate;
+    @JsonAlias({"offQty","askQty"})
     private List<Long> offQty;
 
     @JsonProperty("TBidQ")
+    @JsonAlias({"totalBidQty"})
     private Long totalBidQty;
 
     @JsonProperty("TOffQ")
+    @JsonAlias({"totalOffQty"})
     private Long totalOffQty;
 
     @JsonProperty("companyName")
@@ -209,24 +219,13 @@ public class OrderBookSnapshot {
      * Check if this snapshot is valid
      */
     public boolean isValid() {
-        // Validate that we have essential data
         if (token == null || token.isEmpty()) {
             return false;
         }
-        
-        // Must have at least one side of the book
         boolean hasBids = bidRate != null && !bidRate.isEmpty() && bidQty != null && !bidQty.isEmpty();
         boolean hasAsks = offRate != null && !offRate.isEmpty() && offQty != null && !offQty.isEmpty();
-        
-        if (!hasBids && !hasAsks) {
-            return false;
-        }
-        
-        // Must have valid timestamp
-        if (receivedTimestamp == null || receivedTimestamp <= 0) {
-            return false;
-        }
-        
+        if (!hasBids && !hasAsks) { return false; }
+        if (receivedTimestamp == null || receivedTimestamp <= 0) { return false; }
         return true;
     }
 

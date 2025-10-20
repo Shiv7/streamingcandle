@@ -263,21 +263,63 @@ public class UnifiedMarketDataProcessor {
         .repartition(Repartitioned.with(Serdes.String(), InstrumentCandle.serde()));
 
         // Token-keyed OI and Orderbook materialized tables (derive key from payload token)
-        KTable<String, OpenInterest> oiTable = builder.stream(
+        // OpenInterest token-keyed table with derived oiChange (prev/current per token)
+        KStream<String, OpenInterest> oiStreamRaw = builder.stream(
             oiTopic,
             Consumed.with(Serdes.String(), OpenInterest.serde())
-        )
-        .map((k, v) -> new KeyValue<>(v != null ? String.valueOf(v.getToken()) : null, v))
-        .groupByKey(Grouped.with(Serdes.String(), OpenInterest.serde()))
-        .reduce((prev, curr) -> curr);
+        );
 
+        // Derive per-token oiChange using a state store
+        final String oiPrevStore = "oi-prev-store";
+        builder.addStateStore(
+            org.apache.kafka.streams.state.Stores.keyValueStoreBuilder(
+                org.apache.kafka.streams.state.Stores.persistentKeyValueStore(oiPrevStore),
+                Serdes.String(),
+                Serdes.Long()
+            )
+        );
+
+        KStream<String, OpenInterest> oiWithChange = oiStreamRaw
+            .selectKey((k, v) -> v != null ? String.valueOf(v.getToken()) : null)
+            .transform(() -> new org.apache.kafka.streams.kstream.Transformer<String, OpenInterest, KeyValue<String, OpenInterest>>() {
+                private org.apache.kafka.streams.state.KeyValueStore<String, Long> store;
+                @SuppressWarnings("unchecked")
+                @Override public void init(org.apache.kafka.streams.processor.ProcessorContext context) {
+                    store = (org.apache.kafka.streams.state.KeyValueStore<String, Long>) context.getStateStore(oiPrevStore);
+                }
+                @Override public KeyValue<String, OpenInterest> transform(String key, OpenInterest value) {
+                    if (key == null || value == null || value.getOpenInterest() == null) return KeyValue.pair(key, value);
+                    Long prev = store.get(key);
+                    if (prev != null) {
+                        value.setOiChange(value.getOpenInterest() - prev);
+                    }
+                    store.put(key, value.getOpenInterest());
+                    return KeyValue.pair(key, value);
+                }
+                @Override public void close() {}
+            }, oiPrevStore);
+
+        KTable<String, OpenInterest> oiTable = oiWithChange
+            .groupByKey(Grouped.with(Serdes.String(), OpenInterest.serde()))
+            .reduce((prev, curr) -> curr);
+
+        // Orderbook token-keyed table (tolerant JSON)
         KTable<String, OrderBookSnapshot> orderbookTable = builder.stream(
-            orderbookTopic,
-            Consumed.with(Serdes.String(), OrderBookSnapshot.serde())
-        )
-        .map((k, v) -> new KeyValue<>(v != null ? String.valueOf(v.getToken()) : null, v))
-        .groupByKey(Grouped.with(Serdes.String(), OrderBookSnapshot.serde()))
-        .reduce((prev, curr) -> curr);
+                orderbookTopic,
+                Consumed.with(Serdes.String(), OrderBookSnapshot.serde())
+            )
+            .map((k, v) -> new KeyValue<>(v != null ? String.valueOf(v.getToken()) : null, v))
+            .groupByKey(Grouped.with(Serdes.String(), OrderBookSnapshot.serde()))
+            .reduce((prev, curr) -> curr);
+
+        // Optional: Microstructure features table (if produced elsewhere), join by token/scripCode
+        KTable<String, MicrostructureData> microTable = null;
+        try {
+            microTable = builder.table(
+                "microstructure-features",
+                Consumed.with(Serdes.String(), new org.springframework.kafka.support.serializer.JsonSerde<>(MicrostructureData.class))
+            );
+        } catch (Exception ignore) {}
 
         // Join by token (or original key if token not found)
         KStream<String, InstrumentCandle> enrichedCandles = rekeyedByToken
@@ -302,7 +344,22 @@ public class UnifiedMarketDataProcessor {
                     candle.setOrderbookDepth(depth);
                 } else { metrics.incOrderbookJoinMiss(); }
                 return candle;
+            })
+            .transformValues(() -> new org.apache.kafka.streams.kstream.ValueTransformer<InstrumentCandle, InstrumentCandle>() {
+                private org.apache.kafka.streams.state.KeyValueStore<String, InstrumentCandle> noop;
+                @Override public void init(org.apache.kafka.streams.processor.ProcessorContext context) {}
+                @Override public InstrumentCandle transform(InstrumentCandle value) { return value; }
+                @Override public void close() {}
             });
+
+        if (microTable != null) {
+            enrichedCandles = enrichedCandles.leftJoin(microTable, (candle, micro) -> {
+                if (micro != null && micro.isValid()) {
+                    candle.setMicrostructure(micro);
+                }
+                return candle;
+            });
+        }
 
         // Map back to family key for aggregation
         KStream<String, InstrumentCandle> keyedByFamily = enrichedCandles

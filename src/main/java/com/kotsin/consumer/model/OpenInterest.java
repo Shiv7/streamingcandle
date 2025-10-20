@@ -2,6 +2,7 @@ package com.kotsin.consumer.model;
 
 import com.fasterxml.jackson.annotation.JsonIgnoreProperties;
 import com.fasterxml.jackson.annotation.JsonProperty;
+import com.fasterxml.jackson.annotation.JsonAlias;
 import lombok.AllArgsConstructor;
 import lombok.Builder;
 import lombok.Data;
@@ -18,21 +19,29 @@ import lombok.NoArgsConstructor;
 public class OpenInterest {
     
     @JsonProperty("Exch")
+    @JsonAlias({"exchange"})
     private String exchange;
 
     @JsonProperty("ExchType")
+    @JsonAlias({"exchangeType"})
     private String exchangeType;
 
     @JsonProperty("Token")
+    @JsonAlias({"token"})
     private int token;
 
     @JsonProperty("OpenInterest")
+    @JsonAlias({"openInterest"})
     private Long openInterest;
 
     // Optional fields (may not be present in producer payload)
+    @JsonAlias({"oiChange"})
     private Long oiChange;
+    @JsonAlias({"oiChangePercent"})
     private Double oiChangePercent;
+    @JsonAlias({"lastRate"})
     private Double lastRate;
+    @JsonAlias({"volume"})
     private Long volume;
 
     @JsonProperty("companyName")
