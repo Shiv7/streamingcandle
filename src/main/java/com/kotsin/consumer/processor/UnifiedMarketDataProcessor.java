@@ -223,7 +223,11 @@ public class UnifiedMarketDataProcessor {
         // DUAL EMISSION STRATEGY
         KStream<String, MultiTimeframeState> stateStream = aggregated.toStream()
             .selectKey((windowedKey, state) -> windowedKey.key())
-            .peek((key, state) -> log.debug("📤 Emitting state for {}: messageCount={}", key, state.getMessageCount()));
+            .peek((key, state) -> {
+                log.debug("📤 Emitting state for {}: messageCount={}", key, state.getMessageCount());
+                // Force window completion for finalized candles
+                state.forceCompleteWindows();
+            });
 
         // Stream 1: ENRICHED updates (DEPRECATED)
         if (enrichedOutputEnabled) {

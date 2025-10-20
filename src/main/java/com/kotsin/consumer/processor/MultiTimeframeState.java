@@ -87,4 +87,12 @@ public class MultiTimeframeState {
     public EnumMap<Timeframe, CandleAccumulator> getCandleAccumulators() {
         return stateManager.getCandleAccumulators();
     }
+
+    /**
+     * Force completion of all windows for finalized candle emission
+     * This is needed when suppression is removed
+     */
+    public void forceCompleteWindows() {
+        stateManager.forceCompleteWindows();
+    }
 }
