@@ -29,8 +29,11 @@ public class InstrumentStateManager {
     private final EnumMap<Timeframe, MicrostructureAccumulator> microAccumulators = new EnumMap<>(Timeframe.class);
     // Imbalance bar accumulators per timeframe
     private final EnumMap<Timeframe, ImbalanceBarAccumulator> imbAccumulators = new EnumMap<>(Timeframe.class);
-    // Orderbook depth accumulators per timeframe
+    // Orderbook depth accumulators per timeframe (reset on window rotation for clean metrics)
     private final EnumMap<Timeframe, com.kotsin.consumer.processor.OrderbookDepthAccumulator> orderbookAccumulators = new EnumMap<>(Timeframe.class);
+    
+    // Global orderbook accumulator (NEVER reset - for iceberg/spoofing detection across windows)
+    private com.kotsin.consumer.processor.OrderbookDepthAccumulator globalOrderbookAccumulator;
 
     // Basic instrument info
     private String scripCode;
@@ -63,6 +66,10 @@ public class InstrumentStateManager {
     }
 
     private void initializeAccumulators() {
+        // Initialize global orderbook accumulator (never reset)
+        globalOrderbookAccumulator = new com.kotsin.consumer.processor.OrderbookDepthAccumulator();
+        
+        // Initialize per-timeframe accumulators
         for (Timeframe timeframe : TIMEFRAMES) {
             candleAccumulators.put(timeframe, new CandleAccumulator());
             microAccumulators.put(timeframe, new MicrostructureAccumulator());
@@ -102,7 +109,10 @@ public class InstrumentStateManager {
             orderbook.getBids() != null ? orderbook.getBids().size() : 0,
             orderbook.getAsks() != null ? orderbook.getAsks().size() : 0);
         
-        // Update all timeframe accumulators with latest snapshot
+        // Update global accumulator (NEVER reset - for iceberg/spoofing detection)
+        globalOrderbookAccumulator.addOrderbook(orderbook);
+        
+        // Update per-timeframe accumulators (reset on window rotation for clean metrics)
         for (com.kotsin.consumer.processor.OrderbookDepthAccumulator acc : orderbookAccumulators.values()) {
             acc.addOrderbook(orderbook);
         }
@@ -251,8 +261,18 @@ public class InstrumentStateManager {
             microAcc.toMicrostructureData(accumulator.getWindowStart(), accumulator.getWindowEnd()) : null;
         ImbalanceBarAccumulator imbAcc = imbAccumulators.get(timeframe);
         ImbalanceBarData imbalanceBars = imbAcc != null ? imbAcc.toImbalanceBarData() : null;
+        
+        // DUAL ORDERBOOK ACCUMULATOR MERGE:
+        // 1. Get per-window orderbook metrics (spread, depth, imbalances)
         com.kotsin.consumer.processor.OrderbookDepthAccumulator obAcc = orderbookAccumulators.get(timeframe);
-        com.kotsin.consumer.model.OrderbookDepthData orderbookDepth = obAcc != null ? obAcc.toOrderbookDepthData() : null;
+        com.kotsin.consumer.model.OrderbookDepthData windowOrderbook = obAcc != null ? obAcc.toOrderbookDepthData() : null;
+        
+        // 2. Get global iceberg/spoofing detection (crosses window boundaries)
+        com.kotsin.consumer.model.OrderbookDepthData globalDetection = globalOrderbookAccumulator != null ? 
+            globalOrderbookAccumulator.toOrderbookDepthData() : null;
+        
+        // 3. Merge: use window metrics, but overlay global iceberg/spoofing data
+        com.kotsin.consumer.model.OrderbookDepthData orderbookDepth = mergeOrderbookData(windowOrderbook, globalDetection);
 
         return InstrumentCandle.builder()
             .scripCode(scripCode)
@@ -288,6 +308,54 @@ public class InstrumentStateManager {
             .microstructure(microstructure != null && microstructure.isValid() ? microstructure : null)
             .imbalanceBars(imbalanceBars)
             .orderbookDepth(orderbookDepth)
+            .build();
+    }
+
+    /**
+     * Merge per-window orderbook metrics with global iceberg/spoofing detection
+     * 
+     * Strategy:
+     * - Use window metrics for: spread, depth, imbalances, VWAPs, slopes (time-aligned)
+     * - Use global metrics for: iceberg detection, spoofing detection (cross-window history)
+     */
+    private com.kotsin.consumer.model.OrderbookDepthData mergeOrderbookData(
+        com.kotsin.consumer.model.OrderbookDepthData windowData,
+        com.kotsin.consumer.model.OrderbookDepthData globalData
+    ) {
+        if (windowData == null && globalData == null) return null;
+        if (windowData == null) return globalData;  // Only global data available
+        if (globalData == null) return windowData;  // Only window data available
+        
+        // Merge: window metrics + global iceberg/spoofing
+        return com.kotsin.consumer.model.OrderbookDepthData.builder()
+            // Use window-aligned metrics
+            .spread(windowData.getSpread())
+            .totalBidDepth(windowData.getTotalBidDepth())
+            .totalAskDepth(windowData.getTotalAskDepth())
+            .weightedDepthImbalance(windowData.getWeightedDepthImbalance())
+            .level1Imbalance(windowData.getLevel1Imbalance())
+            .level2to5Imbalance(windowData.getLevel2to5Imbalance())
+            .level6to10Imbalance(windowData.getLevel6to10Imbalance())
+            .bidVWAP(windowData.getBidVWAP())
+            .askVWAP(windowData.getAskVWAP())
+            .bidSlope(windowData.getBidSlope())
+            .askSlope(windowData.getAskSlope())
+            .slopeRatio(windowData.getSlopeRatio())
+            .bidProfile(windowData.getBidProfile())
+            .askProfile(windowData.getAskProfile())
+            .timestamp(windowData.getTimestamp())
+            .depthLevels(windowData.getDepthLevels())
+            // Use global cross-window iceberg/spoofing detection
+            .icebergDetectedBid(globalData.getIcebergDetectedBid())
+            .icebergDetectedAsk(globalData.getIcebergDetectedAsk())
+            .icebergProbabilityBid(globalData.getIcebergProbabilityBid())
+            .icebergProbabilityAsk(globalData.getIcebergProbabilityAsk())
+            .spoofingCountLast1Min(globalData.getSpoofingCountLast1Min())
+            .activeSpoofingBid(globalData.getActiveSpoofingBid())
+            .activeSpoofingAsk(globalData.getActiveSpoofingAsk())
+            .spoofingEvents(globalData.getSpoofingEvents())
+            // Flags (isValid() is a computed method, not a field)
+            .isComplete(windowData.getIsComplete() != null ? windowData.getIsComplete() : globalData.getIsComplete())
             .build();
     }
 

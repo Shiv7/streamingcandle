@@ -7,6 +7,7 @@ import lombok.Data;
 import lombok.extern.slf4j.Slf4j;
 
 import java.util.*;
+import java.util.Comparator;
 
 /**
  * Service for detecting spoofing activity in the orderbook
@@ -17,6 +18,7 @@ public class SpoofingDetectionService {
 
     private static final long SPOOF_DURATION_THRESHOLD_MS = 5000;  // 5 seconds
     private static final double SPOOF_SIZE_THRESHOLD = 0.3;  // 30% of total depth
+    private static final int MAX_TRACKING_ENTRIES = 20;  // Prevent unbounded growth
 
     private final List<OrderbookDepthData.SpoofingEvent> spoofingEvents = new ArrayList<>();
     private final Map<Double, SpoofDetectionState> bidSpoofTracking = new HashMap<>();
@@ -57,6 +59,27 @@ public class SpoofingDetectionService {
         // Clean up old spoofing events (older than 1 minute)
         long oneMinuteAgo = currentTime - 60000;
         spoofingEvents.removeIf(event -> event.getTimestamp() < oneMinuteAgo);
+        
+        // Clean up stale tracking entries (prevent unbounded growth)
+        cleanupStaleTracking(bidSpoofTracking, currentTime);
+        cleanupStaleTracking(askSpoofTracking, currentTime);
+    }
+    
+    private void cleanupStaleTracking(Map<Double, SpoofDetectionState> tracking, long currentTime) {
+        // Remove entries older than 10 seconds
+        tracking.entrySet().removeIf(entry -> 
+            (currentTime - entry.getValue().firstSeenTime) > 10000);
+        
+        // If still over limit, remove oldest entries
+        if (tracking.size() > MAX_TRACKING_ENTRIES) {
+            List<Map.Entry<Double, SpoofDetectionState>> entries = new ArrayList<>(tracking.entrySet());
+            entries.sort(Comparator.comparingLong(e -> e.getValue().firstSeenTime));
+            
+            int toRemove = tracking.size() - MAX_TRACKING_ENTRIES;
+            for (int i = 0; i < toRemove; i++) {
+                tracking.remove(entries.get(i).getKey());
+            }
+        }
     }
 
     private void detectSpoofingOneSide(
