@@ -156,10 +156,10 @@ public class CandleData {
             return String.format("OHLCV[%.2f,%.2f,%.2f,%.2f,%d] BuyVol:%d SellVol:%d Delta:%.1f%% %s",
                 open, high, low, close, volume,
                 buyVolume, sellVolume, volumeDeltaPercent,
-                isComplete ? "COMPLETE" : "PARTIAL");
+                isComplete != null && isComplete ? "COMPLETE" : "PARTIAL");
         }
         return String.format("OHLCV[%.2f,%.2f,%.2f,%.2f,%d] %s",
             open, high, low, close, volume,
-            isComplete ? "COMPLETE" : "PARTIAL");
+            isComplete != null && isComplete ? "COMPLETE" : "PARTIAL");
     }
 }

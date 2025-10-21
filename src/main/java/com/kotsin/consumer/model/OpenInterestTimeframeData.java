@@ -101,10 +101,10 @@ public class OpenInterestTimeframeData {
         if (putCallRatio != null) {
             return String.format("OI[%d,%+d,%.2f%%] PCR:%.2f Put:%d Call:%d %s",
                 oi, oiChange, oiChangePercent, putCallRatio, putOi, callOi,
-                isComplete ? "COMPLETE" : "PARTIAL");
+                isComplete != null && isComplete ? "COMPLETE" : "PARTIAL");
         }
         return String.format("OI[%d,%+d,%.2f%%] %s",
             oi, oiChange, oiChangePercent,
-            isComplete ? "COMPLETE" : "PARTIAL");
+            isComplete != null && isComplete ? "COMPLETE" : "PARTIAL");
     }
 }

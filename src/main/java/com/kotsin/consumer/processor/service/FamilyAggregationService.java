@@ -211,6 +211,7 @@ public class FamilyAggregationService {
             .vpin(vpinSum / n)
             .depthImbalance(depthImbSum / n)
             .kyleLambda(kyleSum / n)
+            .isComplete(true)
             .build();
     }
 

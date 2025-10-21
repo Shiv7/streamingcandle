@@ -95,7 +95,10 @@ public class MicrostructureData {
      */
     public String getDisplayString() {
         return String.format("Micro[OFI:%.2f,VPIN:%.2f,Depth:%.2f,Spread:%.3f] %s",
-            ofi, vpin, depthImbalance, effectiveSpread,
-            isComplete ? "COMPLETE" : "PARTIAL");
+            ofi != null ? ofi : 0.0,
+            vpin != null ? vpin : 0.0,
+            depthImbalance != null ? depthImbalance : 0.0,
+            effectiveSpread != null ? effectiveSpread : 0.0,
+            isComplete != null && isComplete ? "COMPLETE" : "PARTIAL");
     }
 }
