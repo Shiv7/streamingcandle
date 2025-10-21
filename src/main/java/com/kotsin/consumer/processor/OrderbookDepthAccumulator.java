@@ -26,9 +26,9 @@ import java.util.List;
 public class OrderbookDepthAccumulator {
 
     // Composed services (marked transient for Kafka Streams serialization)
-    // These are lazily initialized on first access after deserialization
-    @JsonIgnore
-    private transient IcebergDetectionService icebergDetectionService;
+    // IcebergDetectionService is serialized to preserve history across restarts
+    // SpoofingDetectionService and OrderbookDepthCalculator are stateless, lazily initialized
+    private IcebergDetectionService icebergDetectionService;
     
     @JsonIgnore
     private transient SpoofingDetectionService spoofingDetectionService;
@@ -129,11 +129,11 @@ public class OrderbookDepthAccumulator {
 
             Double bidSlope = bidProfile.isEmpty() ? null : getDepthCalculator().calculateSlope(bidProfile);
             Double askSlope = askProfile.isEmpty() ? null : getDepthCalculator().calculateSlope(askProfile);
-            Double slopeRatio = (askSlope != null && askSlope != 0) ? bidSlope / askSlope : null;
+            Double slopeRatio = (askSlope != null && askSlope != 0 && bidSlope != null) ? bidSlope / askSlope : null;
 
             // Get results from detection services (using lazy getters)
-            Boolean icebergBid = getIcebergService().detectIcebergBid() ? true : null;
-            Boolean icebergAsk = getIcebergService().detectIcebergAsk() ? true : null;
+            Boolean icebergBid = getIcebergService().detectIcebergBid();
+            Boolean icebergAsk = getIcebergService().detectIcebergAsk();
             Double icebergProbBid = getIcebergService().calculateIcebergProbabilityBid();
             Double icebergProbAsk = getIcebergService().calculateIcebergProbabilityAsk();
 

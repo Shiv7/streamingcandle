@@ -33,24 +33,24 @@ public class IcebergDetectionService {
         }
     }
 
-    public boolean detectIcebergBid() {
+    public Boolean detectIcebergBid() {
         return detectIceberg(recentBidQuantities);
     }
 
-    public boolean detectIcebergAsk() {
+    public Boolean detectIcebergAsk() {
         return detectIceberg(recentAskQuantities);
     }
 
-    public double calculateIcebergProbabilityBid() {
+    public Double calculateIcebergProbabilityBid() {
         return calculateIcebergProbability(recentBidQuantities);
     }
 
-    public double calculateIcebergProbabilityAsk() {
+    public Double calculateIcebergProbabilityAsk() {
         return calculateIcebergProbability(recentAskQuantities);
     }
 
-    private boolean detectIceberg(List<Integer> recentQuantities) {
-        if (recentQuantities.size() < 10) return false;
+    private Boolean detectIceberg(List<Integer> recentQuantities) {
+        if (recentQuantities.size() < 10) return null;
 
         // Iceberg: unusually consistent quantities (low variance)
         double mean = recentQuantities.stream().mapToInt(Integer::intValue).average().orElse(0.0);
@@ -65,8 +65,8 @@ public class IcebergDetectionService {
         return cv < CV_THRESHOLD && mean > MIN_SIZE_THRESHOLD;
     }
 
-    private double calculateIcebergProbability(List<Integer> recentQuantities) {
-        if (recentQuantities.size() < 10) return 0.0;
+    private Double calculateIcebergProbability(List<Integer> recentQuantities) {
+        if (recentQuantities.size() < 10) return null;
 
         double mean = recentQuantities.stream().mapToInt(Integer::intValue).average().orElse(0.0);
         double variance = recentQuantities.stream()

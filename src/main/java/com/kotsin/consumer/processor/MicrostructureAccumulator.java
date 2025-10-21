@@ -225,7 +225,7 @@ public class MicrostructureAccumulator {
         complete = true;
     }
 
-    public MicrostructureData toMicrostructureData() {
+    public MicrostructureData toMicrostructureData(Long windowStart, Long windowEnd) {
         return MicrostructureData.builder()
             .ofi(ofi)
             .vpin(vpin)
@@ -234,6 +234,8 @@ public class MicrostructureAccumulator {
             .effectiveSpread(effectiveSpread)
             .microprice(microprice)
             .isComplete(complete)
+            .windowStart(windowStart)
+            .windowEnd(windowEnd)
             .build();
     }
 }

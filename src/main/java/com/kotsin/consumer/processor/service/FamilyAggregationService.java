@@ -23,6 +23,9 @@ public class FamilyAggregationService {
      * Assemble family from individual instrument candles
      */
     public FamilyEnrichedData assembleFamily(String familyKey, InstrumentCandle candle, FamilyEnrichedData family) {
+        if (candle == null) {
+            return family; // No candle to add, return existing family
+        }
         if (family == null) {
             family = FamilyEnrichedData.builder().build();
         }
@@ -38,7 +41,7 @@ public class FamilyAggregationService {
             String name = null;
             if (family.getEquity() != null && family.getEquity().getCompanyName() != null) {
                 name = family.getEquity().getCompanyName();
-            } else if (candle != null) {
+            } else {
                 name = candle.getCompanyName();
             }
             family.setFamilyName(name);

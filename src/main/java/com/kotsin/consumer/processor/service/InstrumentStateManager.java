@@ -225,7 +225,8 @@ public class InstrumentStateManager {
 
         // Get microstructure data for this timeframe window
         MicrostructureAccumulator microAcc = microAccumulators.get(timeframe);
-        MicrostructureData microstructure = microAcc != null ? microAcc.toMicrostructureData() : null;
+        MicrostructureData microstructure = microAcc != null ? 
+            microAcc.toMicrostructureData(accumulator.getWindowStart(), accumulator.getWindowEnd()) : null;
         ImbalanceBarAccumulator imbAcc = imbAccumulators.get(timeframe);
         ImbalanceBarData imbalanceBars = imbAcc != null ? imbAcc.toImbalanceBarData() : null;
 

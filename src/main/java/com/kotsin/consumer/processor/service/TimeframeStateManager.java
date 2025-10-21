@@ -172,7 +172,9 @@ public class TimeframeStateManager {
     }
 
     public MicrostructureData getMicrostructure() {
-        return microstructureAccumulator.toMicrostructureData();
+        // Note: Called without timeframe context, so window times are null
+        // For window-aligned microstructure, use extractFinalizedCandle() instead
+        return microstructureAccumulator.toMicrostructureData(null, null);
     }
 
     public OrderbookDepthData getOrderbookDepth() {
