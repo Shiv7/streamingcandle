@@ -29,6 +29,8 @@ public class InstrumentStateManager {
     private final EnumMap<Timeframe, MicrostructureAccumulator> microAccumulators = new EnumMap<>(Timeframe.class);
     // Imbalance bar accumulators per timeframe
     private final EnumMap<Timeframe, ImbalanceBarAccumulator> imbAccumulators = new EnumMap<>(Timeframe.class);
+    // Orderbook depth accumulators per timeframe
+    private final EnumMap<Timeframe, com.kotsin.consumer.processor.OrderbookDepthAccumulator> orderbookAccumulators = new EnumMap<>(Timeframe.class);
 
     // Basic instrument info
     private String scripCode;
@@ -65,6 +67,7 @@ public class InstrumentStateManager {
             candleAccumulators.put(timeframe, new CandleAccumulator());
             microAccumulators.put(timeframe, new MicrostructureAccumulator());
             imbAccumulators.put(timeframe, new ImbalanceBarAccumulator());
+            orderbookAccumulators.put(timeframe, new com.kotsin.consumer.processor.OrderbookDepthAccumulator());
         }
     }
 
@@ -85,6 +88,15 @@ public class InstrumentStateManager {
 
         // Update all timeframes
         updateAllTimeframes(tick);
+    }
+
+    public void addOrderbook(com.kotsin.consumer.model.OrderBookSnapshot orderbook) {
+        if (orderbook == null || !orderbook.isValid()) return;
+        
+        // Update all timeframe accumulators with latest snapshot
+        for (com.kotsin.consumer.processor.OrderbookDepthAccumulator acc : orderbookAccumulators.values()) {
+            acc.addOrderbook(orderbook);
+        }
     }
 
     /**
@@ -192,6 +204,7 @@ public class InstrumentStateManager {
                 // New window started → reset per-timeframe accumulators
                 microAccumulators.put(timeframe, new MicrostructureAccumulator());
                 imbAccumulators.put(timeframe, new ImbalanceBarAccumulator());
+                orderbookAccumulators.put(timeframe, new com.kotsin.consumer.processor.OrderbookDepthAccumulator());
             }
 
             // Update accumulators
@@ -229,6 +242,8 @@ public class InstrumentStateManager {
             microAcc.toMicrostructureData(accumulator.getWindowStart(), accumulator.getWindowEnd()) : null;
         ImbalanceBarAccumulator imbAcc = imbAccumulators.get(timeframe);
         ImbalanceBarData imbalanceBars = imbAcc != null ? imbAcc.toImbalanceBarData() : null;
+        com.kotsin.consumer.processor.OrderbookDepthAccumulator obAcc = orderbookAccumulators.get(timeframe);
+        com.kotsin.consumer.model.OrderbookDepthData orderbookDepth = obAcc != null ? obAcc.toOrderbookDepthData() : null;
 
         return InstrumentCandle.builder()
             .scripCode(scripCode)
@@ -263,6 +278,7 @@ public class InstrumentStateManager {
             .timeframe(timeframe.getLabel())
             .microstructure(microstructure != null && microstructure.isValid() ? microstructure : null)
             .imbalanceBars(imbalanceBars)
+            .orderbookDepth(orderbookDepth)
             .build();
     }
 

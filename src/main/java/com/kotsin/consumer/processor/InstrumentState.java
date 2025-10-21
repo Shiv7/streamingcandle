@@ -1,6 +1,7 @@
 package com.kotsin.consumer.processor;
 
 import com.kotsin.consumer.model.InstrumentCandle;
+import com.kotsin.consumer.model.OrderBookSnapshot;
 import com.kotsin.consumer.model.TickData;
 import com.kotsin.consumer.processor.service.InstrumentStateManager;
 import lombok.Data;
@@ -18,10 +19,17 @@ import java.util.Set;
 public class InstrumentState {
 
     private final InstrumentStateManager stateManager = new InstrumentStateManager();
+    private OrderBookSnapshot latestOrderbook;
 
     // Delegate all operations to state manager
     public void addTick(TickData tick) {
         stateManager.addTick(tick);
+    }
+
+    public void addOrderbook(OrderBookSnapshot orderbook) {
+        this.latestOrderbook = orderbook;
+        // Delegate to manager
+        stateManager.addOrderbook(orderbook);
     }
 
     public boolean hasAnyCompleteWindow() {

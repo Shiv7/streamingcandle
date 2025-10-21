@@ -163,6 +163,33 @@ public class UnifiedMarketDataProcessor {
             )
             .filter((key, tick) -> tick != null && tick.getDeltaVolume() != null);
 
+        // Orderbook stream for enrichment
+        KStream<String, OrderBookSnapshot> orderbookStream = builder.stream(
+            orderbookTopic,
+            Consumed.with(Serdes.String(), OrderBookSnapshot.serde())
+        );
+
+        // Create token -> scripCode lookup table from tick stream
+        KTable<String, String> tokenToScripCode = ticks
+            .selectKey((k, tick) -> tick.getToken() != 0 ? String.valueOf(tick.getToken()) : null)
+            .filter((k, v) -> k != null)
+            .mapValues(tick -> tick.getScripCode())
+            .toTable(Materialized.with(Serdes.String(), Serdes.String()));
+
+        // Re-key orderbook by scripCode using lookup
+        KStream<String, OrderBookSnapshot> orderbookByScripCode = orderbookStream
+            .selectKey((k, v) -> v != null && v.getToken() != null ? v.getToken() : k)
+            .leftJoin(tokenToScripCode, 
+                (orderbook, scripCode) -> scripCode != null ? KeyValue.pair(scripCode, orderbook) : null,
+                Joined.with(Serdes.String(), OrderBookSnapshot.serde(), Serdes.String()))
+            .filter((k, v) -> v != null && v.value != null)
+            .selectKey((k, v) -> v.key)
+            .mapValues(v -> v.value);
+
+        // Materialize orderbook as table for join
+        KTable<String, OrderBookSnapshot> orderbookTable = orderbookByScripCode
+            .toTable(Materialized.with(Serdes.String(), OrderBookSnapshot.serde()));
+
         KStream<String, TickData> instrumentKeyed = ticks
             .selectKey((k, v) -> keyResolver.getInstrumentKey(v));
 
@@ -200,8 +227,18 @@ public class UnifiedMarketDataProcessor {
             .peek((windowedKey, state) -> state.forceCompleteWindows(windowedKey.window().end()))
             .selectKey((windowedKey, state) -> windowedKey.key());
 
+        // Enrich with orderbook data
+        KStream<String, InstrumentState> enrichedState = stateStream
+            .leftJoin(orderbookTable,
+                (state, orderbook) -> {
+                    if (orderbook != null && orderbook.isValid()) {
+                        state.addOrderbook(orderbook);
+                    }
+                    return state;
+                });
+
         if (candlesOutputEnabled) {
-            candleEmissionService.emitPerInstrumentCandles(stateStream, this::getCandleTopicForTimeframe);
+            candleEmissionService.emitPerInstrumentCandles(enrichedState, this::getCandleTopicForTimeframe);
         }
 
         KafkaStreams streams = new KafkaStreams(builder.build(), props);
@@ -236,12 +273,11 @@ public class UnifiedMarketDataProcessor {
             .selectKey((k, c) -> c != null ? c.getScripCode() : k)
             .repartition(Repartitioned.with(Serdes.String(), InstrumentCandle.serde()));
 
-        // Build OI and Orderbook enrichment tables
+        // Build OI enrichment table
         KTable<String, OpenInterest> oiTable = buildOiTable(builder);
-        KTable<String, OrderbookDepthData> orderbookDepthTable = buildOrderbookDepthTable(builder);
 
-        // Enrich candles with OI and Orderbook data
-        KStream<String, InstrumentCandle> enrichedCandles = enrichCandles(rekeyedByToken, oiTable, orderbookDepthTable);
+        // Enrich candles with OI data (orderbook already embedded from per-instrument stream)
+        KStream<String, InstrumentCandle> enrichedCandles = enrichCandles(rekeyedByToken, oiTable);
 
         // Map to family key and aggregate
         KStream<String, InstrumentCandle> keyedByFamily = enrichedCandles
@@ -334,52 +370,13 @@ public class UnifiedMarketDataProcessor {
             .reduce((prev, curr) -> curr);
     }
 
-    /**
-     * Build orderbook depth table with accumulator
-     */
-    private KTable<String, OrderbookDepthData> buildOrderbookDepthTable(StreamsBuilder builder) {
-        final String obAccStore = "orderbook-acc-store";
-        builder.addStateStore(
-            org.apache.kafka.streams.state.Stores.keyValueStoreBuilder(
-                org.apache.kafka.streams.state.Stores.persistentKeyValueStore(obAccStore),
-                Serdes.String(),
-                new org.springframework.kafka.support.serializer.JsonSerde<>(com.kotsin.consumer.processor.OrderbookDepthAccumulator.class)
-            )
-        );
-
-        return builder.stream(
-            orderbookTopic,
-                Consumed.with(Serdes.String(), OrderBookSnapshot.serde())
-            )
-            .selectKey((k, v) -> v != null && v.getToken() != null ? v.getToken() : k)
-            .transform(() -> new org.apache.kafka.streams.kstream.Transformer<String, OrderBookSnapshot, KeyValue<String, OrderbookDepthData>>() {
-                private org.apache.kafka.streams.state.KeyValueStore<String, com.kotsin.consumer.processor.OrderbookDepthAccumulator> store;
-                @SuppressWarnings("unchecked")
-                @Override public void init(org.apache.kafka.streams.processor.ProcessorContext context) {
-                    store = (org.apache.kafka.streams.state.KeyValueStore<String, com.kotsin.consumer.processor.OrderbookDepthAccumulator>) context.getStateStore(obAccStore);
-                }
-                @Override public KeyValue<String, OrderbookDepthData> transform(String key, OrderBookSnapshot current) {
-                    if (key == null || current == null || !current.isValid()) return KeyValue.pair(key, null);
-                    com.kotsin.consumer.processor.OrderbookDepthAccumulator acc = store.get(key);
-                    if (acc == null) acc = new com.kotsin.consumer.processor.OrderbookDepthAccumulator();
-                    acc.addOrderbook(current);
-                    store.put(key, acc);
-                    OrderbookDepthData data = acc.toOrderbookDepthData();
-                    return KeyValue.pair(key, data);
-                }
-                @Override public void close() {}
-            }, obAccStore)
-            .groupByKey(Grouped.with(Serdes.String(), OrderbookDepthData.serde()))
-            .reduce((prev, curr) -> curr);
-    }
 
     /**
-     * Enrich candles with OI and Orderbook data
+     * Enrich candles with OI data (orderbook already embedded from per-instrument stream)
      */
     private KStream<String, InstrumentCandle> enrichCandles(
             KStream<String, InstrumentCandle> candles,
-            KTable<String, OpenInterest> oiTable,
-            KTable<String, OrderbookDepthData> orderbookDepthTable) {
+            KTable<String, OpenInterest> oiTable) {
         
         return candles
             .leftJoin(oiTable, (candle, oi) -> {
@@ -392,17 +389,6 @@ public class UnifiedMarketDataProcessor {
                 } else {
                     metrics.incOiJoinMiss();
                     log.debug("❌ OI join miss: scripCode={}", candle.getScripCode());
-                }
-                return candle;
-            })
-            .leftJoin(orderbookDepthTable, (candle, depth) -> {
-                if (depth != null && (depth.getTotalBidDepth() != null || depth.getBidProfile() != null)) {
-                    candle.setOrderbookDepth(depth);
-                    log.debug("✅ Orderbook join success: scripCode={} spread={} totalBid={} totalAsk={} level1Imb={}", 
-                        candle.getScripCode(), depth.getSpread(), depth.getTotalBidDepth(), depth.getTotalAskDepth(), depth.getLevel1Imbalance());
-        } else {
-                    metrics.incOrderbookJoinMiss();
-                    log.debug("❌ Orderbook join miss: scripCode={} depthNull={} ", candle.getScripCode(), (depth == null));
                 }
                 return candle;
             });
