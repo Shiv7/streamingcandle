@@ -91,7 +91,16 @@ public class InstrumentStateManager {
     }
 
     public void addOrderbook(com.kotsin.consumer.model.OrderBookSnapshot orderbook) {
-        if (orderbook == null || !orderbook.isValid()) return;
+        if (orderbook == null || !orderbook.isValid()) {
+            log.debug("⚠️ OB INVALID in manager: scripCode={} ob={} valid={}", 
+                scripCode, orderbook != null, orderbook != null && orderbook.isValid());
+            return;
+        }
+        
+        log.debug("✅ OB ADD to manager: scripCode={} token={} bids={} asks={}", 
+            scripCode, orderbook.getToken(), 
+            orderbook.getBids() != null ? orderbook.getBids().size() : 0,
+            orderbook.getAsks() != null ? orderbook.getAsks().size() : 0);
         
         // Update all timeframe accumulators with latest snapshot
         for (com.kotsin.consumer.processor.OrderbookDepthAccumulator acc : orderbookAccumulators.values()) {

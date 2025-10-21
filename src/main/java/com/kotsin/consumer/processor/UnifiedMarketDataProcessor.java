@@ -163,31 +163,15 @@ public class UnifiedMarketDataProcessor {
             )
             .filter((key, tick) -> tick != null && tick.getDeltaVolume() != null);
 
-        // Orderbook stream for enrichment
+        // Orderbook stream for enrichment (pattern matches OI implementation)
         KStream<String, OrderBookSnapshot> orderbookStream = builder.stream(
             orderbookTopic,
             Consumed.with(Serdes.String(), OrderBookSnapshot.serde())
         );
 
-        // Create token -> scripCode lookup table from tick stream
-        KTable<String, String> tokenToScripCode = ticks
-            .selectKey((k, tick) -> tick.getToken() != 0 ? String.valueOf(tick.getToken()) : null)
-            .filter((k, v) -> k != null)
-            .mapValues(tick -> tick.getScripCode())
-            .toTable(Materialized.with(Serdes.String(), Serdes.String()));
-
-        // Re-key orderbook by scripCode using lookup
-        KStream<String, OrderBookSnapshot> orderbookByScripCode = orderbookStream
+        // Re-key by token (exactly like OI does - token equals scripCode for all instruments)
+        KTable<String, OrderBookSnapshot> orderbookTable = orderbookStream
             .selectKey((k, v) -> v != null && v.getToken() != null ? v.getToken() : k)
-            .leftJoin(tokenToScripCode, 
-                (orderbook, scripCode) -> scripCode != null ? KeyValue.pair(scripCode, orderbook) : null,
-                Joined.with(Serdes.String(), OrderBookSnapshot.serde(), Serdes.String()))
-            .filter((k, v) -> v != null && v.value != null)
-            .selectKey((k, v) -> v.key)
-            .mapValues(v -> v.value);
-
-        // Materialize orderbook as table for join
-        KTable<String, OrderBookSnapshot> orderbookTable = orderbookByScripCode
             .toTable(Materialized.with(Serdes.String(), OrderBookSnapshot.serde()));
 
         KStream<String, TickData> instrumentKeyed = ticks
@@ -231,8 +215,16 @@ public class UnifiedMarketDataProcessor {
         KStream<String, InstrumentState> enrichedState = stateStream
             .leftJoin(orderbookTable,
                 (state, orderbook) -> {
+                    log.debug("🔍 OB JOIN: scripCode={} obToken={} obValid={} hasBids={}", 
+                        state.getScripCode(), 
+                        orderbook != null ? orderbook.getToken() : "null",
+                        orderbook != null && orderbook.isValid(),
+                        orderbook != null && orderbook.getBids() != null ? orderbook.getBids().size() : 0);
                     if (orderbook != null && orderbook.isValid()) {
                         state.addOrderbook(orderbook);
+                    } else if (orderbook != null) {
+                        log.warn("⚠️ OB INVALID: scripCode={} token={} valid={}", 
+                            state.getScripCode(), orderbook.getToken(), orderbook.isValid());
                     }
                     return state;
                 });
