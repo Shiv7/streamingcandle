@@ -65,6 +65,7 @@ public class InstrumentCandle {
     // Optional: Per-instrument OI snapshot
     private Long openInterest;
     private Long oiChange;
+    private Double oiChangePercent;
 
     // Optional: Per-instrument orderbook/microstructure snapshots
     private OrderbookDepthData orderbookDepth;

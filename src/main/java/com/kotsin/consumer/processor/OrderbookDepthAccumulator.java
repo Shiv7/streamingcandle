@@ -114,34 +114,39 @@ public class OrderbookDepthAccumulator {
             List<Double> cumulativeBidDepth = getDepthCalculator().calculateCumulativeDepth(bidProfile);
             List<Double> cumulativeAskDepth = getDepthCalculator().calculateCumulativeDepth(askProfile);
 
-            double totalBidDepth = cumulativeBidDepth.isEmpty() ? 0.0 :
+            Double totalBidDepth = cumulativeBidDepth.isEmpty() ? null :
                 cumulativeBidDepth.get(cumulativeBidDepth.size() - 1);
-            double totalAskDepth = cumulativeAskDepth.isEmpty() ? 0.0 :
+            Double totalAskDepth = cumulativeAskDepth.isEmpty() ? null :
                 cumulativeAskDepth.get(cumulativeAskDepth.size() - 1);
 
-            double bidVWAP = getDepthCalculator().calculateSideVWAP(bidProfile);
-            double askVWAP = getDepthCalculator().calculateSideVWAP(askProfile);
-            double depthPressure = midPrice > 0 ? (bidVWAP - askVWAP) / midPrice : 0.0;
+            Double bidVWAP = bidProfile.isEmpty() ? null : getDepthCalculator().calculateSideVWAP(bidProfile);
+            Double askVWAP = askProfile.isEmpty() ? null : getDepthCalculator().calculateSideVWAP(askProfile);
+            Double depthPressure = (midPrice > 0 && bidVWAP != null && askVWAP != null) ? 
+                (bidVWAP - askVWAP) / midPrice : null;
 
-            double weightedImbalance = getDepthCalculator().calculateWeightedDepthImbalance(bidProfile, askProfile);
+            Double weightedImbalance = (bidProfile.isEmpty() || askProfile.isEmpty()) ? null :
+                getDepthCalculator().calculateWeightedDepthImbalance(bidProfile, askProfile);
 
-            double bidSlope = getDepthCalculator().calculateSlope(bidProfile);
-            double askSlope = getDepthCalculator().calculateSlope(askProfile);
-            double slopeRatio = askSlope != 0 ? bidSlope / askSlope : 0.0;
+            Double bidSlope = bidProfile.isEmpty() ? null : getDepthCalculator().calculateSlope(bidProfile);
+            Double askSlope = askProfile.isEmpty() ? null : getDepthCalculator().calculateSlope(askProfile);
+            Double slopeRatio = (askSlope != null && askSlope != 0) ? bidSlope / askSlope : null;
 
             // Get results from detection services (using lazy getters)
-            boolean icebergBid = getIcebergService().detectIcebergBid();
-            boolean icebergAsk = getIcebergService().detectIcebergAsk();
-            double icebergProbBid = getIcebergService().calculateIcebergProbabilityBid();
-            double icebergProbAsk = getIcebergService().calculateIcebergProbabilityAsk();
+            Boolean icebergBid = getIcebergService().detectIcebergBid() ? true : null;
+            Boolean icebergAsk = getIcebergService().detectIcebergAsk() ? true : null;
+            Double icebergProbBid = getIcebergService().calculateIcebergProbabilityBid();
+            Double icebergProbAsk = getIcebergService().calculateIcebergProbabilityAsk();
 
-            double level1Imb = getDepthCalculator().calculateLevelImbalance(bidProfile, askProfile, 1, 1);
-            double level2to5Imb = getDepthCalculator().calculateLevelImbalance(bidProfile, askProfile, 2, 5);
-            double level6to10Imb = getDepthCalculator().calculateLevelImbalance(bidProfile, askProfile, 6, 10);
+            Double level1Imb = (bidProfile.isEmpty() || askProfile.isEmpty()) ? null :
+                getDepthCalculator().calculateLevelImbalance(bidProfile, askProfile, 1, 1);
+            Double level2to5Imb = (bidProfile.isEmpty() || askProfile.isEmpty()) ? null :
+                getDepthCalculator().calculateLevelImbalance(bidProfile, askProfile, 2, 5);
+            Double level6to10Imb = (bidProfile.isEmpty() || askProfile.isEmpty()) ? null :
+                getDepthCalculator().calculateLevelImbalance(bidProfile, askProfile, 6, 10);
 
-            int spoofCount = getSpoofingService().getSpoofingCount();
-            boolean activeSpoofBid = getSpoofingService().isActiveSpoofingBid();
-            boolean activeSpoofAsk = getSpoofingService().isActiveSpoofingAsk();
+            Integer spoofCount = getSpoofingService().getSpoofingCount();
+            Boolean activeSpoofBid = getSpoofingService().isActiveSpoofingBid() ? true : null;
+            Boolean activeSpoofAsk = getSpoofingService().isActiveSpoofingAsk() ? true : null;
 
             return OrderbookDepthData.builder()
                 .bidProfile(bidProfile)
