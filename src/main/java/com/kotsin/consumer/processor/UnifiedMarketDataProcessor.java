@@ -433,17 +433,18 @@ public class UnifiedMarketDataProcessor {
         KStream<String, FamilyEnrichedData> f30 = builder.stream(
             familyStructured30mTopic, Consumed.with(Serdes.String(), FamilyEnrichedData.serde()));
 
-        KStream<String, FamilyStructuredAll> p1 = f1.mapValues(this::toAllPartial);
-        KStream<String, FamilyStructuredAll> p2 = f2.mapValues(this::toAllPartial);
-        KStream<String, FamilyStructuredAll> p5 = f5.mapValues(this::toAllPartial);
-        KStream<String, FamilyStructuredAll> p15 = f15.mapValues(this::toAllPartial);
-        KStream<String, FamilyStructuredAll> p30 = f30.mapValues(this::toAllPartial);
+        KStream<String, FamilyStructuredAll> p1 = f1.mapValues(this::toAllPartial).filter((k, v) -> v != null);
+        KStream<String, FamilyStructuredAll> p2 = f2.mapValues(this::toAllPartial).filter((k, v) -> v != null);
+        KStream<String, FamilyStructuredAll> p5 = f5.mapValues(this::toAllPartial).filter((k, v) -> v != null);
+        KStream<String, FamilyStructuredAll> p15 = f15.mapValues(this::toAllPartial).filter((k, v) -> v != null);
+        KStream<String, FamilyStructuredAll> p30 = f30.mapValues(this::toAllPartial).filter((k, v) -> v != null);
 
         KStream<String, FamilyStructuredAll> merged = p1
             .merge(p2)
             .merge(p5)
             .merge(p15)
             .merge(p30)
+            .filter((k, v) -> k != null && v != null)
             .groupByKey(Grouped.with(Serdes.String(), FamilyStructuredAll.serde()))
             .reduce(this::mergeAll)
             .toStream()
@@ -458,6 +459,16 @@ public class UnifiedMarketDataProcessor {
     }
 
     private FamilyStructuredAll toAllPartial(FamilyEnrichedData fed) {
+        if (fed == null) {
+            log.warn("⚠️ toAllPartial received null FamilyEnrichedData");
+            return null;
+        }
+        if (fed.getFamilyKey() == null || fed.getTimeframe() == null) {
+            log.warn("⚠️ toAllPartial: familyKey={} timeframe={} - skipping null key/tf",
+                fed.getFamilyKey(), fed.getTimeframe());
+            return null;
+        }
+        
         FamilyStructuredAll all = FamilyStructuredAll.builder()
             .familyKey(fed.getFamilyKey())
             .familyName(fed.getFamilyName())

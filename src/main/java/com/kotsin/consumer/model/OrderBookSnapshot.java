@@ -58,7 +58,14 @@ public class OrderBookSnapshot {
     @JsonProperty("receivedTimestamp")
     private Long receivedTimestamp;
 
-    // Parsed details
+    // NEW: Object array format (bids/asks from new producer)
+    @JsonProperty("bids")
+    private List<OrderBookLevel> bids;
+    
+    @JsonProperty("asks")
+    private List<OrderBookLevel> asks;
+
+    // Parsed details (unified view - combines both formats)
     private List<OrderBookLevel> allBids;
     private List<OrderBookLevel> allAsks;
 
@@ -81,9 +88,17 @@ public class OrderBookSnapshot {
 
     /**
      * Parse raw bid/ask data into OrderBookLevel objects
+     * Handles BOTH formats:
+     * 1. NEW: bids/asks arrays of objects (with Price, Quantity, NumberOfOrders)
+     * 2. OLD: bidRate/bidQty/offRate/offQty separate arrays
      */
     public void parseDetails() {
-        if (allBids == null && bidRate != null && bidQty != null) {
+        // Priority 1: Use new format (bids/asks objects) if available
+        if (bids != null && !bids.isEmpty()) {
+            allBids = new ArrayList<>(bids);
+        } 
+        // Fallback: Use old format (bidRate/bidQty arrays)
+        else if (allBids == null && bidRate != null && bidQty != null) {
             allBids = new ArrayList<>();
             int minSize = Math.min(bidRate.size(), bidQty.size());
             for (int i = 0; i < minSize; i++) {
@@ -95,7 +110,12 @@ public class OrderBookSnapshot {
             }
         }
         
-        if (allAsks == null && offRate != null && offQty != null) {
+        // Priority 1: Use new format (asks objects) if available
+        if (asks != null && !asks.isEmpty()) {
+            allAsks = new ArrayList<>(asks);
+        }
+        // Fallback: Use old format (offRate/offQty arrays)
+        else if (allAsks == null && offRate != null && offQty != null) {
             allAsks = new ArrayList<>();
             int minSize = Math.min(offRate.size(), offQty.size());
             for (int i = 0; i < minSize; i++) {
@@ -217,15 +237,24 @@ public class OrderBookSnapshot {
 
     /**
      * Check if this snapshot is valid
+     * Supports BOTH old and new formats
      */
     public boolean isValid() {
         if (token == null || token.isEmpty()) {
             return false;
         }
-        boolean hasBids = bidRate != null && !bidRate.isEmpty() && bidQty != null && !bidQty.isEmpty();
-        boolean hasAsks = offRate != null && !offRate.isEmpty() && offQty != null && !offQty.isEmpty();
-        boolean hasLevels = hasBids || hasAsks;
+        
+        // Check new format (bids/asks objects)
+        boolean hasNewBids = bids != null && !bids.isEmpty();
+        boolean hasNewAsks = asks != null && !asks.isEmpty();
+        
+        // Check old format (bidRate/bidQty arrays)
+        boolean hasOldBids = bidRate != null && !bidRate.isEmpty() && bidQty != null && !bidQty.isEmpty();
+        boolean hasOldAsks = offRate != null && !offRate.isEmpty() && offQty != null && !offQty.isEmpty();
+        
+        boolean hasLevels = hasNewBids || hasNewAsks || hasOldBids || hasOldAsks;
         boolean hasTotals = (totalBidQty != null && totalBidQty > 0) || (totalOffQty != null && totalOffQty > 0);
+        
         if (!hasLevels && !hasTotals) { return false; }
         if (receivedTimestamp == null || receivedTimestamp <= 0) { return false; }
         return true;
@@ -233,11 +262,18 @@ public class OrderBookSnapshot {
 
     /**
      * True if we have any bid/ask price levels present
+     * Supports BOTH old and new formats
      */
     public boolean hasBookLevels() {
-        boolean hasBids = bidRate != null && !bidRate.isEmpty() && bidQty != null && !bidQty.isEmpty();
-        boolean hasAsks = offRate != null && !offRate.isEmpty() && offQty != null && !offQty.isEmpty();
-        return hasBids || hasAsks;
+        // Check new format (bids/asks objects)
+        boolean hasNewBids = bids != null && !bids.isEmpty();
+        boolean hasNewAsks = asks != null && !asks.isEmpty();
+        
+        // Check old format (bidRate/bidQty arrays)
+        boolean hasOldBids = bidRate != null && !bidRate.isEmpty() && bidQty != null && !bidQty.isEmpty();
+        boolean hasOldAsks = offRate != null && !offRate.isEmpty() && offQty != null && !offQty.isEmpty();
+        
+        return hasNewBids || hasNewAsks || hasOldBids || hasOldAsks;
     }
 
     /**
