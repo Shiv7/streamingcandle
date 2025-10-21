@@ -262,6 +262,9 @@ public class UnifiedMarketDataProcessor {
                     Long prev = store.get(key);
                     if (prev != null) {
                         value.setOiChange(value.getOpenInterest() - prev);
+                        if (prev > 0 && value.getOiChange() != null) {
+                            value.setOiChangePercent((value.getOiChange() * 100.0) / prev);
+                        }
                     }
                     store.put(key, value.getOpenInterest());
                     return KeyValue.pair(key, value);
@@ -273,20 +276,39 @@ public class UnifiedMarketDataProcessor {
             .groupByKey(Grouped.with(Serdes.String(), OpenInterest.serde()))
             .reduce((prev, curr) -> curr);
 
-        // Orderbook token-keyed table (tolerant JSON)
-        KTable<String, OrderBookSnapshot> orderbookTable = builder.stream(
+        // Orderbook depth table using stateful accumulator (includes spoofing/iceberg)
+        final String obAccStore = "orderbook-acc-store";
+        builder.addStateStore(
+            org.apache.kafka.streams.state.Stores.keyValueStoreBuilder(
+                org.apache.kafka.streams.state.Stores.persistentKeyValueStore(obAccStore),
+                Serdes.String(),
+                new org.springframework.kafka.support.serializer.JsonSerde<>(com.kotsin.consumer.processor.OrderbookDepthAccumulator.class)
+            )
+        );
+
+        KTable<String, OrderbookDepthData> orderbookDepthTable = builder.stream(
                 orderbookTopic,
                 Consumed.with(Serdes.String(), OrderBookSnapshot.serde())
             )
-            .peek((k, v) -> {
-                if (v != null) {
-                    log.debug("📊 Orderbook received: originalKey={} token={} valid={} totalBid={} totalAsk={}", 
-                        k, v.getToken(), v.isValid(), v.getTotalBidQty(), v.getTotalOffQty());
-                }
-            })
             .selectKey((k, v) -> v != null && v.getToken() != null ? v.getToken() : k)
-            .peek((k, v) -> log.debug("📊 Orderbook re-keyed: newKey={} companyName={}", k, v != null ? v.getCompanyName() : null))
-            .groupByKey(Grouped.with(Serdes.String(), OrderBookSnapshot.serde()))
+            .transform(() -> new org.apache.kafka.streams.kstream.Transformer<String, OrderBookSnapshot, KeyValue<String, OrderbookDepthData>>() {
+                private org.apache.kafka.streams.state.KeyValueStore<String, com.kotsin.consumer.processor.OrderbookDepthAccumulator> store;
+                @SuppressWarnings("unchecked")
+                @Override public void init(org.apache.kafka.streams.processor.ProcessorContext context) {
+                    store = (org.apache.kafka.streams.state.KeyValueStore<String, com.kotsin.consumer.processor.OrderbookDepthAccumulator>) context.getStateStore(obAccStore);
+                }
+                @Override public KeyValue<String, OrderbookDepthData> transform(String key, OrderBookSnapshot current) {
+                    if (key == null || current == null || !current.isValid()) return KeyValue.pair(key, null);
+                    com.kotsin.consumer.processor.OrderbookDepthAccumulator acc = store.get(key);
+                    if (acc == null) acc = new com.kotsin.consumer.processor.OrderbookDepthAccumulator();
+                    acc.addOrderbook(current);
+                    store.put(key, acc);
+                    OrderbookDepthData data = acc.toOrderbookDepthData();
+                    return KeyValue.pair(key, data);
+                }
+                @Override public void close() {}
+            }, obAccStore)
+            .groupByKey(Grouped.with(Serdes.String(), OrderbookDepthData.serde()))
             .reduce((prev, curr) -> curr);
 
         // Join by scripCode (token = scripCode)
@@ -303,24 +325,14 @@ public class UnifiedMarketDataProcessor {
                 }
                 return candle;
             })
-            .leftJoin(orderbookTable, (candle, ob) -> {
-                if (ob != null && ob.isValid()) {
-                    ob.parseDetails();
-                    OrderbookDepthData depth = OrderbookDepthData.builder()
-                        .totalBidDepth(ob.getTotalBidQty() != null ? ob.getTotalBidQty().doubleValue() : null)
-                        .totalAskDepth(ob.getTotalOffQty() != null ? ob.getTotalOffQty().doubleValue() : null)
-                        .spread(ob.getSpread())
-                        .midPrice(ob.getMidPrice())
-                        .timestamp(ob.getTimestamp())
-                        .isComplete(true)
-                        .build();
+            .leftJoin(orderbookDepthTable, (candle, depth) -> {
+                if (depth != null && (depth.getTotalBidDepth() != null || depth.getBidProfile() != null)) {
                     candle.setOrderbookDepth(depth);
-                    log.debug("✅ Orderbook join success: scripCode={} spread={} totalBid={} totalAsk={}", 
-                        candle.getScripCode(), depth.getSpread(), depth.getTotalBidDepth(), depth.getTotalAskDepth());
+                    log.debug("✅ Orderbook join success: scripCode={} spread={} totalBid={} totalAsk={} level1Imb={}", 
+                        candle.getScripCode(), depth.getSpread(), depth.getTotalBidDepth(), depth.getTotalAskDepth(), depth.getLevel1Imbalance());
                 } else {
                     metrics.incOrderbookJoinMiss();
-                    log.debug("❌ Orderbook join miss: scripCode={} obNull={} obValid={}", 
-                        candle.getScripCode(), (ob == null), (ob != null && ob.isValid()));
+                    log.debug("❌ Orderbook join miss: scripCode={} depthNull={} ", candle.getScripCode(), (depth == null));
                 }
                 return candle;
             });
@@ -505,6 +517,18 @@ public class UnifiedMarketDataProcessor {
         family.setMicrostructure(computeFamilyMicrostructure(family));
         family.setOrderbookDepth(computeFamilyOrderbookDepth(family));
         family.setImbalanceBars(computeFamilyImbalanceBars(family));
+        // Adjust identity and spot fallback for derivative-only families
+        if (family.getEquity() == null) {
+            if (family.getFutures() != null && !family.getFutures().isEmpty()) {
+                family.setInstrumentType("DERIVATIVE_FAMILY");
+                // Fallback spot price: use near-month future close
+                if (family.getAggregatedMetrics() != null && family.getAggregatedMetrics().getSpotPrice() == null) {
+                    family.getAggregatedMetrics().setSpotPrice(
+                        family.getAggregatedMetrics().getNearMonthFuturePrice()
+                    );
+                }
+            }
+        }
         family.setTotalInstrumentsCount(family.calculateTotalCount());
         return family;
     }
@@ -635,21 +659,75 @@ public class UnifiedMarketDataProcessor {
     }
 
     private OrderbookDepthData computeFamilyOrderbookDepth(FamilyEnrichedData family) {
-        double spreadSum = 0.0; int n = 0; double totalBid = 0.0, totalAsk = 0.0;
+        double spreadSum = 0.0; int spreadCount = 0;
+        double totalBid = 0.0, totalAsk = 0.0;
+        double weightedImbSum = 0.0; int imbCount = 0;
+        double lvl1ImbSum = 0.0, l2to5ImbSum = 0.0, l6to10ImbSum = 0.0; int lvlImbCount = 0;
+        double bidVwapSum = 0.0, askVwapSum = 0.0; int vwapCount = 0;
+        double bidSlopeSum = 0.0, askSlopeSum = 0.0, slopeRatioSum = 0.0; int slopeCount = 0;
+        long tsMax = 0L; Integer depthLevelsMin = null;
+
         for (InstrumentCandle c : collectAllInstruments(family)) {
-            if (c.getOrderbookDepth() != null) {
-                OrderbookDepthData d = c.getOrderbookDepth();
-                if (d.getSpread() != null) { spreadSum += d.getSpread(); n++; }
-                if (d.getTotalBidDepth() != null) totalBid += d.getTotalBidDepth();
-                if (d.getTotalAskDepth() != null) totalAsk += d.getTotalAskDepth();
+            OrderbookDepthData d = c.getOrderbookDepth();
+            if (d == null) continue;
+
+            if (d.getSpread() != null) { spreadSum += d.getSpread(); spreadCount++; }
+            if (d.getTotalBidDepth() != null) totalBid += d.getTotalBidDepth();
+            if (d.getTotalAskDepth() != null) totalAsk += d.getTotalAskDepth();
+
+            if (d.getWeightedDepthImbalance() != null) { weightedImbSum += d.getWeightedDepthImbalance(); imbCount++; }
+            if (d.getLevel1Imbalance() != null || d.getLevel2to5Imbalance() != null || d.getLevel6to10Imbalance() != null) {
+                if (d.getLevel1Imbalance() != null) lvl1ImbSum += d.getLevel1Imbalance();
+                if (d.getLevel2to5Imbalance() != null) l2to5ImbSum += d.getLevel2to5Imbalance();
+                if (d.getLevel6to10Imbalance() != null) l6to10ImbSum += d.getLevel6to10Imbalance();
+                lvlImbCount++;
             }
+
+            if (d.getBidVWAP() != null && d.getAskVWAP() != null) {
+                bidVwapSum += d.getBidVWAP();
+                askVwapSum += d.getAskVWAP();
+                vwapCount++;
+            }
+
+            if (d.getBidSlope() != null && d.getAskSlope() != null) {
+                bidSlopeSum += d.getBidSlope();
+                askSlopeSum += d.getAskSlope();
+                if (d.getSlopeRatio() != null) slopeRatioSum += d.getSlopeRatio();
+                slopeCount++;
+            }
+
+            if (d.getTimestamp() != null && d.getTimestamp() > tsMax) tsMax = d.getTimestamp();
+            if (d.getDepthLevels() != null) depthLevelsMin = depthLevelsMin == null ? d.getDepthLevels() : Math.min(depthLevelsMin, d.getDepthLevels());
         }
-        if (n == 0 && totalBid == 0.0 && totalAsk == 0.0) return null;
-        Double imb = (totalBid + totalAsk) > 0 ? ((totalBid - totalAsk) / (totalBid + totalAsk)) : null;
+
+        if (spreadCount == 0 && totalBid == 0.0 && totalAsk == 0.0 && imbCount == 0 && vwapCount == 0 && slopeCount == 0) return null;
+        Double familySpread = spreadCount > 0 ? (spreadSum / spreadCount) : null;
+        Double familyImb = (totalBid + totalAsk) > 0 ? ((totalBid - totalAsk) / (totalBid + totalAsk)) : null;
+        Double weightedImb = imbCount > 0 ? (weightedImbSum / imbCount) : null;
+        Double lvl1Imb = lvlImbCount > 0 ? (lvl1ImbSum / lvlImbCount) : null;
+        Double l2to5Imb = lvlImbCount > 0 ? (l2to5ImbSum / lvlImbCount) : null;
+        Double l6to10Imb = lvlImbCount > 0 ? (l6to10ImbSum / lvlImbCount) : null;
+        Double bidVwap = vwapCount > 0 ? (bidVwapSum / vwapCount) : null;
+        Double askVwap = vwapCount > 0 ? (askVwapSum / vwapCount) : null;
+        Double bidSlope = slopeCount > 0 ? (bidSlopeSum / slopeCount) : null;
+        Double askSlope = slopeCount > 0 ? (askSlopeSum / slopeCount) : null;
+        Double slopeRatio = slopeCount > 0 ? (slopeRatioSum / slopeCount) : null;
+
         return OrderbookDepthData.builder()
-            .spread(n > 0 ? (spreadSum / n) : null)
+            .spread(familySpread)
             .totalBidDepth(totalBid > 0 ? totalBid : null)
             .totalAskDepth(totalAsk > 0 ? totalAsk : null)
+            .weightedDepthImbalance(weightedImb)
+            .level1Imbalance(lvl1Imb)
+            .level2to5Imbalance(l2to5Imb)
+            .level6to10Imbalance(l6to10Imb)
+            .bidVWAP(bidVwap)
+            .askVWAP(askVwap)
+            .bidSlope(bidSlope)
+            .askSlope(askSlope)
+            .slopeRatio(slopeRatio)
+            .timestamp(tsMax > 0 ? tsMax : null)
+            .depthLevels(depthLevelsMin)
             .build();
     }
 
@@ -670,6 +748,76 @@ public class UnifiedMarketDataProcessor {
             }
         }
         return best;
+    }
+
+    private OrderbookDepthData computeFullDepthMetrics(OrderBookSnapshot ob) {
+        if (ob == null) return null;
+        
+        if (ob.hasBookLevels()) {
+            ob.parseDetails();
+        }
+        
+        com.kotsin.consumer.processor.service.OrderbookDepthCalculator calc = 
+            new com.kotsin.consumer.processor.service.OrderbookDepthCalculator();
+        
+        double midPrice = ob.hasBookLevels() ? ob.getMidPrice() : 0.0;
+        double spread = ob.hasBookLevels() ? ob.getSpread() : 0.0;
+        
+        java.util.List<OrderbookDepthData.DepthLevel> bidProfile = null;
+        java.util.List<OrderbookDepthData.DepthLevel> askProfile = null;
+        java.util.List<Double> cumulativeBid = null;
+        java.util.List<Double> cumulativeAsk = null;
+        Double bidVWAP = null, askVWAP = null, depthPressure = null;
+        Double weightedImb = null, level1Imb = null, level2to5Imb = null, level6to10Imb = null;
+        Double bidSlope = null, askSlope = null, slopeRatio = null;
+        
+        if (ob.hasBookLevels() && ob.getAllBids() != null && ob.getAllAsks() != null) {
+            bidProfile = calc.buildDepthProfile(ob.getAllBids(), "BID", midPrice);
+            askProfile = calc.buildDepthProfile(ob.getAllAsks(), "ASK", midPrice);
+            
+            if (!bidProfile.isEmpty() && !askProfile.isEmpty()) {
+                cumulativeBid = calc.calculateCumulativeDepth(bidProfile);
+                cumulativeAsk = calc.calculateCumulativeDepth(askProfile);
+                bidVWAP = calc.calculateSideVWAP(bidProfile);
+                askVWAP = calc.calculateSideVWAP(askProfile);
+                if (midPrice > 0) {
+                    depthPressure = (bidVWAP - askVWAP) / midPrice;
+                }
+                weightedImb = calc.calculateWeightedDepthImbalance(bidProfile, askProfile);
+                level1Imb = calc.calculateLevelImbalance(bidProfile, askProfile, 1, 1);
+                level2to5Imb = calc.calculateLevelImbalance(bidProfile, askProfile, 2, 5);
+                level6to10Imb = calc.calculateLevelImbalance(bidProfile, askProfile, 6, 10);
+                bidSlope = calc.calculateSlope(bidProfile);
+                askSlope = calc.calculateSlope(askProfile);
+                if (askSlope != 0) {
+                    slopeRatio = bidSlope / askSlope;
+                }
+            }
+        }
+        
+        return OrderbookDepthData.builder()
+            .bidProfile(bidProfile)
+            .askProfile(askProfile)
+            .cumulativeBidDepth(cumulativeBid)
+            .cumulativeAskDepth(cumulativeAsk)
+            .totalBidDepth(ob.getTotalBidQty() != null ? ob.getTotalBidQty().doubleValue() : null)
+            .totalAskDepth(ob.getTotalOffQty() != null ? ob.getTotalOffQty().doubleValue() : null)
+            .bidVWAP(bidVWAP)
+            .askVWAP(askVWAP)
+            .depthPressure(depthPressure)
+            .weightedDepthImbalance(weightedImb)
+            .level1Imbalance(level1Imb)
+            .level2to5Imbalance(level2to5Imb)
+            .level6to10Imbalance(level6to10Imb)
+            .bidSlope(bidSlope)
+            .askSlope(askSlope)
+            .slopeRatio(slopeRatio)
+            .timestamp(ob.getTimestamp())
+            .midPrice(midPrice > 0 ? midPrice : null)
+            .spread(spread)
+            .depthLevels(bidProfile != null ? bidProfile.size() : null)
+            .isComplete(true)
+            .build();
     }
 
     private void replaceOptionIfBetter(FamilyEnrichedData family, InstrumentCandle candidate) {

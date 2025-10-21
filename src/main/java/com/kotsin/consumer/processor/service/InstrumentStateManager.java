@@ -249,6 +249,9 @@ public class InstrumentStateManager {
             .volumeDelta(candleData.getVolumeDelta())
             .volumeDeltaPercent(candleData.getVolumeDeltaPercent())
             .vwap(candleData.getVwap())
+            .hlc3((candleData.getHigh() != null && candleData.getLow() != null && candleData.getClose() != null)
+                ? (candleData.getHigh() + candleData.getLow() + candleData.getClose()) / 3.0
+                : null)
             .tickCount(candleData.getTickCount())
             .windowStartMillis(candleData.getWindowStart())
             .windowEndMillis(candleData.getWindowEnd())

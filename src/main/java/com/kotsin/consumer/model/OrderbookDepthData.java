@@ -6,6 +6,7 @@ import lombok.Data;
 import lombok.NoArgsConstructor;
 
 import java.util.List;
+import org.springframework.kafka.support.serializer.JsonSerde;
 
 /**
  * Comprehensive orderbook depth analytics
@@ -187,5 +188,9 @@ public class OrderbookDepthData {
             icebergDetectedAsk != null && icebergDetectedAsk ? "Y" : "N",
             spoofingCountLast1Min != null ? spoofingCountLast1Min : 0,
             isComplete != null && isComplete ? "COMPLETE" : "PARTIAL");
+    }
+
+    public static org.apache.kafka.common.serialization.Serde<OrderbookDepthData> serde() {
+        return new JsonSerde<>(OrderbookDepthData.class);
     }
 }
