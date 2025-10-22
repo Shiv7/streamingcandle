@@ -3,7 +3,6 @@ package com.kotsin.consumer.processor;
 import com.kotsin.consumer.config.KafkaConfig;
 import com.kotsin.consumer.service.CandleEmissionService;
 import com.kotsin.consumer.service.DataEnrichmentService;
-import com.kotsin.consumer.service.FamilyAggregationService;
 import com.kotsin.consumer.service.InstrumentProcessor;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
@@ -36,7 +35,6 @@ public class MarketDataOrchestrator {
     private final InstrumentProcessor instrumentProcessor;
     private final DataEnrichmentService enrichmentService;
     private final CandleEmissionService candleEmissionService;
-    private final FamilyAggregationService familyAggService;
 
     private final Map<String, KafkaStreams> streamsInstances = new ConcurrentHashMap<>();
     

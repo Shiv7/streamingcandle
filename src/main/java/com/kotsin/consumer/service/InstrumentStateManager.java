@@ -255,6 +255,9 @@ public class InstrumentStateManager {
 
         CandleData candleData = accumulator.toCandleData(exchange, exchangeType);
 
+        // --- CRITICAL FIX: Reset accumulator after extraction ---
+        candleAccumulators.put(timeframe, new CandleAccumulator());
+
         // Get microstructure data for this timeframe window
         MicrostructureAccumulator microAcc = microAccumulators.get(timeframe);
         MicrostructureData microstructure = microAcc != null ? 

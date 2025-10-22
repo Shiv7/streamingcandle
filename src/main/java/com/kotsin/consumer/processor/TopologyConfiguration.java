@@ -4,10 +4,13 @@ import com.kotsin.consumer.config.KafkaConfig;
 import com.kotsin.consumer.model.FamilyAggregatedMetrics;
 import com.kotsin.consumer.model.FamilyEnrichedData;
 import com.kotsin.consumer.model.InstrumentCandle;
+import com.kotsin.consumer.model.MicrostructureData;
 import com.kotsin.consumer.model.OpenInterest;
+import com.kotsin.consumer.model.OrderbookDepthData;
 import com.kotsin.consumer.model.OrderBookSnapshot;
 import com.kotsin.consumer.model.TickData;
 import com.kotsin.consumer.monitoring.Timeframe;
+import java.util.List;
 // FIX: use the canonical metrics class (the one that has incCandleDrop)
 import com.kotsin.consumer.metrics.StreamMetrics;
 
@@ -414,6 +417,10 @@ public class TopologyConfiguration {
                     FamilyAggregatedMetrics famMetrics = calculateFamilyMetrics(family);
                     family.setAggregatedMetrics(famMetrics);
 
+                    // --- NEW: Calculate and set volume-weighted metrics ---
+                    calculateVolumeWeightedMetrics(family);
+
+
                     // Set total count (derived)
                     family.setTotalInstrumentsCount(
                         (family.getEquity() != null ? 1 : 0) +
@@ -568,6 +575,57 @@ public class TopologyConfiguration {
             .putCallVolumeRatio(putCallVolumeRatio)
             .calculatedAt(System.currentTimeMillis())
             .build();
+    }
+
+    /**
+     * Calculate and set volume-weighted metrics for microstructure and order book
+     */
+    private void calculateVolumeWeightedMetrics(FamilyEnrichedData family) {
+        double totalVolume = family.getAggregatedMetrics().getTotalVolume() != null ? family.getAggregatedMetrics().getTotalVolume() : 0.0;
+        if (totalVolume == 0) {
+            return; // Avoid division by zero
+        }
+
+        double weightedOfi = 0.0;
+        double weightedVpin = 0.0;
+        double weightedDepthImbalance = 0.0;
+        double weightedSpread = 0.0;
+
+        List<InstrumentCandle> allInstruments = new ArrayList<>();
+        if (family.getEquity() != null) allInstruments.add(family.getEquity());
+        if (family.getFutures() != null) allInstruments.addAll(family.getFutures());
+        if (family.getOptions() != null) allInstruments.addAll(family.getOptions());
+
+        for (InstrumentCandle instrument : allInstruments) {
+            long instrumentVolume = instrument.getVolume() != null ? instrument.getVolume() : 0;
+            double weight = instrumentVolume / totalVolume;
+
+            if (instrument.getMicrostructure() != null) {
+                MicrostructureData micro = instrument.getMicrostructure();
+                if (micro.getOfi() != null) weightedOfi += micro.getOfi() * weight;
+                if (micro.getVpin() != null) weightedVpin += micro.getVpin() * weight;
+                if (micro.getDepthImbalance() != null) weightedDepthImbalance += micro.getDepthImbalance() * weight;
+            }
+            if (instrument.getOrderbookDepth() != null && instrument.getOrderbookDepth().getSpread() != null) {
+                weightedSpread += instrument.getOrderbookDepth().getSpread() * weight;
+            }
+        }
+
+        // Create and set aggregated microstructure data
+        MicrostructureData aggregatedMicrostructure = MicrostructureData.builder()
+            .ofi(weightedOfi)
+            .vpin(weightedVpin)
+            .depthImbalance(weightedDepthImbalance)
+            .isComplete(true)
+            .build();
+        family.setMicrostructure(aggregatedMicrostructure);
+
+        // Create and set aggregated order book data
+        OrderbookDepthData aggregatedOrderbook = OrderbookDepthData.builder()
+            .spread(weightedSpread)
+            .isComplete(true)
+            .build();
+        family.setOrderbookDepth(aggregatedOrderbook);
     }
 
     /**
