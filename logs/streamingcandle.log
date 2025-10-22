@@ -1,0 +1,483 @@
+2025-10-23 00:00:10.487 WARN  [main] c.k.consumer.retry.RetryHandler - ⚠️ Operation 'test-max-attempts' failed (attempt 1/3). Retrying in 100ms. Error: Always fails
+2025-10-23 00:00:10.635 WARN  [main] c.k.consumer.retry.RetryHandler - ⚠️ Operation 'test-max-attempts' failed (attempt 2/3). Retrying in 200ms. Error: Always fails
+2025-10-23 00:00:10.841 ERROR [main] c.k.consumer.retry.RetryHandler - ❌ Operation 'test-max-attempts' failed after 3 attempts
+2025-10-23 00:00:10.967 WARN  [main] c.k.consumer.retry.RetryHandler - ⚠️ Operation 'test-exception-wrapping' failed (attempt 1/2). Retrying in 100ms. Error: java.io.IOException: Original error
+2025-10-23 00:00:11.084 ERROR [main] c.k.consumer.retry.RetryHandler - ❌ Operation 'test-exception-wrapping' failed after 2 attempts
+2025-10-23 00:00:11.112 WARN  [main] c.k.consumer.retry.RetryHandler - ⚠️ Operation 'test-performance' failed (attempt 1/3). Retrying in 100ms. Error: Always fails
+2025-10-23 00:00:11.218 WARN  [main] c.k.consumer.retry.RetryHandler - ⚠️ Operation 'test-performance' failed (attempt 2/3). Retrying in 200ms. Error: Always fails
+2025-10-23 00:00:11.425 ERROR [main] c.k.consumer.retry.RetryHandler - ❌ Operation 'test-performance' failed after 3 attempts
+2025-10-23 00:00:11.506 WARN  [main] c.k.consumer.retry.RetryHandler - ⚠️ Operation 'test-retry-operation' failed (attempt 1/3). Retrying in 100ms. Error: Transient failure
+2025-10-23 00:00:11.617 WARN  [main] c.k.consumer.retry.RetryHandler - ⚠️ Operation 'test-retry-operation' failed (attempt 2/3). Retrying in 200ms. Error: Transient failure
+2025-10-23 00:00:11.842 WARN  [main] c.k.consumer.retry.RetryHandler - ⚠️ Operation 'test-interrupted' failed (attempt 1/3). Retrying in 100ms. Error: Fail to trigger retry
+2025-10-23 00:00:11.892 ERROR [main] c.k.consumer.retry.RetryHandler - ❌ Operation 'test-single-attempt' failed after 1 attempts
+2025-10-23 00:00:11.897 WARN  [main] c.k.consumer.retry.RetryHandler - ⚠️ Operation 'test-backoff' failed (attempt 1/3). Retrying in 100ms. Error: Force retry
+2025-10-23 00:00:12.003 WARN  [main] c.k.consumer.retry.RetryHandler - ⚠️ Operation 'test-backoff' failed (attempt 2/3). Retrying in 200ms. Error: Force retry
+2025-10-23 00:00:12.206 ERROR [main] c.k.consumer.retry.RetryHandler - ❌ Operation 'test-backoff' failed after 3 attempts
+2025-10-23 00:00:12.257 WARN  [main] c.k.consumer.retry.RetryHandler - ⚠️ Operation 'test-default-attempts' failed (attempt 1/3). Retrying in 100ms. Error: Always fails
+2025-10-23 00:00:12.362 WARN  [main] c.k.consumer.retry.RetryHandler - ⚠️ Operation 'test-default-attempts' failed (attempt 2/3). Retrying in 200ms. Error: Always fails
+2025-10-23 00:00:12.569 ERROR [main] c.k.consumer.retry.RetryHandler - ❌ Operation 'test-default-attempts' failed after 3 attempts
+2025-10-23 00:00:13.473 WARN  [main] c.k.c.p.s.CircuitBreakerDetector - 🛑 Manual circuit breaker triggered for STOCK1: Testing
+2025-10-23 00:00:13.483 INFO  [main] c.k.c.p.s.CircuitBreakerDetector - ✅ Circuit breaker resolved for STOCK1
+2025-10-23 00:00:13.522 WARN  [main] c.k.c.p.s.CircuitBreakerDetector - ⚠️ Inactivity warning for STOCK1: 15 minutes since last tick
+2025-10-23 00:00:13.528 WARN  [main] c.k.c.p.s.CircuitBreakerDetector - ⚠️ Inactivity warning for STOCK1: 10 minutes since last tick
+2025-10-23 00:00:13.530 ERROR [main] c.k.c.p.s.CircuitBreakerDetector - 🛑 CIRCUIT BREAKER TRIGGERED for STOCK2: 25 minutes of inactivity. Last tick: 2025-10-22T18:05:13.530688Z
+2025-10-23 00:00:13.537 ERROR [main] c.k.c.p.s.CircuitBreakerDetector - 🛑 CIRCUIT BREAKER TRIGGERED for STOCK1: 25 minutes of inactivity. Last tick: 2025-10-22T18:05:13.530688Z
+2025-10-23 00:00:13.538 INFO  [main] c.k.c.p.s.CircuitBreakerDetector - ✅ Market activity resumed for STOCK1: inactive for PT25M0.000006S
+2025-10-23 00:00:13.549 ERROR [main] c.k.c.p.s.CircuitBreakerDetector - 🛑 CIRCUIT BREAKER TRIGGERED for STOCK8: 25 minutes of inactivity. Last tick: 2025-10-22T18:05:13.549161Z
+2025-10-23 00:00:13.550 ERROR [main] c.k.c.p.s.CircuitBreakerDetector - 🛑 CIRCUIT BREAKER TRIGGERED for STOCK9: 25 minutes of inactivity. Last tick: 2025-10-22T18:05:13.549161Z
+2025-10-23 00:00:13.551 ERROR [main] c.k.c.p.s.CircuitBreakerDetector - 🛑 CIRCUIT BREAKER TRIGGERED for STOCK6: 25 minutes of inactivity. Last tick: 2025-10-22T18:05:13.549161Z
+2025-10-23 00:00:13.552 ERROR [main] c.k.c.p.s.CircuitBreakerDetector - 🛑 CIRCUIT BREAKER TRIGGERED for STOCK7: 25 minutes of inactivity. Last tick: 2025-10-22T18:05:13.549161Z
+2025-10-23 00:00:13.552 ERROR [main] c.k.c.p.s.CircuitBreakerDetector - 🛑 CIRCUIT BREAKER TRIGGERED for STOCK4: 25 minutes of inactivity. Last tick: 2025-10-22T18:05:13.549161Z
+2025-10-23 00:00:13.553 ERROR [main] c.k.c.p.s.CircuitBreakerDetector - 🛑 CIRCUIT BREAKER TRIGGERED for STOCK5: 25 minutes of inactivity. Last tick: 2025-10-22T18:05:13.549161Z
+2025-10-23 00:00:13.554 ERROR [main] c.k.c.p.s.CircuitBreakerDetector - 🛑 CIRCUIT BREAKER TRIGGERED for STOCK2: 25 minutes of inactivity. Last tick: 2025-10-22T18:05:13.549161Z
+2025-10-23 00:00:13.554 ERROR [main] c.k.c.p.s.CircuitBreakerDetector - 🛑 CIRCUIT BREAKER TRIGGERED for STOCK3: 25 minutes of inactivity. Last tick: 2025-10-22T18:05:13.549161Z
+2025-10-23 00:00:13.554 ERROR [main] c.k.c.p.s.CircuitBreakerDetector - 🛑 CIRCUIT BREAKER TRIGGERED for STOCK1: 25 minutes of inactivity. Last tick: 2025-10-22T18:05:13.549161Z
+2025-10-23 00:00:13.554 ERROR [main] c.k.c.p.s.CircuitBreakerDetector - 🛑 CIRCUIT BREAKER TRIGGERED for STOCK10: 25 minutes of inactivity. Last tick: 2025-10-22T18:05:13.549161Z
+2025-10-23 00:00:13.554 ERROR [main] c.k.c.p.s.CircuitBreakerDetector - 🚨 GLOBAL MARKET HALT DETECTED: 10 instruments affected. Time: 2025-10-22T18:30:13.554845Z
+2025-10-23 00:00:13.569 ERROR [main] c.k.c.p.s.CircuitBreakerDetector - 🛑 CIRCUIT BREAKER TRIGGERED for STOCK10: 25 minutes of inactivity. Last tick: 2025-10-22T18:05:13.569099Z
+2025-10-23 00:00:13.570 ERROR [main] c.k.c.p.s.CircuitBreakerDetector - 🛑 CIRCUIT BREAKER TRIGGERED for STOCK8: 25 minutes of inactivity. Last tick: 2025-10-22T18:05:13.569099Z
+2025-10-23 00:00:13.571 ERROR [main] c.k.c.p.s.CircuitBreakerDetector - 🛑 CIRCUIT BREAKER TRIGGERED for STOCK9: 25 minutes of inactivity. Last tick: 2025-10-22T18:05:13.569099Z
+2025-10-23 00:00:13.572 ERROR [main] c.k.c.p.s.CircuitBreakerDetector - 🛑 CIRCUIT BREAKER TRIGGERED for STOCK6: 25 minutes of inactivity. Last tick: 2025-10-22T18:05:13.569099Z
+2025-10-23 00:00:13.572 ERROR [main] c.k.c.p.s.CircuitBreakerDetector - 🛑 CIRCUIT BREAKER TRIGGERED for STOCK7: 25 minutes of inactivity. Last tick: 2025-10-22T18:05:13.569099Z
+2025-10-23 00:00:13.572 ERROR [main] c.k.c.p.s.CircuitBreakerDetector - 🛑 CIRCUIT BREAKER TRIGGERED for STOCK4: 25 minutes of inactivity. Last tick: 2025-10-22T18:05:13.569099Z
+2025-10-23 00:00:13.572 ERROR [main] c.k.c.p.s.CircuitBreakerDetector - 🛑 CIRCUIT BREAKER TRIGGERED for STOCK5: 25 minutes of inactivity. Last tick: 2025-10-22T18:05:13.569099Z
+2025-10-23 00:00:13.572 ERROR [main] c.k.c.p.s.CircuitBreakerDetector - 🛑 CIRCUIT BREAKER TRIGGERED for STOCK2: 25 minutes of inactivity. Last tick: 2025-10-22T18:05:13.569099Z
+2025-10-23 00:00:13.572 ERROR [main] c.k.c.p.s.CircuitBreakerDetector - 🛑 CIRCUIT BREAKER TRIGGERED for STOCK3: 25 minutes of inactivity. Last tick: 2025-10-22T18:05:13.569099Z
+2025-10-23 00:00:13.573 ERROR [main] c.k.c.p.s.CircuitBreakerDetector - 🛑 CIRCUIT BREAKER TRIGGERED for STOCK1: 25 minutes of inactivity. Last tick: 2025-10-22T18:05:13.569099Z
+2025-10-23 00:00:13.573 ERROR [main] c.k.c.p.s.CircuitBreakerDetector - 🚨 GLOBAL MARKET HALT DETECTED: 10 instruments affected. Time: 2025-10-22T18:30:13.569333Z
+2025-10-23 00:00:13.573 INFO  [main] c.k.c.p.s.CircuitBreakerDetector - ✅ Market activity resumed for STOCK1: inactive for PT25M0.000234S
+2025-10-23 00:00:13.573 INFO  [main] c.k.c.p.s.CircuitBreakerDetector - ✅ Market activity resumed for STOCK2: inactive for PT25M0.000234S
+2025-10-23 00:00:13.574 INFO  [main] c.k.c.p.s.CircuitBreakerDetector - ✅ Market activity resumed for STOCK3: inactive for PT25M0.000234S
+2025-10-23 00:00:13.574 INFO  [main] c.k.c.p.s.CircuitBreakerDetector - ✅ Market activity resumed for STOCK4: inactive for PT25M0.000234S
+2025-10-23 00:00:13.574 INFO  [main] c.k.c.p.s.CircuitBreakerDetector - ✅ Market activity resumed for STOCK5: inactive for PT25M0.000234S
+2025-10-23 00:00:13.574 INFO  [main] c.k.c.p.s.CircuitBreakerDetector - ✅ Market activity resumed for STOCK6: inactive for PT25M0.000234S
+2025-10-23 00:00:13.576 ERROR [main] c.k.c.p.s.CircuitBreakerDetector - 🛑 CIRCUIT BREAKER TRIGGERED for STOCK2: 25 minutes of inactivity. Last tick: 2025-10-22T18:05:13.576827Z
+2025-10-23 00:00:13.584 ERROR [main] c.k.c.p.s.CircuitBreakerDetector - 🛑 CIRCUIT BREAKER TRIGGERED for STOCK1: 30 minutes of inactivity. Last tick: 2025-10-22T18:00:13.584924Z
+2025-10-23 00:00:13.594 ERROR [main] c.k.c.p.s.CircuitBreakerDetector - 🛑 CIRCUIT BREAKER TRIGGERED for STOCK1: 25 minutes of inactivity. Last tick: 2025-10-22T18:05:13.594149Z
+2025-10-23 00:00:13.594 INFO  [main] c.k.c.p.s.CircuitBreakerDetector - ✅ Market activity resumed for STOCK1: inactive for PT25M0.000005S
+2025-10-23 00:00:13.597 ERROR [main] c.k.c.p.s.CircuitBreakerDetector - 🛑 CIRCUIT BREAKER TRIGGERED for STOCK1: 25 minutes of inactivity. Last tick: 2025-10-22T18:05:13.597027Z
+2025-10-23 00:00:13.598 ERROR [main] c.k.c.p.s.CircuitBreakerDetector - 🛑 CIRCUIT BREAKER TRIGGERED for STOCK1: 25 minutes of inactivity. Last tick: 2025-10-22T18:05:13.598408Z
+2025-10-23 00:00:13.601 WARN  [main] c.k.c.p.s.CircuitBreakerDetector - 🛑 Manual circuit breaker triggered for STOCK2: Test
+2025-10-23 00:00:20.519 WARN  [main] c.k.c.p.service.BackpressureHandler - 🚨 Backpressure triggered: lag=1500, processed=0, percentage={:.2f}%
+2025-10-23 00:00:20.539 WARN  [main] c.k.c.p.service.BackpressureHandler - 🚨 Backpressure triggered: lag=1500, processed=0, percentage={:.2f}%
+2025-10-23 00:00:20.549 WARN  [main] c.k.c.p.service.BackpressureHandler - 🚨 Backpressure triggered: lag=9223372036854775807, processed=0, percentage={:.2f}%
+2025-10-23 00:00:20.557 WARN  [main] c.k.c.p.service.BackpressureHandler - 🚨 Backpressure triggered: lag=1500, processed=0, percentage={:.2f}%
+2025-10-23 00:00:20.563 WARN  [main] c.k.c.p.service.BackpressureHandler - 🚨 Backpressure triggered: lag=2000, processed=0, percentage={:.2f}%
+2025-10-23 00:00:20.574 WARN  [main] c.k.c.p.service.BackpressureHandler - 🚨 Backpressure triggered: lag=1500, processed=0, percentage={:.2f}%
+2025-10-23 00:00:20.575 INFO  [main] c.k.c.p.service.BackpressureHandler - ✅ Backpressure released after 0ms: lag=500, processed=0
+2025-10-23 00:00:20.594 WARN  [main] c.k.c.p.service.BackpressureHandler - 🚨 Backpressure triggered: lag=15, processed=100, percentage={:.2f}%
+2025-10-23 00:00:20.624 WARN  [main] c.k.c.p.service.BackpressureHandler - 🚨 Backpressure triggered: lag=1500, processed=0, percentage={:.2f}%
+2025-10-23 00:00:20.648 INFO  [main] c.k.c.p.service.BackpressureHandler - 🔄 Backpressure statistics reset
+2025-10-23 00:00:20.657 WARN  [main] c.k.c.p.service.BackpressureHandler - 🚨 Backpressure triggered: lag=1500, processed=0, percentage={:.2f}%
+2025-10-23 00:00:23.085 INFO  [main] c.k.c.ConsumerApplicationTests - Starting ConsumerApplicationTests using Java 17.0.15 with PID 10707 (started by shivendrapratap in /Users/shivendrapratap/Documents/kotsin/streamingcandle)
+2025-10-23 00:00:23.092 INFO  [main] c.k.c.ConsumerApplicationTests - The following 1 profile is active: "test"
+2025-10-23 00:00:32.475 INFO  [main] c.k.c.s.MongoInstrumentFamilyService - 🚀 Initializing MongoDB-based instrument family cache...
+2025-10-23 00:00:32.668 INFO  [main] c.k.c.s.MongoInstrumentFamilyService - 📊 Found 0 ScripGroups from MongoDB for tradingType=EQUITY
+2025-10-23 00:00:32.688 INFO  [main] c.k.c.s.MongoInstrumentFamilyService - 📊 Total ScripGroups in database: 0
+2025-10-23 00:00:32.689 WARN  [main] c.k.c.s.MongoInstrumentFamilyService - ⚠️ No ScripGroups found in database at all! Check database name and collection name.
+2025-10-23 00:00:32.690 WARN  [main] c.k.c.s.MongoInstrumentFamilyService - ⚠️ Current MongoDB URI: mongodb://localhost:27017/tradeIngestion
+2025-10-23 00:00:32.690 WARN  [main] c.k.c.s.MongoInstrumentFamilyService - ⚠️ Expected collection: ScripGroup
+2025-10-23 00:00:32.690 WARN  [main] c.k.c.s.MongoInstrumentFamilyService - ⚠️ Expected tradingType values: EQUITY, FUTURE, OPTION
+2025-10-23 00:00:32.690 WARN  [main] c.k.c.s.MongoInstrumentFamilyService - ⚠️ No ScripGroups found in MongoDB, skipping cache refresh
+2025-10-23 00:00:32.690 INFO  [main] c.k.c.s.MongoInstrumentFamilyService - ✅ MongoDB instrument family cache initialized successfully
+2025-10-23 00:00:32.798 INFO  [main] c.k.c.p.UnifiedMarketDataProcessor - 🚀 Starting Unified Market Data Processor (Refactored)
+2025-10-23 00:00:32.798 INFO  [main] c.k.c.p.UnifiedMarketDataProcessor - Flags: candlesOutputEnabled=true, familyStructuredEnabled=true
+2025-10-23 00:00:32.799 INFO  [main] c.k.c.p.UnifiedMarketDataProcessor - Input topics: ticks=forwardtesting-data, oi=OpenInterest, orderbook=Orderbook
+2025-10-23 00:00:32.799 INFO  [main] c.k.c.p.UnifiedMarketDataProcessor - Candle topics: 1m=candle-complete-1m-test, 2m=candle-complete-2m-test, 3m=candle-complete-3m-test, 5m=candle-complete-5m-test, 15m=candle-complete-15m-test, 30m=candle-complete-30m-test
+2025-10-23 00:00:32.799 INFO  [main] c.k.c.p.UnifiedMarketDataProcessor - Family topics: 1m=family-structured-1m-test, 2m=family-structured-2m-test, 5m=family-structured-5m-test, 15m=family-structured-15m-test, 30m=family-structured-30m-test, all=family-structured-all-test
+2025-10-23 00:00:32.799 INFO  [main] c.k.c.p.s.MarketDataOrchestrator - 🚀 Starting all market data processing streams
+2025-10-23 00:00:32.799 INFO  [main] c.k.c.p.s.TopologyConfiguration - 🏗️ Building per-instrument candle topology
+2025-10-23 00:00:34.314 INFO  [main] c.k.c.p.s.MarketDataOrchestrator - ✅ Started per-instrument candle stream
+2025-10-23 00:00:34.320 INFO  [main] c.k.c.p.s.MarketDataOrchestrator - 🏗️ Starting family-structured streams
+2025-10-23 00:00:34.321 INFO  [main] c.k.c.p.s.TopologyConfiguration - 🏗️ Building family-structured topology for 1m
+2025-10-23 00:00:34.930 INFO  [main] c.k.c.p.s.MarketDataOrchestrator - ✅ Started family-structured-1m stream → topic: family-structured-1m
+2025-10-23 00:00:34.931 INFO  [main] c.k.c.p.s.TopologyConfiguration - 🏗️ Building family-structured topology for 2m
+2025-10-23 00:00:35.246 INFO  [main] c.k.c.p.s.MarketDataOrchestrator - ✅ Started family-structured-2m stream → topic: family-structured-2m
+2025-10-23 00:00:35.248 INFO  [main] c.k.c.p.s.TopologyConfiguration - 🏗️ Building family-structured topology for 5m
+2025-10-23 00:00:35.489 INFO  [main] c.k.c.p.s.MarketDataOrchestrator - ✅ Started family-structured-5m stream → topic: family-structured-5m
+2025-10-23 00:00:35.490 INFO  [main] c.k.c.p.s.TopologyConfiguration - 🏗️ Building family-structured topology for 15m
+2025-10-23 00:00:35.791 INFO  [main] c.k.c.p.s.MarketDataOrchestrator - ✅ Started family-structured-15m stream → topic: family-structured-15m
+2025-10-23 00:00:35.793 INFO  [main] c.k.c.p.s.TopologyConfiguration - 🏗️ Building family-structured topology for 30m
+2025-10-23 00:00:36.042 INFO  [main] c.k.c.p.s.MarketDataOrchestrator - ✅ Started family-structured-30m stream → topic: family-structured-30m
+2025-10-23 00:00:36.045 INFO  [main] c.k.c.p.s.MarketDataOrchestrator - ✅ All streams started successfully
+2025-10-23 00:00:36.046 INFO  [main] c.k.c.p.UnifiedMarketDataProcessor - ✅ Unified Market Data Processor started successfully
+2025-10-23 00:00:36.127 WARN  [family-30m-be82f70f-fc25-4ad8-9688-61df9d288376-StreamThread-1] o.a.kafka.clients.NetworkClient - [Consumer clientId=family-30m-be82f70f-fc25-4ad8-9688-61df9d288376-StreamThread-1-consumer, groupId=family-30m] Error while fetching metadata with correlation id 2 : {candle-complete-30m=UNKNOWN_TOPIC_OR_PARTITION, family-30m-KSTREAM-REPARTITION-0000000002-repartition=UNKNOWN_TOPIC_OR_PARTITION, family-30m-KSTREAM-TOTABLE-0000000008-repartition=UNKNOWN_TOPIC_OR_PARTITION, family-30m-KSTREAM-REPARTITION-0000000014-repartition=UNKNOWN_TOPIC_OR_PARTITION}
+2025-10-23 00:00:36.292 WARN  [family-30m-be82f70f-fc25-4ad8-9688-61df9d288376-StreamThread-1] o.a.kafka.clients.NetworkClient - [Consumer clientId=family-30m-be82f70f-fc25-4ad8-9688-61df9d288376-StreamThread-1-consumer, groupId=family-30m] Error while fetching metadata with correlation id 7 : {candle-complete-30m=UNKNOWN_TOPIC_OR_PARTITION, family-30m-KSTREAM-REPARTITION-0000000002-repartition=UNKNOWN_TOPIC_OR_PARTITION, family-30m-KSTREAM-TOTABLE-0000000008-repartition=UNKNOWN_TOPIC_OR_PARTITION, family-30m-KSTREAM-REPARTITION-0000000014-repartition=UNKNOWN_TOPIC_OR_PARTITION}
+2025-10-23 00:00:36.293 ERROR [family-30m-be82f70f-fc25-4ad8-9688-61df9d288376-StreamThread-1] o.a.k.s.p.i.RepartitionTopics - stream-thread [family-30m-be82f70f-fc25-4ad8-9688-61df9d288376-StreamThread-1-consumer] Subtopology 0 was missing source topics [candle-complete-30m] and will be excluded from the current assignment, this can be due to the consumer client's metadata being stale or because they have not been created yet. Please verify that you have created all input topics; if they do exist, you just need to wait for the metadata to be updated, at which time a new rebalance will be kicked off automatically and the topology will be retried at that time.
+2025-10-23 00:00:36.296 ERROR [family-30m-be82f70f-fc25-4ad8-9688-61df9d288376-StreamThread-1] o.a.k.s.p.i.StreamsPartitionAssignor - stream-thread [family-30m-be82f70f-fc25-4ad8-9688-61df9d288376-StreamThread-1-consumer] Caught an error in the task assignment. Returning an error assignment.
+org.apache.kafka.streams.errors.MissingSourceTopicException: Missing source topics.
+	at org.apache.kafka.streams.processor.internals.StreamsPartitionAssignor.prepareRepartitionTopics(StreamsPartitionAssignor.java:526)
+	at org.apache.kafka.streams.processor.internals.StreamsPartitionAssignor.assign(StreamsPartitionAssignor.java:392)
+	at org.apache.kafka.clients.consumer.internals.ConsumerCoordinator.onLeaderElected(ConsumerCoordinator.java:703)
+	at org.apache.kafka.clients.consumer.internals.AbstractCoordinator.onLeaderElected(AbstractCoordinator.java:736)
+	at org.apache.kafka.clients.consumer.internals.AbstractCoordinator.access$1000(AbstractCoordinator.java:112)
+	at org.apache.kafka.clients.consumer.internals.AbstractCoordinator$JoinGroupResponseHandler.handle(AbstractCoordinator.java:640)
+	at org.apache.kafka.clients.consumer.internals.AbstractCoordinator$JoinGroupResponseHandler.handle(AbstractCoordinator.java:603)
+	at org.apache.kafka.clients.consumer.internals.AbstractCoordinator$CoordinatorResponseHandler.onSuccess(AbstractCoordinator.java:1270)
+	at org.apache.kafka.clients.consumer.internals.AbstractCoordinator$CoordinatorResponseHandler.onSuccess(AbstractCoordinator.java:1245)
+	at org.apache.kafka.clients.consumer.internals.RequestFuture$1.onSuccess(RequestFuture.java:206)
+	at org.apache.kafka.clients.consumer.internals.RequestFuture.fireSuccess(RequestFuture.java:169)
+	at org.apache.kafka.clients.consumer.internals.RequestFuture.complete(RequestFuture.java:129)
+	at org.apache.kafka.clients.consumer.internals.ConsumerNetworkClient$RequestFutureCompletionHandler.fireCompletion(ConsumerNetworkClient.java:617)
+	at org.apache.kafka.clients.consumer.internals.ConsumerNetworkClient.firePendingCompletedRequests(ConsumerNetworkClient.java:427)
+	at org.apache.kafka.clients.consumer.internals.ConsumerNetworkClient.poll(ConsumerNetworkClient.java:312)
+	at org.apache.kafka.clients.consumer.internals.ConsumerNetworkClient.poll(ConsumerNetworkClient.java:251)
+	at org.apache.kafka.clients.consumer.KafkaConsumer.pollForFetches(KafkaConsumer.java:1255)
+	at org.apache.kafka.clients.consumer.KafkaConsumer.poll(KafkaConsumer.java:1186)
+	at org.apache.kafka.clients.consumer.KafkaConsumer.poll(KafkaConsumer.java:1159)
+	at org.apache.kafka.streams.processor.internals.StreamThread.pollRequests(StreamThread.java:1014)
+	at org.apache.kafka.streams.processor.internals.StreamThread.pollPhase(StreamThread.java:962)
+	at org.apache.kafka.streams.processor.internals.StreamThread.runOnce(StreamThread.java:766)
+	at org.apache.kafka.streams.processor.internals.StreamThread.runLoop(StreamThread.java:617)
+	at org.apache.kafka.streams.processor.internals.StreamThread.run(StreamThread.java:579)
+2025-10-23 00:00:36.301 WARN  [family-30m-be82f70f-fc25-4ad8-9688-61df9d288376-StreamThread-1] o.a.k.c.c.i.ConsumerCoordinator - [Consumer clientId=family-30m-be82f70f-fc25-4ad8-9688-61df9d288376-StreamThread-1-consumer, groupId=family-30m] The following subscribed topics are not assigned to any members: [OpenInterest, candle-complete-30m, family-30m-KSTREAM-REPARTITION-0000000002-repartition, family-30m-KSTREAM-REPARTITION-0000000014-repartition, family-30m-KSTREAM-TOTABLE-0000000008-repartition] 
+2025-10-23 00:00:36.334 ERROR [family-30m-be82f70f-fc25-4ad8-9688-61df9d288376-StreamThread-1] o.a.k.s.p.internals.StreamThread - stream-thread [family-30m-be82f70f-fc25-4ad8-9688-61df9d288376-StreamThread-1] Received error code INCOMPLETE_SOURCE_TOPIC_METADATA
+2025-10-23 00:00:36.335 ERROR [family-30m-be82f70f-fc25-4ad8-9688-61df9d288376-StreamThread-1] o.a.k.c.c.i.ConsumerCoordinator - [Consumer clientId=family-30m-be82f70f-fc25-4ad8-9688-61df9d288376-StreamThread-1-consumer, groupId=family-30m] User provided listener org.apache.kafka.streams.processor.internals.StreamsRebalanceListener failed on invocation of onPartitionsAssigned for partitions []
+org.apache.kafka.streams.errors.MissingSourceTopicException: One or more source topics were missing during rebalance
+	at org.apache.kafka.streams.processor.internals.StreamsRebalanceListener.onPartitionsAssigned(StreamsRebalanceListener.java:58)
+	at org.apache.kafka.clients.consumer.internals.ConsumerCoordinator.invokePartitionsAssigned(ConsumerCoordinator.java:329)
+	at org.apache.kafka.clients.consumer.internals.ConsumerCoordinator.onJoinComplete(ConsumerCoordinator.java:478)
+	at org.apache.kafka.clients.consumer.internals.AbstractCoordinator.joinGroupIfNeeded(AbstractCoordinator.java:478)
+	at org.apache.kafka.clients.consumer.internals.AbstractCoordinator.ensureActiveGroup(AbstractCoordinator.java:389)
+	at org.apache.kafka.clients.consumer.internals.ConsumerCoordinator.poll(ConsumerCoordinator.java:564)
+	at org.apache.kafka.clients.consumer.KafkaConsumer.updateAssignmentMetadataIfNeeded(KafkaConsumer.java:1220)
+	at org.apache.kafka.clients.consumer.KafkaConsumer.poll(KafkaConsumer.java:1179)
+	at org.apache.kafka.clients.consumer.KafkaConsumer.poll(KafkaConsumer.java:1159)
+	at org.apache.kafka.streams.processor.internals.StreamThread.pollRequests(StreamThread.java:1014)
+	at org.apache.kafka.streams.processor.internals.StreamThread.pollPhase(StreamThread.java:962)
+	at org.apache.kafka.streams.processor.internals.StreamThread.runOnce(StreamThread.java:766)
+	at org.apache.kafka.streams.processor.internals.StreamThread.runLoop(StreamThread.java:617)
+	at org.apache.kafka.streams.processor.internals.StreamThread.run(StreamThread.java:579)
+2025-10-23 00:00:36.337 ERROR [family-30m-be82f70f-fc25-4ad8-9688-61df9d288376-StreamThread-1] o.apache.kafka.streams.KafkaStreams - stream-client [family-30m-be82f70f-fc25-4ad8-9688-61df9d288376] Encountered the following exception during processing and the registered exception handler opted to SHUTDOWN_CLIENT. The streams client is going to shut down now. 
+org.apache.kafka.streams.errors.MissingSourceTopicException: One or more source topics were missing during rebalance
+	at org.apache.kafka.streams.processor.internals.StreamsRebalanceListener.onPartitionsAssigned(StreamsRebalanceListener.java:58)
+	at org.apache.kafka.clients.consumer.internals.ConsumerCoordinator.invokePartitionsAssigned(ConsumerCoordinator.java:329)
+	at org.apache.kafka.clients.consumer.internals.ConsumerCoordinator.onJoinComplete(ConsumerCoordinator.java:478)
+	at org.apache.kafka.clients.consumer.internals.AbstractCoordinator.joinGroupIfNeeded(AbstractCoordinator.java:478)
+	at org.apache.kafka.clients.consumer.internals.AbstractCoordinator.ensureActiveGroup(AbstractCoordinator.java:389)
+	at org.apache.kafka.clients.consumer.internals.ConsumerCoordinator.poll(ConsumerCoordinator.java:564)
+	at org.apache.kafka.clients.consumer.KafkaConsumer.updateAssignmentMetadataIfNeeded(KafkaConsumer.java:1220)
+	at org.apache.kafka.clients.consumer.KafkaConsumer.poll(KafkaConsumer.java:1179)
+	at org.apache.kafka.clients.consumer.KafkaConsumer.poll(KafkaConsumer.java:1159)
+	at org.apache.kafka.streams.processor.internals.StreamThread.pollRequests(StreamThread.java:1014)
+	at org.apache.kafka.streams.processor.internals.StreamThread.pollPhase(StreamThread.java:962)
+	at org.apache.kafka.streams.processor.internals.StreamThread.runOnce(StreamThread.java:766)
+	at org.apache.kafka.streams.processor.internals.StreamThread.runLoop(StreamThread.java:617)
+	at org.apache.kafka.streams.processor.internals.StreamThread.run(StreamThread.java:579)
+2025-10-23 00:00:39.496 ERROR [family-15m-0373593f-85c4-4482-b8e1-fb266bbac6d5-StreamThread-1] o.a.k.s.p.internals.TaskExecutor - stream-thread [family-15m-0373593f-85c4-4482-b8e1-fb266bbac6d5-StreamThread-1] Failed to process stream task 1_0 due to the following error:
+org.apache.kafka.streams.errors.StreamsException: A serializer (org.apache.kafka.common.serialization.StringSerializer) is not compatible to the actual value type (value type: com.kotsin.consumer.model.OpenInterest). Change the default Serdes in StreamConfig or provide correct Serdes via method parameters.
+	at org.apache.kafka.streams.state.StateSerdes.rawValue(StateSerdes.java:207)
+	at org.apache.kafka.streams.state.internals.MeteredKeyValueStore.lambda$put$6(MeteredKeyValueStore.java:331)
+	at org.apache.kafka.streams.processor.internals.metrics.StreamsMetricsImpl.maybeMeasureLatency(StreamsMetricsImpl.java:872)
+	at org.apache.kafka.streams.state.internals.MeteredKeyValueStore.put(MeteredKeyValueStore.java:331)
+	at org.apache.kafka.streams.processor.internals.AbstractReadWriteDecorator$KeyValueStoreReadWriteDecorator.put(AbstractReadWriteDecorator.java:131)
+	at org.apache.kafka.streams.state.internals.KeyValueStoreWrapper.put(KeyValueStoreWrapper.java:102)
+	at org.apache.kafka.streams.kstream.internals.KTableSource$KTableSourceProcessor.process(KTableSource.java:151)
+	at org.apache.kafka.streams.processor.internals.ProcessorNode.process(ProcessorNode.java:152)
+	at org.apache.kafka.streams.processor.internals.ProcessorContextImpl.forwardInternal(ProcessorContextImpl.java:290)
+	at org.apache.kafka.streams.processor.internals.ProcessorContextImpl.forward(ProcessorContextImpl.java:269)
+	at org.apache.kafka.streams.processor.internals.ProcessorContextImpl.forward(ProcessorContextImpl.java:228)
+	at org.apache.kafka.streams.processor.internals.SourceNode.process(SourceNode.java:84)
+	at org.apache.kafka.streams.processor.internals.StreamTask.lambda$doProcess$1(StreamTask.java:810)
+	at org.apache.kafka.streams.processor.internals.metrics.StreamsMetricsImpl.maybeMeasureLatency(StreamsMetricsImpl.java:872)
+	at org.apache.kafka.streams.processor.internals.StreamTask.doProcess(StreamTask.java:810)
+	at org.apache.kafka.streams.processor.internals.StreamTask.process(StreamTask.java:741)
+	at org.apache.kafka.streams.processor.internals.TaskExecutor.processTask(TaskExecutor.java:97)
+	at org.apache.kafka.streams.processor.internals.TaskExecutor.process(TaskExecutor.java:78)
+	at org.apache.kafka.streams.processor.internals.TaskManager.process(TaskManager.java:1765)
+	at org.apache.kafka.streams.processor.internals.StreamThread.runOnce(StreamThread.java:807)
+	at org.apache.kafka.streams.processor.internals.StreamThread.runLoop(StreamThread.java:617)
+	at org.apache.kafka.streams.processor.internals.StreamThread.run(StreamThread.java:579)
+Caused by: java.lang.ClassCastException: class com.kotsin.consumer.model.OpenInterest cannot be cast to class java.lang.String (com.kotsin.consumer.model.OpenInterest is in unnamed module of loader 'app'; java.lang.String is in module java.base of loader 'bootstrap')
+	at org.apache.kafka.common.serialization.StringSerializer.serialize(StringSerializer.java:29)
+	at org.apache.kafka.streams.state.internals.ValueAndTimestampSerializer.serialize(ValueAndTimestampSerializer.java:83)
+	at org.apache.kafka.streams.state.internals.ValueAndTimestampSerializer.serialize(ValueAndTimestampSerializer.java:74)
+	at org.apache.kafka.streams.state.internals.ValueAndTimestampSerializer.serialize(ValueAndTimestampSerializer.java:31)
+	at org.apache.kafka.streams.state.StateSerdes.rawValue(StateSerdes.java:195)
+	... 21 common frames omitted
+2025-10-23 00:00:39.508 ERROR [family-15m-0373593f-85c4-4482-b8e1-fb266bbac6d5-StreamThread-1] o.apache.kafka.streams.KafkaStreams - stream-client [family-15m-0373593f-85c4-4482-b8e1-fb266bbac6d5] Encountered the following exception during processing and the registered exception handler opted to SHUTDOWN_CLIENT. The streams client is going to shut down now. 
+org.apache.kafka.streams.errors.StreamsException: A serializer (org.apache.kafka.common.serialization.StringSerializer) is not compatible to the actual value type (value type: com.kotsin.consumer.model.OpenInterest). Change the default Serdes in StreamConfig or provide correct Serdes via method parameters.
+	at org.apache.kafka.streams.state.StateSerdes.rawValue(StateSerdes.java:207)
+	at org.apache.kafka.streams.state.internals.MeteredKeyValueStore.lambda$put$6(MeteredKeyValueStore.java:331)
+	at org.apache.kafka.streams.processor.internals.metrics.StreamsMetricsImpl.maybeMeasureLatency(StreamsMetricsImpl.java:872)
+	at org.apache.kafka.streams.state.internals.MeteredKeyValueStore.put(MeteredKeyValueStore.java:331)
+	at org.apache.kafka.streams.processor.internals.AbstractReadWriteDecorator$KeyValueStoreReadWriteDecorator.put(AbstractReadWriteDecorator.java:131)
+	at org.apache.kafka.streams.state.internals.KeyValueStoreWrapper.put(KeyValueStoreWrapper.java:102)
+	at org.apache.kafka.streams.kstream.internals.KTableSource$KTableSourceProcessor.process(KTableSource.java:151)
+	at org.apache.kafka.streams.processor.internals.ProcessorNode.process(ProcessorNode.java:152)
+	at org.apache.kafka.streams.processor.internals.ProcessorContextImpl.forwardInternal(ProcessorContextImpl.java:290)
+	at org.apache.kafka.streams.processor.internals.ProcessorContextImpl.forward(ProcessorContextImpl.java:269)
+	at org.apache.kafka.streams.processor.internals.ProcessorContextImpl.forward(ProcessorContextImpl.java:228)
+	at org.apache.kafka.streams.processor.internals.SourceNode.process(SourceNode.java:84)
+	at org.apache.kafka.streams.processor.internals.StreamTask.lambda$doProcess$1(StreamTask.java:810)
+	at org.apache.kafka.streams.processor.internals.metrics.StreamsMetricsImpl.maybeMeasureLatency(StreamsMetricsImpl.java:872)
+	at org.apache.kafka.streams.processor.internals.StreamTask.doProcess(StreamTask.java:810)
+	at org.apache.kafka.streams.processor.internals.StreamTask.process(StreamTask.java:741)
+	at org.apache.kafka.streams.processor.internals.TaskExecutor.processTask(TaskExecutor.java:97)
+	at org.apache.kafka.streams.processor.internals.TaskExecutor.process(TaskExecutor.java:78)
+	at org.apache.kafka.streams.processor.internals.TaskManager.process(TaskManager.java:1765)
+	at org.apache.kafka.streams.processor.internals.StreamThread.runOnce(StreamThread.java:807)
+	at org.apache.kafka.streams.processor.internals.StreamThread.runLoop(StreamThread.java:617)
+	at org.apache.kafka.streams.processor.internals.StreamThread.run(StreamThread.java:579)
+Caused by: java.lang.ClassCastException: class com.kotsin.consumer.model.OpenInterest cannot be cast to class java.lang.String (com.kotsin.consumer.model.OpenInterest is in unnamed module of loader 'app'; java.lang.String is in module java.base of loader 'bootstrap')
+	at org.apache.kafka.common.serialization.StringSerializer.serialize(StringSerializer.java:29)
+	at org.apache.kafka.streams.state.internals.ValueAndTimestampSerializer.serialize(ValueAndTimestampSerializer.java:83)
+	at org.apache.kafka.streams.state.internals.ValueAndTimestampSerializer.serialize(ValueAndTimestampSerializer.java:74)
+	at org.apache.kafka.streams.state.internals.ValueAndTimestampSerializer.serialize(ValueAndTimestampSerializer.java:31)
+	at org.apache.kafka.streams.state.StateSerdes.rawValue(StateSerdes.java:195)
+	... 21 common frames omitted
+2025-10-23 00:00:39.825 INFO  [main] c.k.c.ConsumerApplicationTests - Started ConsumerApplicationTests in 17.428 seconds (process running for 36.307)
+2025-10-23 00:00:39.853 INFO  [main] c.k.c.config.ConfigurationValidator - 🔍 Validating application configuration...
+2025-10-23 00:00:39.856 INFO  [main] c.k.c.config.ConfigurationValidator - ✅ Configuration validation passed
+2025-10-23 00:00:39.856 INFO  [main] c.k.c.config.ConfigurationValidator - 📋 Configuration Summary:
+2025-10-23 00:00:39.856 INFO  [main] c.k.c.config.ConfigurationValidator -   Kafka Bootstrap Servers: 13.203.60.173:9094
+2025-10-23 00:00:39.857 INFO  [main] c.k.c.config.ConfigurationValidator -   Application ID: unified-market-processor2-test
+2025-10-23 00:00:39.858 INFO  [main] c.k.c.config.ConfigurationValidator -   Input Topics: ticks=forwardtesting-data, oi=OpenInterest, orderbook=Orderbook
+2025-10-23 00:00:39.858 INFO  [main] c.k.c.config.ConfigurationValidator -   Output Topics: 1m=candle-complete-1m-test
+2025-10-23 00:00:39.858 INFO  [main] c.k.c.config.ConfigurationValidator -   MongoDB URI: mongodb://localhost:27017/tradeIngestion-test
+2025-10-23 00:00:39.859 INFO  [main] c.k.c.config.ConfigurationValidator -   Trading Hours: 09:15 - 15:30
+2025-10-23 00:00:40.451 WARN  [instrument-08a3b2d7-99b5-4342-b402-e9161745216d-StreamThread-1] o.a.k.s.p.i.StoreChangelogReader - stream-thread [instrument-08a3b2d7-99b5-4342-b402-e9161745216d-StreamThread-1] Encountered org.apache.kafka.clients.consumer.OffsetOutOfRangeException fetching records from restore consumer for partitions [instrument-instrument-state-store-changelog-0], it is likely that the consumer's position has fallen out of the topic partition offset range because the topic was truncated or compacted on the broker, marking the corresponding tasks as corrupted and re-initializing it later.
+org.apache.kafka.clients.consumer.OffsetOutOfRangeException: Fetch position FetchPosition{offset=1331, offsetEpoch=Optional.empty, currentLeader=LeaderAndEpoch{leader=Optional[13.203.60.173:9094 (id: 1 rack: null)], epoch=0}} is out of range for partition instrument-instrument-state-store-changelog-0
+	at org.apache.kafka.clients.consumer.internals.AbstractFetch.handleOffsetOutOfRange(AbstractFetch.java:664)
+	at org.apache.kafka.clients.consumer.internals.AbstractFetch.handleInitializeCompletedFetchErrors(AbstractFetch.java:625)
+	at org.apache.kafka.clients.consumer.internals.AbstractFetch.initializeCompletedFetch(AbstractFetch.java:514)
+	at org.apache.kafka.clients.consumer.internals.AbstractFetch.collectFetch(AbstractFetch.java:283)
+	at org.apache.kafka.clients.consumer.KafkaConsumer.pollForFetches(KafkaConsumer.java:1262)
+	at org.apache.kafka.clients.consumer.KafkaConsumer.poll(KafkaConsumer.java:1186)
+	at org.apache.kafka.clients.consumer.KafkaConsumer.poll(KafkaConsumer.java:1159)
+	at org.apache.kafka.streams.processor.internals.StoreChangelogReader.pollRecordsFromRestoreConsumer(StoreChangelogReader.java:490)
+	at org.apache.kafka.streams.processor.internals.StoreChangelogReader.restore(StoreChangelogReader.java:446)
+	at org.apache.kafka.streams.processor.internals.StreamThread.initializeAndRestorePhase(StreamThread.java:918)
+	at org.apache.kafka.streams.processor.internals.StreamThread.runOnce(StreamThread.java:778)
+	at org.apache.kafka.streams.processor.internals.StreamThread.runLoop(StreamThread.java:617)
+	at org.apache.kafka.streams.processor.internals.StreamThread.run(StreamThread.java:579)
+2025-10-23 00:00:40.468 WARN  [instrument-08a3b2d7-99b5-4342-b402-e9161745216d-StreamThread-1] o.a.k.s.p.internals.StreamThread - stream-thread [instrument-08a3b2d7-99b5-4342-b402-e9161745216d-StreamThread-1] Detected the states of tasks [3_0] are corrupted. Will close the task as dirty and re-create and bootstrap from scratch.
+org.apache.kafka.streams.errors.TaskCorruptedException: Tasks [3_0] are corrupted and hence need to be re-initialized
+	at org.apache.kafka.streams.processor.internals.StoreChangelogReader.pollRecordsFromRestoreConsumer(StoreChangelogReader.java:503)
+	at org.apache.kafka.streams.processor.internals.StoreChangelogReader.restore(StoreChangelogReader.java:446)
+	at org.apache.kafka.streams.processor.internals.StreamThread.initializeAndRestorePhase(StreamThread.java:918)
+	at org.apache.kafka.streams.processor.internals.StreamThread.runOnce(StreamThread.java:778)
+	at org.apache.kafka.streams.processor.internals.StreamThread.runLoop(StreamThread.java:617)
+	at org.apache.kafka.streams.processor.internals.StreamThread.run(StreamThread.java:579)
+Caused by: org.apache.kafka.clients.consumer.OffsetOutOfRangeException: Fetch position FetchPosition{offset=1331, offsetEpoch=Optional.empty, currentLeader=LeaderAndEpoch{leader=Optional[13.203.60.173:9094 (id: 1 rack: null)], epoch=0}} is out of range for partition instrument-instrument-state-store-changelog-0
+	at org.apache.kafka.clients.consumer.internals.AbstractFetch.handleOffsetOutOfRange(AbstractFetch.java:664)
+	at org.apache.kafka.clients.consumer.internals.AbstractFetch.handleInitializeCompletedFetchErrors(AbstractFetch.java:625)
+	at org.apache.kafka.clients.consumer.internals.AbstractFetch.initializeCompletedFetch(AbstractFetch.java:514)
+	at org.apache.kafka.clients.consumer.internals.AbstractFetch.collectFetch(AbstractFetch.java:283)
+	at org.apache.kafka.clients.consumer.KafkaConsumer.pollForFetches(KafkaConsumer.java:1262)
+	at org.apache.kafka.clients.consumer.KafkaConsumer.poll(KafkaConsumer.java:1186)
+	at org.apache.kafka.clients.consumer.KafkaConsumer.poll(KafkaConsumer.java:1159)
+	at org.apache.kafka.streams.processor.internals.StoreChangelogReader.pollRecordsFromRestoreConsumer(StoreChangelogReader.java:490)
+	... 5 common frames omitted
+2025-10-23 00:00:40.519 ERROR [family-5m-bd7312ef-8a09-473b-b607-22b0c8ea711e-StreamThread-1] o.a.k.s.p.internals.TaskExecutor - stream-thread [family-5m-bd7312ef-8a09-473b-b607-22b0c8ea711e-StreamThread-1] Failed to process stream task 1_0 due to the following error:
+org.apache.kafka.streams.errors.StreamsException: A serializer (org.apache.kafka.common.serialization.StringSerializer) is not compatible to the actual value type (value type: com.kotsin.consumer.model.OpenInterest). Change the default Serdes in StreamConfig or provide correct Serdes via method parameters.
+	at org.apache.kafka.streams.state.StateSerdes.rawValue(StateSerdes.java:207)
+	at org.apache.kafka.streams.state.internals.MeteredKeyValueStore.lambda$put$6(MeteredKeyValueStore.java:331)
+	at org.apache.kafka.streams.processor.internals.metrics.StreamsMetricsImpl.maybeMeasureLatency(StreamsMetricsImpl.java:872)
+	at org.apache.kafka.streams.state.internals.MeteredKeyValueStore.put(MeteredKeyValueStore.java:331)
+	at org.apache.kafka.streams.processor.internals.AbstractReadWriteDecorator$KeyValueStoreReadWriteDecorator.put(AbstractReadWriteDecorator.java:131)
+	at org.apache.kafka.streams.state.internals.KeyValueStoreWrapper.put(KeyValueStoreWrapper.java:102)
+	at org.apache.kafka.streams.kstream.internals.KTableSource$KTableSourceProcessor.process(KTableSource.java:151)
+	at org.apache.kafka.streams.processor.internals.ProcessorNode.process(ProcessorNode.java:152)
+	at org.apache.kafka.streams.processor.internals.ProcessorContextImpl.forwardInternal(ProcessorContextImpl.java:290)
+	at org.apache.kafka.streams.processor.internals.ProcessorContextImpl.forward(ProcessorContextImpl.java:269)
+	at org.apache.kafka.streams.processor.internals.ProcessorContextImpl.forward(ProcessorContextImpl.java:228)
+	at org.apache.kafka.streams.processor.internals.SourceNode.process(SourceNode.java:84)
+	at org.apache.kafka.streams.processor.internals.StreamTask.lambda$doProcess$1(StreamTask.java:810)
+	at org.apache.kafka.streams.processor.internals.metrics.StreamsMetricsImpl.maybeMeasureLatency(StreamsMetricsImpl.java:872)
+	at org.apache.kafka.streams.processor.internals.StreamTask.doProcess(StreamTask.java:810)
+	at org.apache.kafka.streams.processor.internals.StreamTask.process(StreamTask.java:741)
+	at org.apache.kafka.streams.processor.internals.TaskExecutor.processTask(TaskExecutor.java:97)
+	at org.apache.kafka.streams.processor.internals.TaskExecutor.process(TaskExecutor.java:78)
+	at org.apache.kafka.streams.processor.internals.TaskManager.process(TaskManager.java:1765)
+	at org.apache.kafka.streams.processor.internals.StreamThread.runOnce(StreamThread.java:807)
+	at org.apache.kafka.streams.processor.internals.StreamThread.runLoop(StreamThread.java:617)
+	at org.apache.kafka.streams.processor.internals.StreamThread.run(StreamThread.java:579)
+Caused by: java.lang.ClassCastException: class com.kotsin.consumer.model.OpenInterest cannot be cast to class java.lang.String (com.kotsin.consumer.model.OpenInterest is in unnamed module of loader 'app'; java.lang.String is in module java.base of loader 'bootstrap')
+	at org.apache.kafka.common.serialization.StringSerializer.serialize(StringSerializer.java:29)
+	at org.apache.kafka.streams.state.internals.ValueAndTimestampSerializer.serialize(ValueAndTimestampSerializer.java:83)
+	at org.apache.kafka.streams.state.internals.ValueAndTimestampSerializer.serialize(ValueAndTimestampSerializer.java:74)
+	at org.apache.kafka.streams.state.internals.ValueAndTimestampSerializer.serialize(ValueAndTimestampSerializer.java:31)
+	at org.apache.kafka.streams.state.StateSerdes.rawValue(StateSerdes.java:195)
+	... 21 common frames omitted
+2025-10-23 00:00:40.530 ERROR [family-5m-bd7312ef-8a09-473b-b607-22b0c8ea711e-StreamThread-1] o.apache.kafka.streams.KafkaStreams - stream-client [family-5m-bd7312ef-8a09-473b-b607-22b0c8ea711e] Encountered the following exception during processing and the registered exception handler opted to SHUTDOWN_CLIENT. The streams client is going to shut down now. 
+org.apache.kafka.streams.errors.StreamsException: A serializer (org.apache.kafka.common.serialization.StringSerializer) is not compatible to the actual value type (value type: com.kotsin.consumer.model.OpenInterest). Change the default Serdes in StreamConfig or provide correct Serdes via method parameters.
+	at org.apache.kafka.streams.state.StateSerdes.rawValue(StateSerdes.java:207)
+	at org.apache.kafka.streams.state.internals.MeteredKeyValueStore.lambda$put$6(MeteredKeyValueStore.java:331)
+	at org.apache.kafka.streams.processor.internals.metrics.StreamsMetricsImpl.maybeMeasureLatency(StreamsMetricsImpl.java:872)
+	at org.apache.kafka.streams.state.internals.MeteredKeyValueStore.put(MeteredKeyValueStore.java:331)
+	at org.apache.kafka.streams.processor.internals.AbstractReadWriteDecorator$KeyValueStoreReadWriteDecorator.put(AbstractReadWriteDecorator.java:131)
+	at org.apache.kafka.streams.state.internals.KeyValueStoreWrapper.put(KeyValueStoreWrapper.java:102)
+	at org.apache.kafka.streams.kstream.internals.KTableSource$KTableSourceProcessor.process(KTableSource.java:151)
+	at org.apache.kafka.streams.processor.internals.ProcessorNode.process(ProcessorNode.java:152)
+	at org.apache.kafka.streams.processor.internals.ProcessorContextImpl.forwardInternal(ProcessorContextImpl.java:290)
+	at org.apache.kafka.streams.processor.internals.ProcessorContextImpl.forward(ProcessorContextImpl.java:269)
+	at org.apache.kafka.streams.processor.internals.ProcessorContextImpl.forward(ProcessorContextImpl.java:228)
+	at org.apache.kafka.streams.processor.internals.SourceNode.process(SourceNode.java:84)
+	at org.apache.kafka.streams.processor.internals.StreamTask.lambda$doProcess$1(StreamTask.java:810)
+	at org.apache.kafka.streams.processor.internals.metrics.StreamsMetricsImpl.maybeMeasureLatency(StreamsMetricsImpl.java:872)
+	at org.apache.kafka.streams.processor.internals.StreamTask.doProcess(StreamTask.java:810)
+	at org.apache.kafka.streams.processor.internals.StreamTask.process(StreamTask.java:741)
+	at org.apache.kafka.streams.processor.internals.TaskExecutor.processTask(TaskExecutor.java:97)
+	at org.apache.kafka.streams.processor.internals.TaskExecutor.process(TaskExecutor.java:78)
+	at org.apache.kafka.streams.processor.internals.TaskManager.process(TaskManager.java:1765)
+	at org.apache.kafka.streams.processor.internals.StreamThread.runOnce(StreamThread.java:807)
+	at org.apache.kafka.streams.processor.internals.StreamThread.runLoop(StreamThread.java:617)
+	at org.apache.kafka.streams.processor.internals.StreamThread.run(StreamThread.java:579)
+Caused by: java.lang.ClassCastException: class com.kotsin.consumer.model.OpenInterest cannot be cast to class java.lang.String (com.kotsin.consumer.model.OpenInterest is in unnamed module of loader 'app'; java.lang.String is in module java.base of loader 'bootstrap')
+	at org.apache.kafka.common.serialization.StringSerializer.serialize(StringSerializer.java:29)
+	at org.apache.kafka.streams.state.internals.ValueAndTimestampSerializer.serialize(ValueAndTimestampSerializer.java:83)
+	at org.apache.kafka.streams.state.internals.ValueAndTimestampSerializer.serialize(ValueAndTimestampSerializer.java:74)
+	at org.apache.kafka.streams.state.internals.ValueAndTimestampSerializer.serialize(ValueAndTimestampSerializer.java:31)
+	at org.apache.kafka.streams.state.StateSerdes.rawValue(StateSerdes.java:195)
+	... 21 common frames omitted
+2025-10-23 00:00:41.022 WARN  [main] o.a.k.s.p.internals.StateDirectory - Using an OS temp directory in the state.dir property can cause failures with writing the checkpoint file due to the fact that this directory can be cleared by the OS. Resolved state.dir: [/var/folders/q0/9zn8w7w12x76gfpt845612hm0000gn/T//kafka-streams]
+2025-10-23 00:00:42.408 WARN  [main] o.a.k.s.p.internals.StateDirectory - Using an OS temp directory in the state.dir property can cause failures with writing the checkpoint file due to the fact that this directory can be cleared by the OS. Resolved state.dir: [/var/folders/q0/9zn8w7w12x76gfpt845612hm0000gn/T//kafka-streams]
+2025-10-23 00:00:43.510 WARN  [main] o.a.k.s.p.internals.StateDirectory - Using an OS temp directory in the state.dir property can cause failures with writing the checkpoint file due to the fact that this directory can be cleared by the OS. Resolved state.dir: [/var/folders/q0/9zn8w7w12x76gfpt845612hm0000gn/T//kafka-streams]
+2025-10-23 00:00:43.987 WARN  [main] o.a.k.s.p.internals.StateDirectory - Using an OS temp directory in the state.dir property can cause failures with writing the checkpoint file due to the fact that this directory can be cleared by the OS. Resolved state.dir: [/var/folders/q0/9zn8w7w12x76gfpt845612hm0000gn/T//kafka-streams]
+2025-10-23 00:00:44.317 ERROR [family-1m-5046a8b4-d0b9-4bd9-b19f-082f58dcaa90-StreamThread-1] o.a.k.s.p.internals.TaskExecutor - stream-thread [family-1m-5046a8b4-d0b9-4bd9-b19f-082f58dcaa90-StreamThread-1] Failed to process stream task 1_0 due to the following error:
+org.apache.kafka.streams.errors.StreamsException: A serializer (org.apache.kafka.common.serialization.StringSerializer) is not compatible to the actual value type (value type: com.kotsin.consumer.model.OpenInterest). Change the default Serdes in StreamConfig or provide correct Serdes via method parameters.
+	at org.apache.kafka.streams.state.StateSerdes.rawValue(StateSerdes.java:207)
+	at org.apache.kafka.streams.state.internals.MeteredKeyValueStore.lambda$put$6(MeteredKeyValueStore.java:331)
+	at org.apache.kafka.streams.processor.internals.metrics.StreamsMetricsImpl.maybeMeasureLatency(StreamsMetricsImpl.java:872)
+	at org.apache.kafka.streams.state.internals.MeteredKeyValueStore.put(MeteredKeyValueStore.java:331)
+	at org.apache.kafka.streams.processor.internals.AbstractReadWriteDecorator$KeyValueStoreReadWriteDecorator.put(AbstractReadWriteDecorator.java:131)
+	at org.apache.kafka.streams.state.internals.KeyValueStoreWrapper.put(KeyValueStoreWrapper.java:102)
+	at org.apache.kafka.streams.kstream.internals.KTableSource$KTableSourceProcessor.process(KTableSource.java:151)
+	at org.apache.kafka.streams.processor.internals.ProcessorNode.process(ProcessorNode.java:152)
+	at org.apache.kafka.streams.processor.internals.ProcessorContextImpl.forwardInternal(ProcessorContextImpl.java:290)
+	at org.apache.kafka.streams.processor.internals.ProcessorContextImpl.forward(ProcessorContextImpl.java:269)
+	at org.apache.kafka.streams.processor.internals.ProcessorContextImpl.forward(ProcessorContextImpl.java:228)
+	at org.apache.kafka.streams.processor.internals.SourceNode.process(SourceNode.java:84)
+	at org.apache.kafka.streams.processor.internals.StreamTask.lambda$doProcess$1(StreamTask.java:810)
+	at org.apache.kafka.streams.processor.internals.metrics.StreamsMetricsImpl.maybeMeasureLatency(StreamsMetricsImpl.java:872)
+	at org.apache.kafka.streams.processor.internals.StreamTask.doProcess(StreamTask.java:810)
+	at org.apache.kafka.streams.processor.internals.StreamTask.process(StreamTask.java:741)
+	at org.apache.kafka.streams.processor.internals.TaskExecutor.processTask(TaskExecutor.java:97)
+	at org.apache.kafka.streams.processor.internals.TaskExecutor.process(TaskExecutor.java:78)
+	at org.apache.kafka.streams.processor.internals.TaskManager.process(TaskManager.java:1765)
+	at org.apache.kafka.streams.processor.internals.StreamThread.runOnce(StreamThread.java:807)
+	at org.apache.kafka.streams.processor.internals.StreamThread.runLoop(StreamThread.java:617)
+	at org.apache.kafka.streams.processor.internals.StreamThread.run(StreamThread.java:579)
+Caused by: java.lang.ClassCastException: class com.kotsin.consumer.model.OpenInterest cannot be cast to class java.lang.String (com.kotsin.consumer.model.OpenInterest is in unnamed module of loader 'app'; java.lang.String is in module java.base of loader 'bootstrap')
+	at org.apache.kafka.common.serialization.StringSerializer.serialize(StringSerializer.java:29)
+	at org.apache.kafka.streams.state.internals.ValueAndTimestampSerializer.serialize(ValueAndTimestampSerializer.java:83)
+	at org.apache.kafka.streams.state.internals.ValueAndTimestampSerializer.serialize(ValueAndTimestampSerializer.java:74)
+	at org.apache.kafka.streams.state.internals.ValueAndTimestampSerializer.serialize(ValueAndTimestampSerializer.java:31)
+	at org.apache.kafka.streams.state.StateSerdes.rawValue(StateSerdes.java:195)
+	... 21 common frames omitted
+2025-10-23 00:00:44.317 ERROR [family-2m-10801ac3-56ee-4e7f-a060-3388cadecba1-StreamThread-1] o.a.k.s.p.internals.TaskExecutor - stream-thread [family-2m-10801ac3-56ee-4e7f-a060-3388cadecba1-StreamThread-1] Failed to process stream task 1_0 due to the following error:
+org.apache.kafka.streams.errors.StreamsException: A serializer (org.apache.kafka.common.serialization.StringSerializer) is not compatible to the actual value type (value type: com.kotsin.consumer.model.OpenInterest). Change the default Serdes in StreamConfig or provide correct Serdes via method parameters.
+	at org.apache.kafka.streams.state.StateSerdes.rawValue(StateSerdes.java:207)
+	at org.apache.kafka.streams.state.internals.MeteredKeyValueStore.lambda$put$6(MeteredKeyValueStore.java:331)
+	at org.apache.kafka.streams.processor.internals.metrics.StreamsMetricsImpl.maybeMeasureLatency(StreamsMetricsImpl.java:872)
+	at org.apache.kafka.streams.state.internals.MeteredKeyValueStore.put(MeteredKeyValueStore.java:331)
+	at org.apache.kafka.streams.processor.internals.AbstractReadWriteDecorator$KeyValueStoreReadWriteDecorator.put(AbstractReadWriteDecorator.java:131)
+	at org.apache.kafka.streams.state.internals.KeyValueStoreWrapper.put(KeyValueStoreWrapper.java:102)
+	at org.apache.kafka.streams.kstream.internals.KTableSource$KTableSourceProcessor.process(KTableSource.java:151)
+	at org.apache.kafka.streams.processor.internals.ProcessorNode.process(ProcessorNode.java:152)
+	at org.apache.kafka.streams.processor.internals.ProcessorContextImpl.forwardInternal(ProcessorContextImpl.java:290)
+	at org.apache.kafka.streams.processor.internals.ProcessorContextImpl.forward(ProcessorContextImpl.java:269)
+	at org.apache.kafka.streams.processor.internals.ProcessorContextImpl.forward(ProcessorContextImpl.java:228)
+	at org.apache.kafka.streams.processor.internals.SourceNode.process(SourceNode.java:84)
+	at org.apache.kafka.streams.processor.internals.StreamTask.lambda$doProcess$1(StreamTask.java:810)
+	at org.apache.kafka.streams.processor.internals.metrics.StreamsMetricsImpl.maybeMeasureLatency(StreamsMetricsImpl.java:872)
+	at org.apache.kafka.streams.processor.internals.StreamTask.doProcess(StreamTask.java:810)
+	at org.apache.kafka.streams.processor.internals.StreamTask.process(StreamTask.java:741)
+	at org.apache.kafka.streams.processor.internals.TaskExecutor.processTask(TaskExecutor.java:97)
+	at org.apache.kafka.streams.processor.internals.TaskExecutor.process(TaskExecutor.java:78)
+	at org.apache.kafka.streams.processor.internals.TaskManager.process(TaskManager.java:1765)
+	at org.apache.kafka.streams.processor.internals.StreamThread.runOnce(StreamThread.java:807)
+	at org.apache.kafka.streams.processor.internals.StreamThread.runLoop(StreamThread.java:617)
+	at org.apache.kafka.streams.processor.internals.StreamThread.run(StreamThread.java:579)
+Caused by: java.lang.ClassCastException: class com.kotsin.consumer.model.OpenInterest cannot be cast to class java.lang.String (com.kotsin.consumer.model.OpenInterest is in unnamed module of loader 'app'; java.lang.String is in module java.base of loader 'bootstrap')
+	at org.apache.kafka.common.serialization.StringSerializer.serialize(StringSerializer.java:29)
+	at org.apache.kafka.streams.state.internals.ValueAndTimestampSerializer.serialize(ValueAndTimestampSerializer.java:83)
+	at org.apache.kafka.streams.state.internals.ValueAndTimestampSerializer.serialize(ValueAndTimestampSerializer.java:74)
+	at org.apache.kafka.streams.state.internals.ValueAndTimestampSerializer.serialize(ValueAndTimestampSerializer.java:31)
+	at org.apache.kafka.streams.state.StateSerdes.rawValue(StateSerdes.java:195)
+	... 21 common frames omitted
+2025-10-23 00:00:44.331 ERROR [family-2m-10801ac3-56ee-4e7f-a060-3388cadecba1-StreamThread-1] o.apache.kafka.streams.KafkaStreams - stream-client [family-2m-10801ac3-56ee-4e7f-a060-3388cadecba1] Encountered the following exception during processing and the registered exception handler opted to SHUTDOWN_CLIENT. The streams client is going to shut down now. 
+org.apache.kafka.streams.errors.StreamsException: A serializer (org.apache.kafka.common.serialization.StringSerializer) is not compatible to the actual value type (value type: com.kotsin.consumer.model.OpenInterest). Change the default Serdes in StreamConfig or provide correct Serdes via method parameters.
+	at org.apache.kafka.streams.state.StateSerdes.rawValue(StateSerdes.java:207)
+	at org.apache.kafka.streams.state.internals.MeteredKeyValueStore.lambda$put$6(MeteredKeyValueStore.java:331)
+	at org.apache.kafka.streams.processor.internals.metrics.StreamsMetricsImpl.maybeMeasureLatency(StreamsMetricsImpl.java:872)
+	at org.apache.kafka.streams.state.internals.MeteredKeyValueStore.put(MeteredKeyValueStore.java:331)
+	at org.apache.kafka.streams.processor.internals.AbstractReadWriteDecorator$KeyValueStoreReadWriteDecorator.put(AbstractReadWriteDecorator.java:131)
+	at org.apache.kafka.streams.state.internals.KeyValueStoreWrapper.put(KeyValueStoreWrapper.java:102)
+	at org.apache.kafka.streams.kstream.internals.KTableSource$KTableSourceProcessor.process(KTableSource.java:151)
+	at org.apache.kafka.streams.processor.internals.ProcessorNode.process(ProcessorNode.java:152)
+	at org.apache.kafka.streams.processor.internals.ProcessorContextImpl.forwardInternal(ProcessorContextImpl.java:290)
+	at org.apache.kafka.streams.processor.internals.ProcessorContextImpl.forward(ProcessorContextImpl.java:269)
+	at org.apache.kafka.streams.processor.internals.ProcessorContextImpl.forward(ProcessorContextImpl.java:228)
+	at org.apache.kafka.streams.processor.internals.SourceNode.process(SourceNode.java:84)
+	at org.apache.kafka.streams.processor.internals.StreamTask.lambda$doProcess$1(StreamTask.java:810)
+	at org.apache.kafka.streams.processor.internals.metrics.StreamsMetricsImpl.maybeMeasureLatency(StreamsMetricsImpl.java:872)
+	at org.apache.kafka.streams.processor.internals.StreamTask.doProcess(StreamTask.java:810)
+	at org.apache.kafka.streams.processor.internals.StreamTask.process(StreamTask.java:741)
+	at org.apache.kafka.streams.processor.internals.TaskExecutor.processTask(TaskExecutor.java:97)
+	at org.apache.kafka.streams.processor.internals.TaskExecutor.process(TaskExecutor.java:78)
+	at org.apache.kafka.streams.processor.internals.TaskManager.process(TaskManager.java:1765)
+	at org.apache.kafka.streams.processor.internals.StreamThread.runOnce(StreamThread.java:807)
+	at org.apache.kafka.streams.processor.internals.StreamThread.runLoop(StreamThread.java:617)
+	at org.apache.kafka.streams.processor.internals.StreamThread.run(StreamThread.java:579)
+Caused by: java.lang.ClassCastException: class com.kotsin.consumer.model.OpenInterest cannot be cast to class java.lang.String (com.kotsin.consumer.model.OpenInterest is in unnamed module of loader 'app'; java.lang.String is in module java.base of loader 'bootstrap')
+	at org.apache.kafka.common.serialization.StringSerializer.serialize(StringSerializer.java:29)
+	at org.apache.kafka.streams.state.internals.ValueAndTimestampSerializer.serialize(ValueAndTimestampSerializer.java:83)
+	at org.apache.kafka.streams.state.internals.ValueAndTimestampSerializer.serialize(ValueAndTimestampSerializer.java:74)
+	at org.apache.kafka.streams.state.internals.ValueAndTimestampSerializer.serialize(ValueAndTimestampSerializer.java:31)
+	at org.apache.kafka.streams.state.StateSerdes.rawValue(StateSerdes.java:195)
+	... 21 common frames omitted
+2025-10-23 00:00:44.331 ERROR [family-1m-5046a8b4-d0b9-4bd9-b19f-082f58dcaa90-StreamThread-1] o.apache.kafka.streams.KafkaStreams - stream-client [family-1m-5046a8b4-d0b9-4bd9-b19f-082f58dcaa90] Encountered the following exception during processing and the registered exception handler opted to SHUTDOWN_CLIENT. The streams client is going to shut down now. 
+org.apache.kafka.streams.errors.StreamsException: A serializer (org.apache.kafka.common.serialization.StringSerializer) is not compatible to the actual value type (value type: com.kotsin.consumer.model.OpenInterest). Change the default Serdes in StreamConfig or provide correct Serdes via method parameters.
+	at org.apache.kafka.streams.state.StateSerdes.rawValue(StateSerdes.java:207)
+	at org.apache.kafka.streams.state.internals.MeteredKeyValueStore.lambda$put$6(MeteredKeyValueStore.java:331)
+	at org.apache.kafka.streams.processor.internals.metrics.StreamsMetricsImpl.maybeMeasureLatency(StreamsMetricsImpl.java:872)
+	at org.apache.kafka.streams.state.internals.MeteredKeyValueStore.put(MeteredKeyValueStore.java:331)
+	at org.apache.kafka.streams.processor.internals.AbstractReadWriteDecorator$KeyValueStoreReadWriteDecorator.put(AbstractReadWriteDecorator.java:131)
+	at org.apache.kafka.streams.state.internals.KeyValueStoreWrapper.put(KeyValueStoreWrapper.java:102)
+	at org.apache.kafka.streams.kstream.internals.KTableSource$KTableSourceProcessor.process(KTableSource.java:151)
+	at org.apache.kafka.streams.processor.internals.ProcessorNode.process(ProcessorNode.java:152)
+	at org.apache.kafka.streams.processor.internals.ProcessorContextImpl.forwardInternal(ProcessorContextImpl.java:290)
+	at org.apache.kafka.streams.processor.internals.ProcessorContextImpl.forward(ProcessorContextImpl.java:269)
+	at org.apache.kafka.streams.processor.internals.ProcessorContextImpl.forward(ProcessorContextImpl.java:228)
+	at org.apache.kafka.streams.processor.internals.SourceNode.process(SourceNode.java:84)
+	at org.apache.kafka.streams.processor.internals.StreamTask.lambda$doProcess$1(StreamTask.java:810)
+	at org.apache.kafka.streams.processor.internals.metrics.StreamsMetricsImpl.maybeMeasureLatency(StreamsMetricsImpl.java:872)
+	at org.apache.kafka.streams.processor.internals.StreamTask.doProcess(StreamTask.java:810)
+	at org.apache.kafka.streams.processor.internals.StreamTask.process(StreamTask.java:741)
+	at org.apache.kafka.streams.processor.internals.TaskExecutor.processTask(TaskExecutor.java:97)
+	at org.apache.kafka.streams.processor.internals.TaskExecutor.process(TaskExecutor.java:78)
+	at org.apache.kafka.streams.processor.internals.TaskManager.process(TaskManager.java:1765)
+	at org.apache.kafka.streams.processor.internals.StreamThread.runOnce(StreamThread.java:807)
+	at org.apache.kafka.streams.processor.internals.StreamThread.runLoop(StreamThread.java:617)
+	at org.apache.kafka.streams.processor.internals.StreamThread.run(StreamThread.java:579)
+Caused by: java.lang.ClassCastException: class com.kotsin.consumer.model.OpenInterest cannot be cast to class java.lang.String (com.kotsin.consumer.model.OpenInterest is in unnamed module of loader 'app'; java.lang.String is in module java.base of loader 'bootstrap')
+	at org.apache.kafka.common.serialization.StringSerializer.serialize(StringSerializer.java:29)
+	at org.apache.kafka.streams.state.internals.ValueAndTimestampSerializer.serialize(ValueAndTimestampSerializer.java:83)
+	at org.apache.kafka.streams.state.internals.ValueAndTimestampSerializer.serialize(ValueAndTimestampSerializer.java:74)
+	at org.apache.kafka.streams.state.internals.ValueAndTimestampSerializer.serialize(ValueAndTimestampSerializer.java:31)
+	at org.apache.kafka.streams.state.StateSerdes.rawValue(StateSerdes.java:195)
+	... 21 common frames omitted
+2025-10-23 00:00:44.649 WARN  [main] o.a.k.s.p.internals.StateDirectory - Using an OS temp directory in the state.dir property can cause failures with writing the checkpoint file due to the fact that this directory can be cleared by the OS. Resolved state.dir: [/var/folders/q0/9zn8w7w12x76gfpt845612hm0000gn/T//kafka-streams]
+2025-10-23 00:00:45.234 WARN  [main] o.a.k.s.p.internals.StateDirectory - Using an OS temp directory in the state.dir property can cause failures with writing the checkpoint file due to the fact that this directory can be cleared by the OS. Resolved state.dir: [/var/folders/q0/9zn8w7w12x76gfpt845612hm0000gn/T//kafka-streams]
+2025-10-23 00:00:45.518 WARN  [main] o.a.k.s.p.internals.StateDirectory - Using an OS temp directory in the state.dir property can cause failures with writing the checkpoint file due to the fact that this directory can be cleared by the OS. Resolved state.dir: [/var/folders/q0/9zn8w7w12x76gfpt845612hm0000gn/T//kafka-streams]
+2025-10-23 00:00:45.849 WARN  [main] o.a.k.s.p.internals.StateDirectory - Using an OS temp directory in the state.dir property can cause failures with writing the checkpoint file due to the fact that this directory can be cleared by the OS. Resolved state.dir: [/var/folders/q0/9zn8w7w12x76gfpt845612hm0000gn/T//kafka-streams]
+2025-10-23 00:00:46.608 WARN  [main] o.a.k.s.p.internals.StateDirectory - Using an OS temp directory in the state.dir property can cause failures with writing the checkpoint file due to the fact that this directory can be cleared by the OS. Resolved state.dir: [/var/folders/q0/9zn8w7w12x76gfpt845612hm0000gn/T//kafka-streams]
+2025-10-23 00:00:47.170 WARN  [main] o.a.k.s.p.internals.StateDirectory - Using an OS temp directory in the state.dir property can cause failures with writing the checkpoint file due to the fact that this directory can be cleared by the OS. Resolved state.dir: [/var/folders/q0/9zn8w7w12x76gfpt845612hm0000gn/T//kafka-streams]
+2025-10-23 00:00:47.462 WARN  [main] o.a.k.s.p.internals.StateDirectory - Using an OS temp directory in the state.dir property can cause failures with writing the checkpoint file due to the fact that this directory can be cleared by the OS. Resolved state.dir: [/var/folders/q0/9zn8w7w12x76gfpt845612hm0000gn/T//kafka-streams]
+2025-10-23 00:00:48.061 INFO  [SpringApplicationShutdownHook] c.k.c.p.UnifiedMarketDataProcessor - 🛑 Starting graceful shutdown of Unified Market Data Processor
+2025-10-23 00:00:48.062 INFO  [SpringApplicationShutdownHook] c.k.c.p.UnifiedMarketDataProcessor - 📤 Step 1: Stopping new data acceptance
+2025-10-23 00:00:48.062 INFO  [SpringApplicationShutdownHook] c.k.c.p.UnifiedMarketDataProcessor - ⏳ Step 2: Waiting for in-flight processing to complete
+2025-10-23 00:00:50.068 INFO  [SpringApplicationShutdownHook] c.k.c.p.UnifiedMarketDataProcessor - 💾 Step 3: Flushing pending state
+2025-10-23 00:00:50.074 INFO  [SpringApplicationShutdownHook] c.k.c.p.UnifiedMarketDataProcessor - 🔄 Step 4: Stopping all streams
+2025-10-23 00:00:50.074 INFO  [SpringApplicationShutdownHook] c.k.c.p.s.MarketDataOrchestrator - 🛑 Stopping all market data processing streams
+2025-10-23 00:00:50.079 INFO  [SpringApplicationShutdownHook] c.k.c.p.s.MarketDataOrchestrator - ✅ Stopped stream: family-structured-30m
+2025-10-23 00:00:50.080 INFO  [SpringApplicationShutdownHook] c.k.c.p.s.MarketDataOrchestrator - ✅ Stopped stream: family-structured-5m
+2025-10-23 00:00:50.080 INFO  [SpringApplicationShutdownHook] c.k.c.p.s.MarketDataOrchestrator - ✅ Stopped stream: family-structured-15m
+2025-10-23 00:00:50.398 INFO  [SpringApplicationShutdownHook] c.k.c.p.s.MarketDataOrchestrator - ✅ Stopped stream: instrument-stream
+2025-10-23 00:00:50.398 INFO  [SpringApplicationShutdownHook] c.k.c.p.s.MarketDataOrchestrator - ✅ Stopped stream: family-structured-2m
+2025-10-23 00:00:50.398 INFO  [SpringApplicationShutdownHook] c.k.c.p.s.MarketDataOrchestrator - ✅ Stopped stream: family-structured-1m
+2025-10-23 00:00:50.398 INFO  [SpringApplicationShutdownHook] c.k.c.p.s.MarketDataOrchestrator - ✅ All streams stopped
+2025-10-23 00:00:50.398 INFO  [SpringApplicationShutdownHook] c.k.c.p.UnifiedMarketDataProcessor - 🧹 Step 5: Final cleanup
+2025-10-23 00:00:50.398 INFO  [SpringApplicationShutdownHook] c.k.c.p.UnifiedMarketDataProcessor - ✅ Unified Market Data Processor stopped gracefully

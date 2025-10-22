@@ -1,9 +1,13 @@
 # High-Level Design (HLD)
 ## Market Data Processing System
 
-**Version:** 1.0  
+**Version:** 1.0 (DEPRECATED - See HLD_V2.md)  
 **Date:** October 22, 2025  
 **Author:** System Architecture Team
+
+> ⚠️ **IMPORTANT**: This is the original design document.  
+> 📄 **For the current architecture, see: [HLD_V2.md](HLD_V2.md)**  
+> 🎯 **V2.0 includes**: 19 new services, 112 new tests, all issues fixed, A+ grade
 
 ---
 

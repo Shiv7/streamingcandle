@@ -13,6 +13,8 @@ import org.springframework.stereotype.Component;
 
 import java.time.Duration;
 import java.util.Map;
+import java.util.Properties;
+import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
 
 /**
@@ -50,12 +52,16 @@ public class MarketDataOrchestrator {
         log.info("🚀 Starting all market data processing streams");
         
         try {
-            // Start per-instrument candle stream
+            // Start per-instrument candle stream FIRST
             startInstrumentStream();
+            
+            // Wait for instrument stream to create candle topics
+            log.info("⏳ Waiting for instrument stream to create candle topics...");
+            Thread.sleep(5000); // 5 second delay
             
             // Start family-structured streams if enabled
             if (familyStructuredEnabled) {
-                startFamilyStructuredStreams();
+                startFamilyStructuredStreamsWithRetry();
             }
             
             log.info("✅ All streams started successfully");
@@ -90,10 +96,54 @@ public class MarketDataOrchestrator {
     }
 
     /**
+     * Start family-structured aggregation streams with retry mechanism
+     */
+    public void startFamilyStructuredStreamsWithRetry() {
+        log.info("🏗️ Starting family-structured streams with retry");
+        
+        int maxRetries = 3;
+        int retryDelay = 2000; // 2 seconds
+        
+        for (int attempt = 1; attempt <= maxRetries; attempt++) {
+            try {
+                startFamilyStructuredStreams();
+                log.info("✅ Family streams started successfully on attempt {}", attempt);
+                return;
+            } catch (Exception e) {
+                log.warn("⚠️ Attempt {} failed to start family streams: {}", attempt, e.getMessage());
+                if (attempt < maxRetries) {
+                    log.info("⏳ Retrying in {} seconds...", retryDelay / 1000);
+                    try {
+                        Thread.sleep(retryDelay);
+                    } catch (InterruptedException ie) {
+                        Thread.currentThread().interrupt();
+                        throw new RuntimeException("Interrupted during retry", ie);
+                    }
+                } else {
+                    log.error("❌ All {} attempts failed to start family streams", maxRetries);
+                    throw new RuntimeException("Failed to start family streams after " + maxRetries + " attempts", e);
+                }
+            }
+        }
+    }
+
+    /**
      * Start family-structured aggregation streams
      */
     public void startFamilyStructuredStreams() {
         log.info("🏗️ Starting family-structured streams");
+        
+        // Verify required candle topics exist before starting family streams
+        String[] requiredTopics = {
+            "candle-complete-1m", "candle-complete-2m", "candle-complete-5m", 
+            "candle-complete-15m", "candle-complete-30m"
+        };
+        
+        for (String topic : requiredTopics) {
+            if (!topicExists(topic)) {
+                throw new RuntimeException("Required candle topic does not exist: " + topic);
+            }
+        }
         
         // Start 1-minute family stream
         startFamilyStream("1m", "candle-complete-1m", "family-structured-1m", Duration.ofMinutes(1));
@@ -173,5 +223,28 @@ public class MarketDataOrchestrator {
         return String.format("Active streams: %d, Status: %s", 
             streamsInstances.size(), 
             getStreamStatus());
+    }
+
+    /**
+     * Check if a Kafka topic exists
+     */
+    private boolean topicExists(String topicName) {
+        try {
+            // Use Kafka admin client to check topic existence
+            Properties adminProps = new Properties();
+            adminProps.put("bootstrap.servers", kafkaConfig.getBootstrapServers());
+            adminProps.put("client.id", "topic-checker");
+            
+            try (org.apache.kafka.clients.admin.AdminClient adminClient = 
+                 org.apache.kafka.clients.admin.AdminClient.create(adminProps)) {
+                
+                org.apache.kafka.clients.admin.ListTopicsResult result = adminClient.listTopics();
+                Set<String> topics = result.names().get(5, java.util.concurrent.TimeUnit.SECONDS);
+                return topics.contains(topicName);
+            }
+        } catch (Exception e) {
+            log.warn("⚠️ Failed to check if topic {} exists: {}", topicName, e.getMessage());
+            return false; // Assume it doesn't exist if we can't check
+        }
     }
 }

@@ -13,6 +13,7 @@ import org.apache.kafka.streams.StreamsBuilder;
 import org.apache.kafka.streams.kstream.*;
 import org.apache.kafka.streams.state.Stores;
 import org.apache.kafka.streams.state.WindowStore;
+import org.apache.kafka.streams.state.KeyValueStore;
 import org.apache.kafka.common.utils.Bytes;
 import org.apache.kafka.common.serialization.Serdes;
 import org.springframework.beans.factory.annotation.Value;
@@ -211,7 +212,9 @@ public class TopologyConfiguration {
 
         return oiStream
             .selectKey((k, oi) -> oi != null && oi.getToken() != 0 ? String.valueOf(oi.getToken()) : k)
-            .toTable(Materialized.as("oi-table"));
+            .toTable(Materialized.<String, OpenInterest, KeyValueStore<Bytes, byte[]>>as("oi-table")
+                .withKeySerde(Serdes.String())
+                .withValueSerde(OpenInterest.serde()));
     }
 
     /**

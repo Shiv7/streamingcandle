@@ -1,9 +1,13 @@
 # Detailed-Level Design (DLD)
 ## Market Data Processing System
 
-**Version:** 1.0  
+**Version:** 1.0 (DEPRECATED - See DLD_V2.md)  
 **Date:** October 22, 2025  
 **Author:** Engineering Team
+
+> ⚠️ **IMPORTANT**: This is the original detailed design.  
+> 📄 **For the current implementation, see: [DLD_V2.md](DLD_V2.md)**  
+> 🎯 **V2.0 includes**: Complete API specs, testing strategy, configuration details
 
 ---
 
