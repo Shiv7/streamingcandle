@@ -449,6 +449,15 @@ public class TopologyConfiguration {
         long futuresVolume = 0;
         long optionsVolume = 0;
 
+        // --- OI Metrics Initialization ---
+        Long totalOpenInterest = 0L;
+        Long futuresOI = 0L;
+        Long callsOI = 0L;
+        Long putsOI = 0L;
+        Long futuresOIChange = 0L;
+        Long callsOIChange = 0L;
+        Long putsOIChange = 0L;
+
         Double spotPrice = null;
         Double nearMonthFuturePrice = null;
         String nearMonthExpiry = null;
@@ -459,6 +468,9 @@ public class TopologyConfiguration {
             equityVolume = equity.getVolume() != null ? equity.getVolume() : 0;
             spotPrice = equity.getClose();
             totalVolume += equityVolume;
+            if (equity.getOpenInterest() != null) {
+                totalOpenInterest += equity.getOpenInterest();
+            }
         }
 
         // Futures metrics
@@ -467,6 +479,15 @@ public class TopologyConfiguration {
                 long vol = future.getVolume() != null ? future.getVolume() : 0;
                 futuresVolume += vol;
                 totalVolume += vol;
+
+                // --- OI Aggregation for Futures ---
+                if (future.getOpenInterest() != null) {
+                    totalOpenInterest += future.getOpenInterest();
+                    futuresOI += future.getOpenInterest();
+                }
+                if (future.getOiChange() != null) {
+                    futuresOIChange += future.getOiChange();
+                }
 
                 // Find near month future (earliest expiry)
                 if (nearMonthExpiry == null ||
@@ -486,16 +507,34 @@ public class TopologyConfiguration {
                 optionsVolume += vol;
                 totalVolume += vol;
 
+                // --- OI Aggregation for Options ---
+                if (option.getOpenInterest() != null) {
+                    totalOpenInterest += option.getOpenInterest();
+                }
+
                 if ("CE".equals(option.getOptionType())) {
                     callsVolume += vol;
+                    if (option.getOpenInterest() != null) {
+                        callsOI += option.getOpenInterest();
+                    }
+                    if (option.getOiChange() != null) {
+                        callsOIChange += option.getOiChange();
+                    }
                 } else if ("PE".equals(option.getOptionType())) {
                     putsVolume += vol;
+                    if (option.getOpenInterest() != null) {
+                        putsOI += option.getOpenInterest();
+                    }
+                    if (option.getOiChange() != null) {
+                        putsOIChange += option.getOiChange();
+                    }
                 }
             }
         }
 
         // Calculate ratios
         Double putCallVolumeRatio = callsVolume > 0 ? (double) putsVolume / callsVolume : null;
+        Double putCallRatio = (callsOI != null && callsOI > 0) ? (putsOI.doubleValue() / callsOI.doubleValue()) : null;
 
         // Calculate futures basis
         Double futuresBasis = null;
@@ -510,6 +549,15 @@ public class TopologyConfiguration {
             .equityVolume(equityVolume)
             .futuresVolume(futuresVolume)
             .optionsVolume(optionsVolume)
+            // --- Add OI Metrics to Builder ---
+            .totalOpenInterest(totalOpenInterest > 0 ? totalOpenInterest : null)
+            .futuresOI(futuresOI > 0 ? futuresOI : null)
+            .callsOI(callsOI > 0 ? callsOI : null)
+            .putsOI(putsOI > 0 ? putsOI : null)
+            .futuresOIChange(futuresOIChange != 0 ? futuresOIChange : null)
+            .callsOIChange(callsOIChange != 0 ? callsOIChange : null)
+            .putsOIChange(putsOIChange != 0 ? putsOIChange : null)
+            .putCallRatio(putCallRatio)
             .spotPrice(spotPrice)
             .nearMonthFuturePrice(nearMonthFuturePrice)
             .futuresBasis(futuresBasis)
