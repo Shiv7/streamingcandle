@@ -11,10 +11,8 @@ import org.springframework.scheduling.annotation.Scheduled;
 import org.springframework.stereotype.Service;
 
 import jakarta.annotation.PostConstruct;
-import java.time.Duration;
 import java.util.*;
 import java.util.concurrent.ConcurrentHashMap;
-import java.util.stream.Collectors;
 
 /**
  * MongoDB-based service to cache instrument families (equity + future + options)
@@ -26,9 +24,13 @@ import java.util.stream.Collectors;
 public class MongoInstrumentFamilyService {
     
     private final ScripGroupRepository scripGroupRepository;
+    
+    // OPTIMIZED: Two-level cache for O(1) lookups
     private final Map<String, InstrumentFamily> localCache = new ConcurrentHashMap<>();
     
-    private static final Duration CACHE_TTL = Duration.ofDays(1);
+    // NEW: Scrip-to-FamilyKey lookup map (scripCode → equityScripCode)
+    // This eliminates ALL blocking DB calls during real-time processing
+    private final Map<String, String> scripToFamilyMap = new ConcurrentHashMap<>();
     
     @PostConstruct
     public void initializeCache() {
@@ -87,6 +89,10 @@ public class MongoInstrumentFamilyService {
             localCache.clear();
             localCache.putAll(families);
             
+            // 4. Build scrip-to-family lookup map for ALL derivatives
+            scripToFamilyMap.clear();
+            buildScripToFamilyMap(scripGroups);
+            
             long duration = System.currentTimeMillis() - startTime;
             log.info("✅ MongoDB cache refresh complete. Loaded {} families in {}ms", 
                 families.size(), duration);
@@ -112,6 +118,57 @@ public class MongoInstrumentFamilyService {
         }
         
         return families;
+    }
+    
+    /**
+     * Build scrip-to-family lookup map for O(1) derivative resolution
+     * Maps: derivativeScripCode → underlyingEquityScripCode
+     * 
+     * Example for PNB family:
+     * - "10666" (equity) → "10666" (itself)
+     * - "49067" (future) → "10666" (PNB equity)
+     * - "112921" (option) → "10666" (PNB equity)
+     */
+    private void buildScripToFamilyMap(List<ScripGroup> scripGroups) {
+        int equityCount = 0;
+        int futureCount = 0;
+        int optionCount = 0;
+        
+        for (ScripGroup group : scripGroups) {
+            String equityScripCode = group.getEquityScripCode();
+            if (equityScripCode == null || equityScripCode.isBlank()) {
+                continue;
+            }
+            
+            // Map equity to itself
+            if (group.getEquity() != null && group.getEquity().getScripCode() != null) {
+                scripToFamilyMap.put(group.getEquity().getScripCode(), equityScripCode);
+                equityCount++;
+            }
+            
+            // Map all futures to equity
+            if (group.getFutures() != null) {
+                for (Scrip future : group.getFutures()) {
+                    if (future.getScripCode() != null) {
+                        scripToFamilyMap.put(future.getScripCode(), equityScripCode);
+                        futureCount++;
+                    }
+                }
+            }
+            
+            // Map all options to equity
+            if (group.getOptions() != null) {
+                for (Scrip option : group.getOptions()) {
+                    if (option.getScripCode() != null) {
+                        scripToFamilyMap.put(option.getScripCode(), equityScripCode);
+                        optionCount++;
+                    }
+                }
+            }
+        }
+        
+        log.info("📊 Built scrip-to-family map: {} equities, {} futures, {} options = {} total mappings",
+            equityCount, futureCount, optionCount, scripToFamilyMap.size());
     }
     
     private InstrumentFamily convertScripGroupToFamily(ScripGroup scripGroup) {
@@ -212,57 +269,47 @@ public class MongoInstrumentFamilyService {
     }
     
     /**
-     * Resolve instrument family for derivatives by looking up the underlying equity
+     * OPTIMIZED: Resolve instrument family using in-memory lookup ONLY
+     * NO BLOCKING DB CALLS - Uses pre-built scripToFamilyMap
+     * 
+     * Performance: O(1) lookup vs O(n) DB query
      */
     public InstrumentFamily resolveFamily(String scripCode, String exchangeType, String companyName) {
-        try {
-            // Non-derivative: normal equity lookup
-            if (exchangeType == null || !"D".equalsIgnoreCase(exchangeType)) {
-                return getFamily(scripCode);
-            }
-            
-            // For derivatives, try to find the underlying equity family
-            // Method 1: Look for ScripGroup containing this scripCode in futures or options
-            List<ScripGroup> futureGroups = scripGroupRepository.findByFuturesScripCode(scripCode);
-            if (!futureGroups.isEmpty()) {
-                InstrumentFamily family = convertScripGroupToFamily(futureGroups.get(0));
-                if (family != null) {
-                    localCache.put(scripCode, family);
-                    return family;
-                }
-            }
-            
-            List<ScripGroup> optionGroups = scripGroupRepository.findByOptionsScripCode(scripCode);
-            if (!optionGroups.isEmpty()) {
-                InstrumentFamily family = convertScripGroupToFamily(optionGroups.get(0));
-                if (family != null) {
-                    localCache.put(scripCode, family);
-                    return family;
-                }
-            }
-            
-            // Method 2: Parse company name to extract symbol root and find by company name
-            if (companyName != null && !companyName.isBlank()) {
-                String symbolRoot = extractSymbolRoot(companyName);
-                if (symbolRoot != null) {
-                    List<ScripGroup> groups = scripGroupRepository.findByCompanyNameIgnoreCase(symbolRoot);
-                    if (!groups.isEmpty()) {
-                        InstrumentFamily family = convertScripGroupToFamily(groups.get(0));
-                        if (family != null) {
-                            localCache.put(scripCode, family);
-                            return family;
-                        }
-                    }
-                }
-            }
-            
-            // Method 3: Fallback to direct lookup (might be an equity)
-            return getFamily(scripCode);
-            
-        } catch (Exception e) {
-            log.warn("Derivative resolution fallback for scripCode {}: {}", scripCode, e.toString());
-            return getFamily(scripCode);
+        if (scripCode == null || scripCode.isBlank()) {
+            return null;
         }
+        
+        // Step 1: Try scrip-to-family map (O(1) lookup)
+        String familyKey = scripToFamilyMap.get(scripCode);
+        if (familyKey != null) {
+            InstrumentFamily family = localCache.get(familyKey);
+            if (family != null) {
+                log.debug("✅ Resolved derivative {} → family {} (cache hit)", scripCode, familyKey);
+                return family;
+            }
+        }
+        
+        // Step 2: Fallback for equities or non-mapped scrips
+        InstrumentFamily family = localCache.get(scripCode);
+        if (family != null) {
+            log.debug("✅ Found equity family for {} (direct lookup)", scripCode);
+            return family;
+        }
+        
+        // Step 3: Last resort - extract from company name (NO DB CALL)
+        if (companyName != null && !companyName.isBlank()) {
+            String symbolRoot = extractSymbolRoot(companyName);
+            if (symbolRoot != null) {
+                family = localCache.get(symbolRoot);
+                if (family != null) {
+                    log.debug("✅ Resolved {} → family {} (name extraction)", scripCode, symbolRoot);
+                    return family;
+                }
+            }
+        }
+        
+        log.debug("❌ No family found for scripCode: {} (not in cache)", scripCode);
+        return null;
     }
     
     private String extractSymbolRoot(String companyName) {

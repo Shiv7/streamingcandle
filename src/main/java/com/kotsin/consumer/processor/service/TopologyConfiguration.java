@@ -8,7 +8,6 @@ import com.kotsin.consumer.model.OrderBookSnapshot;
 import com.kotsin.consumer.model.TickData;
 import com.kotsin.consumer.processor.InstrumentState;
 import com.kotsin.consumer.processor.Timeframe;
-import com.kotsin.consumer.processor.service.StreamMetrics;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.apache.kafka.streams.StreamsBuilder;
@@ -37,6 +36,9 @@ public class TopologyConfiguration {
 
     private final KafkaConfig kafkaConfig;
     private final StreamMetrics metrics;
+    private final FamilyAggregationService familyAggregationService;
+    private final InstrumentKeyResolver keyResolver;
+    private final TradingHoursValidationService tradingHoursService;
     
     @Value("${spring.kafka.streams.application-id:unified-market-processor1}")
     private String appIdPrefix;
@@ -129,11 +131,26 @@ public class TopologyConfiguration {
 
         // Aggregate into InstrumentState
         KTable<Windowed<String>, InstrumentState> aggregated = instrumentKeyed
+            .filter((key, tick) -> tradingHoursService.withinTradingHours(tick))
             .groupByKey(Grouped.with(Serdes.String(), TickData.serde()))
             .windowedBy(windows)
             .aggregate(
                 InstrumentState::new,
                 (scripCode, tick, state) -> {
+                    // 🔧 CRITICAL FIX: Set metadata on first tick
+                    if (state.getScripCode() == null) {
+                        try {
+                            String instrumentType = keyResolver.getInstrumentType(tick);
+                            String familyKey = keyResolver.getFamilyKey(tick);
+                            state.setInstrumentType(instrumentType);
+                            state.setUnderlyingEquityScripCode(familyKey);
+                            log.debug("🔧 Metadata set: scrip={}, type={}, family={}", 
+                                scripCode, instrumentType, familyKey);
+                        } catch (Exception e) {
+                            log.error("❌ Failed to set metadata for {}", scripCode, e);
+                        }
+                    }
+                    
                     state.addTick(tick);
                     return state;
                 },
@@ -221,6 +238,30 @@ public class TopologyConfiguration {
     }
 
     /**
+     * Resolve family key for candle aggregation
+     */
+    private String resolveFamilyKey(InstrumentCandle candle) {
+        if (candle == null) {
+            return "unknown";
+        }
+
+        // For options, try to extract underlying from company name
+        if (candle.getOptionType() != null && candle.getCompanyName() != null) {
+            // Extract underlying from "INDUSINDBK 28 OCT 2025 PE 760.00" -> "INDUSINDBK"
+            String companyName = candle.getCompanyName();
+            String[] parts = companyName.split(" ");
+            if (parts.length > 0) {
+                String underlying = parts[0];
+                log.debug("🔗 Extracted underlying {} from option {}", underlying, candle.getScripCode());
+                return underlying;
+            }
+        }
+
+        // Fallback to scripCode
+        return candle.getScripCode();
+    }
+
+    /**
      * Create family-structured aggregation topology
      */
     public StreamsBuilder createFamilyTopology(String timeframeLabel, String sourceTopic, String sinkTopic, Duration windowSize) {
@@ -249,9 +290,12 @@ public class TopologyConfiguration {
 
         // Map to family key and aggregate
         KStream<String, InstrumentCandle> keyedByFamily = enrichedCandles
-            .selectKey((scripOrToken, candle) -> candle.getUnderlyingEquityScripCode() != null
-                ? candle.getUnderlyingEquityScripCode()
-                : candle.getScripCode())
+            .selectKey((scripOrToken, candle) -> {
+                // CRITICAL FIX: Use proper family key resolution
+                String familyKey = resolveFamilyKey(candle);
+                log.debug("🔗 Mapped candle {} to family key {}", candle.getScripCode(), familyKey);
+                return familyKey;
+            })
             .repartition(Repartitioned.with(Serdes.String(), InstrumentCandle.serde()));
 
         // BALANCED APPROACH: 30s grace period for family aggregation
@@ -264,8 +308,13 @@ public class TopologyConfiguration {
             .aggregate(
                 () -> FamilyEnrichedData.builder().build(),
                 (familyKey, candle, family) -> {
-                    // This will be handled by FamilyAggregationService
-                    return family;
+                    // CRITICAL FIX: Actually call FamilyAggregationService
+                    if (familyAggregationService != null) {
+                        return familyAggregationService.assembleFamily(familyKey, candle, family);
+                    } else {
+                        log.warn("❌ FamilyAggregationService is null, family aggregation will fail");
+                        return family;
+                    }
                 },
                 Materialized.with(Serdes.String(), FamilyEnrichedData.serde())
             );
