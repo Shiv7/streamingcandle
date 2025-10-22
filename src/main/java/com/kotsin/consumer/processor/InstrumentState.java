@@ -3,7 +3,8 @@ package com.kotsin.consumer.processor;
 import com.kotsin.consumer.model.InstrumentCandle;
 import com.kotsin.consumer.model.OrderBookSnapshot;
 import com.kotsin.consumer.model.TickData;
-import com.kotsin.consumer.processor.service.InstrumentStateManager;
+import com.kotsin.consumer.monitoring.Timeframe;
+import com.kotsin.consumer.service.InstrumentStateManager;
 import lombok.Data;
 
 import java.util.Set;

@@ -2,6 +2,8 @@ package com.kotsin.consumer.processor.service;
 
 import com.kotsin.consumer.model.FamilyEnrichedData;
 import com.kotsin.consumer.model.InstrumentCandle;
+import com.kotsin.consumer.service.FamilyAggregationService;
+import com.kotsin.consumer.service.InstrumentKeyResolver;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.DisplayName;

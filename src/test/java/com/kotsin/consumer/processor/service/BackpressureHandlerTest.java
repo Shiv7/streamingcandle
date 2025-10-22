@@ -1,5 +1,6 @@
 package com.kotsin.consumer.processor.service;
 
+import com.kotsin.consumer.service.BackpressureHandler;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;

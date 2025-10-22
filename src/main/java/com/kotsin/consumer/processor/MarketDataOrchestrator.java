@@ -1,9 +1,10 @@
-package com.kotsin.consumer.processor.service;
+package com.kotsin.consumer.processor;
 
 import com.kotsin.consumer.config.KafkaConfig;
-import com.kotsin.consumer.model.FamilyEnrichedData;
-import com.kotsin.consumer.model.InstrumentCandle;
-import com.kotsin.consumer.processor.InstrumentState;
+import com.kotsin.consumer.service.CandleEmissionService;
+import com.kotsin.consumer.service.DataEnrichmentService;
+import com.kotsin.consumer.service.FamilyAggregationService;
+import com.kotsin.consumer.service.InstrumentProcessor;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.apache.kafka.streams.KafkaStreams;

@@ -1,8 +1,7 @@
-package com.kotsin.consumer.processor.service;
+package com.kotsin.consumer.service;
 
 import com.kotsin.consumer.model.InstrumentFamily;
 import com.kotsin.consumer.model.TickData;
-import com.kotsin.consumer.service.MongoInstrumentFamilyService;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.stereotype.Service;

@@ -1,4 +1,4 @@
-package com.kotsin.consumer.processor.service;
+package com.kotsin.consumer.service;
 
 import com.kotsin.consumer.model.TickData;
 import lombok.RequiredArgsConstructor;
@@ -6,7 +6,6 @@ import lombok.extern.slf4j.Slf4j;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Service;
 
-import java.time.Duration;
 import java.time.LocalTime;
 import java.time.ZoneId;
 import java.time.ZonedDateTime;

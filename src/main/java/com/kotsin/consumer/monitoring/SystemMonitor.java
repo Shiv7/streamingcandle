@@ -1,8 +1,7 @@
 package com.kotsin.consumer.monitoring;
 
-import com.kotsin.consumer.config.ProcessingConstants;
-import com.kotsin.consumer.processor.service.BackpressureHandler;
-import com.kotsin.consumer.processor.service.StreamMetrics;
+import com.kotsin.consumer.service.BackpressureHandler;
+import com.kotsin.consumer.service.StreamMetrics;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.scheduling.annotation.Scheduled;

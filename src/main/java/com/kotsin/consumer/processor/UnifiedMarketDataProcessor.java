@@ -1,7 +1,6 @@
 package com.kotsin.consumer.processor;
 
-import com.kotsin.consumer.processor.service.MarketDataOrchestrator;
-import com.kotsin.consumer.processor.service.StreamMetrics;
+import com.kotsin.consumer.service.StreamMetrics;
 import jakarta.annotation.PostConstruct;
 import jakarta.annotation.PreDestroy;
 import lombok.RequiredArgsConstructor;

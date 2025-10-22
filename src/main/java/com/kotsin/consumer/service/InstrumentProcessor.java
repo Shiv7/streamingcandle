@@ -1,4 +1,4 @@
-package com.kotsin.consumer.processor.service;
+package com.kotsin.consumer.service;
 
 import com.kotsin.consumer.model.TickData;
 import com.kotsin.consumer.processor.InstrumentState;

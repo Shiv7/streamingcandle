@@ -1,9 +1,9 @@
-package com.kotsin.consumer.processor.service;
+package com.kotsin.consumer.service;
 
 import com.kotsin.consumer.metrics.StreamMetrics;
 import com.kotsin.consumer.model.InstrumentCandle;
 import com.kotsin.consumer.processor.InstrumentState;
-import com.kotsin.consumer.processor.Timeframe;
+import com.kotsin.consumer.monitoring.Timeframe;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.apache.kafka.common.serialization.Serdes;

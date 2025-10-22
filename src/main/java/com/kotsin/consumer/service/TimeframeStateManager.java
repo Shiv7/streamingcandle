@@ -1,4 +1,4 @@
-package com.kotsin.consumer.processor.service;
+package com.kotsin.consumer.service;
 
 import com.kotsin.consumer.model.*;
 import com.kotsin.consumer.processor.CandleAccumulator;
@@ -6,7 +6,7 @@ import com.kotsin.consumer.processor.OiAccumulator;
 import com.kotsin.consumer.processor.ImbalanceBarAccumulator;
 import com.kotsin.consumer.processor.MicrostructureAccumulator;
 import com.kotsin.consumer.processor.OrderbookDepthAccumulator;
-import com.kotsin.consumer.processor.Timeframe;
+import com.kotsin.consumer.monitoring.Timeframe;
 import com.kotsin.consumer.processor.WindowRotationService;
 import lombok.Data;
 import lombok.extern.slf4j.Slf4j;

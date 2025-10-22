@@ -1,4 +1,4 @@
-package com.kotsin.consumer.processor;
+package com.kotsin.consumer.monitoring;
 
 /**
  * Strongly-typed timeframes used across aggregation.

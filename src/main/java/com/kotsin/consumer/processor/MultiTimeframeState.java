@@ -1,7 +1,8 @@
 package com.kotsin.consumer.processor;
 
 import com.kotsin.consumer.model.*;
-import com.kotsin.consumer.processor.service.TimeframeStateManager;
+import com.kotsin.consumer.monitoring.Timeframe;
+import com.kotsin.consumer.service.TimeframeStateManager;
 import lombok.Data;
 
 import java.util.*;

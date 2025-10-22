@@ -3,9 +3,9 @@ package com.kotsin.consumer.processor;
 import com.fasterxml.jackson.annotation.JsonIgnore;
 import com.kotsin.consumer.model.OrderBookSnapshot;
 import com.kotsin.consumer.model.OrderbookDepthData;
-import com.kotsin.consumer.processor.service.IcebergDetectionService;
-import com.kotsin.consumer.processor.service.OrderbookDepthCalculator;
-import com.kotsin.consumer.processor.service.SpoofingDetectionService;
+import com.kotsin.consumer.service.IcebergDetectionService;
+import com.kotsin.consumer.service.OrderbookDepthCalculator;
+import com.kotsin.consumer.service.SpoofingDetectionService;
 import lombok.Data;
 import lombok.extern.slf4j.Slf4j;
 

@@ -1,4 +1,4 @@
-package com.kotsin.consumer.processor.service;
+package com.kotsin.consumer.processor;
 
 import com.kotsin.consumer.config.KafkaConfig;
 import com.kotsin.consumer.model.FamilyAggregatedMetrics;
@@ -7,11 +7,12 @@ import com.kotsin.consumer.model.InstrumentCandle;
 import com.kotsin.consumer.model.OpenInterest;
 import com.kotsin.consumer.model.OrderBookSnapshot;
 import com.kotsin.consumer.model.TickData;
-import com.kotsin.consumer.processor.InstrumentState;
-import com.kotsin.consumer.processor.Timeframe;
+import com.kotsin.consumer.monitoring.Timeframe;
 // FIX: use the canonical metrics class (the one that has incCandleDrop)
 import com.kotsin.consumer.metrics.StreamMetrics;
 
+import com.kotsin.consumer.service.InstrumentKeyResolver;
+import com.kotsin.consumer.service.TradingHoursValidationService;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.apache.kafka.streams.StreamsBuilder;
@@ -26,7 +27,6 @@ import org.springframework.stereotype.Component;
 
 import java.time.Duration;
 import java.util.ArrayList;
-import java.util.List;
 import java.util.Properties;
 
 /**
