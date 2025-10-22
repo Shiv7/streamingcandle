@@ -417,9 +417,11 @@ public class TopologyConfiguration {
                     FamilyAggregatedMetrics famMetrics = calculateFamilyMetrics(family);
                     family.setAggregatedMetrics(famMetrics);
 
-                    // --- NEW: Calculate and set volume-weighted metrics ---
+                    // --- Calculate and set volume-weighted metrics ---
                     calculateVolumeWeightedMetrics(family);
 
+                    // ✅ FIX #3: Calculate and set imbalance bars (placeholder)
+                    calculateFamilyImbalanceBars(family);
 
                     // Set total count (derived)
                     family.setTotalInstrumentsCount(
@@ -465,7 +467,8 @@ public class TopologyConfiguration {
         Long callsOIChange = 0L;
         Long putsOIChange = 0L;
 
-        Double spotPrice = null;
+        // ✅ FIX #4: Separate variables for robust spot price calculation
+        Double spotPriceFromEquity = null;  // Try to get from equity first
         Double nearMonthFuturePrice = null;
         String nearMonthExpiry = null;
 
@@ -473,7 +476,7 @@ public class TopologyConfiguration {
         if (family.getEquity() != null) {
             InstrumentCandle equity = family.getEquity();
             equityVolume = equity.getVolume() != null ? equity.getVolume() : 0;
-            spotPrice = equity.getClose();
+            spotPriceFromEquity = equity.getClose();  // Store equity price separately
             totalVolume += equityVolume;
             if (equity.getOpenInterest() != null) {
                 totalOpenInterest += equity.getOpenInterest();
@@ -543,13 +546,20 @@ public class TopologyConfiguration {
         Double putCallVolumeRatio = callsVolume > 0 ? (double) putsVolume / callsVolume : null;
         Double putCallRatio = (callsOI != null && callsOI > 0) ? (putsOI.doubleValue() / callsOI.doubleValue()) : null;
 
-        // Calculate futures basis
+        // ✅ FIX #4: Robust spot price calculation with fallback
+        // Prioritize equity price, but fall back to near-month future if equity is absent
+        Double finalSpotPrice = (spotPriceFromEquity != null) ? spotPriceFromEquity : nearMonthFuturePrice;
+
+        // Calculate futures basis using the robust spot price
         Double futuresBasis = null;
         Double futuresBasisPercent = null;
-        if (spotPrice != null && nearMonthFuturePrice != null && spotPrice > 0) {
-            futuresBasis = nearMonthFuturePrice - spotPrice;
-            futuresBasisPercent = (futuresBasis / spotPrice) * 100.0;
+        if (finalSpotPrice != null && nearMonthFuturePrice != null && finalSpotPrice > 0) {
+            futuresBasis = nearMonthFuturePrice - finalSpotPrice;
+            futuresBasisPercent = (futuresBasis / finalSpotPrice) * 100.0;
         }
+
+        log.debug("📊 Calculated spot price: equity={} nearFuture={} final={}", 
+            spotPriceFromEquity, nearMonthFuturePrice, finalSpotPrice);
 
         return FamilyAggregatedMetrics.builder()
             .totalVolume(totalVolume)
@@ -565,7 +575,7 @@ public class TopologyConfiguration {
             .callsOIChange(callsOIChange != 0 ? callsOIChange : null)
             .putsOIChange(putsOIChange != 0 ? putsOIChange : null)
             .putCallRatio(putCallRatio)
-            .spotPrice(spotPrice)
+            .spotPrice(finalSpotPrice)  // Use robust spot price
             .nearMonthFuturePrice(nearMonthFuturePrice)
             .futuresBasis(futuresBasis)
             .futuresBasisPercent(futuresBasisPercent)
@@ -579,17 +589,29 @@ public class TopologyConfiguration {
 
     /**
      * Calculate and set volume-weighted metrics for microstructure and order book
+     * 
+     * ✅ FIX: Dynamic isComplete/valid flags + comprehensive field aggregation
      */
     private void calculateVolumeWeightedMetrics(FamilyEnrichedData family) {
         double totalVolume = family.getAggregatedMetrics().getTotalVolume() != null ? family.getAggregatedMetrics().getTotalVolume() : 0.0;
         if (totalVolume == 0) {
-            return; // Avoid division by zero
+            // Set empty but valid objects to avoid null pointers downstream
+            family.setMicrostructure(MicrostructureData.builder().isComplete(false).valid(false).build());
+            family.setOrderbookDepth(OrderbookDepthData.builder().isComplete(false).valid(false).build());
+            return;
         }
 
+        // Microstructure metrics
         double weightedOfi = 0.0;
         double weightedVpin = 0.0;
         double weightedDepthImbalance = 0.0;
+        double weightedEffectiveSpread = 0.0;
+        double weightedMicroprice = 0.0;
+        
+        // Order book metrics
         double weightedSpread = 0.0;
+        double weightedTotalBidDepth = 0.0;
+        double weightedTotalAskDepth = 0.0;
 
         List<InstrumentCandle> allInstruments = new ArrayList<>();
         if (family.getEquity() != null) allInstruments.add(family.getEquity());
@@ -600,32 +622,66 @@ public class TopologyConfiguration {
             long instrumentVolume = instrument.getVolume() != null ? instrument.getVolume() : 0;
             double weight = instrumentVolume / totalVolume;
 
+            // Aggregate microstructure metrics
             if (instrument.getMicrostructure() != null) {
                 MicrostructureData micro = instrument.getMicrostructure();
                 if (micro.getOfi() != null) weightedOfi += micro.getOfi() * weight;
                 if (micro.getVpin() != null) weightedVpin += micro.getVpin() * weight;
                 if (micro.getDepthImbalance() != null) weightedDepthImbalance += micro.getDepthImbalance() * weight;
+                if (micro.getEffectiveSpread() != null) weightedEffectiveSpread += micro.getEffectiveSpread() * weight;
+                if (micro.getMicroprice() != null) weightedMicroprice += micro.getMicroprice() * weight;
             }
-            if (instrument.getOrderbookDepth() != null && instrument.getOrderbookDepth().getSpread() != null) {
-                weightedSpread += instrument.getOrderbookDepth().getSpread() * weight;
+            
+            // Aggregate order book metrics
+            if (instrument.getOrderbookDepth() != null) {
+                OrderbookDepthData depth = instrument.getOrderbookDepth();
+                if (depth.getSpread() != null) weightedSpread += depth.getSpread() * weight;
+                if (depth.getTotalBidDepth() != null) weightedTotalBidDepth += depth.getTotalBidDepth() * weight;
+                if (depth.getTotalAskDepth() != null) weightedTotalAskDepth += depth.getTotalAskDepth() * weight;
             }
         }
 
-        // Create and set aggregated microstructure data
+        // ✅ FIX #1: Dynamic completeness flags based on actual data
+        boolean isMicrostructureComplete = weightedOfi != 0.0 && weightedVpin != 0.0;
         MicrostructureData aggregatedMicrostructure = MicrostructureData.builder()
-            .ofi(weightedOfi)
-            .vpin(weightedVpin)
-            .depthImbalance(weightedDepthImbalance)
-            .isComplete(true)
+            .ofi(weightedOfi != 0.0 ? weightedOfi : null)
+            .vpin(weightedVpin != 0.0 ? weightedVpin : null)
+            .depthImbalance(weightedDepthImbalance != 0.0 ? weightedDepthImbalance : null)
+            .effectiveSpread(weightedEffectiveSpread != 0.0 ? weightedEffectiveSpread : null)
+            .microprice(weightedMicroprice != 0.0 ? weightedMicroprice : null)
+            .isComplete(isMicrostructureComplete)
+            .valid(isMicrostructureComplete)
+            .displayString(String.format("Micro[OFI:%.2f,VPIN:%.2f,Depth:%.2f] %s",
+                weightedOfi, weightedVpin, weightedDepthImbalance, 
+                isMicrostructureComplete ? "COMPLETE" : "PARTIAL"))
             .build();
         family.setMicrostructure(aggregatedMicrostructure);
 
-        // Create and set aggregated order book data
+        // ✅ FIX #1: Dynamic completeness flags for order book
+        boolean isOrderbookComplete = weightedSpread > 0.0;
         OrderbookDepthData aggregatedOrderbook = OrderbookDepthData.builder()
-            .spread(weightedSpread)
-            .isComplete(true)
+            .spread(weightedSpread > 0.0 ? weightedSpread : null)
+            .totalBidDepth(weightedTotalBidDepth > 0.0 ? weightedTotalBidDepth : null)
+            .totalAskDepth(weightedTotalAskDepth > 0.0 ? weightedTotalAskDepth : null)
+            .isComplete(isOrderbookComplete)
+            .valid(isOrderbookComplete)
+            .displayString(String.format("Depth[Spread:%.2f,Bid:%.2f,Ask:%.2f] %s",
+                weightedSpread, weightedTotalBidDepth, weightedTotalAskDepth,
+                isOrderbookComplete ? "COMPLETE" : "INCOMPLETE"))
             .build();
         family.setOrderbookDepth(aggregatedOrderbook);
+    }
+
+    /**
+     * ✅ FIX #3: Aggregates imbalance bar data across all instruments in a family
+     * 
+     * NOTE: This is a placeholder. A full implementation would require a new class
+     * `FamilyImbalanceBars` and logic to aggregate from `InstrumentCandle.imbalanceBars`.
+     */
+    private void calculateFamilyImbalanceBars(FamilyEnrichedData family) {
+        // Explicitly set to null until implemented
+        family.setImbalanceBars(null);
+        log.warn("⚠️ Imbalance bar aggregation is not yet implemented for family: {}", family.getFamilyKey());
     }
 
     /**
