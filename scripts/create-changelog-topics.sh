@@ -15,7 +15,8 @@ echo ""
 # CANDLE OUTPUT TOPICS (Issue #1 Fix)
 # ============================================================================
 echo "📊 Creating candle output topics..."
-CANDLE_TOPICS="candle-complete-1m candle-complete-2m candle-complete-3m candle-complete-5m candle-complete-15m candle-complete-30m"
+# CRITICAL: Include both candle-complete-30m AND candle-complete-30m-v2 for compatibility
+CANDLE_TOPICS="candle-complete-1m candle-complete-2m candle-complete-3m candle-complete-5m candle-complete-15m candle-complete-30m candle-complete-30m-v2"
 
 # ============================================================================
 # FAMILY AGGREGATION TOPICS (Issue #1 Fix)
@@ -25,8 +26,11 @@ FAMILY_TOPICS="family-structured-1m family-structured-2m family-structured-5m fa
 # ============================================================================
 # CHANGELOG TOPICS (Issue #2 Fix - State Store Corruption)
 # ============================================================================
-echo "🗂️ Creating changelog topics..."
-CHANGELOG_TOPICS="instrument-instrument-delta-volume-store-changelog instrument-instrument-state-store-changelog instrument-KSTREAM-TOTABLE-STATE-STORE-0000000006-changelog"
+# CRITICAL: DON'T pre-create changelog topics!
+# Kafka Streams will auto-create them with the correct partition count
+# Pre-creating with wrong partition count causes "invalid partitions" error
+echo "🗂️ Skipping changelog topics (Kafka Streams will auto-create with correct partitions)"
+CHANGELOG_TOPICS=""
 
 # Configuration
 PARTITIONS=6
@@ -100,24 +104,27 @@ for topic in $FAMILY_TOPICS; do
 done
 echo ""
 
-# Create changelog topics
-echo "🗂️ Creating changelog topics..."
-for topic in $CHANGELOG_TOPICS; do
-    create_changelog_topic "$topic"
-done
-echo ""
+# Create changelog topics (if any)
+if [ -n "$CHANGELOG_TOPICS" ]; then
+    echo "🗂️ Creating changelog topics..."
+    for topic in $CHANGELOG_TOPICS; do
+        create_changelog_topic "$topic"
+    done
+    echo ""
+fi
 
-echo "✅ All topics created successfully!"
-echo ""
-echo "🔍 Verify topics:"
-echo "  $KAFKA_BIN/kafka-topics.sh --bootstrap-server $KAFKA_BOOTSTRAP_SERVER --list | grep -E '(candle|family|changelog)'"
+echo "✅ All required topics created successfully!"
 echo ""
 echo "📋 Topic counts:"
 echo "  Candle topics: $(echo $CANDLE_TOPICS | wc -w)"
 echo "  Family topics: $(echo $FAMILY_TOPICS | wc -w)"
-echo "  Changelog topics: $(echo $CHANGELOG_TOPICS | wc -w)"
+echo "  Changelog topics: Kafka Streams will auto-create"
 echo ""
-echo "⚠️ NOTE: Topics may not have been created if kafka-topics.sh is not in PATH"
-echo "To verify topics were actually created, run:"
-echo "  $KAFKA_BIN/kafka-topics.sh --bootstrap-server $KAFKA_BOOTSTRAP_SERVER --list"
+echo "🔍 Verify topics were created:"
+echo "  $KAFKA_BIN/kafka-topics.sh --bootstrap-server $KAFKA_BOOTSTRAP_SERVER --list | grep -E '(candle|family)'"
+echo ""
+echo "⚠️ IMPORTANT NOTES:"
+echo "  - Changelog topics will be auto-created by Kafka Streams with correct partition count"
+echo "  - Do NOT manually create changelog topics (causes partition mismatch)"
+echo "  - Both candle-complete-30m and candle-complete-30m-v2 were created for compatibility"
 
