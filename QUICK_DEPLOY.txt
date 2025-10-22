@@ -1,0 +1,73 @@
+=============================================================================
+QUICK DEPLOYMENT - StreamingCandle (All Issues Fixed)
+=============================================================================
+
+ON YOUR LOCAL MACHINE:
+----------------------
+cd /Users/shivendrapratap/Documents/kotsin/streamingcandle
+scp target/demo-0.0.1-SNAPSHOT.jar ubuntu@13.203.60.173:/home/ubuntu/streamingcandle/demo.jar
+scp scripts/*.sh ubuntu@13.203.60.173:/home/ubuntu/streamingcandle/scripts/
+
+ON SERVER:
+----------
+ssh ubuntu@13.203.60.173
+cd /home/ubuntu/streamingcandle
+
+# 1. Stop old version
+pkill -f demo.jar
+
+# 2. Clean state stores
+./scripts/cleanup-state-stores.sh
+
+# 3. Create ALL topics (IMPORTANT: Use bash, not sh!)
+chmod +x scripts/*.sh
+bash scripts/create-changelog-topics.sh 13.203.60.173:9094
+
+# 4. Start application
+export SPRING_PROFILES_ACTIVE=production
+nohup java -jar demo.jar > logs/app.log 2>&1 &
+echo $! > app.pid
+
+# 5. Monitor
+tail -f logs/app.log | grep -E "(✅|❌|📤)"
+
+VERIFY SUCCESS:
+---------------
+# All consumer groups stable
+kafka-consumer-groups.sh --bootstrap-server 13.203.60.173:9094 --list
+
+# Data in candles
+kafka-console-consumer.sh --bootstrap-server 13.203.60.173:9094 \
+  --topic candle-complete-1m --max-messages 5
+
+# Health check
+curl http://localhost:8081/api/v1/health
+
+EXPECTED TOPICS (15 total):
+---------------------------
+Candles: candle-complete-{1m,2m,3m,5m,15m,30m}
+Family:  family-structured-{1m,2m,5m,15m,30m,all}
+Changelogs: instrument-*-changelog (3 topics)
+
+SUCCESS LOGS:
+-------------
+✅ Started per-instrument candle stream
+✅ State has complete windows
+📤 candle emit tf=1m scrip=XXX vol=XXX → candle-complete-1m
+✅ Family streams started successfully
+
+FIXES APPLIED:
+--------------
+✅ Issue #1: Topic dependencies (startup delay + retry)
+✅ Issue #2: State store corruption (standby replicas)
+✅ Issue #3: Out-of-order data (30s grace period)
+✅ Issue #6: Serialization (@JsonIgnore)
+✅ Issue #7b: VPIN formula (corrected normalization)
+✅ Issue #8: ArrayList performance (ArrayDeque)
+✅ Issue #9: Monitoring (health endpoints)
+✅ Issue #10: Config validation (startup checks)
+✅ Issue #13: Logging (INFO level)
+
+READY TO DEPLOY: YES ✅
+=============================================================================
+

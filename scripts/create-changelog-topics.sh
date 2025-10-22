@@ -4,9 +4,11 @@
 # This prevents topic dependency issues and state store corruption
 
 KAFKA_BOOTSTRAP_SERVER="${1:-localhost:9092}"
+KAFKA_BIN="${2:-/opt/kafka/bin}"
 
 echo "🚀 Creating all required Kafka topics..."
 echo "📡 Kafka Bootstrap Server: $KAFKA_BOOTSTRAP_SERVER"
+echo "📂 Kafka Bin Directory: $KAFKA_BIN"
 echo ""
 
 # ============================================================================
@@ -46,7 +48,7 @@ create_data_topic() {
     local topic=$1
     echo "📝 Creating data topic: $topic"
     
-    kafka-topics.sh --bootstrap-server "$KAFKA_BOOTSTRAP_SERVER" \
+    $KAFKA_BIN/kafka-topics.sh --bootstrap-server "$KAFKA_BOOTSTRAP_SERVER" \
         --create \
         --topic "$topic" \
         --partitions "$PARTITIONS" \
@@ -67,7 +69,7 @@ create_changelog_topic() {
     local topic=$1
     echo "📝 Creating changelog topic: $topic"
     
-    kafka-topics.sh --bootstrap-server "$KAFKA_BOOTSTRAP_SERVER" \
+    $KAFKA_BIN/kafka-topics.sh --bootstrap-server "$KAFKA_BOOTSTRAP_SERVER" \
         --create \
         --topic "$topic" \
         --partitions "$PARTITIONS" \
@@ -108,10 +110,14 @@ echo ""
 echo "✅ All topics created successfully!"
 echo ""
 echo "🔍 Verify topics:"
-echo "  kafka-topics.sh --bootstrap-server $KAFKA_BOOTSTRAP_SERVER --list | grep -E '(candle|family|changelog)'"
+echo "  $KAFKA_BIN/kafka-topics.sh --bootstrap-server $KAFKA_BOOTSTRAP_SERVER --list | grep -E '(candle|family|changelog)'"
 echo ""
 echo "📋 Topic counts:"
 echo "  Candle topics: $(echo $CANDLE_TOPICS | wc -w)"
 echo "  Family topics: $(echo $FAMILY_TOPICS | wc -w)"
 echo "  Changelog topics: $(echo $CHANGELOG_TOPICS | wc -w)"
+echo ""
+echo "⚠️ NOTE: Topics may not have been created if kafka-topics.sh is not in PATH"
+echo "To verify topics were actually created, run:"
+echo "  $KAFKA_BIN/kafka-topics.sh --bootstrap-server $KAFKA_BOOTSTRAP_SERVER --list"
 
