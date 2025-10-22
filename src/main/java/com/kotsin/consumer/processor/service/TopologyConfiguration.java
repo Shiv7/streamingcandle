@@ -9,7 +9,9 @@ import com.kotsin.consumer.model.OrderBookSnapshot;
 import com.kotsin.consumer.model.TickData;
 import com.kotsin.consumer.processor.InstrumentState;
 import com.kotsin.consumer.processor.Timeframe;
-import com.kotsin.consumer.processor.service.StreamMetrics;
+// FIX: use the canonical metrics class (the one that has incCandleDrop)
+import com.kotsin.consumer.metrics.StreamMetrics;
+
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.apache.kafka.streams.StreamsBuilder;
@@ -29,10 +31,10 @@ import java.util.Properties;
 
 /**
  * Configuration service for Kafka Streams topologies
- * 
+ *
  * SINGLE RESPONSIBILITY: Topology building and configuration
  * EXTRACTED FROM: UnifiedMarketDataProcessor (God class refactoring)
- * 
+ *
  * FIXED ISSUES:
  * 1. Added metadata setting in instrument aggregation
  * 2. Fixed family aggregation to actually assemble families
@@ -48,16 +50,16 @@ public class TopologyConfiguration {
     private final StreamMetrics metrics;
     private final InstrumentKeyResolver keyResolver;  // ✅ ADDED for metadata
     private final TradingHoursValidationService tradingHoursService;  // ✅ ADDED for filtering
-    
+
     @Value("${spring.kafka.streams.application-id:unified-market-processor1}")
     private String appIdPrefix;
-    
+
     @Value("${unified.input.topic.ticks:forwardtesting-data}")
     private String ticksTopic;
-    
+
     @Value("${unified.input.topic.oi:OpenInterest}")
     private String oiTopic;
-    
+
     @Value("${unified.input.topic.orderbook:Orderbook}")
     private String orderbookTopic;
 
@@ -87,7 +89,7 @@ public class TopologyConfiguration {
      */
     public StreamsBuilder createInstrumentTopology() {
         log.info("🗃️ Building per-instrument candle topology");
-        
+
         Properties props = kafkaConfig.getStreamProperties(appIdPrefix + "-instrument");
         props.put("auto.offset.reset", "earliest");
         StreamsBuilder builder = new StreamsBuilder();
@@ -159,15 +161,15 @@ public class TopologyConfiguration {
                             String familyKey = keyResolver.getFamilyKey(tick);
                             state.setInstrumentType(instrumentType);
                             state.setUnderlyingEquityScripCode(familyKey);
-                            
-                            log.debug("🔧 Metadata set: scrip={}, type={}, family={}", 
+
+                            log.debug("🔧 Metadata set: scrip={}, type={}, family={}",
                                 scripCode, instrumentType, familyKey);
                         } catch (Exception e) {
                             log.error("❌ Failed to set metadata for scripCode={}", scripCode, e);
                             // Continue with tick processing even if metadata fails
                         }
                     }
-                    
+
                     // Add tick to state
                     state.addTick(tick);
                     return state;
@@ -184,7 +186,7 @@ public class TopologyConfiguration {
             .peek((windowedKey, state) -> {
                 long windowEnd = windowedKey.window().end();
                 state.forceCompleteWindows(windowEnd);
-                log.info("🎉 Window closed: scrip={} windowEnd={} hasComplete={}", 
+                log.info("🎉 Window closed: scrip={} windowEnd={} hasComplete={}",
                     state.getScripCode(), windowEnd, state.hasAnyCompleteWindow());
             })
             .selectKey((windowedKey, state) -> windowedKey.key());
@@ -208,26 +210,26 @@ public class TopologyConfiguration {
         // This prevents the race condition where new ticks reset accumulators
         if (candlesOutputEnabled) {
             log.info("📤 Setting up immediate candle extraction to prevent race condition");
-            
+
             // Extract and emit candles for each timeframe RIGHT NOW
             for (Timeframe tf : Timeframe.values()) {
                 final String tfLabel = tf.getLabel();
                 String topic = getCandleTopicForTimeframe(tfLabel);
-                
+
                 if (topic != null) {
                     log.info("📤 Setting up candle emission for {} → {}", tfLabel, topic);
-                    
+
                     enrichedState
                         .mapValues(state -> {
                             // Extract candle IMMEDIATELY while accumulator is still complete
                             InstrumentCandle candle = state.extractFinalizedCandle(tf);
                             if (candle != null) {
-                                log.info("📤 Extracted candle: tf={} scrip={} vol={} complete={} type={} family={}", 
-                                    tfLabel, candle.getScripCode(), candle.getVolume(), 
+                                log.info("📤 Extracted candle: tf={} scrip={} vol={} complete={} type={} family={}",
+                                    tfLabel, candle.getScripCode(), candle.getVolume(),
                                     candle.getIsComplete(), candle.getInstrumentType(),
                                     candle.getUnderlyingEquityScripCode());
                             } else {
-                                log.warn("❌ Failed to extract candle: tf={} scrip={} hasComplete={}", 
+                                log.warn("❌ Failed to extract candle: tf={} scrip={} hasComplete={}",
                                     tfLabel, state.getScripCode(), state.hasAnyCompleteWindow());
                             }
                             return candle;
@@ -247,7 +249,7 @@ public class TopologyConfiguration {
                             return true;
                         })
                         .peek((k, candle) -> {
-                            log.info("📤 EMITTING: tf={} scrip={} vol={} type={} family={} → {}", 
+                            log.info("📤 EMITTING: tf={} scrip={} vol={} type={} family={} → {}",
                                 tfLabel, candle.getScripCode(), candle.getVolume(),
                                 candle.getInstrumentType(), candle.getUnderlyingEquityScripCode(), topic);
                             metrics.incCandleEmit(tfLabel);
@@ -273,7 +275,7 @@ public class TopologyConfiguration {
             case "5m": return candle5mTopic;
             case "15m": return candle15mTopic;
             case "30m": return candle30mTopic;
-            default: 
+            default:
                 log.warn("⚠️ Unknown timeframe: {}", timeframe);
                 return null;
         }
@@ -281,12 +283,12 @@ public class TopologyConfiguration {
 
     /**
      * Create family-structured aggregation topology
-     * 
+     *
      * ✅ FIX #2: Actually assemble families instead of returning empty builder
      */
     public StreamsBuilder createFamilyTopology(String timeframeLabel, String sourceTopic, String sinkTopic, Duration windowSize) {
         log.info("🗃️ Building family-structured topology for {}", timeframeLabel);
-        
+
         Properties props = kafkaConfig.getStreamProperties(appIdPrefix + "-family-" + timeframeLabel);
         props.put("auto.offset.reset", "earliest");
         StreamsBuilder builder = new StreamsBuilder();
@@ -314,10 +316,10 @@ public class TopologyConfiguration {
                 String familyKey = candle.getUnderlyingEquityScripCode() != null
                     ? candle.getUnderlyingEquityScripCode()
                     : candle.getScripCode();
-                
-                log.debug("🔑 Keying candle by family: scrip={} type={} familyKey={}", 
+
+                log.debug("🔑 Keying candle by family: scrip={} type={} familyKey={}",
                     candle.getScripCode(), candle.getInstrumentType(), familyKey);
-                    
+
                 return familyKey;
             })
             .repartition(Repartitioned.with(Serdes.String(), InstrumentCandle.serde()));
@@ -326,7 +328,7 @@ public class TopologyConfiguration {
         // Aligns with instrument stream grace period
         TimeWindows windows = TimeWindows.ofSizeAndGrace(windowSize, Duration.ofSeconds(30));
 
-        // ✅ FIX #2: ACTUALLY ASSEMBLE FAMILIES (not just return empty builder!)
+        // ✅ FIX #2: ACTUALLY ASSEMBLE FAMILIES
         KTable<Windowed<String>, FamilyEnrichedData> aggregated = keyedByFamily
             .groupByKey(Grouped.with(Serdes.String(), InstrumentCandle.serde()))
             .windowedBy(windows)
@@ -348,7 +350,7 @@ public class TopologyConfiguration {
                         family.setInstrumentType("EQUITY_FAMILY");
                         log.info("🏗️ Initialized family: key={} name={}", familyKey, familyKey);
                     }
-                    
+
                     // Set/update window times
                     if (family.getWindowStartMillis() == null && candle.getWindowStartMillis() != null) {
                         family.setWindowStartMillis(candle.getWindowStartMillis());
@@ -356,43 +358,43 @@ public class TopologyConfiguration {
                     if (candle.getWindowEndMillis() != null) {
                         family.setWindowEndMillis(candle.getWindowEndMillis());
                     }
-                    
+
                     // Add instrument to family based on type
                     String instrType = candle.getInstrumentType();
                     if (instrType != null) {
                         switch (instrType) {
                             case "EQUITY":
-                                log.info("➕ Adding EQUITY to family: familyKey={} scripCode={}", 
+                                log.info("➕ Adding EQUITY to family: familyKey={} scripCode={}",
                                     familyKey, candle.getScripCode());
                                 family.setEquity(candle);
                                 break;
-                                
+
                             case "FUTURE":
-                                log.info("➕ Adding FUTURE to family: familyKey={} scripCode={} expiry={}", 
+                                log.info("➕ Adding FUTURE to family: familyKey={} scripCode={} expiry={}",
                                     familyKey, candle.getScripCode(), candle.getExpiry());
                                 if (family.getFutures() == null) {
                                     family.setFutures(new ArrayList<>());
                                 }
                                 family.getFutures().add(candle);
                                 break;
-                                
+
                             case "OPTION":
-                                log.info("➕ Adding OPTION to family: familyKey={} scripCode={} type={} strike={}", 
+                                log.info("➕ Adding OPTION to family: familyKey={} scripCode={} type={} strike={}",
                                     familyKey, candle.getScripCode(), candle.getOptionType(), candle.getStrikePrice());
                                 if (family.getOptions() == null) {
                                     family.setOptions(new ArrayList<>());
                                 }
                                 family.getOptions().add(candle);
                                 break;
-                                
+
                             default:
-                                log.warn("⚠️ Unknown instrument type: {} for scripCode={}", 
+                                log.warn("⚠️ Unknown instrument type: {} for scripCode={}",
                                     instrType, candle.getScripCode());
                         }
                     } else {
                         log.warn("⚠️ Candle has null instrumentType: scripCode={}", candle.getScripCode());
                     }
-                    
+
                     return family;
                 },
                 Materialized.with(Serdes.String(), FamilyEnrichedData.serde())
@@ -407,26 +409,26 @@ public class TopologyConfiguration {
                 if (family != null) {
                     family.setProcessingTimestamp(System.currentTimeMillis());
                     family.setTimeframe(timeframeLabel);
-                    
+
                     // Calculate aggregated metrics
-                    FamilyAggregatedMetrics metrics = calculateFamilyMetrics(family);
-                    family.setAggregatedMetrics(metrics);
-                    
-                    // Set counts
+                    FamilyAggregatedMetrics famMetrics = calculateFamilyMetrics(family);
+                    family.setAggregatedMetrics(famMetrics);
+
+                    // Set total count (derived)
                     family.setTotalInstrumentsCount(
                         (family.getEquity() != null ? 1 : 0) +
                         (family.getFutures() != null ? family.getFutures().size() : 0) +
                         (family.getOptions() != null ? family.getOptions().size() : 0)
                     );
-                    family.setFuturesCount(family.getFutures() != null ? family.getFutures().size() : 0);
-                    family.setOptionsCount(family.getOptions() != null ? family.getOptions().size() : 0);
-                    
-                    log.info("📊 Family complete: key={} tf={} equity={} futures={} options={} totalVol={}", 
+
+                    // NOTE: Removed non-existent setters setFuturesCount/setOptionsCount.
+                    // If you need explicit counts in the payload, compute and expose via getters or metrics.
+                    log.info("📊 Family complete: key={} tf={} equity={} futures={} options={} totalVol={}",
                         family.getFamilyKey(), timeframeLabel,
                         family.getEquity() != null,
-                        family.getFuturesCount(),
-                        family.getOptionsCount(),
-                        metrics.getTotalVolume());
+                        (family.getFutures() != null ? family.getFutures().size() : 0),
+                        (family.getOptions() != null ? family.getOptions().size() : 0),
+                        famMetrics.getTotalVolume());
                 }
                 return family;
             });
@@ -438,7 +440,7 @@ public class TopologyConfiguration {
 
     /**
      * Calculate aggregated metrics for a family
-     * 
+     *
      * ✅ FIX #3: Proper metrics calculation
      */
     private FamilyAggregatedMetrics calculateFamilyMetrics(FamilyEnrichedData family) {
@@ -446,11 +448,11 @@ public class TopologyConfiguration {
         long equityVolume = 0;
         long futuresVolume = 0;
         long optionsVolume = 0;
-        
+
         Double spotPrice = null;
         Double nearMonthFuturePrice = null;
         String nearMonthExpiry = null;
-        
+
         // Equity metrics
         if (family.getEquity() != null) {
             InstrumentCandle equity = family.getEquity();
@@ -458,23 +460,23 @@ public class TopologyConfiguration {
             spotPrice = equity.getClose();
             totalVolume += equityVolume;
         }
-        
+
         // Futures metrics
         if (family.getFutures() != null && !family.getFutures().isEmpty()) {
             for (InstrumentCandle future : family.getFutures()) {
                 long vol = future.getVolume() != null ? future.getVolume() : 0;
                 futuresVolume += vol;
                 totalVolume += vol;
-                
+
                 // Find near month future (earliest expiry)
-                if (nearMonthExpiry == null || 
+                if (nearMonthExpiry == null ||
                     (future.getExpiry() != null && future.getExpiry().compareTo(nearMonthExpiry) < 0)) {
                     nearMonthExpiry = future.getExpiry();
                     nearMonthFuturePrice = future.getClose();
                 }
             }
         }
-        
+
         // Options metrics
         long callsVolume = 0;
         long putsVolume = 0;
@@ -483,7 +485,7 @@ public class TopologyConfiguration {
                 long vol = option.getVolume() != null ? option.getVolume() : 0;
                 optionsVolume += vol;
                 totalVolume += vol;
-                
+
                 if ("CE".equals(option.getOptionType())) {
                     callsVolume += vol;
                 } else if ("PE".equals(option.getOptionType())) {
@@ -491,10 +493,10 @@ public class TopologyConfiguration {
                 }
             }
         }
-        
+
         // Calculate ratios
         Double putCallVolumeRatio = callsVolume > 0 ? (double) putsVolume / callsVolume : null;
-        
+
         // Calculate futures basis
         Double futuresBasis = null;
         Double futuresBasisPercent = null;
@@ -502,7 +504,7 @@ public class TopologyConfiguration {
             futuresBasis = nearMonthFuturePrice - spotPrice;
             futuresBasisPercent = (futuresBasis / spotPrice) * 100.0;
         }
-        
+
         return FamilyAggregatedMetrics.builder()
             .totalVolume(totalVolume)
             .equityVolume(equityVolume)
@@ -549,7 +551,7 @@ public class TopologyConfiguration {
                 if (candle != null && oi != null) {
                     candle.setOpenInterest(oi.getOpenInterest());
                     candle.setOiChange(oi.getOiChange());
-                    log.debug("✅ OI enriched: scrip={} oi={} oiChange={}", 
+                    log.debug("✅ OI enriched: scrip={} oi={} oiChange={}",
                         candle.getScripCode(), oi.getOpenInterest(), oi.getOiChange());
                 }
                 return candle;
