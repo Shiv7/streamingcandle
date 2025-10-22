@@ -370,7 +370,10 @@ public class MicrostructureAccumulator {
     
     /**
      * Calculate VPIN from buckets
-     * Formula: VPIN = Σ|V_buy - V_sell| / Σ V_total
+     * CORRECT Formula per Easley-López de Prado-O'Hara (2012):
+     * VPIN = (1/n) × Σ|V_buy - V_sell| / V_bucket
+     * 
+     * This gives average order imbalance per bucket normalized by bucket size
      */
     private void calculateVPIN() {
         if (vpinBuckets.size() < 10) {
@@ -378,15 +381,21 @@ public class MicrostructureAccumulator {
             return;
         }
         
+        int n = vpinBuckets.size();
+        
+        // Sum of absolute imbalances: Σ|V_buy - V_sell|
         double totalImbalance = vpinBuckets.stream()
             .mapToDouble(VPINBucket::getImbalance)
             .sum();
         
-        double totalVolume = vpinBuckets.stream()
+        // Average bucket volume
+        double avgBucketVolume = vpinBuckets.stream()
             .mapToDouble(VPINBucket::getTotalVolume)
-            .sum();
+            .average()
+            .orElse(1.0);
         
-        vpin = (totalVolume > 0) ? (totalImbalance / totalVolume) : 0.0;
+        // VPIN = (1/n) × Σ|V_buy - V_sell| / V_bucket
+        vpin = (avgBucketVolume > 0) ? ((1.0 / n) * (totalImbalance / avgBucketVolume)) : 0.0;
     }
     
     /**

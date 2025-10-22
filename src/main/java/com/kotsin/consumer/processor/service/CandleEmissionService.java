@@ -25,7 +25,16 @@ public class CandleEmissionService {
      * Emit per-instrument candles to timeframe-specific topics
      */
     public void emitPerInstrumentCandles(KStream<String, InstrumentState> stateStream, CandleTopicResolver topicResolver) {
+        // Filter for states with complete windows
         KStream<String, InstrumentState> completeStates = stateStream
+            .peek((key, state) -> {
+                boolean hasComplete = state.hasAnyCompleteWindow();
+                if (!hasComplete) {
+                    log.debug("⏭️ Skipping state with no complete windows: scripCode={}", state.getScripCode());
+                } else {
+                    log.info("✅ State has complete windows: scripCode={}, ready for emission", state.getScripCode());
+                }
+            })
             .filter((key, state) -> state.hasAnyCompleteWindow());
 
         for (Timeframe timeframe : new Timeframe[]{Timeframe.ONE_MIN, Timeframe.TWO_MIN, Timeframe.THREE_MIN,

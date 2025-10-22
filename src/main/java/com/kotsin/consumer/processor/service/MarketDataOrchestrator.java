@@ -45,6 +45,22 @@ public class MarketDataOrchestrator {
     @Value("${stream.outputs.familyStructured.enabled:false}")
     private boolean familyStructuredEnabled;
 
+    // Candle topic names
+    @Value("${stream.outputs.candles.1m:candle-complete-1m}")
+    private String candle1mTopic;
+    
+    @Value("${stream.outputs.candles.2m:candle-complete-2m}")
+    private String candle2mTopic;
+    
+    @Value("${stream.outputs.candles.5m:candle-complete-5m}")
+    private String candle5mTopic;
+    
+    @Value("${stream.outputs.candles.15m:candle-complete-15m}")
+    private String candle15mTopic;
+    
+    @Value("${stream.outputs.candles.30m:candle-complete-30m}")
+    private String candle30mTopic;
+
     /**
      * Start all processing streams
      */
@@ -135,8 +151,8 @@ public class MarketDataOrchestrator {
         
         // Verify required candle topics exist before starting family streams
         String[] requiredTopics = {
-            "candle-complete-1m", "candle-complete-2m", "candle-complete-5m", 
-            "candle-complete-15m", "candle-complete-30m"
+            candle1mTopic, candle2mTopic, candle5mTopic, 
+            candle15mTopic, candle30mTopic
         };
         
         for (String topic : requiredTopics) {
@@ -146,19 +162,19 @@ public class MarketDataOrchestrator {
         }
         
         // Start 1-minute family stream
-        startFamilyStream("1m", "candle-complete-1m", "family-structured-1m", Duration.ofMinutes(1));
+        startFamilyStream("1m", candle1mTopic, "family-structured-1m", Duration.ofMinutes(1));
         
         // Start 2-minute family stream  
-        startFamilyStream("2m", "candle-complete-2m", "family-structured-2m", Duration.ofMinutes(2));
+        startFamilyStream("2m", candle2mTopic, "family-structured-2m", Duration.ofMinutes(2));
         
         // Start 5-minute family stream
-        startFamilyStream("5m", "candle-complete-5m", "family-structured-5m", Duration.ofMinutes(5));
+        startFamilyStream("5m", candle5mTopic, "family-structured-5m", Duration.ofMinutes(5));
         
         // Start 15-minute family stream
-        startFamilyStream("15m", "candle-complete-15m", "family-structured-15m", Duration.ofMinutes(15));
+        startFamilyStream("15m", candle15mTopic, "family-structured-15m", Duration.ofMinutes(15));
         
         // Start 30-minute family stream
-        startFamilyStream("30m", "candle-complete-30m", "family-structured-30m", Duration.ofMinutes(30));
+        startFamilyStream("30m", candle30mTopic, "family-structured-30m", Duration.ofMinutes(30));
     }
 
     /**

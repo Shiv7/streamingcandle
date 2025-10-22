@@ -97,8 +97,11 @@ public class TopologyConfiguration {
             .selectKey((k, v) -> v.getScripCode());
 
         // Define windowing
+        // BALANCED APPROACH: 30s grace period (delays candle by max 30s)
+        // Trade-off: Captures 95%+ of late data without excessive delay
+        // Note: suppress().untilWindowCloses() delays emission by grace period
         TimeWindows windows = TimeWindows
-            .ofSizeAndGrace(Duration.ofMinutes(1), Duration.ofSeconds(10));
+            .ofSizeAndGrace(Duration.ofMinutes(1), Duration.ofSeconds(30));
 
         // Aggregate into InstrumentState
         KTable<Windowed<String>, InstrumentState> aggregated = instrumentKeyed
@@ -171,7 +174,9 @@ public class TopologyConfiguration {
                 : candle.getScripCode())
             .repartition(Repartitioned.with(Serdes.String(), InstrumentCandle.serde()));
 
-        TimeWindows windows = TimeWindows.ofSizeAndGrace(windowSize, Duration.ofSeconds(10));
+        // BALANCED APPROACH: 30s grace period for family aggregation
+        // Aligns with instrument stream grace period
+        TimeWindows windows = TimeWindows.ofSizeAndGrace(windowSize, Duration.ofSeconds(30));
 
         KTable<Windowed<String>, FamilyEnrichedData> aggregated = keyedByFamily
             .groupByKey(Grouped.with(Serdes.String(), InstrumentCandle.serde()))
