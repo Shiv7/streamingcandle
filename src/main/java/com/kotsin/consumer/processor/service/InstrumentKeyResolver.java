@@ -35,6 +35,8 @@ public class InstrumentKeyResolver {
     /**
      * Get underlying equity scripCode for FAMILY-LEVEL aggregation (Stream 2)
      * Maps derivatives to underlying equity, handles indices correctly
+     * 
+     * CRITICAL FIX: Uses in-memory cache only, NO blocking MongoDB calls
      */
     public String getFamilyKey(TickData tick) {
         if (tick == null) {
@@ -47,23 +49,50 @@ public class InstrumentKeyResolver {
             return tick.getScripCode();
         }
 
-        // If it's a derivative, resolve to underlying equity
+        // If it's a derivative, resolve to underlying equity using CACHE ONLY
         if ("D".equalsIgnoreCase(tick.getExchangeType())) {
-            InstrumentFamily family = cacheService.resolveFamily(
-                tick.getScripCode(),
-                tick.getExchangeType(),
-                tick.getCompanyName()
-            );
+            // CRITICAL: Use cache-only lookup to avoid blocking MongoDB calls
+            InstrumentFamily family = cacheService.getFamily(tick.getScripCode());
 
             if (family != null && family.getEquityScripCode() != null) {
                 log.debug("📍 Mapped derivative {} to family key {}",
                     tick.getScripCode(), family.getEquityScripCode());
                 return family.getEquityScripCode();
             }
+            
+            // Fallback: Try to extract underlying from company name (no DB call)
+            String underlying = extractUnderlyingFromCompanyName(tick.getCompanyName());
+            if (underlying != null) {
+                log.debug("📍 Extracted underlying {} from company name for derivative {}",
+                    underlying, tick.getScripCode());
+                return underlying;
+            }
         }
 
         // For equities or if resolution fails, use the tick's own scripCode
         return tick.getScripCode();
+    }
+    
+    /**
+     * Extract underlying equity from derivative company name (no DB call)
+     * Example: "RELIANCE 28 OCT 2025 CE 3850.00" -> "RELIANCE"
+     */
+    private String extractUnderlyingFromCompanyName(String companyName) {
+        if (companyName == null || companyName.isBlank()) {
+            return null;
+        }
+        
+        // Extract first word as underlying symbol
+        String[] parts = companyName.split("\\s+");
+        if (parts.length > 0) {
+            String underlying = parts[0].replaceAll("[^A-Za-z0-9&]", "");
+            // Only return if it looks like a valid symbol (letters only)
+            if (underlying.matches("[A-Za-z]+")) {
+                return underlying;
+            }
+        }
+        
+        return null;
     }
 
     /**

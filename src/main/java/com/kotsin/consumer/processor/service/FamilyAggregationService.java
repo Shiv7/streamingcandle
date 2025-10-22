@@ -7,6 +7,7 @@ import org.springframework.stereotype.Service;
 
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Map;
 
 /**
  * Service for family-level aggregation logic
@@ -342,19 +343,16 @@ public class FamilyAggregationService {
             family.setFutures(new ArrayList<>());
         }
         
-        // Check if this future already exists (by scripCode)
         String candleScripCode = candle.getScripCode();
-        int existingIdx = -1;
-        
-        for (int i = 0; i < family.getFutures().size(); i++) {
-            InstrumentCandle existing = family.getFutures().get(i);
-            if (candleScripCode != null && candleScripCode.equals(existing.getScripCode())) {
-                existingIdx = i;
-                break;
-            }
+        if (candleScripCode == null) {
+            return;
         }
         
-        if (existingIdx >= 0) {
+        // OPTIMIZATION: Use HashMap for O(1) lookup instead of O(n) linear search
+        Map<String, Integer> futureIndexMap = getOrCreateFutureIndexMap(family);
+        Integer existingIdx = futureIndexMap.get(candleScripCode);
+        
+        if (existingIdx != null) {
             // Future already exists - update if new one has more volume (more recent/complete data)
             InstrumentCandle existing = family.getFutures().get(existingIdx);
             if (candle.getVolume() != null && 
@@ -365,15 +363,34 @@ public class FamilyAggregationService {
             // New future - add it, but keep only near-month (earliest expiry)
             if (family.getFutures().isEmpty()) {
                 family.getFutures().add(candle);
+                futureIndexMap.put(candleScripCode, 0);
             } else {
                 // Replace if this is nearer month, otherwise skip
                 InstrumentCandle nearMonth = family.getFutures().get(0);
                 if (nearMonth.getExpiry() == null || 
                     (candle.getExpiry() != null && candle.getExpiry().compareTo(nearMonth.getExpiry()) < 0)) {
                     family.getFutures().set(0, candle);
+                    futureIndexMap.put(candleScripCode, 0);
                 }
             }
         }
+    }
+    
+    /**
+     * Get or create future index map for O(1) lookups
+     * OPTIMIZATION: Avoids O(n) linear search in family aggregation
+     */
+    private Map<String, Integer> getOrCreateFutureIndexMap(FamilyEnrichedData family) {
+        Map<String, Integer> indexMap = new java.util.HashMap<>();
+        if (family.getFutures() != null) {
+            for (int i = 0; i < family.getFutures().size(); i++) {
+                InstrumentCandle future = family.getFutures().get(i);
+                if (future.getScripCode() != null) {
+                    indexMap.put(future.getScripCode(), i);
+                }
+            }
+        }
+        return indexMap;
     }
     
     /**
@@ -391,18 +408,11 @@ public class FamilyAggregationService {
             return; // Invalid option, skip
         }
         
-        // Check if this option already exists
-        int existingIdx = -1;
-        for (int i = 0; i < family.getOptions().size(); i++) {
-            InstrumentCandle existing = family.getOptions().get(i);
-            String existingKey = getOptionKey(existing);
-            if (optionKey.equals(existingKey)) {
-                existingIdx = i;
-                break;
-            }
-        }
+        // OPTIMIZATION: Use HashMap for O(1) lookup instead of O(n) linear search
+        Map<String, Integer> optionIndexMap = getOrCreateOptionIndexMap(family);
+        Integer existingIdx = optionIndexMap.get(optionKey);
         
-        if (existingIdx >= 0) {
+        if (existingIdx != null) {
             // Option already exists - update if new one has more volume (more recent/complete data)
             InstrumentCandle existing = family.getOptions().get(existingIdx);
             if (candle.getVolume() != null && 
@@ -413,10 +423,29 @@ public class FamilyAggregationService {
             // New option - add if we have space, or replace worst one
             if (family.getOptions().size() < 4) {
                 family.getOptions().add(candle);
+                optionIndexMap.put(optionKey, family.getOptions().size() - 1);
             } else {
                 replaceOptionIfBetter(family, candle);
             }
         }
+    }
+    
+    /**
+     * Get or create option index map for O(1) lookups
+     * OPTIMIZATION: Avoids O(n) linear search in family aggregation
+     */
+    private Map<String, Integer> getOrCreateOptionIndexMap(FamilyEnrichedData family) {
+        Map<String, Integer> indexMap = new java.util.HashMap<>();
+        if (family.getOptions() != null) {
+            for (int i = 0; i < family.getOptions().size(); i++) {
+                InstrumentCandle option = family.getOptions().get(i);
+                String optionKey = getOptionKey(option);
+                if (optionKey != null) {
+                    indexMap.put(optionKey, i);
+                }
+            }
+        }
+        return indexMap;
     }
     
     /**
