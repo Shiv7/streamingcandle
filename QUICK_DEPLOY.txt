@@ -19,11 +19,14 @@ pkill -f demo.jar
 # 2. Clean state stores
 ./scripts/cleanup-state-stores.sh
 
-# 3. Create ALL topics (IMPORTANT: Provide Kafka bin path!)
+# 3. Delete wrong changelog topics (if they exist)
 chmod +x scripts/*.sh
+bash scripts/delete-wrong-topics.sh 13.203.60.173:9094 /opt/kafka/bin
+
+# 4. Create ALL data topics (candles + family)
 bash scripts/create-changelog-topics.sh 13.203.60.173:9094 /opt/kafka/bin
 
-# 4. Start application
+# 5. Start application
 export SPRING_PROFILES_ACTIVE=production
 nohup java -jar demo.jar > logs/app.log 2>&1 &
 echo $! > app.pid

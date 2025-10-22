@@ -7,6 +7,8 @@ import com.kotsin.consumer.model.OpenInterest;
 import com.kotsin.consumer.model.OrderBookSnapshot;
 import com.kotsin.consumer.model.TickData;
 import com.kotsin.consumer.processor.InstrumentState;
+import com.kotsin.consumer.processor.Timeframe;
+import com.kotsin.consumer.processor.service.StreamMetrics;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.apache.kafka.streams.StreamsBuilder;
@@ -34,6 +36,7 @@ import java.util.Properties;
 public class TopologyConfiguration {
 
     private final KafkaConfig kafkaConfig;
+    private final StreamMetrics metrics;
     
     @Value("${spring.kafka.streams.application-id:unified-market-processor1}")
     private String appIdPrefix;
@@ -46,6 +49,27 @@ public class TopologyConfiguration {
     
     @Value("${unified.input.topic.orderbook:Orderbook}")
     private String orderbookTopic;
+
+    @Value("${stream.outputs.candles.enabled:true}")
+    private boolean candlesOutputEnabled;
+
+    @Value("${stream.outputs.candles.1m:candle-complete-1m}")
+    private String candle1mTopic;
+
+    @Value("${stream.outputs.candles.2m:candle-complete-2m}")
+    private String candle2mTopic;
+
+    @Value("${stream.outputs.candles.3m:candle-complete-3m}")
+    private String candle3mTopic;
+
+    @Value("${stream.outputs.candles.5m:candle-complete-5m}")
+    private String candle5mTopic;
+
+    @Value("${stream.outputs.candles.15m:candle-complete-15m}")
+    private String candle15mTopic;
+
+    @Value("${stream.outputs.candles.30m:candle-complete-30m}")
+    private String candle30mTopic;
 
     /**
      * Create per-instrument candle generation topology
@@ -122,7 +146,11 @@ public class TopologyConfiguration {
         KStream<String, InstrumentState> stateStream = aggregated
             .suppress(Suppressed.untilWindowCloses(Suppressed.BufferConfig.unbounded()))
             .toStream()
-            .peek((windowedKey, state) -> state.forceCompleteWindows(windowedKey.window().end()))
+            .peek((windowedKey, state) -> {
+                long windowEnd = windowedKey.window().end();
+                state.forceCompleteWindows(windowEnd);
+                log.info("🎉 Window closed: scrip={} windowEnd={}", state.getScripCode(), windowEnd);
+            })
             .selectKey((windowedKey, state) -> windowedKey.key());
 
         // Enrich with orderbook data
@@ -137,7 +165,59 @@ public class TopologyConfiguration {
                 }
             );
 
+        // 🚀 CRITICAL FIX: Extract candles IMMEDIATELY before state gets modified
+        // This prevents the race condition where new ticks reset accumulators
+        if (candlesOutputEnabled) {
+            log.info("📤 Setting up immediate candle extraction to prevent race condition");
+            
+            // Extract and emit candles for each timeframe RIGHT NOW
+            for (Timeframe tf : Timeframe.values()) {
+                final String tfLabel = tf.getLabel();
+                String topic = getCandleTopicForTimeframe(tfLabel);
+                
+                if (topic != null) {
+                    log.info("📤 Setting up candle emission for {} → {}", tfLabel, topic);
+                    
+                    enrichedState
+                        .mapValues(state -> {
+                            // Extract candle IMMEDIATELY while accumulator is still complete
+                            InstrumentCandle candle = state.extractFinalizedCandle(tf);
+                            if (candle != null) {
+                                log.info("📤 Extracted candle: tf={} scrip={} vol={} complete={}", 
+                                    tfLabel, candle.getScripCode(), candle.getVolume(), candle.getIsComplete());
+                            } else {
+                                log.warn("❌ Failed to extract candle: tf={} scrip={} hasComplete={}", 
+                                    tfLabel, state.getScripCode(), state.hasAnyCompleteWindow());
+                            }
+                            return candle;
+                        })
+                        .filter((k, candle) -> candle != null && candle.isValid())
+                        .peek((k, candle) -> {
+                            log.info("📤 EMITTING: tf={} scrip={} vol={} → {}", 
+                                tfLabel, candle.getScripCode(), candle.getVolume(), topic);
+                            metrics.incCandleEmit(tfLabel);
+                        })
+                        .to(topic, Produced.with(Serdes.String(), InstrumentCandle.serde()));
+                }
+            }
+        }
+
         return builder;
+    }
+
+    /**
+     * Get candle topic for timeframe
+     */
+    private String getCandleTopicForTimeframe(String timeframe) {
+        switch (timeframe) {
+            case "1m": return candle1mTopic;
+            case "2m": return candle2mTopic;
+            case "3m": return candle3mTopic;
+            case "5m": return candle5mTopic;
+            case "15m": return candle15mTopic;
+            case "30m": return candle30mTopic;
+            default: return null;
+        }
     }
 
     /**

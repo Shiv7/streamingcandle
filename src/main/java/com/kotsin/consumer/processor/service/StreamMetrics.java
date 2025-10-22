@@ -38,6 +38,14 @@ public class StreamMetrics {
     }
 
     /**
+     * Record candle emission (alias for recordCandle)
+     */
+    public void incCandleEmit(String timeframe) {
+        processedCandles.incrementAndGet();
+        log.debug("📤 Candle emitted: timeframe={}, total={}", timeframe, processedCandles.get());
+    }
+
+    /**
      * Record processed family
      */
     public void recordFamily() {
