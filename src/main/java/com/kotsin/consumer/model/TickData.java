@@ -87,6 +87,9 @@ public class TickData {
     @JsonProperty("DeltaQty")        // internal field used inside streams topology
     private Integer deltaVolume;     // null until we compute the delta
     
+    @JsonProperty("ResetFlag")       // internal flag to indicate cumulative volume reset
+    private Boolean resetFlag;       // true when volume reset detected (day rollover or feed restart)
+    
     // Additional fields for unified processing
     private Long openInterest;
     private Long oiChange;

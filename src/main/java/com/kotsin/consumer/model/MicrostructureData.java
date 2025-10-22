@@ -21,6 +21,8 @@ public class MicrostructureData {
     private Double kyleLambda;             // Kyle's Lambda
     private Double effectiveSpread;        // Effective Spread
     private Double microprice;             // Microprice
+    private Double midPrice;               // Mid-price (bid+ask)/2
+    private Double bidAskSpread;           // Bid-Ask spread
     private Boolean isComplete;
     private Long windowStart;
     private Long windowEnd;

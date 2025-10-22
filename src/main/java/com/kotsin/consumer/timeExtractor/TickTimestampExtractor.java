@@ -48,15 +48,45 @@ public class TickTimestampExtractor implements TimestampExtractor {
                     return record.timestamp();
                 }
 
-                // CRITICAL: Validate timestamp is reasonable
-                long now = System.currentTimeMillis();
-                if (ts > now + 60000L) { // More than 1 min in future
-                    LOGGER.error("Timestamp {} is in the future for token {}. Using record timestamp.", ts, tick.getToken());
-                    return record.timestamp();
+                // CRITICAL: Validate using business logic (trading hours), NOT wall-clock time
+                // This allows replay of historical data without "too old" rejections
+                
+                // Validate timestamp is within reasonable range (not too far from record timestamp)
+                // Use record timestamp as reference (works for both live and replay)
+                long recordTs = record.timestamp();
+                if (recordTs > 0) {
+                    long deviation = Math.abs(ts - recordTs);
+                    // Allow 7 days deviation (handles clock skew, but catches corrupt data)
+                    if (deviation > 7L * 24 * 3600 * 1000) {
+                        LOGGER.warn("Timestamp {} deviates {} ms from record timestamp {} for token {}. Using record timestamp.", 
+                            ts, deviation, recordTs, tick.getToken());
+                        return recordTs;
+                    }
                 }
-                if (ts < now - 365L * 24 * 3600 * 1000) { // More than 1 year old
-                    LOGGER.warn("Timestamp {} is more than 1 year old for token {}. Using record timestamp.", ts, tick.getToken());
-                    return record.timestamp();
+                
+                // Additional validation: Check if timestamp is within trading hours
+                // This catches obviously wrong timestamps (e.g., midnight, weekends)
+                try {
+                    ZonedDateTime zdt = ZonedDateTime.ofInstant(
+                        java.time.Instant.ofEpochMilli(ts), 
+                        ZoneId.of("Asia/Kolkata")
+                    );
+                    int hour = zdt.getHour();
+                    int dayOfWeek = zdt.getDayOfWeek().getValue();
+                    
+                    // Weekend check
+                    if (dayOfWeek == 6 || dayOfWeek == 7) {
+                        LOGGER.debug("Timestamp {} is on weekend for token {}. Using record timestamp.", ts, tick.getToken());
+                        return recordTs > 0 ? recordTs : ts; // Use record if available
+                    }
+                    
+                    // Trading hours check (9 AM to 4 PM IST with buffer)
+                    if (hour < 8 || hour > 17) {
+                        LOGGER.debug("Timestamp {} is outside trading hours for token {}. Using record timestamp.", ts, tick.getToken());
+                        return recordTs > 0 ? recordTs : ts; // Use record if available
+                    }
+                } catch (Exception e) {
+                    LOGGER.warn("Failed to validate timestamp {} for token {}: {}", ts, tick.getToken(), e.getMessage());
                 }
 
                 return ts;

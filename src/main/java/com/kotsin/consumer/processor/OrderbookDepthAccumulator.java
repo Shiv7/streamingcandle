@@ -26,9 +26,10 @@ import java.util.List;
 public class OrderbookDepthAccumulator {
 
     // Composed services (marked transient for Kafka Streams serialization)
-    // IcebergDetectionService is serialized to preserve history across restarts
-    // SpoofingDetectionService and OrderbookDepthCalculator are stateless, lazily initialized
-    private IcebergDetectionService icebergDetectionService;
+    // CRITICAL: All services must be @JsonIgnore to avoid serialization issues
+    // Services are stateless or maintain serializable state separately
+    @JsonIgnore
+    private transient IcebergDetectionService icebergDetectionService;
     
     @JsonIgnore
     private transient SpoofingDetectionService spoofingDetectionService;

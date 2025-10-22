@@ -59,18 +59,11 @@ public class FamilyAggregationService {
                 family.setFamilyName(candle.getCompanyName());
             }
         } else if ("FUTURE".equals(type)) {
-            InstrumentCandle existing = family.getFutures() != null && !family.getFutures().isEmpty() ? family.getFutures().get(0) : null;
-            if (existing == null) {
-                family.getFutures().add(candle);
-            } else if (existing.getExpiry() == null || (candle.getExpiry() != null && candle.getExpiry().compareTo(existing.getExpiry()) < 0)) {
-                family.getFutures().set(0, candle);
-            }
+            // CRITICAL: Deduplicate futures by scripCode to prevent double-counting
+            addOrUpdateFuture(family, candle);
         } else if ("OPTION".equals(type)) {
-            if (family.getOptions().size() < 4) {
-                family.getOptions().add(candle);
-            } else {
-                replaceOptionIfBetter(family, candle);
-            }
+            // CRITICAL: Deduplicate options by unique key (strike + type)
+            addOrUpdateOption(family, candle);
         }
 
         // Recompute aggregated family-level analytics
@@ -338,6 +331,103 @@ public class FamilyAggregationService {
             }
         }
         return best;
+    }
+
+    /**
+     * Add or update future in family (with deduplication by scripCode)
+     * CRITICAL FIX: Prevents duplicate futures from different timeframes
+     */
+    private void addOrUpdateFuture(FamilyEnrichedData family, InstrumentCandle candle) {
+        if (family.getFutures() == null) {
+            family.setFutures(new ArrayList<>());
+        }
+        
+        // Check if this future already exists (by scripCode)
+        String candleScripCode = candle.getScripCode();
+        int existingIdx = -1;
+        
+        for (int i = 0; i < family.getFutures().size(); i++) {
+            InstrumentCandle existing = family.getFutures().get(i);
+            if (candleScripCode != null && candleScripCode.equals(existing.getScripCode())) {
+                existingIdx = i;
+                break;
+            }
+        }
+        
+        if (existingIdx >= 0) {
+            // Future already exists - update if new one has more volume (more recent/complete data)
+            InstrumentCandle existing = family.getFutures().get(existingIdx);
+            if (candle.getVolume() != null && 
+                (existing.getVolume() == null || candle.getVolume() > existing.getVolume())) {
+                family.getFutures().set(existingIdx, candle);
+            }
+        } else {
+            // New future - add it, but keep only near-month (earliest expiry)
+            if (family.getFutures().isEmpty()) {
+                family.getFutures().add(candle);
+            } else {
+                // Replace if this is nearer month, otherwise skip
+                InstrumentCandle nearMonth = family.getFutures().get(0);
+                if (nearMonth.getExpiry() == null || 
+                    (candle.getExpiry() != null && candle.getExpiry().compareTo(nearMonth.getExpiry()) < 0)) {
+                    family.getFutures().set(0, candle);
+                }
+            }
+        }
+    }
+    
+    /**
+     * Add or update option in family (with deduplication by strike+type)
+     * CRITICAL FIX: Prevents duplicate options from different timeframes
+     */
+    private void addOrUpdateOption(FamilyEnrichedData family, InstrumentCandle candle) {
+        if (family.getOptions() == null) {
+            family.setOptions(new ArrayList<>());
+        }
+        
+        // Generate unique key for this option (strike + type)
+        String optionKey = getOptionKey(candle);
+        if (optionKey == null) {
+            return; // Invalid option, skip
+        }
+        
+        // Check if this option already exists
+        int existingIdx = -1;
+        for (int i = 0; i < family.getOptions().size(); i++) {
+            InstrumentCandle existing = family.getOptions().get(i);
+            String existingKey = getOptionKey(existing);
+            if (optionKey.equals(existingKey)) {
+                existingIdx = i;
+                break;
+            }
+        }
+        
+        if (existingIdx >= 0) {
+            // Option already exists - update if new one has more volume (more recent/complete data)
+            InstrumentCandle existing = family.getOptions().get(existingIdx);
+            if (candle.getVolume() != null && 
+                (existing.getVolume() == null || candle.getVolume() > existing.getVolume())) {
+                family.getOptions().set(existingIdx, candle);
+            }
+        } else {
+            // New option - add if we have space, or replace worst one
+            if (family.getOptions().size() < 4) {
+                family.getOptions().add(candle);
+            } else {
+                replaceOptionIfBetter(family, candle);
+            }
+        }
+    }
+    
+    /**
+     * Generate unique key for option (strike + type)
+     */
+    private String getOptionKey(InstrumentCandle option) {
+        if (option.getStrikePrice() == null || option.getOptionType() == null) {
+            // Fallback to scripCode if strike/type not available
+            return option.getScripCode();
+        }
+        return String.format("%.2f_%s", option.getStrikePrice(), option.getOptionType());
     }
 
     /**

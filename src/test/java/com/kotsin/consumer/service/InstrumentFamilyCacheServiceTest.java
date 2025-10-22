@@ -11,10 +11,19 @@ import static org.junit.jupiter.api.Assertions.*;
 
 /**
  * Test for InstrumentFamilyCacheService
+ * 
+ * Integration test that requires:
+ * 1. Remote Kafka broker at 13.203.60.173:9094
+ * 2. MongoDB connection
+ * 
+ * To run this test:
+ * 1. Ensure MongoDB is running at localhost:27017
+ * 2. Ensure remote Kafka broker is accessible
+ * 3. Run with: mvn test -Dtest=InstrumentFamilyCacheServiceTest
  */
 @SpringBootTest
 @ActiveProfiles("test")
-@Disabled("Disabled to avoid Spring context boot in CI; covered by integration tests elsewhere")
+@Disabled("Integration test - requires MongoDB and remote Kafka. Run manually when needed.")
 class InstrumentFamilyCacheServiceTest {
     
     @Autowired
