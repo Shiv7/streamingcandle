@@ -90,4 +90,9 @@ public class InstrumentState {
     public void forceCompleteWindows(long kafkaWindowEnd) {
         stateManager.forceCompleteWindows(kafkaWindowEnd);
     }
+
+    // Metadata setters for derivative enrichment
+    public void setExpiry(String expiry) { stateManager.setExpiry(expiry); }
+    public void setStrikePrice(Double strikePrice) { stateManager.setStrikePrice(strikePrice); }
+    public void setOptionType(String optionType) { stateManager.setOptionType(optionType); }
 }

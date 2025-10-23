@@ -16,6 +16,8 @@ import java.util.List;
 import com.kotsin.consumer.metrics.StreamMetrics;
 
 import com.kotsin.consumer.service.InstrumentKeyResolver;
+import com.kotsin.consumer.service.MongoInstrumentFamilyService;
+import com.kotsin.consumer.model.InstrumentInfo;
 import com.kotsin.consumer.service.TradingHoursValidationService;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
@@ -56,6 +58,7 @@ public class TopologyConfiguration {
     private final StreamMetrics metrics;
     private final InstrumentKeyResolver keyResolver;  // ✅ ADDED for metadata
     private final TradingHoursValidationService tradingHoursService;  // ✅ ADDED for filtering
+    private final MongoInstrumentFamilyService familyService; // ✅ Use cached master for metadata
 
     @Value("${spring.kafka.streams.application-id:unified-market-processor1}")
     private String appIdPrefix;
@@ -184,6 +187,20 @@ public class TopologyConfiguration {
                             String familyKey = keyResolver.getFamilyKey(tick);
                             state.setInstrumentType(instrumentType);
                             state.setUnderlyingEquityScripCode(familyKey);
+
+                            // Enrich derivative metadata from in-memory instrument master
+                            InstrumentInfo info = familyService.getInstrumentInfoByScripCode(tick.getScripCode());
+                            if (info != null) {
+                                // Prefer master data when available
+                                state.setExpiry(info.getExpiry());
+                                state.setStrikePrice(info.getStrikeRate());
+                                if (info.isOption()) {
+                                    state.setOptionType(info.isCallOption() ? "CE" : "PE");
+                                    state.setInstrumentType("OPTION");
+                                } else if (info.isFuture()) {
+                                    state.setInstrumentType("FUTURE");
+                                }
+                            }
 
                             log.debug("🔧 Metadata set: scrip={}, type={}, family={}",
                                 scripCode, instrumentType, familyKey);
@@ -349,7 +366,10 @@ public class TopologyConfiguration {
         // Re-key by scripCode
         KStream<String, InstrumentCandle> rekeyedByToken = candles
             .selectKey((k, c) -> c != null ? c.getScripCode() : k)
-            .repartition(Repartitioned.with(Serdes.String(), InstrumentCandle.serde()));
+            .repartition(Repartitioned
+                .with(Serdes.String(), InstrumentCandle.serde())
+                .withNumberOfPartitions(3)
+            );
 
         // Build OI enrichment table
         KTable<String, OpenInterest> oiTable = buildOiTable(builder);
@@ -369,7 +389,10 @@ public class TopologyConfiguration {
 
                 return familyKey;
             })
-            .repartition(Repartitioned.with(Serdes.String(), InstrumentCandle.serde()));
+            .repartition(Repartitioned
+                .with(Serdes.String(), InstrumentCandle.serde())
+                .withNumberOfPartitions(3)
+            );
 
         // ✅ P2-2 FIX: Configurable grace period for family aggregation
         // Aligns with instrument stream grace period configuration

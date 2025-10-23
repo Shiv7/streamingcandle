@@ -332,6 +332,52 @@ public class MongoInstrumentFamilyService {
     public Map<String, InstrumentFamily> getAllFamilies() {
         return new HashMap<>(localCache);
     }
+
+    /**
+     * Fast lookup for instrument details by scripCode using the in-memory cache only.
+     * Returns the matching InstrumentInfo (equity/future/option) if present.
+     * No Mongo queries are performed here.
+     */
+    public InstrumentInfo getInstrumentInfoByScripCode(String scripCode) {
+        if (scripCode == null || scripCode.isBlank()) {
+            return null;
+        }
+
+        // If the scrip maps to an equity family key, search within that family
+        String familyKey = scripToFamilyMap.get(scripCode);
+        InstrumentFamily family;
+        if (familyKey != null) {
+            family = localCache.get(familyKey);
+        } else {
+            // It might be an equity itself
+            family = localCache.get(scripCode);
+        }
+
+        if (family == null) {
+            return null;
+        }
+
+        // Equity
+        if (family.getEquity() != null && scripCode.equals(family.getEquity().getScripCode())) {
+            return family.getEquity();
+        }
+
+        // Future
+        if (family.getFuture() != null && scripCode.equals(family.getFuture().getScripCode())) {
+            return family.getFuture();
+        }
+
+        // Options
+        if (family.getOptions() != null) {
+            for (InstrumentInfo opt : family.getOptions()) {
+                if (scripCode.equals(opt.getScripCode())) {
+                    return opt;
+                }
+            }
+        }
+
+        return null;
+    }
     
     /**
      * Get cache size
