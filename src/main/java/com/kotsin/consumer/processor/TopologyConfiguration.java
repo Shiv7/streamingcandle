@@ -10,6 +10,7 @@ import com.kotsin.consumer.model.OrderbookDepthData;
 import com.kotsin.consumer.model.OrderBookSnapshot;
 import com.kotsin.consumer.model.TickData;
 import com.kotsin.consumer.monitoring.Timeframe;
+import com.kotsin.consumer.transformers.OiDeltaTransformer;
 import java.util.List;
 // FIX: use the canonical metrics class (the one that has incCandleDrop)
 import com.kotsin.consumer.metrics.StreamMetrics;
@@ -127,6 +128,17 @@ public class TopologyConfiguration {
             )
             .filter((key, tick) -> tick != null && tick.getDeltaVolume() != null);
 
+        String oiDeltaStoreName = "instrument-oi-delta-store";
+        builder.addStateStore(
+            Stores.keyValueStoreBuilder(
+                Stores.persistentKeyValueStore(oiDeltaStoreName),
+                Serdes.String(),
+                Serdes.Long()
+            )
+        );
+
+        KTable<String, OpenInterest> oiTable = buildOiTable(builder);
+
         // Read orderbook stream for enrichment
         KStream<String, OrderBookSnapshot> orderbookStream = builder.stream(
             orderbookTopic,
@@ -230,7 +242,7 @@ public class TopologyConfiguration {
                 if (topic != null) {
                     log.info("📤 Setting up candle emission for {} → {}", tfLabel, topic);
 
-                    enrichedState
+                    KStream<String, InstrumentCandle> extractedCandles = enrichedState
                         .mapValues(state -> {
                             // Extract candle IMMEDIATELY while accumulator is still complete
                             InstrumentCandle candle = state.extractFinalizedCandle(tf);
@@ -244,7 +256,9 @@ public class TopologyConfiguration {
                                     tfLabel, state.getScripCode(), state.hasAnyCompleteWindow());
                             }
                             return candle;
-                        })
+                        });
+
+                    KStream<String, InstrumentCandle> validCandles = extractedCandles
                         .filter((k, candle) -> {
                             if (candle == null) {
                                 log.debug("⚠️ Filtered null candle for key={}", k);
@@ -258,7 +272,29 @@ public class TopologyConfiguration {
                                 return false;
                             }
                             return true;
-                        })
+                        });
+
+                    KStream<String, InstrumentCandle> withOi = validCandles
+                        .leftJoin(
+                            oiTable,
+                            (candle, oi) -> {
+                                if (oi != null) {
+                                    candle.setOpenInterest(oi.getOpenInterest());
+                                    candle.setOiChange(oi.getOiChange());
+                                    candle.setOiChangePercent(oi.getOiChangePercent());
+                                } else {
+                                    candle.setOpenInterest(null);
+                                    candle.setOiChange(null);
+                                    candle.setOiChangePercent(null);
+                                }
+                                return candle;
+                            }
+                        );
+
+                    KStream<String, InstrumentCandle> withOiDelta = withOi
+                        .transformValues(() -> new OiDeltaTransformer(oiDeltaStoreName), oiDeltaStoreName);
+
+                    withOiDelta
                         .peek((k, candle) -> {
                             log.info("📤 EMITTING: tf={} scrip={} vol={} type={} family={} → {}",
                                 tfLabel, candle.getScripCode(), candle.getVolume(),
