@@ -41,7 +41,7 @@ public class KafkaConfig {
     @Value("${spring.kafka.streams.properties.processing.guarantee:at_least_once}")
     private String processingGuarantee;
 
-    @Value("${spring.kafka.streams.properties.auto.offset.reset:earliest}")
+    @Value("${spring.kafka.streams.properties.auto.offset.reset:latest}")
     private String autoOffsetReset;
 
     @Value("${spring.kafka.streams.properties.retry.backoff.ms:100}")

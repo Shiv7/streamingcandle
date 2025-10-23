@@ -101,7 +101,7 @@ public class TopologyConfiguration {
         log.info("🗃️ Building per-instrument candle topology");
 
         Properties props = kafkaConfig.getStreamProperties(appIdPrefix + "-instrument");
-        props.put("auto.offset.reset", "earliest");
+        props.put("auto.offset.reset", "latest");
         StreamsBuilder builder = new StreamsBuilder();
 
         // ✅ P0-4 FIX: Add state store for delta volume calculation (Long to prevent overflow)
@@ -337,7 +337,7 @@ public class TopologyConfiguration {
         log.info("🗃️ Building family-structured topology for {}", timeframeLabel);
 
         Properties props = kafkaConfig.getStreamProperties(appIdPrefix + "-family-" + timeframeLabel);
-        props.put("auto.offset.reset", "earliest");
+        props.put("auto.offset.reset", "latest");
         StreamsBuilder builder = new StreamsBuilder();
 
         // Read candle stream
