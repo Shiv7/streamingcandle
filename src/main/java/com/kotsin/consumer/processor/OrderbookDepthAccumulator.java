@@ -41,23 +41,24 @@ public class OrderbookDepthAccumulator {
     private OrderBookSnapshot currentOrderbook;
     private OrderBookSnapshot previousOrderbook;
     private Long lastUpdateTimestamp;
+    @JsonIgnore
     private SnapshotMetrics lastMetrics;
 
-    private final MetricAccumulator spreadAcc = new MetricAccumulator();
-    private final MetricAccumulator totalBidDepthAcc = new MetricAccumulator();
-    private final MetricAccumulator totalAskDepthAcc = new MetricAccumulator();
-    private final MetricAccumulator bidVwapAcc = new MetricAccumulator();
-    private final MetricAccumulator askVwapAcc = new MetricAccumulator();
-    private final MetricAccumulator depthPressureAcc = new MetricAccumulator();
-    private final MetricAccumulator weightedImbalanceAcc = new MetricAccumulator();
-    private final MetricAccumulator bidSlopeAcc = new MetricAccumulator();
-    private final MetricAccumulator askSlopeAcc = new MetricAccumulator();
-    private final MetricAccumulator slopeRatioAcc = new MetricAccumulator();
-    private final MetricAccumulator level1ImbAcc = new MetricAccumulator();
-    private final MetricAccumulator level2to5ImbAcc = new MetricAccumulator();
-    private final MetricAccumulator level6to10ImbAcc = new MetricAccumulator();
-    private final MetricAccumulator midPriceAcc = new MetricAccumulator();
-    private long sampleCount = 0L;
+    @JsonIgnore private final MetricAccumulator spreadAcc = new MetricAccumulator();
+    @JsonIgnore private final MetricAccumulator totalBidDepthAcc = new MetricAccumulator();
+    @JsonIgnore private final MetricAccumulator totalAskDepthAcc = new MetricAccumulator();
+    @JsonIgnore private final MetricAccumulator bidVwapAcc = new MetricAccumulator();
+    @JsonIgnore private final MetricAccumulator askVwapAcc = new MetricAccumulator();
+    @JsonIgnore private final MetricAccumulator depthPressureAcc = new MetricAccumulator();
+    @JsonIgnore private final MetricAccumulator weightedImbalanceAcc = new MetricAccumulator();
+    @JsonIgnore private final MetricAccumulator bidSlopeAcc = new MetricAccumulator();
+    @JsonIgnore private final MetricAccumulator askSlopeAcc = new MetricAccumulator();
+    @JsonIgnore private final MetricAccumulator slopeRatioAcc = new MetricAccumulator();
+    @JsonIgnore private final MetricAccumulator level1ImbAcc = new MetricAccumulator();
+    @JsonIgnore private final MetricAccumulator level2to5ImbAcc = new MetricAccumulator();
+    @JsonIgnore private final MetricAccumulator level6to10ImbAcc = new MetricAccumulator();
+    @JsonIgnore private final MetricAccumulator midPriceAcc = new MetricAccumulator();
+    @JsonIgnore private long sampleCount = 0L;
 
     /**
      * Lazy initialization for services (called after deserialization)
