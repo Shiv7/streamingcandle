@@ -30,7 +30,9 @@ import org.springframework.stereotype.Component;
 
 import java.time.Duration;
 import java.util.ArrayList;
+import java.util.Comparator;
 import java.util.Properties;
+import java.util.stream.Collectors;
 
 /**
  * Configuration service for Kafka Streams topologies
@@ -87,6 +89,10 @@ public class TopologyConfiguration {
     @Value("${stream.outputs.candles.30m:candle-complete-30m}")
     private String candle30mTopic;
 
+    // ✅ P2-2 FIX: Externalized grace period configuration
+    @Value("${unified.streams.window.grace.period.seconds:30}")
+    private int gracePeriodSeconds;
+
     /**
      * Create per-instrument candle generation topology
      */
@@ -97,13 +103,13 @@ public class TopologyConfiguration {
         props.put("auto.offset.reset", "earliest");
         StreamsBuilder builder = new StreamsBuilder();
 
-        // Add state store for delta volume calculation
+        // ✅ P0-4 FIX: Add state store for delta volume calculation (Long to prevent overflow)
         String deltaVolumeStoreName = "instrument-delta-volume-store";
         builder.addStateStore(
             Stores.keyValueStoreBuilder(
                 Stores.persistentKeyValueStore(deltaVolumeStoreName),
                 Serdes.String(),
-                Serdes.Integer()
+                Serdes.Long()  // ✅ Changed from Integer to Long to prevent overflow on high-volume instruments
             )
         );
 
@@ -136,12 +142,14 @@ public class TopologyConfiguration {
         KStream<String, TickData> instrumentKeyed = ticks
             .selectKey((k, v) -> v.getScripCode());
 
-        // Define windowing
-        // BALANCED APPROACH: 30s grace period (delays candle by max 30s)
-        // Trade-off: Captures 95%+ of late data without excessive delay
+        // ✅ P2-2 FIX: Define windowing with configurable grace period
+        // Grace period: how long to wait for late-arriving data after window closes
+        // Trade-off: Higher grace = more complete data but higher latency
+        // Configured via unified.streams.window.grace.period.seconds (default: 30s)
         // Note: suppress().untilWindowCloses() delays emission by grace period
         TimeWindows windows = TimeWindows
-            .ofSizeAndGrace(Duration.ofMinutes(1), Duration.ofSeconds(30));
+            .ofSizeAndGrace(Duration.ofMinutes(1), Duration.ofSeconds(gracePeriodSeconds));
+        log.info("⏱️ Instrument stream window: size=1m, grace={}s", gracePeriodSeconds);
 
         // ✅ FIX #1: Aggregate with metadata setting AND trading hours filter
         KTable<Windowed<String>, InstrumentState> aggregated = instrumentKeyed
@@ -327,9 +335,10 @@ public class TopologyConfiguration {
             })
             .repartition(Repartitioned.with(Serdes.String(), InstrumentCandle.serde()));
 
-        // BALANCED APPROACH: 30s grace period for family aggregation
-        // Aligns with instrument stream grace period
-        TimeWindows windows = TimeWindows.ofSizeAndGrace(windowSize, Duration.ofSeconds(30));
+        // ✅ P2-2 FIX: Configurable grace period for family aggregation
+        // Aligns with instrument stream grace period configuration
+        TimeWindows windows = TimeWindows.ofSizeAndGrace(windowSize, Duration.ofSeconds(gracePeriodSeconds));
+        log.info("⏱️ Family stream window: size={}, grace={}s", windowSize, gracePeriodSeconds);
 
         // ✅ FIX #2: ACTUALLY ASSEMBLE FAMILIES
         KTable<Windowed<String>, FamilyEnrichedData> aggregated = keyedByFamily
@@ -354,13 +363,9 @@ public class TopologyConfiguration {
                         log.info("🏗️ Initialized family: key={} name={}", familyKey, familyKey);
                     }
 
-                    // Set/update window times
-                    if (family.getWindowStartMillis() == null && candle.getWindowStartMillis() != null) {
-                        family.setWindowStartMillis(candle.getWindowStartMillis());
-                    }
-                    if (candle.getWindowEndMillis() != null) {
-                        family.setWindowEndMillis(candle.getWindowEndMillis());
-                    }
+                    // ✅ P0-3 FIX: Window times will be set from Kafka Streams window boundaries
+                    // after aggregation completes, not from first-arrival candle
+                    // This prevents race conditions from out-of-order arrivals
 
                     // Add instrument to family based on type
                     String instrType = candle.getInstrumentType();
@@ -407,6 +412,18 @@ public class TopologyConfiguration {
         KStream<String, FamilyEnrichedData> out = aggregated
             .suppress(Suppressed.untilWindowCloses(Suppressed.BufferConfig.unbounded()))
             .toStream()
+            .peek((windowedKey, family) -> {
+                // ✅ P0-3 FIX: Set window times from Kafka Streams window boundaries
+                // This prevents race conditions from out-of-order candle arrivals
+                if (family != null) {
+                    long windowStart = windowedKey.window().start();
+                    long windowEnd = windowedKey.window().end();
+                    family.setWindowStartMillis(windowStart);
+                    family.setWindowEndMillis(windowEnd);
+                    log.debug("🕒 Set family window from Kafka Streams: key={} start={} end={}", 
+                        windowedKey.key(), windowStart, windowEnd);
+                }
+            })
             .selectKey((windowedKey, family) -> windowedKey.key())
             .mapValues(family -> {
                 if (family != null) {
@@ -457,6 +474,10 @@ public class TopologyConfiguration {
         long equityVolume = 0;
         long futuresVolume = 0;
         long optionsVolume = 0;
+        double bidAskSpreadSum = 0.0;
+        int bidAskSpreadCount = 0;
+        double totalBidDepthSum = 0.0;
+        double totalAskDepthSum = 0.0;
 
         // --- OI Metrics Initialization ---
         Long totalOpenInterest = 0L;
@@ -478,6 +499,13 @@ public class TopologyConfiguration {
             equityVolume = equity.getVolume() != null ? equity.getVolume() : 0;
             spotPriceFromEquity = equity.getClose();  // Store equity price separately
             totalVolume += equityVolume;
+            OrderbookAccumulator equityOrderbook = extractOrderbookMetrics(equity);
+            if (equityOrderbook != null) {
+                bidAskSpreadSum += equityOrderbook.getSpreadSum();
+                bidAskSpreadCount += equityOrderbook.getSpreadCount();
+                totalBidDepthSum += equityOrderbook.getBidDepthSum();
+                totalAskDepthSum += equityOrderbook.getAskDepthSum();
+            }
             if (equity.getOpenInterest() != null) {
                 totalOpenInterest += equity.getOpenInterest();
             }
@@ -489,6 +517,14 @@ public class TopologyConfiguration {
                 long vol = future.getVolume() != null ? future.getVolume() : 0;
                 futuresVolume += vol;
                 totalVolume += vol;
+
+                OrderbookAccumulator futureOrderbook = extractOrderbookMetrics(future);
+                if (futureOrderbook != null) {
+                    bidAskSpreadSum += futureOrderbook.getSpreadSum();
+                    bidAskSpreadCount += futureOrderbook.getSpreadCount();
+                    totalBidDepthSum += futureOrderbook.getBidDepthSum();
+                    totalAskDepthSum += futureOrderbook.getAskDepthSum();
+                }
 
                 // --- OI Aggregation for Futures ---
                 if (future.getOpenInterest() != null) {
@@ -517,6 +553,14 @@ public class TopologyConfiguration {
                 optionsVolume += vol;
                 totalVolume += vol;
 
+                OrderbookAccumulator optionOrderbook = extractOrderbookMetrics(option);
+                if (optionOrderbook != null) {
+                    bidAskSpreadSum += optionOrderbook.getSpreadSum();
+                    bidAskSpreadCount += optionOrderbook.getSpreadCount();
+                    totalBidDepthSum += optionOrderbook.getBidDepthSum();
+                    totalAskDepthSum += optionOrderbook.getAskDepthSum();
+                }
+
                 // --- OI Aggregation for Options ---
                 if (option.getOpenInterest() != null) {
                     totalOpenInterest += option.getOpenInterest();
@@ -542,9 +586,30 @@ public class TopologyConfiguration {
             }
         }
 
-        // Calculate ratios
-        Double putCallVolumeRatio = callsVolume > 0 ? (double) putsVolume / callsVolume : null;
-        Double putCallRatio = (callsOI != null && callsOI > 0) ? (putsOI.doubleValue() / callsOI.doubleValue()) : null;
+        // ✅ P0-5 FIX: Calculate ratios with NaN/Infinity protection
+        Double putCallVolumeRatio = null;
+        if (callsVolume > 0 && putsVolume >= 0) {
+            double ratio = (double) putsVolume / callsVolume;
+            // Sanity check: ratio should be finite and reasonable (0-100 is extreme but possible)
+            if (Double.isFinite(ratio) && ratio >= 0 && ratio <= 100) {
+                putCallVolumeRatio = ratio;
+            } else {
+                log.warn("⚠️ Extreme volume P/C ratio: puts={} calls={} ratio={} familyKey={}", 
+                    putsVolume, callsVolume, ratio, family.getFamilyKey());
+            }
+        }
+        
+        Double putCallRatio = null;
+        if (callsOI != null && putsOI != null && callsOI > 0 && putsOI >= 0) {
+            double ratio = putsOI.doubleValue() / callsOI.doubleValue();
+            // Sanity check: P/C ratio typically 0.1-10, but allow up to 100 for edge cases
+            if (Double.isFinite(ratio) && ratio >= 0 && ratio <= 100) {
+                putCallRatio = ratio;
+            } else {
+                log.warn("⚠️ Extreme OI P/C ratio: putsOI={} callsOI={} ratio={} familyKey={}", 
+                    putsOI, callsOI, ratio, family.getFamilyKey());
+            }
+        }
 
         // ✅ FIX #4: Robust spot price calculation with fallback
         // Prioritize equity price, but fall back to near-month future if equity is absent
@@ -560,6 +625,15 @@ public class TopologyConfiguration {
 
         log.debug("📊 Calculated spot price: equity={} nearFuture={} final={}", 
             spotPriceFromEquity, nearMonthFuturePrice, finalSpotPrice);
+
+        Double avgBidAskSpread = bidAskSpreadCount > 0 ? bidAskSpreadSum / bidAskSpreadCount : null;
+        Long totalBidVolumeMetric = totalBidDepthSum > 0.0 ? Math.round(totalBidDepthSum) : null;
+        Long totalAskVolumeMetric = totalAskDepthSum > 0.0 ? Math.round(totalAskDepthSum) : null;
+        Double bidAskImbalance = null;
+        double depthTotal = totalBidDepthSum + totalAskDepthSum;
+        if (depthTotal > 0.0) {
+            bidAskImbalance = (totalBidDepthSum - totalAskDepthSum) / depthTotal;
+        }
 
         return FamilyAggregatedMetrics.builder()
             .totalVolume(totalVolume)
@@ -583,6 +657,10 @@ public class TopologyConfiguration {
             .activeOptionsCount(family.getOptions() != null ? family.getOptions().size() : 0)
             .nearMonthExpiry(nearMonthExpiry)
             .putCallVolumeRatio(putCallVolumeRatio)
+            .avgBidAskSpread(avgBidAskSpread)
+            .totalBidVolume(totalBidVolumeMetric)
+            .totalAskVolume(totalAskVolumeMetric)
+            .bidAskImbalance(bidAskImbalance)
             .calculatedAt(System.currentTimeMillis())
             .build();
     }
@@ -593,83 +671,275 @@ public class TopologyConfiguration {
      * ✅ FIX: Dynamic isComplete/valid flags + comprehensive field aggregation
      */
     private void calculateVolumeWeightedMetrics(FamilyEnrichedData family) {
-        double totalVolume = family.getAggregatedMetrics().getTotalVolume() != null ? family.getAggregatedMetrics().getTotalVolume() : 0.0;
-        if (totalVolume == 0) {
-            // Set empty but valid objects to avoid null pointers downstream
-            family.setMicrostructure(MicrostructureData.builder().isComplete(false).valid(false).build());
-            family.setOrderbookDepth(OrderbookDepthData.builder().isComplete(false).valid(false).build());
-            return;
-        }
-
-        // Microstructure metrics
-        double weightedOfi = 0.0;
-        double weightedVpin = 0.0;
-        double weightedDepthImbalance = 0.0;
-        double weightedEffectiveSpread = 0.0;
-        double weightedMicroprice = 0.0;
-        
-        // Order book metrics
-        double weightedSpread = 0.0;
-        double weightedTotalBidDepth = 0.0;
-        double weightedTotalAskDepth = 0.0;
-
         List<InstrumentCandle> allInstruments = new ArrayList<>();
         if (family.getEquity() != null) allInstruments.add(family.getEquity());
         if (family.getFutures() != null) allInstruments.addAll(family.getFutures());
         if (family.getOptions() != null) allInstruments.addAll(family.getOptions());
 
-        for (InstrumentCandle instrument : allInstruments) {
-            long instrumentVolume = instrument.getVolume() != null ? instrument.getVolume() : 0;
-            double weight = instrumentVolume / totalVolume;
+        if (allInstruments.isEmpty()) {
+            family.setMicrostructure(MicrostructureData.builder().isComplete(false).build());
+            family.setOrderbookDepth(OrderbookDepthData.builder().isComplete(false).build());
+            return;
+        }
 
-            // Aggregate microstructure metrics
-            if (instrument.getMicrostructure() != null) {
-                MicrostructureData micro = instrument.getMicrostructure();
-                if (micro.getOfi() != null) weightedOfi += micro.getOfi() * weight;
-                if (micro.getVpin() != null) weightedVpin += micro.getVpin() * weight;
-                if (micro.getDepthImbalance() != null) weightedDepthImbalance += micro.getDepthImbalance() * weight;
-                if (micro.getEffectiveSpread() != null) weightedEffectiveSpread += micro.getEffectiveSpread() * weight;
-                if (micro.getMicroprice() != null) weightedMicroprice += micro.getMicroprice() * weight;
+        if (allInstruments.size() == 1) {
+            InstrumentCandle only = allInstruments.get(0);
+            MicrostructureData micro = copyMicrostructure(only.getMicrostructure());
+            OrderbookDepthData depth = copyOrderbook(only.getOrderbookDepth());
+            family.setMicrostructure(micro != null ? micro : MicrostructureData.builder().isComplete(false).build());
+            family.setOrderbookDepth(depth != null ? depth : OrderbookDepthData.builder().isComplete(false).build());
+            return;
+        }
+
+        boolean anyMicrostructure = false;
+        boolean allMicroComplete = true;
+        boolean anyOrderbook = false;
+        boolean allOrderbookComplete = true;
+
+        double ofiSum = 0.0;
+        double ofiWeight = 0.0;
+        double vpinSum = 0.0;
+        double vpinWeight = 0.0;
+        double depthImbalanceSum = 0.0;
+        double depthImbalanceWeight = 0.0;
+        double kyleLambdaSum = 0.0;
+        double kyleLambdaWeight = 0.0;
+        double effectiveSpreadSum = 0.0;
+        double effectiveSpreadWeight = 0.0;
+        double micropriceSum = 0.0;
+        double micropriceWeight = 0.0;
+        double midPriceSum = 0.0;
+        double midPriceWeight = 0.0;
+        double bidAskSpreadSum = 0.0;
+        double bidAskSpreadWeight = 0.0;
+        Long windowStart = null;
+        Long windowEnd = null;
+
+        double spreadSum = 0.0;
+        double spreadWeight = 0.0;
+        double totalBidDepthSum = 0.0;
+        double totalBidDepthWeight = 0.0;
+        double totalAskDepthSum = 0.0;
+        double totalAskDepthWeight = 0.0;
+        double weightedDepthImbalanceSum = 0.0;
+        double weightedDepthImbalanceWeight = 0.0;
+        double bidVwapSum = 0.0;
+        double bidVwapWeight = 0.0;
+        double askVwapSum = 0.0;
+        double askVwapWeight = 0.0;
+        double depthPressureSum = 0.0;
+        double depthPressureWeight = 0.0;
+        double bidSlopeSum = 0.0;
+        double bidSlopeWeight = 0.0;
+        double askSlopeSum = 0.0;
+        double askSlopeWeight = 0.0;
+        double slopeRatioSum = 0.0;
+        double slopeRatioWeight = 0.0;
+        int spoofingCountSum = 0;
+        boolean spoofingCountPresent = false;
+        boolean activeSpoofingBid = false;
+        boolean activeSpoofingAsk = false;
+        boolean icebergDetectedBid = false;
+        boolean icebergDetectedAsk = false;
+        double icebergProbBidSum = 0.0;
+        double icebergProbBidWeight = 0.0;
+        double icebergProbAskSum = 0.0;
+        double icebergProbAskWeight = 0.0;
+        Long aggregatedTimestamp = null;
+        InstrumentCandle referenceDepthInstrument = null;
+        double referenceDepthWeight = -1.0;
+
+        for (InstrumentCandle instrument : allInstruments) {
+            double weight = instrument.getVolume() != null && instrument.getVolume() > 0
+                ? instrument.getVolume()
+                : 1.0;
+
+            MicrostructureData micro = instrument.getMicrostructure();
+            if (micro != null) {
+                anyMicrostructure = true;
+                if (!Boolean.TRUE.equals(micro.getIsComplete())) {
+                    allMicroComplete = false;
+                }
+                if (micro.getOfi() != null) {
+                    ofiSum += micro.getOfi() * weight;
+                    ofiWeight += weight;
+                }
+                if (micro.getVpin() != null) {
+                    vpinSum += micro.getVpin() * weight;
+                    vpinWeight += weight;
+                }
+                if (micro.getDepthImbalance() != null) {
+                    depthImbalanceSum += micro.getDepthImbalance() * weight;
+                    depthImbalanceWeight += weight;
+                }
+                if (micro.getKyleLambda() != null) {
+                    kyleLambdaSum += micro.getKyleLambda() * weight;
+                    kyleLambdaWeight += weight;
+                }
+                if (micro.getEffectiveSpread() != null) {
+                    effectiveSpreadSum += micro.getEffectiveSpread() * weight;
+                    effectiveSpreadWeight += weight;
+                }
+                if (micro.getMicroprice() != null) {
+                    micropriceSum += micro.getMicroprice() * weight;
+                    micropriceWeight += weight;
+                }
+                if (micro.getMidPrice() != null) {
+                    midPriceSum += micro.getMidPrice() * weight;
+                    midPriceWeight += weight;
+                }
+                if (micro.getBidAskSpread() != null) {
+                    bidAskSpreadSum += micro.getBidAskSpread() * weight;
+                    bidAskSpreadWeight += weight;
+                }
+                if (micro.getWindowStart() != null) {
+                    windowStart = windowStart == null ? micro.getWindowStart() : Math.min(windowStart, micro.getWindowStart());
+                }
+                if (micro.getWindowEnd() != null) {
+                    windowEnd = windowEnd == null ? micro.getWindowEnd() : Math.max(windowEnd, micro.getWindowEnd());
+                }
             }
-            
-            // Aggregate order book metrics
-            if (instrument.getOrderbookDepth() != null) {
-                OrderbookDepthData depth = instrument.getOrderbookDepth();
-                if (depth.getSpread() != null) weightedSpread += depth.getSpread() * weight;
-                if (depth.getTotalBidDepth() != null) weightedTotalBidDepth += depth.getTotalBidDepth() * weight;
-                if (depth.getTotalAskDepth() != null) weightedTotalAskDepth += depth.getTotalAskDepth() * weight;
+
+            OrderbookDepthData depth = instrument.getOrderbookDepth();
+            if (depth != null) {
+                anyOrderbook = true;
+                if (!Boolean.TRUE.equals(depth.getIsComplete())) {
+                    allOrderbookComplete = false;
+                }
+                if (depth.getSpread() != null) {
+                    spreadSum += depth.getSpread() * weight;
+                    spreadWeight += weight;
+                }
+                if (depth.getTotalBidDepth() != null) {
+                    totalBidDepthSum += depth.getTotalBidDepth() * weight;
+                    totalBidDepthWeight += weight;
+                }
+                if (depth.getTotalAskDepth() != null) {
+                    totalAskDepthSum += depth.getTotalAskDepth() * weight;
+                    totalAskDepthWeight += weight;
+                }
+                if (depth.getWeightedDepthImbalance() != null) {
+                    weightedDepthImbalanceSum += depth.getWeightedDepthImbalance() * weight;
+                    weightedDepthImbalanceWeight += weight;
+                }
+                if (depth.getBidVWAP() != null) {
+                    bidVwapSum += depth.getBidVWAP() * weight;
+                    bidVwapWeight += weight;
+                }
+                if (depth.getAskVWAP() != null) {
+                    askVwapSum += depth.getAskVWAP() * weight;
+                    askVwapWeight += weight;
+                }
+                if (depth.getDepthPressure() != null) {
+                    depthPressureSum += depth.getDepthPressure() * weight;
+                    depthPressureWeight += weight;
+                }
+                if (depth.getBidSlope() != null) {
+                    bidSlopeSum += depth.getBidSlope() * weight;
+                    bidSlopeWeight += weight;
+                }
+                if (depth.getAskSlope() != null) {
+                    askSlopeSum += depth.getAskSlope() * weight;
+                    askSlopeWeight += weight;
+                }
+                if (depth.getSlopeRatio() != null) {
+                    slopeRatioSum += depth.getSlopeRatio() * weight;
+                    slopeRatioWeight += weight;
+                }
+                if (depth.getTimestamp() != null) {
+                    aggregatedTimestamp = aggregatedTimestamp == null ? depth.getTimestamp() : Math.max(aggregatedTimestamp, depth.getTimestamp());
+                }
+                if (depth.getSpoofingCountLast1Min() != null) {
+                    spoofingCountSum += depth.getSpoofingCountLast1Min();
+                    spoofingCountPresent = true;
+                }
+                if (Boolean.TRUE.equals(depth.getActiveSpoofingBid())) {
+                    activeSpoofingBid = true;
+                }
+                if (Boolean.TRUE.equals(depth.getActiveSpoofingAsk())) {
+                    activeSpoofingAsk = true;
+                }
+                if (Boolean.TRUE.equals(depth.getIcebergDetectedBid())) {
+                    icebergDetectedBid = true;
+                }
+                if (Boolean.TRUE.equals(depth.getIcebergDetectedAsk())) {
+                    icebergDetectedAsk = true;
+                }
+                if (depth.getIcebergProbabilityBid() != null) {
+                    icebergProbBidSum += depth.getIcebergProbabilityBid() * weight;
+                    icebergProbBidWeight += weight;
+                }
+                if (depth.getIcebergProbabilityAsk() != null) {
+                    icebergProbAskSum += depth.getIcebergProbabilityAsk() * weight;
+                    icebergProbAskWeight += weight;
+                }
+                if (weight > referenceDepthWeight) {
+                    referenceDepthWeight = weight;
+                    referenceDepthInstrument = instrument;
+                }
             }
         }
 
-        // ✅ FIX #1: Dynamic completeness flags based on actual data
-        boolean isMicrostructureComplete = weightedOfi != 0.0 && weightedVpin != 0.0;
         MicrostructureData aggregatedMicrostructure = MicrostructureData.builder()
-            .ofi(weightedOfi != 0.0 ? weightedOfi : null)
-            .vpin(weightedVpin != 0.0 ? weightedVpin : null)
-            .depthImbalance(weightedDepthImbalance != 0.0 ? weightedDepthImbalance : null)
-            .effectiveSpread(weightedEffectiveSpread != 0.0 ? weightedEffectiveSpread : null)
-            .microprice(weightedMicroprice != 0.0 ? weightedMicroprice : null)
-            .isComplete(isMicrostructureComplete)
-            .valid(isMicrostructureComplete)
-            .displayString(String.format("Micro[OFI:%.2f,VPIN:%.2f,Depth:%.2f] %s",
-                weightedOfi, weightedVpin, weightedDepthImbalance, 
-                isMicrostructureComplete ? "COMPLETE" : "PARTIAL"))
+            .ofi(ofiWeight > 0.0 ? ofiSum / ofiWeight : null)
+            .vpin(vpinWeight > 0.0 ? vpinSum / vpinWeight : null)
+            .depthImbalance(depthImbalanceWeight > 0.0 ? depthImbalanceSum / depthImbalanceWeight : null)
+            .kyleLambda(kyleLambdaWeight > 0.0 ? kyleLambdaSum / kyleLambdaWeight : null)
+            .effectiveSpread(effectiveSpreadWeight > 0.0 ? effectiveSpreadSum / effectiveSpreadWeight : null)
+            .microprice(micropriceWeight > 0.0 ? micropriceSum / micropriceWeight : null)
+            .midPrice(midPriceWeight > 0.0 ? midPriceSum / midPriceWeight : null)
+            .bidAskSpread(bidAskSpreadWeight > 0.0 ? bidAskSpreadSum / bidAskSpreadWeight : null)
+            .isComplete(anyMicrostructure && allMicroComplete)
+            .windowStart(windowStart)
+            .windowEnd(windowEnd)
             .build();
-        family.setMicrostructure(aggregatedMicrostructure);
+        family.setMicrostructure(anyMicrostructure
+            ? aggregatedMicrostructure
+            : MicrostructureData.builder().isComplete(false).build());
 
-        // ✅ FIX #1: Dynamic completeness flags for order book
-        boolean isOrderbookComplete = weightedSpread > 0.0;
+        OrderbookDepthData referenceDepth = referenceDepthInstrument != null ? referenceDepthInstrument.getOrderbookDepth() : null;
+
         OrderbookDepthData aggregatedOrderbook = OrderbookDepthData.builder()
-            .spread(weightedSpread > 0.0 ? weightedSpread : null)
-            .totalBidDepth(weightedTotalBidDepth > 0.0 ? weightedTotalBidDepth : null)
-            .totalAskDepth(weightedTotalAskDepth > 0.0 ? weightedTotalAskDepth : null)
-            .isComplete(isOrderbookComplete)
-            .valid(isOrderbookComplete)
-            .displayString(String.format("Depth[Spread:%.2f,Bid:%.2f,Ask:%.2f] %s",
-                weightedSpread, weightedTotalBidDepth, weightedTotalAskDepth,
-                isOrderbookComplete ? "COMPLETE" : "INCOMPLETE"))
+            .bidProfile(copyDepthLevels(referenceDepth != null ? referenceDepth.getBidProfile() : null))
+            .askProfile(copyDepthLevels(referenceDepth != null ? referenceDepth.getAskProfile() : null))
+            .weightedDepthImbalance(weightedDepthImbalanceWeight > 0.0 ? weightedDepthImbalanceSum / weightedDepthImbalanceWeight : null)
+            .level1Imbalance(referenceDepth != null ? referenceDepth.getLevel1Imbalance() : null)
+            .level2to5Imbalance(referenceDepth != null ? referenceDepth.getLevel2to5Imbalance() : null)
+            .level6to10Imbalance(referenceDepth != null ? referenceDepth.getLevel6to10Imbalance() : null)
+            .cumulativeBidDepth(copyDoubleList(referenceDepth != null ? referenceDepth.getCumulativeBidDepth() : null))
+            .cumulativeAskDepth(copyDoubleList(referenceDepth != null ? referenceDepth.getCumulativeAskDepth() : null))
+            .totalBidDepth(totalBidDepthWeight > 0.0 ? totalBidDepthSum / totalBidDepthWeight : (referenceDepth != null ? referenceDepth.getTotalBidDepth() : null))
+            .totalAskDepth(totalAskDepthWeight > 0.0 ? totalAskDepthSum / totalAskDepthWeight : (referenceDepth != null ? referenceDepth.getTotalAskDepth() : null))
+            .bidVWAP(bidVwapWeight > 0.0 ? bidVwapSum / bidVwapWeight : (referenceDepth != null ? referenceDepth.getBidVWAP() : null))
+            .askVWAP(askVwapWeight > 0.0 ? askVwapSum / askVwapWeight : (referenceDepth != null ? referenceDepth.getAskVWAP() : null))
+            .depthPressure(depthPressureWeight > 0.0 ? depthPressureSum / depthPressureWeight : (referenceDepth != null ? referenceDepth.getDepthPressure() : null))
+            .bidSlope(bidSlopeWeight > 0.0 ? bidSlopeSum / bidSlopeWeight : (referenceDepth != null ? referenceDepth.getBidSlope() : null))
+            .askSlope(askSlopeWeight > 0.0 ? askSlopeSum / askSlopeWeight : (referenceDepth != null ? referenceDepth.getAskSlope() : null))
+            .slopeRatio(slopeRatioWeight > 0.0 ? slopeRatioSum / slopeRatioWeight : (referenceDepth != null ? referenceDepth.getSlopeRatio() : null))
+            .icebergDetectedBid(icebergDetectedBid)
+            .icebergDetectedAsk(icebergDetectedAsk)
+            .icebergProbabilityBid(icebergProbBidWeight > 0.0 ? icebergProbBidSum / icebergProbBidWeight : (referenceDepth != null ? referenceDepth.getIcebergProbabilityBid() : null))
+            .icebergProbabilityAsk(icebergProbAskWeight > 0.0 ? icebergProbAskSum / icebergProbAskWeight : (referenceDepth != null ? referenceDepth.getIcebergProbabilityAsk() : null))
+            .spoofingEvents(copySpoofingEvents(referenceDepth != null ? referenceDepth.getSpoofingEvents() : null))
+            .spoofingCountLast1Min(spoofingCountPresent ? spoofingCountSum : null)
+            .activeSpoofingBid(activeSpoofingBid)
+            .activeSpoofingAsk(activeSpoofingAsk)
+            .timestamp(aggregatedTimestamp)
+            .midPrice(midPriceWeight > 0.0 ? midPriceSum / midPriceWeight : (referenceDepth != null ? referenceDepth.getMidPrice() : null))
+            .spread(spreadWeight > 0.0 ? spreadSum / spreadWeight : (referenceDepth != null ? referenceDepth.getSpread() : null))
+            .depthLevels(referenceDepth != null ? referenceDepth.getDepthLevels() : null)
+            .isComplete(anyOrderbook && allOrderbookComplete)
             .build();
-        family.setOrderbookDepth(aggregatedOrderbook);
+
+        family.setOrderbookDepth(anyOrderbook
+            ? aggregatedOrderbook
+            : OrderbookDepthData.builder().isComplete(false).build());
+
+        log.debug("📊 Family microstructure aggregated: complete={} valid={}",
+            aggregatedMicrostructure.getIsComplete(), aggregatedMicrostructure.isValid());
+        log.debug("📊 Family orderbook aggregated: spread={} bidDepth={} askDepth={} complete={} valid={}", 
+            aggregatedOrderbook.getSpread(), aggregatedOrderbook.getTotalBidDepth(), aggregatedOrderbook.getTotalAskDepth(),
+            aggregatedOrderbook.getIsComplete(), aggregatedOrderbook.isValid());
     }
 
     /**
@@ -679,9 +949,162 @@ public class TopologyConfiguration {
      * `FamilyImbalanceBars` and logic to aggregate from `InstrumentCandle.imbalanceBars`.
      */
     private void calculateFamilyImbalanceBars(FamilyEnrichedData family) {
-        // Explicitly set to null until implemented
-        family.setImbalanceBars(null);
-        log.warn("⚠️ Imbalance bar aggregation is not yet implemented for family: {}", family.getFamilyKey());
+        List<InstrumentCandle> instruments = new ArrayList<>();
+        if (family.getEquity() != null) instruments.add(family.getEquity());
+        if (family.getFutures() != null) instruments.addAll(family.getFutures());
+        if (family.getOptions() != null) instruments.addAll(family.getOptions());
+
+        InstrumentCandle selected = instruments.stream()
+            .filter(candle -> candle.getImbalanceBars() != null)
+            .max(Comparator.comparingLong(candle -> candle.getVolume() != null ? candle.getVolume() : 0L))
+            .orElse(null);
+
+        if (selected == null) {
+            family.setImbalanceBars(null);
+            log.debug("⚠️ No imbalance bar data available for family: {}", family.getFamilyKey());
+            return;
+        }
+
+        family.setImbalanceBars(selected.getImbalanceBars());
+        log.debug("📊 Family imbalance bars sourced from {} (volume={})", 
+            selected.getScripCode(), selected.getVolume());
+    }
+
+    private OrderbookAccumulator extractOrderbookMetrics(InstrumentCandle instrument) {
+        if (instrument == null || instrument.getOrderbookDepth() == null) {
+            return null;
+        }
+        OrderbookDepthData depth = instrument.getOrderbookDepth();
+        double spread = depth.getSpread() != null ? depth.getSpread() : 0.0;
+        double bidDepth = depth.getTotalBidDepth() != null ? depth.getTotalBidDepth() : 0.0;
+        double askDepth = depth.getTotalAskDepth() != null ? depth.getTotalAskDepth() : 0.0;
+        int spreadCount = depth.getSpread() != null ? 1 : 0;
+        return new OrderbookAccumulator(spread, spreadCount, bidDepth, askDepth);
+    }
+
+    private MicrostructureData copyMicrostructure(MicrostructureData source) {
+        if (source == null) {
+            return null;
+        }
+        return MicrostructureData.builder()
+            .ofi(source.getOfi())
+            .vpin(source.getVpin())
+            .depthImbalance(source.getDepthImbalance())
+            .kyleLambda(source.getKyleLambda())
+            .effectiveSpread(source.getEffectiveSpread())
+            .microprice(source.getMicroprice())
+            .midPrice(source.getMidPrice())
+            .bidAskSpread(source.getBidAskSpread())
+            .isComplete(source.getIsComplete())
+            .windowStart(source.getWindowStart())
+            .windowEnd(source.getWindowEnd())
+            .build();
+    }
+
+    private OrderbookDepthData copyOrderbook(OrderbookDepthData source) {
+        if (source == null) {
+            return null;
+        }
+        return OrderbookDepthData.builder()
+            .bidProfile(copyDepthLevels(source.getBidProfile()))
+            .askProfile(copyDepthLevels(source.getAskProfile()))
+            .weightedDepthImbalance(source.getWeightedDepthImbalance())
+            .level1Imbalance(source.getLevel1Imbalance())
+            .level2to5Imbalance(source.getLevel2to5Imbalance())
+            .level6to10Imbalance(source.getLevel6to10Imbalance())
+            .cumulativeBidDepth(copyDoubleList(source.getCumulativeBidDepth()))
+            .cumulativeAskDepth(copyDoubleList(source.getCumulativeAskDepth()))
+            .totalBidDepth(source.getTotalBidDepth())
+            .totalAskDepth(source.getTotalAskDepth())
+            .bidVWAP(source.getBidVWAP())
+            .askVWAP(source.getAskVWAP())
+            .depthPressure(source.getDepthPressure())
+            .bidSlope(source.getBidSlope())
+            .askSlope(source.getAskSlope())
+            .slopeRatio(source.getSlopeRatio())
+            .icebergDetectedBid(source.getIcebergDetectedBid())
+            .icebergDetectedAsk(source.getIcebergDetectedAsk())
+            .icebergProbabilityBid(source.getIcebergProbabilityBid())
+            .icebergProbabilityAsk(source.getIcebergProbabilityAsk())
+            .spoofingEvents(copySpoofingEvents(source.getSpoofingEvents()))
+            .spoofingCountLast1Min(source.getSpoofingCountLast1Min())
+            .activeSpoofingBid(source.getActiveSpoofingBid())
+            .activeSpoofingAsk(source.getActiveSpoofingAsk())
+            .timestamp(source.getTimestamp())
+            .midPrice(source.getMidPrice())
+            .spread(source.getSpread())
+            .depthLevels(source.getDepthLevels())
+            .isComplete(source.getIsComplete())
+            .build();
+    }
+
+    private List<OrderbookDepthData.DepthLevel> copyDepthLevels(List<OrderbookDepthData.DepthLevel> source) {
+        if (source == null) {
+            return null;
+        }
+        return source.stream()
+            .map(level -> OrderbookDepthData.DepthLevel.builder()
+                .level(level.getLevel())
+                .price(level.getPrice())
+                .quantity(level.getQuantity())
+                .numberOfOrders(level.getNumberOfOrders())
+                .distanceFromMid(level.getDistanceFromMid())
+                .percentOfTotalDepth(level.getPercentOfTotalDepth())
+                .build())
+            .collect(Collectors.toList());
+    }
+
+    private List<OrderbookDepthData.SpoofingEvent> copySpoofingEvents(List<OrderbookDepthData.SpoofingEvent> source) {
+        if (source == null) {
+            return null;
+        }
+        return source.stream()
+            .map(event -> OrderbookDepthData.SpoofingEvent.builder()
+                .timestamp(event.getTimestamp())
+                .side(event.getSide())
+                .price(event.getPrice())
+                .quantity(event.getQuantity())
+                .durationMs(event.getDurationMs())
+                .classification(event.getClassification())
+                .build())
+            .collect(Collectors.toList());
+    }
+
+    private List<Double> copyDoubleList(List<Double> source) {
+        if (source == null) {
+            return null;
+        }
+        return new ArrayList<>(source);
+    }
+
+    private static class OrderbookAccumulator {
+        private final double spreadSum;
+        private final int spreadCount;
+        private final double bidDepthSum;
+        private final double askDepthSum;
+
+        OrderbookAccumulator(double spreadSum, int spreadCount, double bidDepthSum, double askDepthSum) {
+            this.spreadSum = spreadSum;
+            this.spreadCount = spreadCount;
+            this.bidDepthSum = bidDepthSum;
+            this.askDepthSum = askDepthSum;
+        }
+
+        public double getSpreadSum() {
+            return spreadSum;
+        }
+
+        public int getSpreadCount() {
+            return spreadCount;
+        }
+
+        public double getBidDepthSum() {
+            return bidDepthSum;
+        }
+
+        public double getAskDepthSum() {
+            return askDepthSum;
+        }
     }
 
     /**
@@ -701,7 +1124,10 @@ public class TopologyConfiguration {
     }
 
     /**
-     * Enrich candles with OI data
+     * ✅ P0-2 FIX: Enrich candles with OI data (with temporal validation)
+     * 
+     * CRITICAL: Only enriches candles with OI data if OI timestamp <= candle window end
+     * This prevents look-ahead bias where future OI data corrupts historical candles
      */
     private KStream<String, InstrumentCandle> enrichCandles(
         KStream<String, InstrumentCandle> candles,
@@ -711,10 +1137,37 @@ public class TopologyConfiguration {
             oiTable,
             (candle, oi) -> {
                 if (candle != null && oi != null) {
-                    candle.setOpenInterest(oi.getOpenInterest());
-                    candle.setOiChange(oi.getOiChange());
-                    log.debug("✅ OI enriched: scrip={} oi={} oiChange={}",
-                        candle.getScripCode(), oi.getOpenInterest(), oi.getOiChange());
+                    // ✅ P0-2 FIX: Temporal validation - only use OI if not from the future
+                    Long candleEnd = candle.getWindowEndMillis();
+                    Long oiTimestamp = oi.getReceivedTimestamp();
+                    
+                    if (candleEnd == null) {
+                        // No window end timestamp on candle - skip enrichment
+                        log.warn("⚠️ Candle missing windowEndMillis: scrip={}", candle.getScripCode());
+                        return candle;
+                    }
+                    
+                    if (oiTimestamp == null) {
+                        // OI has no timestamp - use it anyway (backward compatibility)
+                        // But log a warning for visibility
+                        log.debug("⚠️ OI missing receivedTimestamp: scrip={} - enriching anyway", 
+                            candle.getScripCode());
+                        candle.setOpenInterest(oi.getOpenInterest());
+                        candle.setOiChange(oi.getOiChange());
+                    } else if (oiTimestamp <= candleEnd) {
+                        // ✅ VALID: OI timestamp is before or at candle end - safe to use
+                        candle.setOpenInterest(oi.getOpenInterest());
+                        candle.setOiChange(oi.getOiChange());
+                        log.debug("✅ OI enriched: scrip={} candleEnd={} oiTs={} oi={} oiChange={}",
+                            candle.getScripCode(), candleEnd, oiTimestamp, 
+                            oi.getOpenInterest(), oi.getOiChange());
+                    } else {
+                        // ❌ INVALID: OI timestamp is in the future relative to candle
+                        // Skip enrichment to prevent look-ahead bias
+                        log.warn("⏰ Skipped future OI: scrip={} candleEnd={} oiTs={} delta={}ms",
+                            candle.getScripCode(), candleEnd, oiTimestamp, (oiTimestamp - candleEnd));
+                        metrics.incOiFutureSkipped();
+                    }
                 }
                 return candle;
             }

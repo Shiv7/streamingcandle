@@ -8,13 +8,13 @@ import org.apache.kafka.streams.state.KeyValueStore;
 
 public class CumToDeltaTransformer implements Transformer<String, TickData, KeyValue<String, TickData>> {
     private final String storeName;
-    private KeyValueStore<String, Integer> store;
+    private KeyValueStore<String, Long> store;  // ✅ P0-4 FIX: Changed from Integer to Long
 
     public CumToDeltaTransformer(String storeName) { this.storeName = storeName; }
 
     @Override @SuppressWarnings("unchecked")
     public void init(ProcessorContext context) {
-        this.store = (KeyValueStore<String, Integer>) context.getStateStore(storeName);
+        this.store = (KeyValueStore<String, Long>) context.getStateStore(storeName);
     }
 
     @Override
@@ -29,10 +29,10 @@ public class CumToDeltaTransformer implements Transformer<String, TickData, KeyV
             return KeyValue.pair(key, tick);
         }
 
-        int curr = Math.max(0, tick.getTotalQuantity());   // cumulative day volume
-        Integer prevMax = store.get(stateKey);
+        long curr = Math.max(0, tick.getTotalQuantity());   // ✅ Changed to long
+        Long prevMax = store.get(stateKey);  // ✅ Changed to Long
 
-        int add;
+        long add;  // ✅ Changed to long
         boolean isReset = false;
         
         if (prevMax == null) {
@@ -61,7 +61,8 @@ public class CumToDeltaTransformer implements Transformer<String, TickData, KeyV
             add = tick.getLastQuantity();
         }
 
-        tick.setDeltaVolume(add);
+        // ✅ Safe cast: delta should not exceed int range in practice (incremental volume per tick)
+        tick.setDeltaVolume((int) Math.min(add, Integer.MAX_VALUE));
         tick.setResetFlag(isReset);
         return KeyValue.pair(key, tick);
     }
