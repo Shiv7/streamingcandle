@@ -7,11 +7,12 @@ import com.kotsin.consumer.processor.MicrostructureAccumulator;
 import com.kotsin.consumer.processor.ImbalanceBarAccumulator;
 import com.kotsin.consumer.monitoring.Timeframe;
 import com.kotsin.consumer.processor.WindowRotationService;
-import lombok.Data;
-import lombok.extern.slf4j.Slf4j;
-
 import java.text.SimpleDateFormat;
 import java.util.*;
+import lombok.AccessLevel;
+import lombok.Data;
+import lombok.Getter;
+import lombok.extern.slf4j.Slf4j;
 
 /**
  * Manages per-INSTRUMENT state aggregation
@@ -34,6 +35,7 @@ public class InstrumentStateManager {
     private final EnumMap<Timeframe, com.kotsin.consumer.processor.OrderbookDepthAccumulator> orderbookAccumulators = new EnumMap<>(Timeframe.class);
     // Completed window snapshots waiting to be emitted
     @JsonIgnore
+    @Getter(AccessLevel.NONE)
     private final transient EnumMap<Timeframe, Deque<CompletedWindow>> completedWindows = new EnumMap<>(Timeframe.class);
     
     // Global orderbook accumulator (NEVER reset - for iceberg/spoofing detection across windows)
