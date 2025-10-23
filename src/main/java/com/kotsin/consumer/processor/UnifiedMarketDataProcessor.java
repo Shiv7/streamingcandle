@@ -41,48 +41,6 @@ public class UnifiedMarketDataProcessor {
     @Value("${unified.input.topic.orderbook:Orderbook}")
     private String orderbookTopic;
 
-    @Value("${stream.outputs.candles.enabled:true}")
-    private boolean candlesOutputEnabled;
-
-    @Value("${stream.outputs.familyStructured.enabled:false}")
-    private boolean familyStructuredEnabled;
-
-    @Value("${stream.outputs.candles.1m:candle-complete-1m}")
-    private String candle1mTopic;
-
-    @Value("${stream.outputs.candles.2m:candle-complete-2m}")
-    private String candle2mTopic;
-
-    @Value("${stream.outputs.candles.3m:candle-complete-3m}")
-    private String candle3mTopic;
-
-    @Value("${stream.outputs.candles.5m:candle-complete-5m}")
-    private String candle5mTopic;
-
-    @Value("${stream.outputs.candles.15m:candle-complete-15m}")
-    private String candle15mTopic;
-
-    @Value("${stream.outputs.candles.30m:candle-complete-30m}")
-    private String candle30mTopic;
-
-    @Value("${stream.outputs.familyStructured.1m:family-structured-1m}")
-    private String familyStructured1mTopic;
-
-    @Value("${stream.outputs.familyStructured.2m:family-structured-2m}")
-    private String familyStructured2mTopic;
-
-    @Value("${stream.outputs.familyStructured.5m:family-structured-5m}")
-    private String familyStructured5mTopic;
-
-    @Value("${stream.outputs.familyStructured.15m:family-structured-15m}")
-    private String familyStructured15mTopic;
-
-    @Value("${stream.outputs.familyStructured.30m:family-structured-30m}")
-    private String familyStructured30mTopic;
-
-    @Value("${stream.outputs.familyStructured.all:family-structured-all}")
-    private String familyStructuredAllTopic;
-    
     /**
      * Start the unified market data processor
      */
@@ -90,10 +48,7 @@ public class UnifiedMarketDataProcessor {
     public void start() {
         try {
             log.info("🚀 Starting Unified Market Data Processor (Refactored)");
-            log.info("Flags: candlesOutputEnabled={}, familyStructuredEnabled={}", candlesOutputEnabled, familyStructuredEnabled);
             log.info("Input topics: ticks={}, oi={}, orderbook={}", ticksTopic, oiTopic, orderbookTopic);
-            log.info("Candle topics: 1m={}, 2m={}, 3m={}, 5m={}, 15m={}, 30m={}", candle1mTopic, candle2mTopic, candle3mTopic, candle5mTopic, candle15mTopic, candle30mTopic);
-            log.info("Family topics: 1m={}, 2m={}, 5m={}, 15m={}, 30m={}, all={}", familyStructured1mTopic, familyStructured2mTopic, familyStructured5mTopic, familyStructured15mTopic, familyStructured30mTopic, familyStructuredAllTopic);
 
             // Delegate to orchestrator
             orchestrator.startAllStreams();
