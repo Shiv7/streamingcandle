@@ -31,6 +31,8 @@ public class InstrumentStateManager {
     private final EnumMap<Timeframe, ImbalanceBarAccumulator> imbAccumulators = new EnumMap<>(Timeframe.class);
     // Orderbook depth accumulators per timeframe (reset on window rotation for clean metrics)
     private final EnumMap<Timeframe, com.kotsin.consumer.processor.OrderbookDepthAccumulator> orderbookAccumulators = new EnumMap<>(Timeframe.class);
+    // Completed window snapshots waiting to be emitted
+    private final EnumMap<Timeframe, Deque<CompletedWindow>> completedWindows = new EnumMap<>(Timeframe.class);
     
     // Global orderbook accumulator (NEVER reset - for iceberg/spoofing detection across windows)
     private com.kotsin.consumer.processor.OrderbookDepthAccumulator globalOrderbookAccumulator;
@@ -75,6 +77,7 @@ public class InstrumentStateManager {
             microAccumulators.put(timeframe, new MicrostructureAccumulator());
             imbAccumulators.put(timeframe, new ImbalanceBarAccumulator());
             orderbookAccumulators.put(timeframe, new com.kotsin.consumer.processor.OrderbookDepthAccumulator());
+            completedWindows.put(timeframe, new ArrayDeque<>());
         }
     }
 
@@ -210,28 +213,37 @@ public class InstrumentStateManager {
     private void updateAllTimeframes(TickData tick) {
         long tickTime = tick.getTimestamp();
 
-        for (Map.Entry<Timeframe, CandleAccumulator> entry : candleAccumulators.entrySet()) {
-            Timeframe timeframe = entry.getKey();
-            CandleAccumulator acc = entry.getValue();
-            int minutes = timeframe.getMinutes();
+        for (Timeframe timeframe : TIMEFRAMES) {
+            CandleAccumulator currentAcc = candleAccumulators.get(timeframe);
+            MicrostructureAccumulator microAcc = microAccumulators.get(timeframe);
+            ImbalanceBarAccumulator imbAcc = imbAccumulators.get(timeframe);
+            com.kotsin.consumer.processor.OrderbookDepthAccumulator obAcc = orderbookAccumulators.get(timeframe);
 
-            // Detect window rotation to reset per-timeframe microstructure accumulator
-            Long prevWindowStart = acc.getWindowStart();
-            acc = WindowRotationService.rotateCandleIfNeeded(acc, tickTime, minutes);
-            candleAccumulators.put(timeframe, acc);
-            if (prevWindowStart == null || !prevWindowStart.equals(acc.getWindowStart())) {
-                // New window started → reset per-timeframe accumulators
-                microAccumulators.put(timeframe, new MicrostructureAccumulator());
-                imbAccumulators.put(timeframe, new ImbalanceBarAccumulator());
-                orderbookAccumulators.put(timeframe, new com.kotsin.consumer.processor.OrderbookDepthAccumulator());
+            CandleAccumulator rotatedAcc = WindowRotationService.rotateCandleIfNeeded(currentAcc, tickTime, timeframe.getMinutes());
+
+            if (rotatedAcc != currentAcc) {
+                CompletedWindow completed = buildCompletedWindow(currentAcc, microAcc, imbAcc, obAcc);
+                if (completed != null) {
+                    completedWindows.computeIfAbsent(timeframe, tf -> new ArrayDeque<>()).addLast(completed);
+                }
+
+                microAcc = new MicrostructureAccumulator();
+                imbAcc = new ImbalanceBarAccumulator();
+                obAcc = new com.kotsin.consumer.processor.OrderbookDepthAccumulator();
+                microAccumulators.put(timeframe, microAcc);
+                imbAccumulators.put(timeframe, imbAcc);
+                orderbookAccumulators.put(timeframe, obAcc);
             }
 
-            // Update accumulators
-            acc.addTick(tick);
-            MicrostructureAccumulator microAcc = microAccumulators.get(timeframe);
-            if (microAcc != null) { microAcc.addTick(tick); }
-            ImbalanceBarAccumulator imbAcc = imbAccumulators.get(timeframe);
-            if (imbAcc != null) { imbAcc.addTick(tick); }
+            candleAccumulators.put(timeframe, rotatedAcc);
+
+            rotatedAcc.addTick(tick);
+            if (microAcc != null) {
+                microAcc.addTick(tick);
+            }
+            if (imbAcc != null) {
+                imbAcc.addTick(tick);
+            }
         }
     }
 
@@ -248,34 +260,41 @@ public class InstrumentStateManager {
      * Extract finalized candle for a specific timeframe
      */
     public InstrumentCandle extractFinalizedCandle(Timeframe timeframe) {
-        CandleAccumulator accumulator = candleAccumulators.get(timeframe);
-        if (accumulator == null || !accumulator.isComplete()) {
-            return null;
+        Deque<CompletedWindow> queue = completedWindows.get(timeframe);
+        CompletedWindow completed = (queue != null && !queue.isEmpty()) ? queue.pollFirst() : null;
+
+        if (completed == null) {
+            CandleAccumulator accumulator = candleAccumulators.get(timeframe);
+            if (accumulator == null ||
+                !accumulator.isComplete() ||
+                accumulator.getWindowStart() == null ||
+                accumulator.getOpen() == null) {
+                return null;
+            }
+
+            MicrostructureAccumulator microAcc = microAccumulators.get(timeframe);
+            ImbalanceBarAccumulator imbAcc = imbAccumulators.get(timeframe);
+            com.kotsin.consumer.processor.OrderbookDepthAccumulator obAcc = orderbookAccumulators.get(timeframe);
+
+            completed = buildCompletedWindow(accumulator, microAcc, imbAcc, obAcc);
+            if (completed == null) {
+                return null;
+            }
+
+            candleAccumulators.put(timeframe, new CandleAccumulator());
+            microAccumulators.put(timeframe, new MicrostructureAccumulator());
+            imbAccumulators.put(timeframe, new ImbalanceBarAccumulator());
+            orderbookAccumulators.put(timeframe, new com.kotsin.consumer.processor.OrderbookDepthAccumulator());
         }
 
-        CandleData candleData = accumulator.toCandleData(exchange, exchangeType);
+        CandleData candleData = completed.candleData;
+        MicrostructureData microstructure = completed.microstructure;
+        ImbalanceBarData imbalanceBars = completed.imbalanceBars;
+        com.kotsin.consumer.model.OrderbookDepthData windowOrderbook = completed.orderbookDepth;
 
-        // --- CRITICAL FIX: Reset accumulator after extraction ---
-        candleAccumulators.put(timeframe, new CandleAccumulator());
-
-        
-        // Get microstructure data for this timeframe window
-        MicrostructureAccumulator microAcc = microAccumulators.get(timeframe);
-        MicrostructureData microstructure = microAcc != null ? 
-            microAcc.toMicrostructureData(accumulator.getWindowStart(), accumulator.getWindowEnd()) : null;
-        ImbalanceBarAccumulator imbAcc = imbAccumulators.get(timeframe);
-        ImbalanceBarData imbalanceBars = imbAcc != null ? imbAcc.toImbalanceBarData() : null;
-        
-        // DUAL ORDERBOOK ACCUMULATOR MERGE:
-        // 1. Get per-window orderbook metrics (spread, depth, imbalances)
-        com.kotsin.consumer.processor.OrderbookDepthAccumulator obAcc = orderbookAccumulators.get(timeframe);
-        com.kotsin.consumer.model.OrderbookDepthData windowOrderbook = obAcc != null ? obAcc.toOrderbookDepthData() : null;
-        
-        // 2. Get global iceberg/spoofing detection (crosses window boundaries)
-        com.kotsin.consumer.model.OrderbookDepthData globalDetection = globalOrderbookAccumulator != null ? 
+        // Merge per-window depth metrics with ongoing global detectors
+        com.kotsin.consumer.model.OrderbookDepthData globalDetection = globalOrderbookAccumulator != null ?
             globalOrderbookAccumulator.toOrderbookDepthData() : null;
-        
-        // 3. Merge: use window metrics, but overlay global iceberg/spoofing data
         com.kotsin.consumer.model.OrderbookDepthData orderbookDepth = mergeOrderbookData(windowOrderbook, globalDetection);
 
         return InstrumentCandle.builder()
@@ -313,6 +332,51 @@ public class InstrumentStateManager {
             .imbalanceBars(imbalanceBars)
             .orderbookDepth(orderbookDepth)
             .build();
+    }
+
+    private CompletedWindow buildCompletedWindow(
+        CandleAccumulator candleAcc,
+        MicrostructureAccumulator microAcc,
+        ImbalanceBarAccumulator imbalanceAcc,
+        com.kotsin.consumer.processor.OrderbookDepthAccumulator orderbookAcc
+    ) {
+        if (candleAcc == null || candleAcc.getWindowStart() == null || candleAcc.getOpen() == null) {
+            return null;
+        }
+
+        candleAcc.markComplete();
+        CandleData candleData = candleAcc.toCandleData(exchange, exchangeType);
+
+        MicrostructureData microstructure = null;
+        if (microAcc != null) {
+            microAcc.markComplete();
+            microstructure = microAcc.toMicrostructureData(candleAcc.getWindowStart(), candleAcc.getWindowEnd());
+        }
+
+        ImbalanceBarData imbalanceBars = imbalanceAcc != null ? imbalanceAcc.toImbalanceBarData() : null;
+        com.kotsin.consumer.model.OrderbookDepthData windowOrderbook =
+            orderbookAcc != null ? orderbookAcc.toOrderbookDepthData() : null;
+
+        return new CompletedWindow(candleData, microstructure, imbalanceBars, windowOrderbook);
+    }
+
+    private static final class CompletedWindow {
+        private final CandleData candleData;
+        private final MicrostructureData microstructure;
+        private final ImbalanceBarData imbalanceBars;
+        private final com.kotsin.consumer.model.OrderbookDepthData orderbookDepth;
+
+        private CompletedWindow(
+            CandleData candleData,
+            MicrostructureData microstructure,
+            ImbalanceBarData imbalanceBars,
+            com.kotsin.consumer.model.OrderbookDepthData orderbookDepth
+        ) {
+            this.candleData = candleData;
+            this.microstructure = microstructure;
+            this.imbalanceBars = imbalanceBars;
+            this.orderbookDepth = orderbookDepth;
+        }
     }
 
     /**
