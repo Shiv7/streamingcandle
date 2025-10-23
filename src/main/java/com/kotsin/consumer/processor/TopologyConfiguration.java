@@ -899,6 +899,37 @@ public class TopologyConfiguration {
 
         OrderbookDepthData referenceDepth = referenceDepthInstrument != null ? referenceDepthInstrument.getOrderbookDepth() : null;
 
+        Double totalBidDepthValue = totalBidDepthWeight > 0.0
+            ? Double.valueOf(totalBidDepthSum / totalBidDepthWeight)
+            : (referenceDepth != null ? referenceDepth.getTotalBidDepth() : null);
+        Double totalAskDepthValue = totalAskDepthWeight > 0.0
+            ? Double.valueOf(totalAskDepthSum / totalAskDepthWeight)
+            : (referenceDepth != null ? referenceDepth.getTotalAskDepth() : null);
+        Double bidVwapValue = bidVwapWeight > 0.0
+            ? Double.valueOf(bidVwapSum / bidVwapWeight)
+            : (referenceDepth != null ? referenceDepth.getBidVWAP() : null);
+        Double askVwapValue = askVwapWeight > 0.0
+            ? Double.valueOf(askVwapSum / askVwapWeight)
+            : (referenceDepth != null ? referenceDepth.getAskVWAP() : null);
+        Double depthPressureValue = depthPressureWeight > 0.0
+            ? Double.valueOf(depthPressureSum / depthPressureWeight)
+            : (referenceDepth != null ? referenceDepth.getDepthPressure() : null);
+        Double bidSlopeValue = bidSlopeWeight > 0.0
+            ? Double.valueOf(bidSlopeSum / bidSlopeWeight)
+            : (referenceDepth != null ? referenceDepth.getBidSlope() : null);
+        Double askSlopeValue = askSlopeWeight > 0.0
+            ? Double.valueOf(askSlopeSum / askSlopeWeight)
+            : (referenceDepth != null ? referenceDepth.getAskSlope() : null);
+        Double slopeRatioValue = slopeRatioWeight > 0.0
+            ? Double.valueOf(slopeRatioSum / slopeRatioWeight)
+            : (referenceDepth != null ? referenceDepth.getSlopeRatio() : null);
+        Double midPriceValue = midPriceWeight > 0.0
+            ? Double.valueOf(midPriceSum / midPriceWeight)
+            : (referenceDepth != null ? referenceDepth.getMidPrice() : null);
+        Double spreadValue = spreadWeight > 0.0
+            ? Double.valueOf(spreadSum / spreadWeight)
+            : (referenceDepth != null ? referenceDepth.getSpread() : null);
+
         OrderbookDepthData aggregatedOrderbook = OrderbookDepthData.builder()
             .bidProfile(copyDepthLevels(referenceDepth != null ? referenceDepth.getBidProfile() : null))
             .askProfile(copyDepthLevels(referenceDepth != null ? referenceDepth.getAskProfile() : null))
@@ -908,14 +939,14 @@ public class TopologyConfiguration {
             .level6to10Imbalance(referenceDepth != null ? referenceDepth.getLevel6to10Imbalance() : null)
             .cumulativeBidDepth(copyDoubleList(referenceDepth != null ? referenceDepth.getCumulativeBidDepth() : null))
             .cumulativeAskDepth(copyDoubleList(referenceDepth != null ? referenceDepth.getCumulativeAskDepth() : null))
-            .totalBidDepth(totalBidDepthWeight > 0.0 ? totalBidDepthSum / totalBidDepthWeight : (referenceDepth != null ? referenceDepth.getTotalBidDepth() : null))
-            .totalAskDepth(totalAskDepthWeight > 0.0 ? totalAskDepthSum / totalAskDepthWeight : (referenceDepth != null ? referenceDepth.getTotalAskDepth() : null))
-            .bidVWAP(bidVwapWeight > 0.0 ? bidVwapSum / bidVwapWeight : (referenceDepth != null ? referenceDepth.getBidVWAP() : null))
-            .askVWAP(askVwapWeight > 0.0 ? askVwapSum / askVwapWeight : (referenceDepth != null ? referenceDepth.getAskVWAP() : null))
-            .depthPressure(depthPressureWeight > 0.0 ? depthPressureSum / depthPressureWeight : (referenceDepth != null ? referenceDepth.getDepthPressure() : null))
-            .bidSlope(bidSlopeWeight > 0.0 ? bidSlopeSum / bidSlopeWeight : (referenceDepth != null ? referenceDepth.getBidSlope() : null))
-            .askSlope(askSlopeWeight > 0.0 ? askSlopeSum / askSlopeWeight : (referenceDepth != null ? referenceDepth.getAskSlope() : null))
-            .slopeRatio(slopeRatioWeight > 0.0 ? slopeRatioSum / slopeRatioWeight : (referenceDepth != null ? referenceDepth.getSlopeRatio() : null))
+            .totalBidDepth(totalBidDepthValue)
+            .totalAskDepth(totalAskDepthValue)
+            .bidVWAP(bidVwapValue)
+            .askVWAP(askVwapValue)
+            .depthPressure(depthPressureValue)
+            .bidSlope(bidSlopeValue)
+            .askSlope(askSlopeValue)
+            .slopeRatio(slopeRatioValue)
             .icebergDetectedBid(icebergDetectedBid)
             .icebergDetectedAsk(icebergDetectedAsk)
             .icebergProbabilityBid(icebergProbBidWeight > 0.0 ? icebergProbBidSum / icebergProbBidWeight : (referenceDepth != null ? referenceDepth.getIcebergProbabilityBid() : null))
@@ -925,8 +956,8 @@ public class TopologyConfiguration {
             .activeSpoofingBid(activeSpoofingBid)
             .activeSpoofingAsk(activeSpoofingAsk)
             .timestamp(aggregatedTimestamp)
-            .midPrice(midPriceWeight > 0.0 ? midPriceSum / midPriceWeight : (referenceDepth != null ? referenceDepth.getMidPrice() : null))
-            .spread(spreadWeight > 0.0 ? spreadSum / spreadWeight : (referenceDepth != null ? referenceDepth.getSpread() : null))
+            .midPrice(midPriceValue)
+            .spread(spreadValue)
             .depthLevels(referenceDepth != null ? referenceDepth.getDepthLevels() : null)
             .isComplete(anyOrderbook && allOrderbookComplete)
             .build();
