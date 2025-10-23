@@ -1,5 +1,6 @@
 package com.kotsin.consumer.service;
 
+import com.fasterxml.jackson.annotation.JsonIgnore;
 import com.kotsin.consumer.model.*;
 import com.kotsin.consumer.processor.CandleAccumulator;
 import com.kotsin.consumer.processor.MicrostructureAccumulator;
@@ -32,7 +33,8 @@ public class InstrumentStateManager {
     // Orderbook depth accumulators per timeframe (reset on window rotation for clean metrics)
     private final EnumMap<Timeframe, com.kotsin.consumer.processor.OrderbookDepthAccumulator> orderbookAccumulators = new EnumMap<>(Timeframe.class);
     // Completed window snapshots waiting to be emitted
-    private final EnumMap<Timeframe, Deque<CompletedWindow>> completedWindows = new EnumMap<>(Timeframe.class);
+    @JsonIgnore
+    private final transient EnumMap<Timeframe, Deque<CompletedWindow>> completedWindows = new EnumMap<>(Timeframe.class);
     
     // Global orderbook accumulator (NEVER reset - for iceberg/spoofing detection across windows)
     private com.kotsin.consumer.processor.OrderbookDepthAccumulator globalOrderbookAccumulator;
