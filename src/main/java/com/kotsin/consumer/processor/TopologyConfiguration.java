@@ -172,8 +172,10 @@ public class TopologyConfiguration {
                 KStream<String, InstrumentCandle> extracted = stateStream
                     .mapValues(state -> state.extractFinalizedCandle(tf))
                     .filter((k, candle) -> candle != null && candle.isValid())
-                    // Anchor serde via an explicit through topic to avoid optimizer inserting a repartition with default String serde
-                    .through("instrument-candles-" + tfLabel + "-serde", Produced.with(Serdes.String(), com.kotsin.consumer.model.InstrumentCandle.serde()));
+                    // Force internal repartition with correct serdes; Streams will auto-create this internal topic
+                    .repartition(Repartitioned
+                        .with(Serdes.String(), com.kotsin.consumer.model.InstrumentCandle.serde())
+                        .withName("instrument-candles-" + tfLabel + "-repartition"));
 
                 KStream<String, InstrumentCandle> withOi = extracted.leftJoin(
                     oiTable,
