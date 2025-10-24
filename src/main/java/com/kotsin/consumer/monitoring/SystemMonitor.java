@@ -1,7 +1,6 @@
 package com.kotsin.consumer.monitoring;
 
-import com.kotsin.consumer.service.BackpressureHandler;
-import com.kotsin.consumer.service.StreamMetrics;
+import com.kotsin.consumer.metrics.StreamMetrics;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.scheduling.annotation.Scheduled;
@@ -25,7 +24,6 @@ import java.util.Map;
 public class SystemMonitor {
 
     private final StreamMetrics streamMetrics;
-    private final BackpressureHandler backpressureHandler;
     
     private final MemoryMXBean memoryBean = ManagementFactory.getMemoryMXBean();
     
@@ -50,9 +48,6 @@ public class SystemMonitor {
             heapUsage.getUsed() / 1024 / 1024,
             heapUsage.getMax() / 1024 / 1024,
             heapUsedPercent);
-        
-        // Backpressure metrics
-        log.info("🚦 Backpressure: {}", backpressureHandler.getBackpressureStats());
         
         // System health
         boolean isHealthy = isSystemHealthy();
@@ -82,11 +77,6 @@ public class SystemMonitor {
             return false;
         }
         
-        // Check backpressure
-        if (!backpressureHandler.isHealthy()) {
-            return false;
-        }
-        
         return true;
     }
 
@@ -109,13 +99,6 @@ public class SystemMonitor {
         } else if (heapUsedPercent > 80) {
             sendAlert(AlertLevel.WARNING, "Elevated memory usage", 
                 String.format("Heap memory usage: %.2f%%", heapUsedPercent));
-            lastAlertTime = now;
-        }
-
-        // Backpressure alert
-        if (!backpressureHandler.isHealthy()) {
-            sendAlert(AlertLevel.WARNING, "Backpressure detected", 
-                backpressureHandler.getBackpressureStats());
             lastAlertTime = now;
         }
 
@@ -156,9 +139,6 @@ public class SystemMonitor {
         
         // Stream metrics
         metrics.put("stream.metrics", streamMetrics.getMetrics());
-        
-        // Backpressure metrics
-        metrics.put("backpressure.stats", backpressureHandler.getBackpressureStats());
         
         // Health status
         metrics.put("system.healthy", isSystemHealthy());

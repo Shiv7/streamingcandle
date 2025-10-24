@@ -1,6 +1,6 @@
 package com.kotsin.consumer.processor;
 
-import com.kotsin.consumer.service.StreamMetrics;
+import com.kotsin.consumer.metrics.StreamMetrics;
 import jakarta.annotation.PostConstruct;
 import jakarta.annotation.PreDestroy;
 import lombok.RequiredArgsConstructor;
@@ -13,10 +13,8 @@ import java.util.Map;
 /**
  * Unified Market Data Processor (Refactored - God Class Split)
  * 
- * REFACTORED: Split into focused services:
+ * Responsibilities:
  * - TopologyConfiguration: Topology building
- * - InstrumentProcessor: Instrument-level processing  
- * - DataEnrichmentService: Data enrichment
  * - MarketDataOrchestrator: Stream lifecycle management
  * 
  * This class now acts as a thin coordinator
@@ -47,7 +45,7 @@ public class UnifiedMarketDataProcessor {
     @PostConstruct
     public void start() {
         try {
-            log.info("🚀 Starting Unified Market Data Processor (Refactored)");
+            log.info("🚀 Starting Streaming Candle of Kostin Module Entry Point is Unified Market Data Processor");
             log.info("Input topics: ticks={}, oi={}, orderbook={}", ticksTopic, oiTopic, orderbookTopic);
 
             // Delegate to orchestrator

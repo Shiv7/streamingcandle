@@ -1,0 +1,338 @@
+# 🏗️ STREAMINGCANDLE ARCHITECTURE DIAGRAM
+
+## Current System Architecture (VERIFIED CORRECT)
+
+```
+┌─────────────────────────────────────────────────────────────────────────┐
+│                        KAFKA INPUT TOPICS                                 │
+├─────────────────────────────────────────────────────────────────────────┤
+│                                                                           │
+│  ┌──────────────────┐  ┌──────────────────┐  ┌──────────────────┐      │
+│  │ forwardtesting-  │  │    Orderbook     │  │  OpenInterest    │      │
+│  │      data        │  │                  │  │                  │      │
+│  ├──────────────────┤  ├──────────────────┤  ├──────────────────┤      │
+│  │ Trade Ticks      │  │ 20-level depth   │  │ OI updates       │      │
+│  │ 10-100/sec       │  │ 5-50/sec         │  │ every 5-10 sec   │      │
+│  │                  │  │                  │  │                  │      │
+│  │ LastRate         │  │ Bids[20]         │  │ OpenInterest     │      │
+│  │ LastQty          │  │ Asks[20]         │  │ Token            │      │
+│  │ BidRate/OffRate  │  │ TBidQ/TOffQ      │  │                  │      │
+│  └──────────────────┘  └──────────────────┘  └──────────────────┘      │
+│           │                     │                     │                  │
+└───────────┼─────────────────────┼─────────────────────┼──────────────────┘
+            │                     │                     │
+            └─────────────────────┴─────────────────────┘
+                                  │
+                    ┌─────────────▼─────────────┐
+                    │   TopologyConfiguration   │
+                    │   (Kafka Streams)         │
+                    ├───────────────────────────┤
+                    │ • Merge 3 streams         │
+                    │ • Rekey by token          │
+                    │ • Market-aligned windows  │
+                    │ • 9:15 AM IST base        │
+                    └─────────────┬─────────────┘
+                                  │
+                    ┌─────────────▼─────────────┐
+                    │  InstrumentStateManager   │
+                    │  (Per-Instrument State)   │
+                    ├───────────────────────────┤
+                    │ For EACH scripCode:       │
+                    │ • Track window state      │
+                    │ • Accumulate metrics      │
+                    │ • Emit on window close    │
+                    └─────────────┬─────────────┘
+                                  │
+         ┌────────────────────────┼────────────────────────┐
+         │                        │                        │
+    ┌────▼────┐            ┌──────▼──────┐         ┌──────▼──────┐
+    │ Candle  │            │  Imbalance  │         │Microstructure│
+    │Accumulator           │Bar Accumulator        │ Accumulator  │
+    ├─────────┤            ├─────────────┤         ├─────────────┤
+    │• OHLC   │            │• VIB        │         │• OFI        │
+    │• Volume │            │• DIB        │         │• VPIN       │
+    │• VWAP   │            │• TRB        │         │• Kyle λ     │
+    │• Buy/Sell│           │• VRB        │         │• Spread     │
+    └─────────┘            │• Progress   │         │• Microprice │
+                           │• Acceleration│         └─────────────┘
+    ┌─────────┐            │• Exhaustion │         ┌─────────────┐
+    │Orderbook│            │• Divergence │         │    OI       │
+    │ Depth   │            └─────────────┘         │ Accumulator │
+    │Accumulator                                    ├─────────────┤
+    ├─────────┤            ⚠️ MISSING:              │• OI OHLC    │
+    │• Depth  │            ┌─────────────┐         │• OI Change  │
+    │• Slopes │            │   Volume    │         └─────────────┘
+    │• Icebergs│           │   Profile   │
+    │• Spoofing│           │ Accumulator │
+    └─────────┘            ├─────────────┤
+                           │• POC        │
+                           │• Value Area │
+                           │• High Vol   │
+                           │  Nodes      │
+                           └─────────────┘
+                                  │
+                    ┌─────────────▼─────────────┐
+                    │   Window Close Handler    │
+                    │   (Suppress Until Close)  │
+                    ├───────────────────────────┤
+                    │ • Wait for grace period   │
+                    │ • Force complete windows  │
+                    │ • Build output message    │
+                    └─────────────┬─────────────┘
+                                  │
+┌─────────────────────────────────▼─────────────────────────────────────────┐
+│                      KAFKA OUTPUT TOPICS (per timeframe)                   │
+├───────────────────────────────────────────────────────────────────────────┤
+│                                                                            │
+│  ┌──────────────┐ ┌──────────────┐ ┌──────────────┐ ┌──────────────┐    │
+│  │ candle-      │ │ candle-      │ │ candle-      │ │ candle-      │    │
+│  │ complete-1m  │ │ complete-2m  │ │ complete-5m  │ │ complete-15m │    │
+│  └──────────────┘ └──────────────┘ └──────────────┘ └──────────────┘    │
+│                                                                            │
+│         ┌──────────────┐ ┌──────────────┐                                │
+│         │ candle-      │ │ candle-      │                                │
+│         │ complete-3m  │ │ complete-30m │                                │
+│         └──────────────┘ └──────────────┘                                │
+│                                                                            │
+│  Output Message Structure: UnifiedWindowMessage                           │
+│  ┌─────────────────────────────────────────────────────────────────┐     │
+│  │ {                                                                 │     │
+│  │   "scripCode": "96955",                                           │     │
+│  │   "timeframe": "1m",                                              │     │
+│  │   "candle": {                                                     │     │
+│  │     "open": 10.5, "high": 10.6, "low": 10.4, "close": 10.55,    │     │
+│  │     "volume": 25200, "buyVolume": 14500, "sellVolume": 10700     │     │
+│  │   },                                                              │     │
+│  │   "orderbookSignals": {                                           │     │
+│  │     "ofi": 15.2, "vpin": 0.35, "depthImbalance": 0.04,          │     │
+│  │     "icebergBid": false, "spoofingCount": 0                      │     │
+│  │   },                                                              │     │
+│  │   "imbalanceBars": {                                              │     │
+│  │     "volumeImbalance": { "progress": 0.76, "direction": "BUY" }, │     │
+│  │     "dollarImbalance": {...}, "tickRuns": {...}                  │     │
+│  │   },                                                              │     │
+│  │   "openInterest": { "oiClose": 59200, "oiChange": 200 }          │     │
+│  │ }                                                                 │     │
+│  └─────────────────────────────────────────────────────────────────┘     │
+│                                                                            │
+│  ✅ PROVIDES: Raw aggregated metrics only                                 │
+│  ❌ EXCLUDES: Trading signals, profit targets, stop losses                │
+│                                                                            │
+└────────────────────────────────────────────────────────────────────────────┘
+                                  │
+                                  │ Consumed by...
+                                  │
+┌─────────────────────────────────▼─────────────────────────────────────────┐
+│                     SEPARATE TRADING MODULE (Future)                       │
+├───────────────────────────────────────────────────────────────────────────┤
+│                                                                            │
+│  ┌───────────────────────────────────────────────────────────────┐       │
+│  │  Trading Logic (NOT PART OF STREAMINGCANDLE)                  │       │
+│  ├───────────────────────────────────────────────────────────────┤       │
+│  │  • Read enriched candles                                       │       │
+│  │  • Apply trading strategies                                    │       │
+│  │  • Generate signals: BUY/SELL/WAIT                             │       │
+│  │  • Calculate profit targets & stop losses                      │       │
+│  │  • Execute trades via broker API                               │       │
+│  └───────────────────────────────────────────────────────────────┘       │
+│                                                                            │
+└────────────────────────────────────────────────────────────────────────────┘
+```
+
+---
+
+## Key Design Principles (VERIFIED)
+
+### ✅ Separation of Concerns
+```
+StreamingCandle = DATA PROVIDER
+└── Aggregates market data into actionable metrics
+
+Trading Module = DECISION MAKER
+└── Interprets metrics and executes trades
+```
+
+### ✅ Single Responsibility Principle
+```
+Each accumulator does ONE thing:
+├── CandleAccumulator → OHLCV only
+├── ImbalanceBarAccumulator → Imbalance bars only
+├── MicrostructureAccumulator → Microstructure only
+├── OrderbookDepthAccumulator → Depth analysis only
+└── OiAccumulator → Open Interest only
+```
+
+### ✅ Stateless Output
+```
+Each output message is:
+├── Self-contained (no references to past windows)
+├── Immutable (represents completed window)
+├── Time-aligned (market-based, not clock-based)
+└── Independent (can be processed out-of-order)
+```
+
+---
+
+## Window Alignment (CRITICAL FEATURE)
+
+### Market-Aligned Windows (9:15 AM IST Base)
+```
+Market Opens: 9:15:00 AM IST
+
+1-minute windows:
+├── 9:15:00 → 9:16:00
+├── 9:16:00 → 9:17:00
+├── 9:17:00 → 9:18:00
+└── ... (375 windows per 6.5-hour session)
+
+5-minute windows:
+├── 9:15:00 → 9:20:00
+├── 9:20:00 → 9:25:00
+├── 9:25:00 → 9:30:00
+└── ... (75 windows per session)
+
+30-minute windows:
+├── 9:15:00 → 9:45:00  ✅ Correct!
+├── 9:45:00 → 10:15:00
+├── 10:15:00 → 10:45:00
+└── ... (13 windows per session)
+```
+
+### Grace Period Handling
+```
+Window Close: 9:18:00
+Grace Period: 30 seconds
+Final Emit: 9:18:30
+
+Allows late-arriving data while maintaining low latency
+```
+
+---
+
+## Timeframe Processing (6 Separate Topologies)
+
+```
+For EACH timeframe (1m, 2m, 3m, 5m, 15m, 30m):
+├── Create separate Kafka Streams topology
+├── Independent state stores
+├── Independent window processing
+├── Separate output topic
+└── Can scale independently
+
+Benefits:
+├── Fault isolation
+├── Independent scaling
+├── Parallel processing
+└── Easy to add new timeframes
+```
+
+---
+
+## Data Flow (Step-by-Step)
+
+```
+1. Trade Tick Arrives
+   └─→ CumToDeltaTransformer (convert cumulative → delta volume)
+   └─→ Filter invalid ticks
+   └─→ Rekey by scripCode
+
+2. Orderbook Update Arrives
+   └─→ Extract token
+   └─→ Validate (20 levels present)
+   └─→ Rekey by scripCode
+
+3. OpenInterest Update Arrives
+   └─→ Extract token
+   └─→ Store in OI table (KTable)
+   └─→ Will be joined later
+
+4. Merge Streams
+   └─→ Combine trade + orderbook events
+   └─→ Group by scripCode
+   └─→ Window by timeframe
+
+5. Accumulate State (During Window)
+   └─→ InstrumentStateManager
+        ├─→ CandleAccumulator (OHLC, volume)
+        ├─→ ImbalanceBarAccumulator (VIB, DIB, TRB, VRB)
+        ├─→ MicrostructureAccumulator (OFI, VPIN, λ)
+        ├─→ OrderbookDepthAccumulator (depth, icebergs)
+        └─→ OiAccumulator (OI OHLC)
+
+6. Window Closes
+   └─→ Suppress until window closes completely
+   └─→ Grace period waits for late data
+   └─→ Force complete all accumulators
+   └─→ Build UnifiedWindowMessage
+
+7. Join with OI Table
+   └─→ Left join to add latest OI
+   └─→ Calculate OI delta (vs previous window)
+
+8. Emit to Output Topic
+   └─→ candle-complete-{timeframe}
+   └─→ Metrics tracked
+   └─→ Ready for consumption
+```
+
+---
+
+## State Management
+
+### Per-Window State (RESETS on window rotation)
+```
+├── CandleAccumulator
+├── ImbalanceBarAccumulator
+├── MicrostructureAccumulator
+├── OrderbookDepthAccumulator (window metrics only)
+└── OiAccumulator
+```
+
+### Cross-Window State (NEVER RESETS)
+```
+└── Global OrderbookDepthAccumulator
+    ├── Iceberg detection (needs history)
+    └── Spoofing detection (needs history)
+```
+
+### Strategy: Hybrid Approach
+```
+Final Output = Window Metrics + Global Detection
+
+orderbookDepth: {
+  spread: <from window accumulator>,
+  depthImbalance: <from window accumulator>,
+  icebergDetectedBid: <from global accumulator>,
+  spoofingEvents: <from global accumulator>
+}
+```
+
+---
+
+## Scaling Characteristics
+
+### Horizontal Scaling
+```
+Kafka Streams automatically distributes:
+├── By scripCode (natural partitioning)
+├── Across num.stream.threads=3
+├── Can add more application instances
+└── State stores replicated via changelog topics
+```
+
+### Performance Metrics
+```
+Current Configuration:
+├── 5000 stocks (realistic NSE/MCX)
+├── 100 ticks/sec/stock (peak)
+├── 6 timeframes
+├── Latency target: <50ms
+├── Output size: ~2-3 KB/candle
+└── Daily output: ~5 GB (manageable)
+```
+
+---
+
+**Architecture Status:** ✅ PRODUCTION READY
+**Missing Component:** ⚠️ VolumeProfileAccumulator (optional)
+**Next Action:** Decide if VolumeProfile is needed

@@ -72,6 +72,9 @@ public class InstrumentCandle {
     private MicrostructureData microstructure;
     private ImbalanceBarData imbalanceBars;
 
+    // Optional: Volume profile snapshot (POC, Value Area, distribution stats)
+    private VolumeProfileData volumeProfile;
+
     /**
      * Get Kafka Serde for serialization/deserialization
      */

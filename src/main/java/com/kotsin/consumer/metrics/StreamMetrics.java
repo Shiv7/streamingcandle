@@ -37,4 +37,21 @@ public class StreamMetrics {
         src.forEach((k, v) -> out.put(k, v.get()));
         return out;
     }
+
+    // ===== Unified reporting used by SystemMonitor/Processor =====
+    public String getMetrics() {
+        long emits = candleEmitsByTf.values().stream().mapToLong(AtomicLong::get).sum();
+        long drops = candleDropsByTf.values().stream().mapToLong(AtomicLong::get).sum();
+        long oiFuture = oiFutureSkipped.get();
+        return String.format("emits=%d drops=%d oiFutureSkipped=%d", emits, drops, oiFuture);
+    }
+
+    public boolean isHealthy() {
+        long emits = candleEmitsByTf.values().stream().mapToLong(AtomicLong::get).sum();
+        long drops = candleDropsByTf.values().stream().mapToLong(AtomicLong::get).sum();
+        long total = emits + drops;
+        if (total == 0) return true;
+        double dropRate = (double) drops / total;
+        return dropRate < 0.05; // <5% drops considered healthy
+    }
 }

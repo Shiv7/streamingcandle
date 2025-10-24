@@ -50,38 +50,9 @@ public class InstrumentState {
         return stateManager.getScripCode();
     }
 
-    public String getCompanyName() {
-        return stateManager.getCompanyName();
-    }
-
     public String getExchange() {
         return stateManager.getExchange();
     }
-
-    public String getExchangeType() {
-        return stateManager.getExchangeType();
-    }
-
-    public String getInstrumentType() {
-        return stateManager.getInstrumentType();
-    }
-
-    public void setInstrumentType(String instrumentType) {
-        stateManager.setInstrumentType(instrumentType);
-    }
-
-    public void setUnderlyingEquityScripCode(String underlyingEquityScripCode) {
-        stateManager.setUnderlyingEquityScripCode(underlyingEquityScripCode);
-    }
-
-    public Long getLastTickTime() {
-        return stateManager.getLastTickTime();
-    }
-
-    public Long getMessageCount() {
-        return stateManager.getMessageCount();
-    }
-
     /**
      * Force completion of all windows for finalized candle emission
      *
@@ -91,8 +62,4 @@ public class InstrumentState {
         stateManager.forceCompleteWindows(kafkaWindowEnd);
     }
 
-    // Metadata setters for derivative enrichment
-    public void setExpiry(String expiry) { stateManager.setExpiry(expiry); }
-    public void setStrikePrice(Double strikePrice) { stateManager.setStrikePrice(strikePrice); }
-    public void setOptionType(String optionType) { stateManager.setOptionType(optionType); }
 }

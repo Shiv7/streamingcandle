@@ -35,9 +35,7 @@ public class MarketDataOrchestrator {
         try {
             // Start per-instrument candle stream FIRST
             startInstrumentStream();
-            
             log.info("✅ All streams started successfully");
-            
         } catch (Exception e) {
             log.error("❌ Failed to start streams", e);
             throw new RuntimeException("Failed to start market data streams", e);

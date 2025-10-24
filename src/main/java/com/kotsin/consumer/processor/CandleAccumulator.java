@@ -1,6 +1,4 @@
 package com.kotsin.consumer.processor;
-
-import com.kotsin.consumer.model.Candlestick;
 import com.kotsin.consumer.model.CandleData;
 import lombok.Data;
 
@@ -132,34 +130,6 @@ public class CandleAccumulator {
             .build();
     }
 
-    public Candlestick toFinalizedCandlestick(String scripCode, String companyName,
-                                               String exchange, String exchangeType,
-                                               boolean includeExtras) {
-        Candlestick candle = new Candlestick();
-        candle.setScripCode(scripCode);
-        candle.setCompanyName(companyName);
-        candle.setExchange(exchange);
-        candle.setExchangeType(exchangeType);
-        candle.setWindowStartMillis(windowStart != null ? windowStart : 0);
-        candle.setWindowEndMillis(windowEnd != null ? windowEnd : 0);
-        candle.setIsComplete(complete);
-        candle.setOpen(open != null ? open : 0.0);
-        candle.setHigh(high != null ? high : 0.0);
-        candle.setLow(low != null ? low : 0.0);
-        candle.setClose(close != null ? close : 0.0);
-        candle.setVolume(volume != null ? volume.intValue() : 0);
-        if (includeExtras) {
-            if (volume > 0) candle.setVwap(priceVolumeSum / volume);
-            if (high != null && low != null && close != null) candle.setHlc3((high + low + close) / 3.0);
-            if (previousClose != null && close != null && previousClose > 0) candle.setLogReturnFromPrevBar(Math.log(close / previousClose));
-            candle.setTicksInWindow(tickCount);
-            candle.setWindowLatencyMs(System.currentTimeMillis() - windowEnd);
-        }
-        return candle;
-    }
-
-    public void setPreviousClose(Double prevClose) { this.previousClose = prevClose; }
     public Long getWindowStart() { return windowStart; }
 }
-
 

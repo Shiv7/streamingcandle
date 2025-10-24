@@ -33,6 +33,8 @@ public class InstrumentStateManager {
     private final EnumMap<Timeframe, ImbalanceBarAccumulator> imbAccumulators = new EnumMap<>(Timeframe.class);
     // Orderbook depth accumulators per timeframe (reset on window rotation for clean metrics)
     private final EnumMap<Timeframe, com.kotsin.consumer.processor.OrderbookDepthAccumulator> orderbookAccumulators = new EnumMap<>(Timeframe.class);
+    // Volume profile accumulators per timeframe (reset on window rotation)
+    private final EnumMap<Timeframe, com.kotsin.consumer.processor.VolumeProfileAccumulator> volumeProfileAccumulators = new EnumMap<>(Timeframe.class);
     // Completed window snapshots waiting to be emitted
     @JsonIgnore
     @Getter(AccessLevel.NONE)
@@ -81,6 +83,7 @@ public class InstrumentStateManager {
             microAccumulators.put(timeframe, new MicrostructureAccumulator());
             imbAccumulators.put(timeframe, new ImbalanceBarAccumulator());
             orderbookAccumulators.put(timeframe, new com.kotsin.consumer.processor.OrderbookDepthAccumulator());
+            volumeProfileAccumulators.put(timeframe, new com.kotsin.consumer.processor.VolumeProfileAccumulator());
             completedWindows.put(timeframe, new ArrayDeque<>());
         }
     }
@@ -216,17 +219,22 @@ public class InstrumentStateManager {
 
     private void updateAllTimeframes(TickData tick) {
         long tickTime = tick.getTimestamp();
+        boolean isNse = "N".equalsIgnoreCase(exchange);
 
         for (Timeframe timeframe : TIMEFRAMES) {
             CandleAccumulator currentAcc = candleAccumulators.get(timeframe);
             MicrostructureAccumulator microAcc = microAccumulators.get(timeframe);
             ImbalanceBarAccumulator imbAcc = imbAccumulators.get(timeframe);
             com.kotsin.consumer.processor.OrderbookDepthAccumulator obAcc = orderbookAccumulators.get(timeframe);
+            com.kotsin.consumer.processor.VolumeProfileAccumulator vpAcc = volumeProfileAccumulators.get(timeframe);
 
-            CandleAccumulator rotatedAcc = WindowRotationService.rotateCandleIfNeeded(currentAcc, tickTime, timeframe.getMinutes());
+            // Apply NSE 09:15 anchoring ONLY for 30m timeframe
+            CandleAccumulator rotatedAcc = (isNse && timeframe == Timeframe.THIRTY_MIN)
+                ? WindowRotationService.rotateCandleIfNeeded(currentAcc, tickTime, timeframe.getMinutes(), 15)
+                : WindowRotationService.rotateCandleIfNeeded(currentAcc, tickTime, timeframe.getMinutes());
 
             if (rotatedAcc != currentAcc) {
-                CompletedWindow completed = buildCompletedWindow(currentAcc, microAcc, imbAcc, obAcc);
+                CompletedWindow completed = buildCompletedWindow(currentAcc, microAcc, imbAcc, obAcc, vpAcc);
                 if (completed != null) {
                     completedWindows.computeIfAbsent(timeframe, tf -> new ArrayDeque<>()).addLast(completed);
                 }
@@ -234,9 +242,11 @@ public class InstrumentStateManager {
                 microAcc = new MicrostructureAccumulator();
                 imbAcc = new ImbalanceBarAccumulator();
                 obAcc = new com.kotsin.consumer.processor.OrderbookDepthAccumulator();
+                vpAcc = new com.kotsin.consumer.processor.VolumeProfileAccumulator();
                 microAccumulators.put(timeframe, microAcc);
                 imbAccumulators.put(timeframe, imbAcc);
                 orderbookAccumulators.put(timeframe, obAcc);
+                volumeProfileAccumulators.put(timeframe, vpAcc);
             }
 
             candleAccumulators.put(timeframe, rotatedAcc);
@@ -247,6 +257,9 @@ public class InstrumentStateManager {
             }
             if (imbAcc != null) {
                 imbAcc.addTick(tick);
+            }
+            if (vpAcc != null && tick.getDeltaVolume() != null && tick.getDeltaVolume() > 0) {
+                vpAcc.addTrade(tick.getLastRate(), tick.getDeltaVolume());
             }
         }
     }
@@ -279,8 +292,9 @@ public class InstrumentStateManager {
             MicrostructureAccumulator microAcc = microAccumulators.get(timeframe);
             ImbalanceBarAccumulator imbAcc = imbAccumulators.get(timeframe);
             com.kotsin.consumer.processor.OrderbookDepthAccumulator obAcc = orderbookAccumulators.get(timeframe);
+            com.kotsin.consumer.processor.VolumeProfileAccumulator vpAcc = volumeProfileAccumulators.get(timeframe);
 
-            completed = buildCompletedWindow(accumulator, microAcc, imbAcc, obAcc);
+            completed = buildCompletedWindow(accumulator, microAcc, imbAcc, obAcc, vpAcc);
             if (completed == null) {
                 return null;
             }
@@ -289,12 +303,14 @@ public class InstrumentStateManager {
             microAccumulators.put(timeframe, new MicrostructureAccumulator());
             imbAccumulators.put(timeframe, new ImbalanceBarAccumulator());
             orderbookAccumulators.put(timeframe, new com.kotsin.consumer.processor.OrderbookDepthAccumulator());
+            volumeProfileAccumulators.put(timeframe, new com.kotsin.consumer.processor.VolumeProfileAccumulator());
         }
 
         CandleData candleData = completed.candleData;
         MicrostructureData microstructure = completed.microstructure;
         ImbalanceBarData imbalanceBars = completed.imbalanceBars;
         com.kotsin.consumer.model.OrderbookDepthData windowOrderbook = completed.orderbookDepth;
+        com.kotsin.consumer.model.VolumeProfileData volumeProfile = completed.volumeProfile;
 
         // Merge per-window depth metrics with ongoing global detectors
         com.kotsin.consumer.model.OrderbookDepthData globalDetection = globalOrderbookAccumulator != null ?
@@ -334,6 +350,7 @@ public class InstrumentStateManager {
             .timeframe(timeframe.getLabel())
             .microstructure(microstructure != null && microstructure.isValid() ? microstructure : null)
             .imbalanceBars(imbalanceBars)
+            .volumeProfile(volumeProfile)
             .orderbookDepth(orderbookDepth)
             .build();
     }
@@ -342,7 +359,8 @@ public class InstrumentStateManager {
         CandleAccumulator candleAcc,
         MicrostructureAccumulator microAcc,
         ImbalanceBarAccumulator imbalanceAcc,
-        com.kotsin.consumer.processor.OrderbookDepthAccumulator orderbookAcc
+        com.kotsin.consumer.processor.OrderbookDepthAccumulator orderbookAcc,
+        com.kotsin.consumer.processor.VolumeProfileAccumulator volumeProfileAcc
     ) {
         if (candleAcc == null || candleAcc.getWindowStart() == null || candleAcc.getOpen() == null) {
             return null;
@@ -360,8 +378,10 @@ public class InstrumentStateManager {
         ImbalanceBarData imbalanceBars = imbalanceAcc != null ? imbalanceAcc.toImbalanceBarData() : null;
         com.kotsin.consumer.model.OrderbookDepthData windowOrderbook =
             orderbookAcc != null ? orderbookAcc.toOrderbookDepthData() : null;
+        com.kotsin.consumer.model.VolumeProfileData volumeProfile =
+            volumeProfileAcc != null ? volumeProfileAcc.calculate() : null;
 
-        return new CompletedWindow(candleData, microstructure, imbalanceBars, windowOrderbook);
+        return new CompletedWindow(candleData, microstructure, imbalanceBars, windowOrderbook, volumeProfile);
     }
 
     private static final class CompletedWindow {
@@ -369,17 +389,20 @@ public class InstrumentStateManager {
         private final MicrostructureData microstructure;
         private final ImbalanceBarData imbalanceBars;
         private final com.kotsin.consumer.model.OrderbookDepthData orderbookDepth;
+        private final com.kotsin.consumer.model.VolumeProfileData volumeProfile;
 
         private CompletedWindow(
             CandleData candleData,
             MicrostructureData microstructure,
             ImbalanceBarData imbalanceBars,
-            com.kotsin.consumer.model.OrderbookDepthData orderbookDepth
+            com.kotsin.consumer.model.OrderbookDepthData orderbookDepth,
+            com.kotsin.consumer.model.VolumeProfileData volumeProfile
         ) {
             this.candleData = candleData;
             this.microstructure = microstructure;
             this.imbalanceBars = imbalanceBars;
             this.orderbookDepth = orderbookDepth;
+            this.volumeProfile = volumeProfile;
         }
     }
 
