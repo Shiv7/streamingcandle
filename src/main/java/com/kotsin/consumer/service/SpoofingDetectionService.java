@@ -128,7 +128,8 @@ public class SpoofingDetectionService {
                             .build();
 
                         spoofingEvents.add(event);
-                        log.warn("🚨 Spoofing detected: {} @ {} qty={} duration={}ms",
+                        // Reduce log noise in production; keep event recorded for downstream use
+                        log.debug("Spoofing detected: {} @ {} qty={} duration={}ms",
                             side, price, quantity, duration);
                     }
 
