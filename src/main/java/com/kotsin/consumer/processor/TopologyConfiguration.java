@@ -171,7 +171,9 @@ public class TopologyConfiguration {
 
                 KStream<String, InstrumentCandle> extracted = stateStream
                     .mapValues(state -> state.extractFinalizedCandle(tf))
-                    .filter((k, candle) -> candle != null && candle.isValid());
+                    .filter((k, candle) -> candle != null && candle.isValid())
+                    // Explicit repartition serde to avoid default String serde for InstrumentCandle values
+                    .repartition(Repartitioned.with(Serdes.String(), com.kotsin.consumer.model.InstrumentCandle.serde()));
 
                 KStream<String, InstrumentCandle> withOi = extracted.leftJoin(
                     oiTable,
