@@ -312,10 +312,18 @@ public class TopologyConfiguration {
         );
     }
 
-    private static final class MergedEvent {
-        final TickData tick;
-        final OrderBookSnapshot orderbook;
-        private MergedEvent(TickData tick, OrderBookSnapshot orderbook) { this.tick = tick; this.orderbook = orderbook; }
+    public static class MergedEvent {
+        // Public fields + no-arg ctor to allow Jackson (JsonSerde) to serialize/deserialize via field access
+        public TickData tick;
+        public OrderBookSnapshot orderbook;
+
+        public MergedEvent() {}
+
+        private MergedEvent(TickData tick, OrderBookSnapshot orderbook) {
+            this.tick = tick;
+            this.orderbook = orderbook;
+        }
+
         static MergedEvent trade(TickData t) { return new MergedEvent(t, null); }
         static MergedEvent orderbook(OrderBookSnapshot ob) { return new MergedEvent(null, ob); }
     }
