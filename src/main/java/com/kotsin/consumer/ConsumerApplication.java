@@ -7,7 +7,7 @@ import org.springframework.boot.autoconfigure.SpringBootApplication;
 /**
  * Spring Boot Application to initialize Kafka Streams for various candlestick durations.
  */
-@SpringBootApplication(scanBasePackages = {"com.kotsin.consumer", "com.kotsin.replay"})
+@SpringBootApplication
 public class ConsumerApplication {
 
     public static void main(String[] args) {
