@@ -35,7 +35,7 @@ public class CumToDeltaTransformerTest {
 
         b.addStateStore(Stores.keyValueStoreBuilder(
                 Stores.persistentKeyValueStore(STORE),
-                Serdes.String(), Serdes.Integer()));
+                Serdes.String(), Serdes.Long()));
 
         JsonSerde<TickData> serde = new JsonSerde<>(TickData.class);
 
@@ -83,5 +83,4 @@ public class CumToDeltaTransformerTest {
         assertEquals(0, r3.value.getDeltaVolume());
     }
 }
-
 

@@ -83,6 +83,7 @@ public class TopologyConfiguration {
         KStream<String, TickData> ticksRaw = builder.stream(
             ticksTopic,
             Consumed.with(Serdes.String(), TickData.serde())
+                .withTimestampExtractor(new com.kotsin.consumer.time.MarketAlignedTimestampExtractor())
         );
         KStream<String, TickData> ticks = ticksRaw
             .transform(
@@ -96,6 +97,7 @@ public class TopologyConfiguration {
         KStream<String, OrderBookSnapshot> orderbookStream = builder.stream(
             orderbookTopic,
             Consumed.with(Serdes.String(), OrderBookSnapshot.serde())
+                .withTimestampExtractor(new com.kotsin.consumer.time.MarketAlignedTimestampExtractor())
         );
 
         // OI table by token
@@ -142,7 +144,8 @@ public class TopologyConfiguration {
                                         state.addTick(evt.tick);
                                     }
                                 } catch (Exception e) {
-                                    state.addTick(evt.tick);
+                                    // On validation errors, drop the tick to avoid polluting session data
+                                    log.warn("Trading hours validation error; dropping tick: {}", e.getMessage());
                                 }
                             }
                             if (evt.orderbook != null && evt.orderbook.isValid()) {

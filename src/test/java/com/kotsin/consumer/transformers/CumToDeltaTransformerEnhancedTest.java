@@ -42,7 +42,7 @@ class CumToDeltaTransformerEnhancedTest {
 
         builder.addStateStore(Stores.keyValueStoreBuilder(
             Stores.persistentKeyValueStore(STORE_NAME),
-            Serdes.String(), Serdes.Integer()
+            Serdes.String(), Serdes.Long()
         ));
 
         JsonSerde<TickData> serde = new JsonSerde<>(TickData.class);
@@ -271,4 +271,3 @@ class CumToDeltaTransformerEnhancedTest {
         return tick;
     }
 }
-

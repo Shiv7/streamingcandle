@@ -243,21 +243,27 @@ public class OrderBookSnapshot {
         if (token == null || token.isEmpty()) {
             return false;
         }
-        
-        // Check new format (bids/asks objects)
-        boolean hasNewBids = bids != null && !bids.isEmpty();
-        boolean hasNewAsks = asks != null && !asks.isEmpty();
-        
-        // Check old format (bidRate/bidQty arrays)
-        boolean hasOldBids = bidRate != null && !bidRate.isEmpty() && bidQty != null && !bidQty.isEmpty();
-        boolean hasOldAsks = offRate != null && !offRate.isEmpty() && offQty != null && !offQty.isEmpty();
-        
-        boolean hasLevels = hasNewBids || hasNewAsks || hasOldBids || hasOldAsks;
-        boolean hasTotals = (totalBidQty != null && totalBidQty > 0) || (totalOffQty != null && totalOffQty > 0);
-        
-        if (!hasLevels && !hasTotals) { return false; }
+
+        // Ensure we have a plausible timestamp
         if (receivedTimestamp == null || receivedTimestamp <= 0) { return false; }
-        return true;
+
+        // Consider both new (objects) and old (parallel arrays) formats
+        int bidLevels = 0;
+        int askLevels = 0;
+
+        if (bids != null) bidLevels = Math.max(bidLevels, bids.size());
+        if (asks != null) askLevels = Math.max(askLevels, asks.size());
+
+        if (bidRate != null && bidQty != null) bidLevels = Math.max(bidLevels, Math.min(bidRate.size(), bidQty.size()));
+        if (offRate != null && offQty != null) askLevels = Math.max(askLevels, Math.min(offRate.size(), offQty.size()));
+
+        // Minimum depth threshold (design calls for 20 levels; accept >=5 to be resilient)
+        boolean sufficientDepth = bidLevels >= 5 && askLevels >= 5;
+
+        // Or accept if totals exist as a fallback signal of presence
+        boolean hasTotals = (totalBidQty != null && totalBidQty > 0) || (totalOffQty != null && totalOffQty > 0);
+
+        return sufficientDepth || hasTotals;
     }
 
     /**

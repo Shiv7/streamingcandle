@@ -228,8 +228,8 @@ public class InstrumentStateManager {
             com.kotsin.consumer.processor.OrderbookDepthAccumulator obAcc = orderbookAccumulators.get(timeframe);
             com.kotsin.consumer.processor.VolumeProfileAccumulator vpAcc = volumeProfileAccumulators.get(timeframe);
 
-            // Apply NSE 09:15 anchoring ONLY for 30m timeframe
-            CandleAccumulator rotatedAcc = (isNse && timeframe == Timeframe.THIRTY_MIN)
+            // Apply NSE 09:15 anchoring for ALL timeframes (design: market-aligned windows)
+            CandleAccumulator rotatedAcc = isNse
                 ? WindowRotationService.rotateCandleIfNeeded(currentAcc, tickTime, timeframe.getMinutes(), 15)
                 : WindowRotationService.rotateCandleIfNeeded(currentAcc, tickTime, timeframe.getMinutes());
 
