@@ -131,7 +131,22 @@ public class TopologyConfiguration {
                     .mapValues(MergedEvent::orderbook);
                 KStream<String, MergedEvent> merged = tradeEvents.merge(obEvents);
 
-                KTable<Windowed<String>, InstrumentState> aggregated = merged
+                // Debug: track late arrivals before windowed aggregation
+                String debugStoreName = "debug-stream-time-store-" + tfLabel;
+                builder.addStateStore(
+                    Stores.keyValueStoreBuilder(
+                        Stores.persistentKeyValueStore(debugStoreName),
+                        Serdes.String(),
+                        Serdes.Long()
+                    )
+                );
+
+                KStream<String, MergedEvent> observed = merged.transform(
+                    () -> new DebugLateRecordTransformer(tfLabel, tfGrace * 1000L, debugStoreName),
+                    debugStoreName
+                );
+
+                KTable<Windowed<String>, InstrumentState> aggregated = observed
                     .filter((key, evt) -> evt != null && (evt.tick != null || evt.orderbook != null))
                     .groupByKey(Grouped.with(Serdes.String(), new JsonSerde<>(MergedEvent.class)))
                     .windowedBy(windows)
