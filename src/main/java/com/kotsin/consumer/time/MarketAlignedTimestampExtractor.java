@@ -10,7 +10,7 @@ import org.apache.kafka.streams.processor.TimestampExtractor;
  * This makes Kafka Streams windows start at 09:15-based boundaries rather than wall-clock hours.
  */
 public class MarketAlignedTimestampExtractor implements TimestampExtractor {
-    private static final long OFFSET_MS_15_MIN = 15L * 60L * 1000L;
+    private static final long OFFSET_MS_15_MIN = 15L * 60L * 1000L; // currently unused (market-shift disabled)
 
     @Override
     public long extract(ConsumerRecord<Object, Object> record, long partitionTime) {
@@ -30,11 +30,7 @@ public class MarketAlignedTimestampExtractor implements TimestampExtractor {
             if (vts > 0) ts = vts;
         }
 
-        // Apply 15-minute offset for NSE (exchange code "N")
-        if (exch != null && exch.equalsIgnoreCase("N")) {
-            return ts - OFFSET_MS_15_MIN;
-        }
+        // Market-aligned shift disabled for now — return raw event-time
         return ts;
     }
 }
-
