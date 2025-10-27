@@ -24,7 +24,7 @@ public class TradingHoursValidationService {
      * Check if tick is within trading hours for its exchange
      */
     public boolean withinTradingHours(TickData tick) {
-       /* try {
+        try {
             long ts = tick.getTimestamp();
             if (ts <= 0) {
                 log.warn("⚠️ Invalid timestamp (<=0) for token {}", tick.getToken());
@@ -50,7 +50,6 @@ public class TradingHoursValidationService {
         } catch (Exception e) {
             log.warn("⚠️ Invalid timestamp for token {}: {}", tick.getToken(), e.toString());
             return false;
-        }*/
-    return true;
+        }
     }
 }
