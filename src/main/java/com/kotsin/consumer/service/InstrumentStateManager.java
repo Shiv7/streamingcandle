@@ -316,11 +316,8 @@ public class InstrumentStateManager {
                     return null;
                 }
                 
-                // Reset accumulators
-                microAccumulators.put(timeframe, new MicrostructureAccumulator());
-                imbAccumulators.put(timeframe, new ImbalanceBarAccumulator());
-                orderbookAccumulators.put(timeframe, new com.kotsin.consumer.processor.OrderbookDepthAccumulator());
-                volumeProfileAccumulators.put(timeframe, new com.kotsin.consumer.processor.VolumeProfileAccumulator());
+                // DON'T reset accumulators here! Each Kafka Streams window has its own state instance.
+                // Resetting here causes data loss because Kafka might save the reset state.
                 
                 // Build and return orderbook-only candle
                 return buildOrderbookOnlyCandle(completed, timeframe);
@@ -343,11 +340,8 @@ public class InstrumentStateManager {
                 return null;
             }
 
-            candleAccumulators.put(timeframe, new CandleAccumulator());
-            microAccumulators.put(timeframe, new MicrostructureAccumulator());
-            imbAccumulators.put(timeframe, new ImbalanceBarAccumulator());
-            orderbookAccumulators.put(timeframe, new com.kotsin.consumer.processor.OrderbookDepthAccumulator());
-            volumeProfileAccumulators.put(timeframe, new com.kotsin.consumer.processor.VolumeProfileAccumulator());
+            // DON'T reset accumulators here! Each Kafka Streams window has its own state instance.
+            // Resetting here causes data loss because Kafka might save the reset state.
         }
 
         CandleData candleData = completed.candleData;
