@@ -59,10 +59,12 @@ public class TopologyConfiguration {
     @Value("${unified.streams.window.grace.period.seconds:10}")
     private int gracePeriodSeconds;
 
-    public StreamsBuilder createInstrumentTopology() {
-        log.info("🗃️ Building SIMPLE 3-STREAM ARCHITECTURE (no merging, no joins)");
-        Properties props = kafkaConfig.getStreamProperties(appIdPrefix + "-instrument");
-        props.put("auto.offset.reset", "earliest");
+    /**
+     * CONSUMER 1: Ticks → OHLCV Candles
+     * Independent consumer with its own application-id and state stores
+     */
+    public StreamsBuilder createTicksTopology() {
+        log.info("📊 Building Ticks Consumer (independent)");
         StreamsBuilder builder = new StreamsBuilder();
 
         if (!candlesOutputEnabled) {
@@ -70,15 +72,41 @@ public class TopologyConfiguration {
             return builder;
         }
 
-        // Stream 1: Ticks → OHLCV Candles
         buildTickStream(builder);
+        return builder;
+    }
 
-        // Stream 2: Orderbook → Orderbook Signals
+    /**
+     * CONSUMER 2: Orderbook → Orderbook Signals
+     * Independent consumer with its own application-id and state stores
+     */
+    public StreamsBuilder createOrderbookTopology() {
+        log.info("📖 Building Orderbook Consumer (independent)");
+        StreamsBuilder builder = new StreamsBuilder();
+
+        if (!candlesOutputEnabled) {
+            log.warn("⚠️ Candle outputs disabled via configuration");
+            return builder;
+        }
+
         buildOrderbookStream(builder);
+        return builder;
+    }
 
-        // Stream 3: OI → OI Metrics
+    /**
+     * CONSUMER 3: OI → OI Metrics
+     * Independent consumer with its own application-id and state stores
+     */
+    public StreamsBuilder createOITopology() {
+        log.info("💰 Building OI Consumer (independent)");
+        StreamsBuilder builder = new StreamsBuilder();
+
+        if (!candlesOutputEnabled) {
+            log.warn("⚠️ Candle outputs disabled via configuration");
+            return builder;
+        }
+
         buildOIStream(builder);
-
         return builder;
     }
 

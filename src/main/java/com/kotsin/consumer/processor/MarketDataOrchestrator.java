@@ -27,15 +27,22 @@ public class MarketDataOrchestrator {
     private final Map<String, KafkaStreams> streamsInstances = new ConcurrentHashMap<>();
     
     /**
-     * Start all processing streams
+     * Start all processing streams (3 independent consumers)
      */
     public void startAllStreams() {
-        log.info("🚀 Starting all market data processing streams");
-        
+        log.info("🚀 Starting 3 INDEPENDENT market data processing streams");
+
         try {
-            // Start per-instrument candle stream FIRST
-            startInstrumentStream();
-            log.info("✅ All streams started successfully");
+            // Consumer 1: Ticks → OHLCV Candles
+            startTicksStream();
+
+            // Consumer 2: Orderbook → Orderbook Signals
+            startOrderbookStream();
+
+            // Consumer 3: OI → OI Metrics
+            startOIStream();
+
+            log.info("✅ All 3 independent streams started successfully");
         } catch (Exception e) {
             log.error("❌ Failed to start streams", e);
             throw new RuntimeException("Failed to start market data streams", e);
@@ -43,24 +50,76 @@ public class MarketDataOrchestrator {
     }
 
     /**
-     * Start per-instrument candle generation stream
+     * CONSUMER 1: Ticks → OHLCV Candles
+     * Input: forwardtesting-data
+     * Output: candle-ohlcv-{1m,2m,3m,5m,15m,30m}
      */
-    public void startInstrumentStream() {
-        String instanceKey = "instrument-stream";
-        
+    public void startTicksStream() {
+        String instanceKey = "ticks-stream";
+
         if (streamsInstances.containsKey(instanceKey)) {
-            log.warn("⚠️ Instrument stream already running. Skipping duplicate start.");
+            log.warn("⚠️ Ticks stream already running. Skipping duplicate start.");
             return;
         }
 
         try {
-            StreamsBuilder builder = topologyConfig.createInstrumentTopology();
-            KafkaStreams streams = new KafkaStreams(builder.build(), kafkaConfig.getStreamProperties("instrument"));
+            StreamsBuilder builder = topologyConfig.createTicksTopology();
+            KafkaStreams streams = new KafkaStreams(builder.build(), kafkaConfig.getStreamProperties("ticks-consumer"));
             streamsInstances.put(instanceKey, streams);
             streams.start();
-            log.info("✅ Started per-instrument candle stream");
+            log.info("✅ Started TICKS consumer (candle-ohlcv-*)");
         } catch (Exception e) {
-            log.error("❌ Failed to start instrument stream", e);
+            log.error("❌ Failed to start ticks stream", e);
+            throw e;
+        }
+    }
+
+    /**
+     * CONSUMER 2: Orderbook → Orderbook Signals
+     * Input: Orderbook
+     * Output: orderbook-signals-{1m,2m,3m,5m,15m,30m}
+     */
+    public void startOrderbookStream() {
+        String instanceKey = "orderbook-stream";
+
+        if (streamsInstances.containsKey(instanceKey)) {
+            log.warn("⚠️ Orderbook stream already running. Skipping duplicate start.");
+            return;
+        }
+
+        try {
+            StreamsBuilder builder = topologyConfig.createOrderbookTopology();
+            KafkaStreams streams = new KafkaStreams(builder.build(), kafkaConfig.getStreamProperties("orderbook-consumer"));
+            streamsInstances.put(instanceKey, streams);
+            streams.start();
+            log.info("✅ Started ORDERBOOK consumer (orderbook-signals-*)");
+        } catch (Exception e) {
+            log.error("❌ Failed to start orderbook stream", e);
+            throw e;
+        }
+    }
+
+    /**
+     * CONSUMER 3: OI → OI Metrics
+     * Input: OpenInterest
+     * Output: oi-metrics-{1m,2m,3m,5m,15m,30m}
+     */
+    public void startOIStream() {
+        String instanceKey = "oi-stream";
+
+        if (streamsInstances.containsKey(instanceKey)) {
+            log.warn("⚠️ OI stream already running. Skipping duplicate start.");
+            return;
+        }
+
+        try {
+            StreamsBuilder builder = topologyConfig.createOITopology();
+            KafkaStreams streams = new KafkaStreams(builder.build(), kafkaConfig.getStreamProperties("oi-consumer"));
+            streamsInstances.put(instanceKey, streams);
+            streams.start();
+            log.info("✅ Started OI consumer (oi-metrics-*)");
+        } catch (Exception e) {
+            log.error("❌ Failed to start OI stream", e);
             throw e;
         }
     }

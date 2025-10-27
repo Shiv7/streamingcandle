@@ -3,11 +3,25 @@
 ## Issue 1: Cross-Stream Late Records (Original Problem)
 **Problem:** Orderbook timestamps advancing stream time, causing ticks to be dropped as "late"
 
-**Solution:** SIMPLE 3-STREAM ARCHITECTURE (No merging, no joins, no intermediate topics)
-- Stream 1: Ticks → OHLCV Candles (6 output topics)
-- Stream 2: Orderbook → Orderbook Signals (6 output topics)
-- Stream 3: OI → OI Metrics (6 output topics)
-- **No joins, no merging** - consumers can merge data if needed
+**Solution:** 3 INDEPENDENT CONSUMERS (No merging, no joins, no shared state)
+- **Consumer 1:** Ticks → OHLCV Candles (6 output topics)
+  - Application ID: `ticks-consumer`
+  - Input: `forwardtesting-data`
+  - Output: `candle-ohlcv-{1m,2m,3m,5m,15m,30m}`
+
+- **Consumer 2:** Orderbook → Orderbook Signals (6 output topics)
+  - Application ID: `orderbook-consumer`
+  - Input: `Orderbook`
+  - Output: `orderbook-signals-{1m,2m,3m,5m,15m,30m}`
+
+- **Consumer 3:** OI → OI Metrics (6 output topics)
+  - Application ID: `oi-consumer`
+  - Input: `OpenInterest`
+  - Output: `oi-metrics-{1m,2m,3m,5m,15m,30m}`
+
+- **No cross-stream interaction** - each consumer runs independently
+- **No shared state stores** - complete isolation
+- Downstream consumers can merge data if needed
 
 **Status:** ✅ Fixed
 
@@ -126,10 +140,12 @@ Failed to append record because it was part of a batch which had invalid records
 
 ## Expected Result
 
+✅ 3 independent consumers running with separate application IDs
 ✅ OHLCV candles emitted to 6 topics without late record issues
 ✅ Orderbook signals emitted to 6 topics independently
 ✅ OI metrics emitted to 6 topics independently
-✅ No cross-stream lateness issues (streams are independent)
+✅ No cross-stream lateness issues (consumers are isolated)
+✅ No shared state stores (complete isolation)
 ✅ No serialization issues (uses existing InstrumentState)
-✅ Single-threaded processing stable
-✅ Consumers can merge data from 3 streams if needed
+✅ Each consumer can scale independently
+✅ Downstream consumers can merge data from 3 streams if needed
