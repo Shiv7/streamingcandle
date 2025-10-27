@@ -157,8 +157,9 @@ public class TopologyConfiguration {
 
         log.info("  [{}] Ticks → OHLCV → {}", tfLabel, outputTopic);
 
+        // CRITICAL FIX: Window size must match the timeframe!
         TimeWindows windows = TimeWindows.ofSizeAndGrace(
-            Duration.ofMinutes(1),
+            Duration.ofMinutes(tf.getMinutes()),  // Use timeframe duration!
             Duration.ofSeconds(gracePeriodSeconds)
         );
 
@@ -243,8 +244,9 @@ public class TopologyConfiguration {
 
         log.info("  [{}] Orderbook → Signals → {}", tfLabel, outputTopic);
 
+        // CRITICAL FIX: Window size must match the timeframe!
         TimeWindows windows = TimeWindows.ofSizeAndGrace(
-            Duration.ofMinutes(1),
+            Duration.ofMinutes(tf.getMinutes()),  // Use timeframe duration!
             Duration.ofSeconds(gracePeriodSeconds)
         );
 
@@ -274,9 +276,16 @@ public class TopologyConfiguration {
             })
             .selectKey((windowedKey, candle) -> windowedKey.key())
             .filter((k, candle) -> {
-                // For orderbook stream, we don't need candle data (OHLCV)
-                // Just check if we have orderbook data
-                return candle != null;  // Don't filter out - let buildOrderbookMessage handle it
+                // CRITICAL: Only emit if orderbook data is actually present AND recent
+                if (candle == null || candle.getOrderbookDepth() == null) {
+                    return false;
+                }
+                // Check if orderbook data has a valid timestamp within reasonable range
+                Long obTimestamp = candle.getOrderbookDepth().getTimestamp();
+                if (obTimestamp == null) {
+                    return false; // No timestamp = old/stale data
+                }
+                return true; // Has orderbook depth data with timestamp
             })
             .mapValues(candle -> buildOrderbookMessage(candle, tfLabel))
             .filter((k, msg) -> msg != null && msg.getOrderbookSignals() != null)  // Filter AFTER building message
@@ -328,8 +337,9 @@ public class TopologyConfiguration {
 
         log.info("  [{}] OI → Metrics → {}", tfLabel, outputTopic);
 
+        // CRITICAL FIX: Window size must match the timeframe!
         TimeWindows windows = TimeWindows.ofSizeAndGrace(
-            Duration.ofMinutes(1),
+            Duration.ofMinutes(tf.getMinutes()),  // Use timeframe duration!
             Duration.ofSeconds(gracePeriodSeconds * 3)  // OI updates slower
         );
 
@@ -346,6 +356,19 @@ public class TopologyConfiguration {
             )
             .suppress(Suppressed.untilWindowCloses(Suppressed.BufferConfig.unbounded()))
             .toStream()
+            .filter((windowedKey, oiData) -> {
+                // CRITICAL: Only emit if we actually received OI data in THIS window
+                // Check if OI timestamp falls within the window
+                if (oiData == null || oiData.getReceivedTimestamp() == null) {
+                    return false;
+                }
+                long windowStart = windowedKey.window().start();
+                long windowEnd = windowedKey.window().end();
+                long oiTimestamp = oiData.getReceivedTimestamp();
+                // Only emit if OI data is within this window (with grace period tolerance)
+                long tolerance = gracePeriodSeconds * 3 * 1000L; // Use same grace as OI window
+                return oiTimestamp >= windowStart && oiTimestamp <= windowEnd + tolerance;
+            })
             .mapValues((windowedKey, oiData) -> {
                 // Pass window times to builder
                 long windowStart = windowedKey.window().start();
