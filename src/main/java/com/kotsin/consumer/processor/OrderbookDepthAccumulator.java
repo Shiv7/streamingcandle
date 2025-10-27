@@ -41,7 +41,7 @@ public class OrderbookDepthAccumulator {
     private OrderBookSnapshot currentOrderbook;
     private OrderBookSnapshot previousOrderbook;
     private Long lastUpdateTimestamp;
-    @JsonIgnore
+    // CRITICAL: Don't mark as @JsonIgnore! Kafka Streams needs to serialize this
     private SnapshotMetrics lastMetrics;
 
     // Serializable accumulated values (sum + count for averaging)
@@ -101,6 +101,7 @@ public class OrderbookDepthAccumulator {
 
     public void addOrderbook(OrderBookSnapshot orderbook) {
         if (orderbook == null || !orderbook.isValid()) {
+            log.warn("⚠️ OrderbookDepthAccumulator: Invalid orderbook, skipping");
             return;
         }
 
@@ -112,6 +113,9 @@ public class OrderbookDepthAccumulator {
         SnapshotMetrics metrics = analyzeSnapshot(orderbook);
         lastMetrics = metrics;
         accumulateMetrics(metrics);
+        
+        log.debug("✅ OrderbookDepthAccumulator: Added orderbook, sampleCount={}, spread={}, bidDepth={}, askDepth={}", 
+            sampleCount, metrics.spread, metrics.totalBidDepth, metrics.totalAskDepth);
 
         // Delegate to specialized services (using lazy getters)
         if (previousOrderbook != null) {
@@ -219,13 +223,20 @@ public class OrderbookDepthAccumulator {
     }
 
     public OrderbookDepthData toOrderbookDepthData() {
+        log.debug("📊 OrderbookDepthAccumulator.toOrderbookDepthData(): sampleCount={}, lastMetrics={}", 
+            sampleCount, lastMetrics != null ? "present" : "null");
+        
         if (sampleCount == 0 || lastMetrics == null) {
+            log.warn("⚠️ OrderbookDepthAccumulator: No data to output (sampleCount={}, lastMetrics={})", 
+                sampleCount, lastMetrics != null ? "present" : "null");
             return OrderbookDepthData.builder()
                 .isComplete(false)
                 .build();
         }
 
         try {
+            log.debug("📊 Computing averages: spreadCount={}, bidDepthCount={}, askDepthCount={}", 
+                spreadCount, totalBidDepthCount, totalAskDepthCount);
             Boolean icebergBid = getIcebergService().detectIcebergBid();
             Boolean icebergAsk = getIcebergService().detectIcebergAsk();
             Double icebergProbBid = getIcebergService().calculateIcebergProbabilityBid();
@@ -273,6 +284,9 @@ public class OrderbookDepthAccumulator {
         }
     }
 
+    @lombok.Data
+    @lombok.NoArgsConstructor
+    @lombok.AllArgsConstructor
     private static class SnapshotMetrics {
         private List<OrderbookDepthData.DepthLevel> bidProfile;
         private List<OrderbookDepthData.DepthLevel> askProfile;

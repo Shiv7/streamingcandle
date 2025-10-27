@@ -437,6 +437,7 @@ public class TopologyConfiguration {
                 .icebergAsk(depth.getIcebergDetectedAsk())
                 .spoofingCount(depth.getSpoofingCountLast1Min())
                 .build())
+            // Don't include candle, imbalanceBars, openInterest, volumeProfile for orderbook-only
             .build();
     }
 
