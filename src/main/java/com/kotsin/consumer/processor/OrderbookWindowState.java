@@ -13,7 +13,7 @@ import lombok.extern.slf4j.Slf4j;
 @Slf4j
 public class OrderbookWindowState {
 
-    private final OrderbookDepthAccumulator orderbookAccumulator = new OrderbookDepthAccumulator();
+    private OrderbookDepthAccumulator orderbookAccumulator;
 
     // Basic instrument info (set from first orderbook)
     private String scripCode;
@@ -21,6 +21,11 @@ public class OrderbookWindowState {
     // Window info
     private Long windowStartMillis;
     private Long windowEndMillis;
+
+    // Default constructor for Jackson
+    public OrderbookWindowState() {
+        this.orderbookAccumulator = new OrderbookDepthAccumulator();
+    }
 
     public void addOrderbook(OrderBookSnapshot orderbook) {
         if (scripCode == null && orderbook.getToken() != null) {

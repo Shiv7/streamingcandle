@@ -1,5 +1,7 @@
 package com.kotsin.consumer.processor;
 
+import com.fasterxml.jackson.annotation.JsonCreator;
+import com.fasterxml.jackson.annotation.JsonProperty;
 import com.kotsin.consumer.model.*;
 import com.kotsin.consumer.monitoring.Timeframe;
 import lombok.Data;
@@ -13,9 +15,9 @@ import lombok.extern.slf4j.Slf4j;
 @Slf4j
 public class TickWindowState {
 
-    private final CandleAccumulator candleAccumulator = new CandleAccumulator();
-    private final MicrostructureAccumulator microAccumulator = new MicrostructureAccumulator();
-    private final ImbalanceBarAccumulator imbalanceAccumulator = new ImbalanceBarAccumulator();
+    private CandleAccumulator candleAccumulator;
+    private MicrostructureAccumulator microAccumulator;
+    private ImbalanceBarAccumulator imbalanceAccumulator;
 
     // Basic instrument info (set from first tick)
     private String scripCode;
@@ -26,6 +28,13 @@ public class TickWindowState {
     // Window info
     private Long windowStartMillis;
     private Long windowEndMillis;
+
+    // Default constructor for Jackson
+    public TickWindowState() {
+        this.candleAccumulator = new CandleAccumulator();
+        this.microAccumulator = new MicrostructureAccumulator();
+        this.imbalanceAccumulator = new ImbalanceBarAccumulator();
+    }
 
     public void addTick(TickData tick) {
         if (scripCode == null) {
