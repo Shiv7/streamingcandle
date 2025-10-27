@@ -140,8 +140,7 @@ public class TopologyConfiguration {
             )
             .filter((key, tick) -> tick != null && tick.getDeltaVolume() != null)
             .filter((key, tick) -> !Boolean.TRUE.equals(tick.getResetFlag()));
-            // REMOVED selectKey - assuming source topic is already keyed by scripCode
-            // If not, you'll need to add it back
+            // NO selectKey needed - forwardtesting-data topic is already keyed by token
 
         // Build candles for each timeframe
         for (Timeframe tf : Timeframe.values()) {
@@ -300,11 +299,23 @@ public class TopologyConfiguration {
             Consumed.with(Serdes.String(), OpenInterest.serde())
         );
 
-        // REMOVED selectKey - assuming source topic is already keyed by token
-        // If not, add back: .selectKey((k, oi) -> String.valueOf(oi.getToken()))
+        // Extract token from composite key (e.g., "N|52343" -> "52343")
+        // OpenInterest topic uses same key format as Orderbook: exch|token
+        KStream<String, OpenInterest> oiKeyed = oiStream
+            .selectKey((k, oi) -> {
+                if (oi != null && oi.getToken() != 0) {
+                    return String.valueOf(oi.getToken());
+                }
+                // If key is in format "N|52343", extract token part
+                if (k != null && k.contains("|")) {
+                    String[] parts = k.split("\\|");
+                    return parts.length > 1 ? parts[1] : k;
+                }
+                return k;
+            });
 
         for (Timeframe tf : Timeframe.values()) {
-            buildOIMetrics(builder, oiStream, tf);
+            buildOIMetrics(builder, oiKeyed, tf);
         }
     }
 
@@ -335,9 +346,14 @@ public class TopologyConfiguration {
             )
             .suppress(Suppressed.untilWindowCloses(Suppressed.BufferConfig.unbounded()))
             .toStream()
-            .selectKey((windowedKey, oiData) -> windowedKey.key())
-            .filter((k, oiData) -> oiData != null)
-            .mapValues((k, oiData) -> buildOIMessage(oiData, tfLabel))
+            .mapValues((windowedKey, oiData) -> {
+                // Pass window times to builder
+                long windowStart = windowedKey.window().start();
+                long windowEnd = windowedKey.window().end();
+                return buildOIMessage(oiData, tfLabel, windowStart, windowEnd);
+            })
+            .selectKey((windowedKey, msg) -> windowedKey.key())
+            .filter((k, msg) -> msg != null)
             .peek((k, msg) -> {
                 log.info("📤 [{}] OI emitted: scrip={} oi={}", tfLabel, k,
                     msg.getOpenInterest() != null ? msg.getOpenInterest().getOiClose() : null);
@@ -347,7 +363,7 @@ public class TopologyConfiguration {
     }
 
     /**
-     * Build OHLCV-only message
+     * Build OHLCV-only message (includes OHLCV + imbalanceBars + volumeProfile)
      */
     private UnifiedWindowMessage buildCandleMessage(InstrumentCandle candle, String tfLabel) {
         return UnifiedWindowMessage.builder()
@@ -373,6 +389,7 @@ public class TopologyConfiguration {
                 .isComplete(candle.getIsComplete())
                 .build())
             .imbalanceBars(candle.getImbalanceBars())
+            .volumeProfile(candle.getVolumeProfile())
             .build();
     }
 
@@ -380,11 +397,24 @@ public class TopologyConfiguration {
      * Build Orderbook-only message
      */
     private UnifiedWindowMessage buildOrderbookMessage(InstrumentCandle candle, String tfLabel) {
+        if (candle == null) {
+            return null;
+        }
+        
         OrderbookDepthData depth = candle.getOrderbookDepth();
         MicrostructureData micro = candle.getMicrostructure();
+        
+        // Only build message if we have orderbook data
+        if (depth == null) {
+            log.debug("⚠️ No orderbook depth data for scripCode={}", candle.getScripCode());
+            return null;
+        }
 
         return UnifiedWindowMessage.builder()
             .scripCode(candle.getScripCode())
+            .companyName(candle.getCompanyName())
+            .exchange(candle.getExchange())
+            .exchangeType(candle.getExchangeType())
             .timeframe(tfLabel)
             .windowStartMillis(candle.getWindowStartMillis())
             .windowEndMillis(candle.getWindowEndMillis())
@@ -396,29 +426,34 @@ public class TopologyConfiguration {
                 .depthSellImbalanced(micro != null ? micro.isDepthSellImbalanced() : null)
                 .spreadLevel(micro != null ? micro.getSpreadLevel() : null)
                 .ofi(micro != null ? micro.getOfi() : null)
-                .depthImbalance(depth != null ? depth.getWeightedDepthImbalance() : null)
-                .spreadAvg(depth != null ? depth.getSpread() : null)
-                .bidDepthSum(depth != null ? depth.getTotalBidDepth() : null)
-                .askDepthSum(depth != null ? depth.getTotalAskDepth() : null)
-                .bidVWAP(depth != null ? depth.getBidVWAP() : null)
-                .askVWAP(depth != null ? depth.getAskVWAP() : null)
-                .microprice(depth != null ? depth.getMidPrice() : null)
-                .icebergBid(depth != null ? depth.getIcebergDetectedBid() : null)
-                .icebergAsk(depth != null ? depth.getIcebergDetectedAsk() : null)
-                .spoofingCount(depth != null ? depth.getSpoofingCountLast1Min() : null)
+                .depthImbalance(depth.getWeightedDepthImbalance())
+                .spreadAvg(depth.getSpread())
+                .bidDepthSum(depth.getTotalBidDepth())
+                .askDepthSum(depth.getTotalAskDepth())
+                .bidVWAP(depth.getBidVWAP())
+                .askVWAP(depth.getAskVWAP())
+                .microprice(depth.getMidPrice())
+                .icebergBid(depth.getIcebergDetectedBid())
+                .icebergAsk(depth.getIcebergDetectedAsk())
+                .spoofingCount(depth.getSpoofingCountLast1Min())
                 .build())
             .build();
     }
 
     /**
-     * Build OI-only message
+     * Build OI-only message with proper window times
      */
-    private UnifiedWindowMessage buildOIMessage(OpenInterest oi, String tfLabel) {
+    private UnifiedWindowMessage buildOIMessage(OpenInterest oi, String tfLabel, long windowStart, long windowEnd) {
         return UnifiedWindowMessage.builder()
             .scripCode(String.valueOf(oi.getToken()))
+            .companyName(oi.getCompanyName())
+            .exchange(oi.getExchange())
+            .exchangeType(oi.getExchangeType())
             .timeframe(tfLabel)
-            .windowStartMillis(oi.getReceivedTimestamp())
-            .windowEndMillis(oi.getReceivedTimestamp())
+            .windowStartMillis(windowStart)
+            .windowEndMillis(windowEnd)
+            .startTimeIST(UnifiedWindowMessage.toIstString(windowStart))
+            .endTimeIST(UnifiedWindowMessage.toIstString(windowEnd))
             .openInterest(UnifiedWindowMessage.OpenInterestSection.builder()
                 .oiClose(oi.getOpenInterest())
                 .oiChange(oi.getOiChange())

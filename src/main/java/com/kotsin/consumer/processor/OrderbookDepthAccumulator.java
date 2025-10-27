@@ -105,6 +105,13 @@ public class OrderbookDepthAccumulator {
 
         trackIcebergPatterns(orderbook);
     }
+    
+    /**
+     * Check if this accumulator has received any orderbook data
+     */
+    public boolean hasData() {
+        return currentOrderbook != null || sampleCount > 0;
+    }
 
     private void accumulateMetrics(SnapshotMetrics metrics) {
         sampleCount++;

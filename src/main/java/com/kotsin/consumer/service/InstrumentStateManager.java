@@ -114,6 +114,15 @@ public class InstrumentStateManager {
             return;
         }
         
+        // Initialize instrument info from orderbook if not yet set
+        if (scripCode == null && orderbook.getToken() != null) {
+            scripCode = String.valueOf(orderbook.getToken());
+            companyName = orderbook.getCompanyName();
+            exchange = orderbook.getExch();
+            exchangeType = orderbook.getExchType();
+            log.debug("📝 Initialized instrument from orderbook: scripCode={} name={}", scripCode, companyName);
+        }
+        
         log.debug("✅ OB ADD to manager: scripCode={} token={} bids={} asks={}", 
             scripCode, orderbook.getToken(), 
             orderbook.getBids() != null ? orderbook.getBids().size() : 0,
@@ -273,6 +282,7 @@ public class InstrumentStateManager {
 
     /**
      * Extract finalized candle for a specific timeframe
+     * Now supports orderbook-only extraction (no tick data required)
      */
     public InstrumentCandle extractFinalizedCandle(Timeframe timeframe) {
         Deque<CompletedWindow> queue = completedWindows.get(timeframe);
@@ -280,6 +290,43 @@ public class InstrumentStateManager {
 
         if (completed == null) {
             CandleAccumulator accumulator = candleAccumulators.get(timeframe);
+            
+            // Check if we have any data at all (ticks OR orderbook)
+            com.kotsin.consumer.processor.OrderbookDepthAccumulator obAcc = orderbookAccumulators.get(timeframe);
+            boolean hasTickData = accumulator != null && accumulator.getOpen() != null;
+            boolean hasOrderbookData = obAcc != null && obAcc.hasData();
+            
+            if (!hasTickData && !hasOrderbookData) {
+                // No data at all - skip
+                return null;
+            }
+            
+            // For orderbook-only: we don't require accumulator.isComplete() or accumulator.getOpen()
+            // We'll build a minimal candle with just orderbook data
+            if (!hasTickData && hasOrderbookData) {
+                log.debug("📖 Orderbook-only window for scripCode={} timeframe={}", scripCode, timeframe.getLabel());
+                
+                MicrostructureAccumulator microAcc = microAccumulators.get(timeframe);
+                ImbalanceBarAccumulator imbAcc = imbAccumulators.get(timeframe);
+                com.kotsin.consumer.processor.VolumeProfileAccumulator vpAcc = volumeProfileAccumulators.get(timeframe);
+                
+                // Build orderbook-only completed window (no candle data)
+                completed = buildOrderbookOnlyWindow(obAcc, microAcc, imbAcc, vpAcc);
+                if (completed == null) {
+                    return null;
+                }
+                
+                // Reset accumulators
+                microAccumulators.put(timeframe, new MicrostructureAccumulator());
+                imbAccumulators.put(timeframe, new ImbalanceBarAccumulator());
+                orderbookAccumulators.put(timeframe, new com.kotsin.consumer.processor.OrderbookDepthAccumulator());
+                volumeProfileAccumulators.put(timeframe, new com.kotsin.consumer.processor.VolumeProfileAccumulator());
+                
+                // Build and return orderbook-only candle
+                return buildOrderbookOnlyCandle(completed, timeframe);
+            }
+            
+            // Standard tick-based processing
             if (accumulator == null ||
                 !accumulator.isComplete() ||
                 accumulator.getWindowStart() == null ||
@@ -289,7 +336,6 @@ public class InstrumentStateManager {
 
             MicrostructureAccumulator microAcc = microAccumulators.get(timeframe);
             ImbalanceBarAccumulator imbAcc = imbAccumulators.get(timeframe);
-            com.kotsin.consumer.processor.OrderbookDepthAccumulator obAcc = orderbookAccumulators.get(timeframe);
             com.kotsin.consumer.processor.VolumeProfileAccumulator vpAcc = volumeProfileAccumulators.get(timeframe);
 
             completed = buildCompletedWindow(accumulator, microAcc, imbAcc, obAcc, vpAcc);
@@ -325,30 +371,107 @@ public class InstrumentStateManager {
             .expiry(expiry)
             .strikePrice(strikePrice)
             .optionType(optionType)
-            .open(candleData.getOpen())
-            .high(candleData.getHigh())
-            .low(candleData.getLow())
-            .close(candleData.getClose())
-            .volume(candleData.getVolume())
-            .buyVolume(candleData.getBuyVolume())
-            .sellVolume(candleData.getSellVolume())
-            .volumeDelta(candleData.getVolumeDelta())
-            .volumeDeltaPercent(candleData.getVolumeDeltaPercent())
-            .vwap(candleData.getVwap())
-            .hlc3((candleData.getHigh() != null && candleData.getLow() != null && candleData.getClose() != null)
+            .open(candleData != null ? candleData.getOpen() : null)
+            .high(candleData != null ? candleData.getHigh() : null)
+            .low(candleData != null ? candleData.getLow() : null)
+            .close(candleData != null ? candleData.getClose() : null)
+            .volume(candleData != null ? candleData.getVolume() : null)
+            .buyVolume(candleData != null ? candleData.getBuyVolume() : null)
+            .sellVolume(candleData != null ? candleData.getSellVolume() : null)
+            .volumeDelta(candleData != null ? candleData.getVolumeDelta() : null)
+            .volumeDeltaPercent(candleData != null ? candleData.getVolumeDeltaPercent() : null)
+            .vwap(candleData != null ? candleData.getVwap() : null)
+            .hlc3((candleData != null && candleData.getHigh() != null && candleData.getLow() != null && candleData.getClose() != null)
                 ? (candleData.getHigh() + candleData.getLow() + candleData.getClose()) / 3.0
                 : null)
-            .tickCount(candleData.getTickCount())
-            .windowStartMillis(candleData.getWindowStart())
-            .windowEndMillis(candleData.getWindowEnd())
-            .isComplete(candleData.getIsComplete())
-            .humanReadableStartTime(formatTimestamp(candleData.getWindowStart()))
-            .humanReadableEndTime(formatTimestamp(candleData.getWindowEnd()))
+            .tickCount(candleData != null ? candleData.getTickCount() : null)
+            .windowStartMillis(candleData != null ? candleData.getWindowStart() : null)
+            .windowEndMillis(candleData != null ? candleData.getWindowEnd() : null)
+            .isComplete(candleData != null ? candleData.getIsComplete() : null)
+            .humanReadableStartTime(candleData != null ? formatTimestamp(candleData.getWindowStart()) : null)
+            .humanReadableEndTime(candleData != null ? formatTimestamp(candleData.getWindowEnd()) : null)
             .processingTimestamp(System.currentTimeMillis())
             .timeframe(timeframe.getLabel())
             .microstructure(microstructure != null && microstructure.isValid() ? microstructure : null)
             .imbalanceBars(imbalanceBars)
             .volumeProfile(volumeProfile)
+            .orderbookDepth(orderbookDepth)
+            .build();
+    }
+    
+    /**
+     * Build orderbook-only completed window (no tick/candle data)
+     */
+    private CompletedWindow buildOrderbookOnlyWindow(
+        com.kotsin.consumer.processor.OrderbookDepthAccumulator orderbookAcc,
+        MicrostructureAccumulator microAcc,
+        ImbalanceBarAccumulator imbalanceAcc,
+        com.kotsin.consumer.processor.VolumeProfileAccumulator volumeProfileAcc
+    ) {
+        if (orderbookAcc == null || !orderbookAcc.hasData()) {
+            return null;
+        }
+        
+        MicrostructureData microstructure = null;
+        if (microAcc != null) {
+            microAcc.markComplete();
+            // For orderbook-only, use current time as window times
+            long now = System.currentTimeMillis();
+            microstructure = microAcc.toMicrostructureData(now, now);
+        }
+        
+        ImbalanceBarData imbalanceBars = imbalanceAcc != null ? imbalanceAcc.toImbalanceBarData() : null;
+        com.kotsin.consumer.model.OrderbookDepthData windowOrderbook = orderbookAcc.toOrderbookDepthData();
+        com.kotsin.consumer.model.VolumeProfileData volumeProfile =
+            volumeProfileAcc != null ? volumeProfileAcc.calculate() : null;
+        
+        return new CompletedWindow(null, microstructure, imbalanceBars, windowOrderbook, volumeProfile);
+    }
+    
+    /**
+     * Build minimal candle for orderbook-only data (no OHLCV)
+     */
+    private InstrumentCandle buildOrderbookOnlyCandle(CompletedWindow completed, Timeframe timeframe) {
+        com.kotsin.consumer.model.OrderbookDepthData windowOrderbook = completed.orderbookDepth;
+        
+        // Merge per-window depth metrics with ongoing global detectors
+        com.kotsin.consumer.model.OrderbookDepthData globalDetection = globalOrderbookAccumulator != null ?
+            globalOrderbookAccumulator.toOrderbookDepthData() : null;
+        com.kotsin.consumer.model.OrderbookDepthData orderbookDepth = mergeOrderbookData(windowOrderbook, globalDetection);
+        
+        // Get window times from orderbook data if available
+        Long windowTime = (orderbookDepth != null && orderbookDepth.getTimestamp() != null) 
+            ? orderbookDepth.getTimestamp() 
+            : System.currentTimeMillis();
+        
+        return InstrumentCandle.builder()
+            .scripCode(scripCode)
+            .instrumentType(instrumentType)
+            .underlyingEquityScripCode(underlyingEquityScripCode)
+            .companyName(companyName)
+            .exchange(exchange)
+            .exchangeType(exchangeType)
+            .expiry(expiry)
+            .strikePrice(strikePrice)
+            .optionType(optionType)
+            // No OHLCV data for orderbook-only
+            .open(null)
+            .high(null)
+            .low(null)
+            .close(null)
+            .volume(null)
+            .buyVolume(null)
+            .sellVolume(null)
+            .windowStartMillis(windowTime)
+            .windowEndMillis(windowTime)
+            .isComplete(true)
+            .humanReadableStartTime(formatTimestamp(windowTime))
+            .humanReadableEndTime(formatTimestamp(windowTime))
+            .processingTimestamp(System.currentTimeMillis())
+            .timeframe(timeframe.getLabel())
+            .microstructure(completed.microstructure)
+            .imbalanceBars(completed.imbalanceBars)
+            .volumeProfile(completed.volumeProfile)
             .orderbookDepth(orderbookDepth)
             .build();
     }
