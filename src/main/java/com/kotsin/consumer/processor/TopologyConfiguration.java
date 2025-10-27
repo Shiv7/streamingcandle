@@ -4,6 +4,7 @@ import com.kotsin.consumer.config.KafkaConfig;
 import com.kotsin.consumer.metrics.StreamMetrics;
 import com.kotsin.consumer.model.*;
 import com.kotsin.consumer.monitoring.Timeframe;
+import com.kotsin.consumer.service.InstrumentStateManager;
 import com.kotsin.consumer.service.TradingHoursValidationService;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
@@ -21,19 +22,18 @@ import java.time.Duration;
 import java.util.Properties;
 
 /**
- * NEW ARCHITECTURE: Separate window aggregations per stream type.
+ * SIMPLE 3-STREAM ARCHITECTURE: No merging, no joins, no intermediate topics
  *
- * Flow:
- * 1. Ticks → Window → WindowedOHLCV → intermediate-ohlcv-{tf}
- * 2. Orderbook → Window → WindowedOrderbookSignals → intermediate-orderbook-{tf}
- * 3. OI → Window → WindowedOIMetrics → intermediate-oi-{tf}
- * 4. LEFT JOIN all three → UnifiedWindowMessage → candle-complete-{tf}
+ * Stream 1: Ticks → OHLCV Candles (6 timeframes)
+ * Stream 2: Orderbook → Orderbook Signals (6 timeframes)
+ * Stream 3: OI → OI Metrics (6 timeframes)
  *
  * Benefits:
- * - No cross-stream "late" records
- * - Each stream processes at its own pace
- * - Independent event time per stream
- * - Easier debugging and monitoring
+ * - No cross-stream lateness issues
+ * - No complex serialization
+ * - No intermediate topics
+ * - Easy to debug and scale
+ * - Consumers can merge data if needed
  */
 @Component
 @RequiredArgsConstructor
@@ -60,7 +60,7 @@ public class TopologyConfiguration {
     private int gracePeriodSeconds;
 
     public StreamsBuilder createInstrumentTopology() {
-        log.info("🗃️ Building NEW ARCHITECTURE: separate window aggregations per stream");
+        log.info("🗃️ Building SIMPLE 3-STREAM ARCHITECTURE (no merging, no joins)");
         Properties props = kafkaConfig.getStreamProperties(appIdPrefix + "-instrument");
         props.put("auto.offset.reset", "earliest");
         StreamsBuilder builder = new StreamsBuilder();
@@ -70,38 +70,27 @@ public class TopologyConfiguration {
             return builder;
         }
 
-        // SHARED: Transform ticks once (cum->delta)
-        KStream<String, TickData> processedTicks = buildSharedTickTransformation(builder);
+        // Stream 1: Ticks → OHLCV Candles
+        buildTickStream(builder);
 
-        // Build separate topologies for each timeframe
-        for (Timeframe tf : Timeframe.values()) {
-            log.info("⏱️ Building topology for timeframe: {}", tf.getLabel());
+        // Stream 2: Orderbook → Orderbook Signals
+        buildOrderbookStream(builder);
 
-            // Step 1: Tick aggregation (uses shared processed ticks)
-            buildTickAggregation(builder, tf, processedTicks);
-
-            // Step 2: Orderbook aggregation
-            buildOrderbookAggregation(builder, tf);
-
-            // Step 3: OI aggregation
-            buildOIAggregation(builder, tf);
-
-            // Step 4: Join all three
-            buildJoinTopology(builder, tf);
-        }
+        // Stream 3: OI → OI Metrics
+        buildOIStream(builder);
 
         return builder;
     }
 
     /**
-     * Shared tick transformation: Read ticks and convert cum->delta ONCE
-     * This stream is then consumed by all timeframe aggregations
+     * STREAM 1: Ticks → OHLCV Candles
+     * Produces: candle-ohlcv-{1m,2m,3m,5m,15m,30m}
      */
-    private KStream<String, TickData> buildSharedTickTransformation(StreamsBuilder builder) {
-        log.info("🔧 Building SHARED tick transformation (cum->delta)");
+    private void buildTickStream(StreamsBuilder builder) {
+        log.info("📊 Stream 1: Building Ticks → OHLCV Candles");
 
-        // State store for cum->delta conversion (SHARED across all timeframes)
-        String deltaVolumeStoreName = "shared-tick-delta-volume-store";
+        // Shared delta volume transformation
+        String deltaVolumeStoreName = "tick-delta-volume-store";
         builder.addStateStore(
             Stores.keyValueStoreBuilder(
                 Stores.persistentKeyValueStore(deltaVolumeStoreName),
@@ -110,45 +99,46 @@ public class TopologyConfiguration {
             )
         );
 
-        // Read ticks
         KStream<String, TickData> ticksRaw = builder.stream(
             ticksTopic,
             Consumed.with(Serdes.String(), TickData.serde())
                 .withTimestampExtractor(new com.kotsin.consumer.time.MarketAlignedTimestampExtractor())
         );
 
-        // Transform cum->delta ONCE
-        return ticksRaw
+        KStream<String, TickData> processedTicks = ticksRaw
             .transform(
                 () -> new com.kotsin.consumer.transformers.CumToDeltaTransformer(deltaVolumeStoreName),
                 deltaVolumeStoreName
             )
             .filter((key, tick) -> tick != null && tick.getDeltaVolume() != null)
             .filter((key, tick) -> !Boolean.TRUE.equals(tick.getResetFlag()))
-            .selectKey((k, tick) -> tick.getScripCode());  // Key by scripCode
+            .selectKey((k, tick) -> tick.getScripCode());
+
+        // Build candles for each timeframe
+        for (Timeframe tf : Timeframe.values()) {
+            buildTickCandles(builder, processedTicks, tf);
+        }
     }
 
     /**
-     * Step 1: Aggregate ticks into WindowedOHLCV
-     * Uses pre-processed ticks (cum->delta already done)
+     * Build OHLCV candles for a specific timeframe
      */
-    private void buildTickAggregation(StreamsBuilder builder, Timeframe tf, KStream<String, TickData> processedTicks) {
+    private void buildTickCandles(StreamsBuilder builder, KStream<String, TickData> ticks, Timeframe tf) {
         String tfLabel = tf.getLabel();
-        String intermediateOHLCVTopic = getIntermediateTopic("ohlcv", tfLabel);
+        String outputTopic = "candle-ohlcv-" + tfLabel;
 
-        log.info("  [{}] Building tick aggregation → {}", tfLabel, intermediateOHLCVTopic);
+        log.info("  [{}] Ticks → OHLCV → {}", tfLabel, outputTopic);
 
-        // Window and aggregate (use pre-processed ticks)
         TimeWindows windows = TimeWindows.ofSizeAndGrace(
             Duration.ofMinutes(1),
             Duration.ofSeconds(gracePeriodSeconds)
         );
 
-        KTable<Windowed<String>, TickWindowState> tickAggregated = processedTicks
+        ticks
             .groupByKey(Grouped.with(Serdes.String(), TickData.serde()))
             .windowedBy(windows)
             .aggregate(
-                TickWindowState::new,
+                InstrumentState::new,
                 (scripCode, tick, state) -> {
                     try {
                         if (tradingHoursService.withinTradingHours(tick)) {
@@ -159,298 +149,232 @@ public class TopologyConfiguration {
                     }
                     return state;
                 },
-                Materialized.<String, TickWindowState, WindowStore<Bytes, byte[]>>as("tick-window-state-" + tfLabel)
+                Materialized.<String, InstrumentState, WindowStore<Bytes, byte[]>>as("tick-state-" + tfLabel)
                     .withKeySerde(Serdes.String())
-                    .withValueSerde(new JsonSerde<>(TickWindowState.class))
-            );
-
-        // Extract OHLCV and emit to intermediate topic
-        tickAggregated
+                    .withValueSerde(new JsonSerde<>(InstrumentState.class))
+            )
             .suppress(Suppressed.untilWindowCloses(Suppressed.BufferConfig.unbounded()))
             .toStream()
             .mapValues((windowedKey, state) -> {
                 long windowStart = windowedKey.window().start();
                 long windowEnd = windowedKey.window().end();
-                return state.extractOHLCV(tf, windowStart, windowEnd);
+                state.forceCompleteWindows(windowEnd);
+                return state.extractFinalizedCandle(tf);
             })
-            .selectKey((windowedKey, ohlcv) -> windowedKey.key())  // Unwrap windowed key
-            .filter((k, ohlcv) -> ohlcv != null && ohlcv.isValid())
-            .peek((k, ohlcv) -> log.info("  [{}] OHLCV emitted: scrip={} vol={}", tfLabel, ohlcv.getScripCode(), ohlcv.getVolume()))
-            .to(intermediateOHLCVTopic, Produced.with(Serdes.String(), WindowedOHLCV.serde()));
-    }
-
-    /**
-     * Step 2: Aggregate orderbook into WindowedOrderbookSignals
-     */
-    private void buildOrderbookAggregation(StreamsBuilder builder, Timeframe tf) {
-        String tfLabel = tf.getLabel();
-        String intermediateOrderbookTopic = getIntermediateTopic("orderbook", tfLabel);
-
-        log.info("  [{}] Building orderbook aggregation → {}", tfLabel, intermediateOrderbookTopic);
-
-        // Read orderbook
-        KStream<String, OrderBookSnapshot> orderbookStream = builder.stream(
-            orderbookTopic,
-            Consumed.with(Serdes.String(), OrderBookSnapshot.serde())
-                .withTimestampExtractor(new com.kotsin.consumer.time.MarketAlignedTimestampExtractor())
-        );
-
-        // Re-key by token (as string)
-        KStream<String, OrderBookSnapshot> orderbookKeyed = orderbookStream
-            .selectKey((k, ob) -> ob != null && ob.getToken() != null ? String.valueOf(ob.getToken()) : k);
-
-        // Window and aggregate
-        TimeWindows windows = TimeWindows.ofSizeAndGrace(
-            Duration.ofMinutes(1),
-            Duration.ofSeconds(gracePeriodSeconds)
-        );
-
-        KTable<Windowed<String>, OrderbookWindowState> obAggregated = orderbookKeyed
-            .filter((k, ob) -> ob != null && ob.isValid())
-            .groupByKey(Grouped.with(Serdes.String(), OrderBookSnapshot.serde()))
-            .windowedBy(windows)
-            .aggregate(
-                OrderbookWindowState::new,
-                (token, ob, state) -> {
-                    state.addOrderbook(ob);
-                    return state;
-                },
-                Materialized.<String, OrderbookWindowState, WindowStore<Bytes, byte[]>>as("orderbook-window-state-" + tfLabel)
-                    .withKeySerde(Serdes.String())
-                    .withValueSerde(new JsonSerde<>(OrderbookWindowState.class))
-            );
-
-        // Extract signals and emit to intermediate topic
-        obAggregated
-            .suppress(Suppressed.untilWindowCloses(Suppressed.BufferConfig.unbounded()))
-            .toStream()
-            .mapValues((windowedKey, state) -> {
-                long windowStart = windowedKey.window().start();
-                long windowEnd = windowedKey.window().end();
-                return state.extractOrderbookSignals(tf, windowStart, windowEnd);
-            })
-            .selectKey((windowedKey, signals) -> windowedKey.key())  // Unwrap windowed key
-            .filter((k, signals) -> signals != null && signals.isValid())
-            .peek((k, signals) -> log.info("  [{}] Orderbook signals emitted: scrip={}", tfLabel, signals.getScripCode()))
-            .to(intermediateOrderbookTopic, Produced.with(Serdes.String(), WindowedOrderbookSignals.serde()));
-    }
-
-    /**
-     * Step 3: Aggregate OI into WindowedOIMetrics
-     */
-    private void buildOIAggregation(StreamsBuilder builder, Timeframe tf) {
-        String tfLabel = tf.getLabel();
-        String intermediateOITopic = getIntermediateTopic("oi", tfLabel);
-
-        log.info("  [{}] Building OI aggregation → {}", tfLabel, intermediateOITopic);
-
-        // Read OI
-        KStream<String, OpenInterest> oiStream = builder.stream(
-            oiTopic,
-            Consumed.with(Serdes.String(), OpenInterest.serde())
-        );
-
-        // Re-key by token (as string)
-        KStream<String, OpenInterest> oiKeyed = oiStream
-            .selectKey((k, oi) -> oi != null && oi.getToken() != 0 ? String.valueOf(oi.getToken()) : k);
-
-        // Window and aggregate
-        TimeWindows windows = TimeWindows.ofSizeAndGrace(
-            Duration.ofMinutes(1),
-            Duration.ofSeconds(gracePeriodSeconds * 3)  // OI updates slower, more grace
-        );
-
-        KTable<Windowed<String>, OIWindowState> oiAggregated = oiKeyed
-            .filter((k, oi) -> oi != null)
-            .groupByKey(Grouped.with(Serdes.String(), OpenInterest.serde()))
-            .windowedBy(windows)
-            .aggregate(
-                OIWindowState::new,
-                (token, oi, state) -> {
-                    state.addOI(oi);
-                    return state;
-                },
-                Materialized.<String, OIWindowState, WindowStore<Bytes, byte[]>>as("oi-window-state-" + tfLabel)
-                    .withKeySerde(Serdes.String())
-                    .withValueSerde(new JsonSerde<>(OIWindowState.class))
-            );
-
-        // Extract metrics and emit to intermediate topic
-        oiAggregated
-            .suppress(Suppressed.untilWindowCloses(Suppressed.BufferConfig.unbounded()))
-            .toStream()
-            .mapValues((windowedKey, state) -> {
-                long windowStart = windowedKey.window().start();
-                long windowEnd = windowedKey.window().end();
-                return state.extractOIMetrics(tf, windowStart, windowEnd);
-            })
-            .selectKey((windowedKey, metrics) -> windowedKey.key())  // Unwrap windowed key
-            .filter((k, metrics) -> metrics != null && metrics.isValid())
-            .peek((k, metrics) -> log.info("  [{}] OI metrics emitted: scrip={} oi={}", tfLabel, metrics.getScripCode(), metrics.getOpenInterest()))
-            .to(intermediateOITopic, Produced.with(Serdes.String(), WindowedOIMetrics.serde()));
-    }
-
-    /**
-     * Step 4: LEFT JOIN all three intermediate streams and produce final UnifiedWindowMessage
-     */
-    private void buildJoinTopology(StreamsBuilder builder, Timeframe tf) {
-        String tfLabel = tf.getLabel();
-        String outputTopic = getCandleTopicForTimeframe(tfLabel);
-
-        log.info("  [{}] Building LEFT JOIN topology → {}", tfLabel, outputTopic);
-
-        // Read intermediate topics
-        KTable<String, WindowedOHLCV> ohlcvTable = builder.table(
-            getIntermediateTopic("ohlcv", tfLabel),
-            Consumed.with(Serdes.String(), WindowedOHLCV.serde()),
-            Materialized.as("ohlcv-table-" + tfLabel)
-        );
-
-        KTable<String, WindowedOrderbookSignals> obTable = builder.table(
-            getIntermediateTopic("orderbook", tfLabel),
-            Consumed.with(Serdes.String(), WindowedOrderbookSignals.serde()),
-            Materialized.as("orderbook-table-" + tfLabel)
-        );
-
-        KTable<String, WindowedOIMetrics> oiTable = builder.table(
-            getIntermediateTopic("oi", tfLabel),
-            Consumed.with(Serdes.String(), WindowedOIMetrics.serde()),
-            Materialized.as("oi-table-" + tfLabel)
-        );
-
-        // LEFT JOIN: OHLCV (base) LEFT JOIN orderbook LEFT JOIN OI
-        ohlcvTable
-            .leftJoin(obTable, (ohlcv, obSignals) -> {
-                log.debug("  [{}] Joining OHLCV + Orderbook: scrip={} ob={}", tfLabel, ohlcv.getScripCode(), obSignals != null);
-                return new IntermediateJoinResult(ohlcv, obSignals, null);
-            })
-            .leftJoin(oiTable, (result, oiMetrics) -> {
-                log.debug("  [{}] Joining + OI: scrip={} oi={}", tfLabel,
-                    result.ohlcv.getScripCode(), oiMetrics != null);
-                return new IntermediateJoinResult(result.ohlcv, result.obSignals, oiMetrics);
-            })
-            .toStream()
-            .mapValues((key, result) -> buildUnifiedWindowMessage(result))
-            .filter((k, msg) -> msg != null)
+            .selectKey((windowedKey, candle) -> windowedKey.key())
+            .filter((k, candle) -> candle != null && candle.isValid())
+            .mapValues(candle -> buildCandleMessage(candle, tfLabel))
             .peek((k, msg) -> {
-                log.info("📤 EMITTING unified: tf={} scrip={} vol={} → {}",
-                    tfLabel, msg.getScripCode(),
-                    msg.getCandle() != null ? msg.getCandle().getVolume() : null,
-                    outputTopic);
+                log.info("📤 [{}] OHLCV emitted: scrip={} vol={}", tfLabel, msg.getScripCode(),
+                    msg.getCandle() != null ? msg.getCandle().getVolume() : null);
                 metrics.incCandleEmit(tfLabel);
             })
             .to(outputTopic, Produced.with(Serdes.String(), new JsonSerde<>(UnifiedWindowMessage.class)));
     }
 
     /**
-     * Helper: Build UnifiedWindowMessage from joined results
+     * STREAM 2: Orderbook → Orderbook Signals
+     * Produces: orderbook-signals-{1m,2m,3m,5m,15m,30m}
      */
-    private UnifiedWindowMessage buildUnifiedWindowMessage(IntermediateJoinResult result) {
-        if (result == null || result.ohlcv == null) {
-            return null;
-        }
+    private void buildOrderbookStream(StreamsBuilder builder) {
+        log.info("📖 Stream 2: Building Orderbook → Signals");
 
-        WindowedOHLCV ohlcv = result.ohlcv;
-        WindowedOrderbookSignals obSignals = result.obSignals;
-        WindowedOIMetrics oiMetrics = result.oiMetrics;
+        KStream<String, OrderBookSnapshot> orderbookStream = builder.stream(
+            orderbookTopic,
+            Consumed.with(Serdes.String(), OrderBookSnapshot.serde())
+                .withTimestampExtractor(new com.kotsin.consumer.time.MarketAlignedTimestampExtractor())
+        );
+
+        KStream<String, OrderBookSnapshot> orderbookKeyed = orderbookStream
+            .selectKey((k, ob) -> ob != null && ob.getToken() != null ? String.valueOf(ob.getToken()) : k);
+
+        for (Timeframe tf : Timeframe.values()) {
+            buildOrderbookSignals(builder, orderbookKeyed, tf);
+        }
+    }
+
+    /**
+     * Build orderbook signals for a specific timeframe
+     */
+    private void buildOrderbookSignals(StreamsBuilder builder, KStream<String, OrderBookSnapshot> orderbook, Timeframe tf) {
+        String tfLabel = tf.getLabel();
+        String outputTopic = "orderbook-signals-" + tfLabel;
+
+        log.info("  [{}] Orderbook → Signals → {}", tfLabel, outputTopic);
+
+        TimeWindows windows = TimeWindows.ofSizeAndGrace(
+            Duration.ofMinutes(1),
+            Duration.ofSeconds(gracePeriodSeconds)
+        );
+
+        orderbook
+            .filter((k, ob) -> ob != null && ob.isValid())
+            .groupByKey(Grouped.with(Serdes.String(), OrderBookSnapshot.serde()))
+            .windowedBy(windows)
+            .aggregate(
+                InstrumentState::new,
+                (token, ob, state) -> {
+                    state.addOrderbook(ob);
+                    return state;
+                },
+                Materialized.<String, InstrumentState, WindowStore<Bytes, byte[]>>as("orderbook-state-" + tfLabel)
+                    .withKeySerde(Serdes.String())
+                    .withValueSerde(new JsonSerde<>(InstrumentState.class))
+            )
+            .suppress(Suppressed.untilWindowCloses(Suppressed.BufferConfig.unbounded()))
+            .toStream()
+            .mapValues((windowedKey, state) -> {
+                long windowStart = windowedKey.window().start();
+                long windowEnd = windowedKey.window().end();
+                state.forceCompleteWindows(windowEnd);
+                return state.extractFinalizedCandle(tf);
+            })
+            .selectKey((windowedKey, candle) -> windowedKey.key())
+            .filter((k, candle) -> candle != null && candle.getOrderbookDepth() != null)
+            .mapValues(candle -> buildOrderbookMessage(candle, tfLabel))
+            .peek((k, msg) -> {
+                log.info("📤 [{}] Orderbook emitted: scrip={}", tfLabel, msg.getScripCode());
+                metrics.incCandleEmit(tfLabel);
+            })
+            .to(outputTopic, Produced.with(Serdes.String(), new JsonSerde<>(UnifiedWindowMessage.class)));
+    }
+
+    /**
+     * STREAM 3: OI → OI Metrics
+     * Produces: oi-metrics-{1m,2m,3m,5m,15m,30m}
+     */
+    private void buildOIStream(StreamsBuilder builder) {
+        log.info("💰 Stream 3: Building OI → Metrics");
+
+        KStream<String, OpenInterest> oiStream = builder.stream(
+            oiTopic,
+            Consumed.with(Serdes.String(), OpenInterest.serde())
+        );
+
+        KStream<String, OpenInterest> oiKeyed = oiStream
+            .selectKey((k, oi) -> oi != null && oi.getToken() != 0 ? String.valueOf(oi.getToken()) : k);
+
+        for (Timeframe tf : Timeframe.values()) {
+            buildOIMetrics(builder, oiKeyed, tf);
+        }
+    }
+
+    /**
+     * Build OI metrics for a specific timeframe
+     */
+    private void buildOIMetrics(StreamsBuilder builder, KStream<String, OpenInterest> oi, Timeframe tf) {
+        String tfLabel = tf.getLabel();
+        String outputTopic = "oi-metrics-" + tfLabel;
+
+        log.info("  [{}] OI → Metrics → {}", tfLabel, outputTopic);
+
+        TimeWindows windows = TimeWindows.ofSizeAndGrace(
+            Duration.ofMinutes(1),
+            Duration.ofSeconds(gracePeriodSeconds * 3)  // OI updates slower
+        );
+
+        oi
+            .filter((k, oiData) -> oiData != null)
+            .groupByKey(Grouped.with(Serdes.String(), OpenInterest.serde()))
+            .windowedBy(windows)
+            .aggregate(
+                () -> null,
+                (token, oiData, current) -> oiData,  // Keep latest OI per window
+                Materialized.<String, OpenInterest, WindowStore<Bytes, byte[]>>as("oi-state-" + tfLabel)
+                    .withKeySerde(Serdes.String())
+                    .withValueSerde(OpenInterest.serde())
+            )
+            .suppress(Suppressed.untilWindowCloses(Suppressed.BufferConfig.unbounded()))
+            .toStream()
+            .selectKey((windowedKey, oiData) -> windowedKey.key())
+            .filter((k, oiData) -> oiData != null)
+            .mapValues((k, oiData) -> buildOIMessage(oiData, tfLabel))
+            .peek((k, msg) -> {
+                log.info("📤 [{}] OI emitted: scrip={} oi={}", tfLabel, k,
+                    msg.getOpenInterest() != null ? msg.getOpenInterest().getOiClose() : null);
+                metrics.incCandleEmit(tfLabel);
+            })
+            .to(outputTopic, Produced.with(Serdes.String(), new JsonSerde<>(UnifiedWindowMessage.class)));
+    }
+
+    /**
+     * Build OHLCV-only message
+     */
+    private UnifiedWindowMessage buildCandleMessage(InstrumentCandle candle, String tfLabel) {
+        return UnifiedWindowMessage.builder()
+            .scripCode(candle.getScripCode())
+            .companyName(candle.getCompanyName())
+            .exchange(candle.getExchange())
+            .exchangeType(candle.getExchangeType())
+            .timeframe(tfLabel)
+            .windowStartMillis(candle.getWindowStartMillis())
+            .windowEndMillis(candle.getWindowEndMillis())
+            .startTimeIST(UnifiedWindowMessage.toIstString(candle.getWindowStartMillis()))
+            .endTimeIST(UnifiedWindowMessage.toIstString(candle.getWindowEndMillis()))
+            .candle(UnifiedWindowMessage.CandleSection.builder()
+                .open(candle.getOpen())
+                .high(candle.getHigh())
+                .low(candle.getLow())
+                .close(candle.getClose())
+                .volume(candle.getVolume())
+                .buyVolume(candle.getBuyVolume())
+                .sellVolume(candle.getSellVolume())
+                .vwap(candle.getVwap())
+                .tickCount(candle.getTickCount())
+                .isComplete(candle.getIsComplete())
+                .build())
+            .imbalanceBars(candle.getImbalanceBars())
+            .build();
+    }
+
+    /**
+     * Build Orderbook-only message
+     */
+    private UnifiedWindowMessage buildOrderbookMessage(InstrumentCandle candle, String tfLabel) {
+        OrderbookDepthData depth = candle.getOrderbookDepth();
+        MicrostructureData micro = candle.getMicrostructure();
 
         return UnifiedWindowMessage.builder()
-            .scripCode(ohlcv.getScripCode())
-            .companyName(ohlcv.getCompanyName())
-            .exchange(ohlcv.getExchange())
-            .exchangeType(ohlcv.getExchangeType())
-            .timeframe(ohlcv.getTimeframe())
-            .windowStartMillis(ohlcv.getWindowStartMillis())
-            .windowEndMillis(ohlcv.getWindowEndMillis())
-            .startTimeIST(UnifiedWindowMessage.toIstString(ohlcv.getWindowStartMillis()))
-            .endTimeIST(UnifiedWindowMessage.toIstString(ohlcv.getWindowEndMillis()))
-            .candle(UnifiedWindowMessage.CandleSection.builder()
-                .open(ohlcv.getOpen())
-                .high(ohlcv.getHigh())
-                .low(ohlcv.getLow())
-                .close(ohlcv.getClose())
-                .volume(ohlcv.getVolume())
-                .buyVolume(ohlcv.getBuyVolume())
-                .sellVolume(ohlcv.getSellVolume())
-                .vwap(ohlcv.getVwap())
-                .tickCount(ohlcv.getTickCount())
-                .isComplete(true)
+            .scripCode(candle.getScripCode())
+            .timeframe(tfLabel)
+            .windowStartMillis(candle.getWindowStartMillis())
+            .windowEndMillis(candle.getWindowEndMillis())
+            .startTimeIST(UnifiedWindowMessage.toIstString(candle.getWindowStartMillis()))
+            .endTimeIST(UnifiedWindowMessage.toIstString(candle.getWindowEndMillis()))
+            .orderbookSignals(UnifiedWindowMessage.OrderbookSignals.builder()
+                .vpinLevel(micro != null ? micro.getVpinLevel() : null)
+                .depthBuyImbalanced(micro != null ? micro.isDepthBuyImbalanced() : null)
+                .depthSellImbalanced(micro != null ? micro.isDepthSellImbalanced() : null)
+                .spreadLevel(micro != null ? micro.getSpreadLevel() : null)
+                .ofi(micro != null ? micro.getOfi() : null)
+                .depthImbalance(depth != null ? depth.getWeightedDepthImbalance() : null)
+                .spreadAvg(depth != null ? depth.getSpread() : null)
+                .bidDepthSum(depth != null ? depth.getTotalBidDepth() : null)
+                .askDepthSum(depth != null ? depth.getTotalAskDepth() : null)
+                .bidVWAP(depth != null ? depth.getBidVWAP() : null)
+                .askVWAP(depth != null ? depth.getAskVWAP() : null)
+                .microprice(depth != null ? depth.getMidPrice() : null)
+                .icebergBid(depth != null ? depth.getIcebergDetectedBid() : null)
+                .icebergAsk(depth != null ? depth.getIcebergDetectedAsk() : null)
+                .spoofingCount(depth != null ? depth.getSpoofingCountLast1Min() : null)
                 .build())
-            .orderbookSignals(buildOrderbookSignals(ohlcv.getMicrostructure(), obSignals))
-            .imbalanceBars(ohlcv.getImbalanceBars())
-            .volumeProfile(null)  // Not implemented in separate aggregation yet
-            .openInterest(oiMetrics != null ? UnifiedWindowMessage.OpenInterestSection.builder()
-                .oiClose(oiMetrics.getOpenInterest())
-                .oiChange(oiMetrics.getOiChange())
-                .oiChangePercent(oiMetrics.getOiChangePercent())
-                .build() : null)
             .build();
     }
 
     /**
-     * Helper: Build orderbook signals section from microstructure + orderbook data
+     * Build OI-only message
      */
-    private UnifiedWindowMessage.OrderbookSignals buildOrderbookSignals(
-        MicrostructureData micro,
-        WindowedOrderbookSignals obSignals
-    ) {
-        OrderbookDepthData depth = obSignals != null ? obSignals.getOrderbookDepth() : null;
-
-        return UnifiedWindowMessage.OrderbookSignals.builder()
-            .vpinLevel(micro != null ? micro.getVpinLevel() : null)
-            .depthBuyImbalanced(micro != null ? micro.isDepthBuyImbalanced() : null)
-            .depthSellImbalanced(micro != null ? micro.isDepthSellImbalanced() : null)
-            .spreadLevel(micro != null ? micro.getSpreadLevel() : null)
-            .ofi(micro != null ? micro.getOfi() : null)
-            .depthImbalance(micro != null ? micro.getDepthImbalance() : (depth != null ? depth.getWeightedDepthImbalance() : null))
-            .spreadAvg(depth != null ? depth.getSpread() : (micro != null ? micro.getBidAskSpread() : null))
-            .bidDepthSum(depth != null ? depth.getTotalBidDepth() : null)
-            .askDepthSum(depth != null ? depth.getTotalAskDepth() : null)
-            .bidVWAP(depth != null ? depth.getBidVWAP() : null)
-            .askVWAP(depth != null ? depth.getAskVWAP() : null)
-            .microprice(micro != null ? micro.getMicroprice() : (depth != null ? depth.getMidPrice() : null))
-            .icebergBid(depth != null ? depth.getIcebergDetectedBid() : null)
-            .icebergAsk(depth != null ? depth.getIcebergDetectedAsk() : null)
-            .spoofingCount(depth != null ? depth.getSpoofingCountLast1Min() : null)
+    private UnifiedWindowMessage buildOIMessage(OpenInterest oi, String tfLabel) {
+        return UnifiedWindowMessage.builder()
+            .scripCode(String.valueOf(oi.getToken()))
+            .timeframe(tfLabel)
+            .windowStartMillis(oi.getReceivedTimestamp())
+            .windowEndMillis(oi.getReceivedTimestamp())
+            .openInterest(UnifiedWindowMessage.OpenInterestSection.builder()
+                .oiClose(oi.getOpenInterest())
+                .oiChange(oi.getOiChange())
+                .oiChangePercent(oi.getOiChangePercent())
+                .build())
             .build();
-    }
-
-    /**
-     * Helper: Get intermediate topic name for stream type and timeframe
-     */
-    private String getIntermediateTopic(String streamType, String timeframe) {
-        // streamType: "ohlcv", "orderbook", "oi"
-        // timeframe: "1m", "2m", etc.
-        return "intermediate-" + streamType + "-" + timeframe;
-    }
-
-    /**
-     * Helper: Get final output topic for timeframe
-     */
-    private String getCandleTopicForTimeframe(String timeframe) {
-        switch (timeframe) {
-            case "1m": return "candle-complete-1m";
-            case "2m": return "candle-complete-2m";
-            case "3m": return "candle-complete-3m";
-            case "5m": return "candle-complete-5m";
-            case "15m": return "candle-complete-15m";
-            case "30m": return "candle-complete-30m-v2";
-            default: return "unified-window-" + timeframe;
-        }
-    }
-
-    /**
-     * Helper class to hold intermediate join results
-     */
-    private static class IntermediateJoinResult {
-        WindowedOHLCV ohlcv;
-        WindowedOrderbookSignals obSignals;
-        WindowedOIMetrics oiMetrics;
-
-        IntermediateJoinResult(WindowedOHLCV ohlcv, WindowedOrderbookSignals obSignals, WindowedOIMetrics oiMetrics) {
-            this.ohlcv = ohlcv;
-            this.obSignals = obSignals;
-            this.oiMetrics = oiMetrics;
-        }
     }
 }

@@ -3,11 +3,11 @@
 ## Issue 1: Cross-Stream Late Records (Original Problem)
 **Problem:** Orderbook timestamps advancing stream time, causing ticks to be dropped as "late"
 
-**Solution:** Separate window aggregations per stream type
-- Ticks → Window → OHLCV
-- Orderbook → Window → Signals
-- OI → Window → Metrics
-- LEFT JOIN all three → Final candle
+**Solution:** SIMPLE 3-STREAM ARCHITECTURE (No merging, no joins, no intermediate topics)
+- Stream 1: Ticks → OHLCV Candles (6 output topics)
+- Stream 2: Orderbook → Orderbook Signals (6 output topics)
+- Stream 3: OI → OI Metrics (6 output topics)
+- **No joins, no merging** - consumers can merge data if needed
 
 **Status:** ✅ Fixed
 
@@ -36,8 +36,8 @@ TickData Stream ──┬─> Window 1m
 
 **Status:** ✅ Fixed
 
-## Issue 3: State Object Serialization
-**Problem:** `final` fields with inline initialization can't be deserialized by Jackson
+## Issue 3: State Object Serialization (Resolved by Architecture Simplification)
+**Problem:** Complex custom state objects with accumulators couldn't be serialized for repartition topics
 
 **Error:**
 ```
@@ -45,97 +45,91 @@ Error sending record to instrument-tick-window-state-30m-repartition
 Failed to append record because it was part of a batch which had invalid records
 ```
 
-**Solution:** Changed from:
-```java
-// Before (doesn't deserialize):
-private final CandleAccumulator candleAccumulator = new CandleAccumulator();
-```
+**Solution:** Abandoned complex intermediate models entirely
+- Deleted: WindowedOHLCV.java, WindowedOrderbookSignals.java, WindowedOIMetrics.java
+- Deleted: TickWindowState.java, OrderbookWindowState.java, OIWindowState.java
+- Uses existing `InstrumentState` which is already properly serializable
+- No custom state objects = no serialization issues
 
-To:
-```java
-// After (Jackson-friendly):
-private CandleAccumulator candleAccumulator;
-
-public TickWindowState() {
-    this.candleAccumulator = new CandleAccumulator();
-}
-```
-
-Applied to:
-- `TickWindowState.java`
-- `OrderbookWindowState.java`
-- `OIWindowState.java`
-
-**Status:** ✅ Fixed
+**Status:** ✅ Fixed by simplification
 
 ## Files Modified
 
-1. **TopologyConfiguration.java**
-   - Added `buildSharedTickTransformation()` method
-   - Modified `buildTickAggregation()` to use shared ticks
-   - Completely refactored to separate stream aggregations
+1. **TopologyConfiguration.java** (completely rewritten)
+   - Added `buildTickStream()` - creates 6 OHLCV candle topics
+   - Added `buildOrderbookStream()` - creates 6 orderbook signal topics
+   - Added `buildOIStream()` - creates 6 OI metrics topics
+   - Single shared delta volume transformation (no duplication)
+   - Uses existing `InstrumentState` for aggregation (no custom state objects)
+   - No joins, no merging, no intermediate topics
 
-2. **TickWindowState.java**
-   - Removed `final` from accumulators
-   - Added default constructor
+2. **application.properties**
+   - Changed `num.stream.threads=1` (from 3)
+   - Kept `auto.offset.reset=earliest`
 
-3. **OrderbookWindowState.java**
-   - Removed `final` from accumulator
-   - Added default constructor
+3. **application-prod.properties**
+   - Changed `num.stream.threads=1` (from 4)
 
-4. **OIWindowState.java**
-   - No changes needed (already mutable)
+4. **scripts/create-changelog-topics.sh**
+   - Updated to create 18 new output topics instead of intermediate topics
+   - Topics: candle-ohlcv-*, orderbook-signals-*, oi-metrics-*
 
-5. **application.properties**
-   - Added 18 intermediate topic configurations
+5. **FIXES_APPLIED.md**
+   - Updated to reflect final simple architecture
 
-6. **scripts/create-changelog-topics.sh**
-   - Added intermediate topics creation
+## New Output Topics (18 total)
 
-## New Intermediate Topics (18 total)
+### OHLCV Candle Topics (6)
+- candle-ohlcv-1m
+- candle-ohlcv-2m
+- candle-ohlcv-3m
+- candle-ohlcv-5m
+- candle-ohlcv-15m
+- candle-ohlcv-30m
 
-### OHLCV Topics (6)
-- intermediate-ohlcv-1m
-- intermediate-ohlcv-2m
-- intermediate-ohlcv-3m
-- intermediate-ohlcv-5m
-- intermediate-ohlcv-15m
-- intermediate-ohlcv-30m
+### Orderbook Signal Topics (6)
+- orderbook-signals-1m
+- orderbook-signals-2m
+- orderbook-signals-3m
+- orderbook-signals-5m
+- orderbook-signals-15m
+- orderbook-signals-30m
 
-### Orderbook Topics (6)
-- intermediate-orderbook-1m
-- intermediate-orderbook-2m
-- intermediate-orderbook-3m
-- intermediate-orderbook-5m
-- intermediate-orderbook-15m
-- intermediate-orderbook-30m
-
-### OI Topics (6)
-- intermediate-oi-1m
-- intermediate-oi-2m
-- intermediate-oi-3m
-- intermediate-oi-5m
-- intermediate-oi-15m
-- intermediate-oi-30m
+### OI Metrics Topics (6)
+- oi-metrics-1m
+- oi-metrics-2m
+- oi-metrics-3m
+- oi-metrics-5m
+- oi-metrics-15m
+- oi-metrics-30m
 
 ## Testing Checklist
 
 - [ ] Start Kafka broker
-- [ ] Create intermediate topics: `bash scripts/create-changelog-topics.sh`
+- [ ] Create output topics: `bash scripts/create-changelog-topics.sh`
 - [ ] Clean state stores: `rm -rf /tmp/kafka-streams/streamingcandle`
+- [ ] Compile: `mvn clean compile -DskipTests`
 - [ ] Start application: `mvn spring-boot:run`
 - [ ] Verify logs show:
-  - `🔧 Building SHARED tick transformation`
-  - `[1m] OHLCV emitted: scrip=...`
-  - `📤 EMITTING unified: tf=1m scrip=...`
+  - `📊 Stream 1: Building Ticks → OHLCV Candles`
+  - `📖 Stream 2: Building Orderbook → Signals`
+  - `💰 Stream 3: Building OI → Metrics`
+  - `📤 [1m] OHLCV emitted: scrip=220 vol=...`
+  - `📤 [1m] Orderbook emitted: scrip=220`
+  - `📤 [1m] OI emitted: scrip=220 oi=...`
   - **NO "late record" warnings**
   - **NO "Failed to append record" errors**
-- [ ] Check intermediate topics have data
-- [ ] Check final output topics have candles
+- [ ] Check output topics have data:
+  - `candle-ohlcv-*`
+  - `orderbook-signals-*`
+  - `oi-metrics-*`
 
 ## Expected Result
 
-✅ Candles produced without late record issues
-✅ All 6 timeframes working
-✅ LEFT JOIN ensures candles always emitted (even if orderbook/OI missing)
+✅ OHLCV candles emitted to 6 topics without late record issues
+✅ Orderbook signals emitted to 6 topics independently
+✅ OI metrics emitted to 6 topics independently
+✅ No cross-stream lateness issues (streams are independent)
+✅ No serialization issues (uses existing InstrumentState)
 ✅ Single-threaded processing stable
+✅ Consumers can merge data from 3 streams if needed
