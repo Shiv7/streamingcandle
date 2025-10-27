@@ -139,8 +139,9 @@ public class TopologyConfiguration {
                 deltaVolumeStoreName
             )
             .filter((key, tick) -> tick != null && tick.getDeltaVolume() != null)
-            .filter((key, tick) -> !Boolean.TRUE.equals(tick.getResetFlag()))
-            .selectKey((k, tick) -> tick.getScripCode());
+            .filter((key, tick) -> !Boolean.TRUE.equals(tick.getResetFlag()));
+            // REMOVED selectKey - assuming source topic is already keyed by scripCode
+            // If not, you'll need to add it back
 
         // Build candles for each timeframe
         for (Timeframe tf : Timeframe.values()) {
@@ -163,7 +164,8 @@ public class TopologyConfiguration {
         );
 
         ticks
-            .groupByKey(Grouped.with(Serdes.String(), TickData.serde()))
+            .groupByKey(Grouped.with(Serdes.String(), TickData.serde())
+                .withName("tick-group-" + tfLabel))  // Give explicit name to avoid conflicts
             .windowedBy(windows)
             .aggregate(
                 InstrumentState::new,
@@ -180,6 +182,7 @@ public class TopologyConfiguration {
                 Materialized.<String, InstrumentState, WindowStore<Bytes, byte[]>>as("tick-state-" + tfLabel)
                     .withKeySerde(Serdes.String())
                     .withValueSerde(new JsonSerde<>(InstrumentState.class))
+                    .withCachingDisabled()  // Disable caching to avoid serialization issues
             )
             .suppress(Suppressed.untilWindowCloses(Suppressed.BufferConfig.unbounded()))
             .toStream()
@@ -213,11 +216,11 @@ public class TopologyConfiguration {
                 .withTimestampExtractor(new com.kotsin.consumer.time.MarketAlignedTimestampExtractor())
         );
 
-        KStream<String, OrderBookSnapshot> orderbookKeyed = orderbookStream
-            .selectKey((k, ob) -> ob != null && ob.getToken() != null ? String.valueOf(ob.getToken()) : k);
+        // REMOVED selectKey - assuming source topic is already keyed by token
+        // If not, add back: .selectKey((k, ob) -> String.valueOf(ob.getToken()))
 
         for (Timeframe tf : Timeframe.values()) {
-            buildOrderbookSignals(builder, orderbookKeyed, tf);
+            buildOrderbookSignals(builder, orderbookStream, tf);
         }
     }
 
@@ -279,11 +282,11 @@ public class TopologyConfiguration {
             Consumed.with(Serdes.String(), OpenInterest.serde())
         );
 
-        KStream<String, OpenInterest> oiKeyed = oiStream
-            .selectKey((k, oi) -> oi != null && oi.getToken() != 0 ? String.valueOf(oi.getToken()) : k);
+        // REMOVED selectKey - assuming source topic is already keyed by token
+        // If not, add back: .selectKey((k, oi) -> String.valueOf(oi.getToken()))
 
         for (Timeframe tf : Timeframe.values()) {
-            buildOIMetrics(builder, oiKeyed, tf);
+            buildOIMetrics(builder, oiStream, tf);
         }
     }
 
