@@ -44,21 +44,36 @@ public class OrderbookDepthAccumulator {
     @JsonIgnore
     private SnapshotMetrics lastMetrics;
 
-    @JsonIgnore private final MetricAccumulator spreadAcc = new MetricAccumulator();
-    @JsonIgnore private final MetricAccumulator totalBidDepthAcc = new MetricAccumulator();
-    @JsonIgnore private final MetricAccumulator totalAskDepthAcc = new MetricAccumulator();
-    @JsonIgnore private final MetricAccumulator bidVwapAcc = new MetricAccumulator();
-    @JsonIgnore private final MetricAccumulator askVwapAcc = new MetricAccumulator();
-    @JsonIgnore private final MetricAccumulator depthPressureAcc = new MetricAccumulator();
-    @JsonIgnore private final MetricAccumulator weightedImbalanceAcc = new MetricAccumulator();
-    @JsonIgnore private final MetricAccumulator bidSlopeAcc = new MetricAccumulator();
-    @JsonIgnore private final MetricAccumulator askSlopeAcc = new MetricAccumulator();
-    @JsonIgnore private final MetricAccumulator slopeRatioAcc = new MetricAccumulator();
-    @JsonIgnore private final MetricAccumulator level1ImbAcc = new MetricAccumulator();
-    @JsonIgnore private final MetricAccumulator level2to5ImbAcc = new MetricAccumulator();
-    @JsonIgnore private final MetricAccumulator level6to10ImbAcc = new MetricAccumulator();
-    @JsonIgnore private final MetricAccumulator midPriceAcc = new MetricAccumulator();
-    @JsonIgnore private long sampleCount = 0L;
+    // Serializable accumulated values (sum + count for averaging)
+    private double spreadSum = 0.0;
+    private long spreadCount = 0L;
+    private double totalBidDepthSum = 0.0;
+    private long totalBidDepthCount = 0L;
+    private double totalAskDepthSum = 0.0;
+    private long totalAskDepthCount = 0L;
+    private double bidVwapSum = 0.0;
+    private long bidVwapCount = 0L;
+    private double askVwapSum = 0.0;
+    private long askVwapCount = 0L;
+    private double depthPressureSum = 0.0;
+    private long depthPressureCount = 0L;
+    private double weightedImbalanceSum = 0.0;
+    private long weightedImbalanceCount = 0L;
+    private double bidSlopeSum = 0.0;
+    private long bidSlopeCount = 0L;
+    private double askSlopeSum = 0.0;
+    private long askSlopeCount = 0L;
+    private double slopeRatioSum = 0.0;
+    private long slopeRatioCount = 0L;
+    private double level1ImbSum = 0.0;
+    private long level1ImbCount = 0L;
+    private double level2to5ImbSum = 0.0;
+    private long level2to5ImbCount = 0L;
+    private double level6to10ImbSum = 0.0;
+    private long level6to10ImbCount = 0L;
+    private double midPriceSum = 0.0;
+    private long midPriceCount = 0L;
+    private long sampleCount = 0L;
 
     /**
      * Lazy initialization for services (called after deserialization)
@@ -115,20 +130,20 @@ public class OrderbookDepthAccumulator {
 
     private void accumulateMetrics(SnapshotMetrics metrics) {
         sampleCount++;
-        spreadAcc.add(metrics.spread);
-        totalBidDepthAcc.add(metrics.totalBidDepth);
-        totalAskDepthAcc.add(metrics.totalAskDepth);
-        bidVwapAcc.add(metrics.bidVWAP);
-        askVwapAcc.add(metrics.askVWAP);
-        depthPressureAcc.add(metrics.depthPressure);
-        weightedImbalanceAcc.add(metrics.weightedDepthImbalance);
-        bidSlopeAcc.add(metrics.bidSlope);
-        askSlopeAcc.add(metrics.askSlope);
-        slopeRatioAcc.add(metrics.slopeRatio);
-        level1ImbAcc.add(metrics.level1Imbalance);
-        level2to5ImbAcc.add(metrics.level2to5Imbalance);
-        level6to10ImbAcc.add(metrics.level6to10Imbalance);
-        midPriceAcc.add(metrics.midPrice);
+        if (metrics.spread != null) { spreadSum += metrics.spread; spreadCount++; }
+        if (metrics.totalBidDepth != null) { totalBidDepthSum += metrics.totalBidDepth; totalBidDepthCount++; }
+        if (metrics.totalAskDepth != null) { totalAskDepthSum += metrics.totalAskDepth; totalAskDepthCount++; }
+        if (metrics.bidVWAP != null) { bidVwapSum += metrics.bidVWAP; bidVwapCount++; }
+        if (metrics.askVWAP != null) { askVwapSum += metrics.askVWAP; askVwapCount++; }
+        if (metrics.depthPressure != null) { depthPressureSum += metrics.depthPressure; depthPressureCount++; }
+        if (metrics.weightedDepthImbalance != null) { weightedImbalanceSum += metrics.weightedDepthImbalance; weightedImbalanceCount++; }
+        if (metrics.bidSlope != null) { bidSlopeSum += metrics.bidSlope; bidSlopeCount++; }
+        if (metrics.askSlope != null) { askSlopeSum += metrics.askSlope; askSlopeCount++; }
+        if (metrics.slopeRatio != null) { slopeRatioSum += metrics.slopeRatio; slopeRatioCount++; }
+        if (metrics.level1Imbalance != null) { level1ImbSum += metrics.level1Imbalance; level1ImbCount++; }
+        if (metrics.level2to5Imbalance != null) { level2to5ImbSum += metrics.level2to5Imbalance; level2to5ImbCount++; }
+        if (metrics.level6to10Imbalance != null) { level6to10ImbSum += metrics.level6to10Imbalance; level6to10ImbCount++; }
+        if (metrics.midPrice != null) { midPriceSum += metrics.midPrice; midPriceCount++; }
     }
 
     private SnapshotMetrics analyzeSnapshot(OrderBookSnapshot orderbook) {
@@ -225,18 +240,18 @@ public class OrderbookDepthAccumulator {
                 .askProfile(lastMetrics.askProfile)
                 .cumulativeBidDepth(lastMetrics.cumulativeBidDepth)
                 .cumulativeAskDepth(lastMetrics.cumulativeAskDepth)
-                .totalBidDepth(totalBidDepthAcc.average())
-                .totalAskDepth(totalAskDepthAcc.average())
-                .bidVWAP(bidVwapAcc.average())
-                .askVWAP(askVwapAcc.average())
-                .depthPressure(depthPressureAcc.average())
-                .weightedDepthImbalance(weightedImbalanceAcc.average())
-                .level1Imbalance(level1ImbAcc.average())
-                .level2to5Imbalance(level2to5ImbAcc.average())
-                .level6to10Imbalance(level6to10ImbAcc.average())
-                .bidSlope(bidSlopeAcc.average())
-                .askSlope(askSlopeAcc.average())
-                .slopeRatio(slopeRatioAcc.average())
+                .totalBidDepth(totalBidDepthCount > 0 ? totalBidDepthSum / totalBidDepthCount : null)
+                .totalAskDepth(totalAskDepthCount > 0 ? totalAskDepthSum / totalAskDepthCount : null)
+                .bidVWAP(bidVwapCount > 0 ? bidVwapSum / bidVwapCount : null)
+                .askVWAP(askVwapCount > 0 ? askVwapSum / askVwapCount : null)
+                .depthPressure(depthPressureCount > 0 ? depthPressureSum / depthPressureCount : null)
+                .weightedDepthImbalance(weightedImbalanceCount > 0 ? weightedImbalanceSum / weightedImbalanceCount : null)
+                .level1Imbalance(level1ImbCount > 0 ? level1ImbSum / level1ImbCount : null)
+                .level2to5Imbalance(level2to5ImbCount > 0 ? level2to5ImbSum / level2to5ImbCount : null)
+                .level6to10Imbalance(level6to10ImbCount > 0 ? level6to10ImbSum / level6to10ImbCount : null)
+                .bidSlope(bidSlopeCount > 0 ? bidSlopeSum / bidSlopeCount : null)
+                .askSlope(askSlopeCount > 0 ? askSlopeSum / askSlopeCount : null)
+                .slopeRatio(slopeRatioCount > 0 ? slopeRatioSum / slopeRatioCount : null)
                 .icebergDetectedBid(icebergBid)
                 .icebergDetectedAsk(icebergAsk)
                 .icebergProbabilityBid(icebergProbBid)
@@ -246,8 +261,8 @@ public class OrderbookDepthAccumulator {
                 .activeSpoofingBid(activeSpoofBid)
                 .activeSpoofingAsk(activeSpoofAsk)
                 .timestamp(lastUpdateTimestamp)
-                .midPrice(midPriceAcc.average())
-                .spread(spreadAcc.average())
+                .midPrice(midPriceCount > 0 ? midPriceSum / midPriceCount : null)
+                .spread(spreadCount > 0 ? spreadSum / spreadCount : null)
                 .depthLevels(lastMetrics.depthLevels)
                 .isComplete(true)
                 .build();
@@ -255,22 +270,6 @@ public class OrderbookDepthAccumulator {
         } catch (Exception e) {
             log.error("Failed to build orderbook depth data", e);
             return OrderbookDepthData.builder().isComplete(false).build();
-        }
-    }
-
-    private static class MetricAccumulator {
-        private double sum = 0.0;
-        private long count = 0L;
-
-        void add(Double value) {
-            if (value != null) {
-                sum += value;
-                count++;
-            }
-        }
-
-        Double average() {
-            return count > 0 ? sum / count : null;
         }
     }
 
