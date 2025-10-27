@@ -216,11 +216,22 @@ public class TopologyConfiguration {
                 .withTimestampExtractor(new com.kotsin.consumer.time.MarketAlignedTimestampExtractor())
         );
 
-        // REMOVED selectKey - assuming source topic is already keyed by token
-        // If not, add back: .selectKey((k, ob) -> String.valueOf(ob.getToken()))
+        // Extract token from composite key (e.g., "N|48817" -> "48817")
+        KStream<String, OrderBookSnapshot> orderbookKeyed = orderbookStream
+            .selectKey((k, ob) -> {
+                if (ob != null && ob.getToken() != null) {
+                    return String.valueOf(ob.getToken());
+                }
+                // If key is in format "N|48817", extract token part
+                if (k != null && k.contains("|")) {
+                    String[] parts = k.split("\\|");
+                    return parts.length > 1 ? parts[1] : k;
+                }
+                return k;
+            });
 
         for (Timeframe tf : Timeframe.values()) {
-            buildOrderbookSignals(builder, orderbookStream, tf);
+            buildOrderbookSignals(builder, orderbookKeyed, tf);
         }
     }
 
@@ -239,7 +250,9 @@ public class TopologyConfiguration {
         );
 
         orderbook
+            .peek((k, ob) -> log.info("🔍 [{}] Orderbook received: key={} token={}", tfLabel, k, ob != null ? ob.getToken() : "null"))
             .filter((k, ob) -> ob != null && ob.isValid())
+            .peek((k, ob) -> log.info("✅ [{}] Orderbook passed filter: key={}", tfLabel, k))
             .groupByKey(Grouped.with(Serdes.String(), OrderBookSnapshot.serde()))
             .windowedBy(windows)
             .aggregate(
@@ -261,8 +274,13 @@ public class TopologyConfiguration {
                 return state.extractFinalizedCandle(tf);
             })
             .selectKey((windowedKey, candle) -> windowedKey.key())
-            .filter((k, candle) -> candle != null && candle.getOrderbookDepth() != null)
+            .filter((k, candle) -> {
+                // For orderbook stream, we don't need candle data (OHLCV)
+                // Just check if we have orderbook data
+                return candle != null;  // Don't filter out - let buildOrderbookMessage handle it
+            })
             .mapValues(candle -> buildOrderbookMessage(candle, tfLabel))
+            .filter((k, msg) -> msg != null && msg.getOrderbookSignals() != null)  // Filter AFTER building message
             .peek((k, msg) -> {
                 log.info("📤 [{}] Orderbook emitted: scrip={}", tfLabel, msg.getScripCode());
                 metrics.incCandleEmit(tfLabel);
