@@ -22,15 +22,32 @@ public class MarketAlignedTimestampExtractor implements TimestampExtractor {
             TickData t = (TickData) value;
             exch = t.getExchange();
             long vts = t.getTimestamp();
-            if (vts > 0) ts = vts;
+            // Validate timestamp is reasonable before using it
+            if (vts > 0 && isValidTimestamp(vts)) {
+                ts = vts;
+            } else if (vts > 0) {
+                // Invalid timestamp - use Kafka record timestamp instead
+                System.err.println("Invalid timestamp from TickData: " + vts + ", using record timestamp: " + ts);
+            }
         } else if (value instanceof OrderBookSnapshot) {
             OrderBookSnapshot ob = (OrderBookSnapshot) value;
             exch = ob.getExchange();
             long vts = ob.getTimestamp();
-            if (vts > 0) ts = vts;
+            if (vts > 0 && isValidTimestamp(vts)) {
+                ts = vts;
+            }
         }
 
         // Market-aligned shift disabled for now — return raw event-time
         return ts;
+    }
+    
+    /**
+     * Validate timestamp is within reasonable range (year 2020-2050)
+     */
+    private boolean isValidTimestamp(long timestamp) {
+        long year2020 = 1577836800000L; // Jan 1, 2020
+        long year2050 = 2524608000000L; // Jan 1, 2050
+        return timestamp >= year2020 && timestamp <= year2050;
     }
 }
