@@ -24,6 +24,12 @@ CANDLE_TOPICS="candle-complete-1m candle-complete-2m candle-complete-3m candle-c
 FAMILY_TOPICS="family-structured-1m family-structured-2m family-structured-5m family-structured-15m family-structured-30m family-structured-all"
 
 # ============================================================================
+# INTERMEDIATE TOPICS (New Architecture - Separate Stream Aggregations)
+# ============================================================================
+echo "🔄 Creating intermediate topics for separate stream aggregations..."
+INTERMEDIATE_TOPICS="intermediate-ohlcv-1m intermediate-ohlcv-2m intermediate-ohlcv-3m intermediate-ohlcv-5m intermediate-ohlcv-15m intermediate-ohlcv-30m intermediate-orderbook-1m intermediate-orderbook-2m intermediate-orderbook-3m intermediate-orderbook-5m intermediate-orderbook-15m intermediate-orderbook-30m intermediate-oi-1m intermediate-oi-2m intermediate-oi-3m intermediate-oi-5m intermediate-oi-15m intermediate-oi-30m"
+
+# ============================================================================
 # CHANGELOG TOPICS (Issue #2 Fix - State Store Corruption)
 # ============================================================================
 # CRITICAL: DON'T pre-create changelog topics!
@@ -104,6 +110,13 @@ for topic in $FAMILY_TOPICS; do
 done
 echo ""
 
+# Create intermediate topics
+echo "🔄 Creating intermediate topics..."
+for topic in $INTERMEDIATE_TOPICS; do
+    create_data_topic "$topic"
+done
+echo ""
+
 # Create changelog topics (if any)
 if [ -n "$CHANGELOG_TOPICS" ]; then
     echo "🗂️ Creating changelog topics..."
@@ -118,6 +131,7 @@ echo ""
 echo "📋 Topic counts:"
 echo "  Candle topics: $(echo $CANDLE_TOPICS | wc -w)"
 echo "  Family topics: $(echo $FAMILY_TOPICS | wc -w)"
+echo "  Intermediate topics: $(echo $INTERMEDIATE_TOPICS | wc -w)"
 echo "  Changelog topics: Kafka Streams will auto-create"
 echo ""
 echo "🔍 Verify topics were created:"

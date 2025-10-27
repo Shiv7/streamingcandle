@@ -70,12 +70,15 @@ public class TopologyConfiguration {
             return builder;
         }
 
+        // SHARED: Transform ticks once (cum->delta)
+        KStream<String, TickData> processedTicks = buildSharedTickTransformation(builder);
+
         // Build separate topologies for each timeframe
         for (Timeframe tf : Timeframe.values()) {
             log.info("⏱️ Building topology for timeframe: {}", tf.getLabel());
 
-            // Step 1: Tick aggregation
-            buildTickAggregation(builder, tf);
+            // Step 1: Tick aggregation (uses shared processed ticks)
+            buildTickAggregation(builder, tf, processedTicks);
 
             // Step 2: Orderbook aggregation
             buildOrderbookAggregation(builder, tf);
@@ -91,16 +94,14 @@ public class TopologyConfiguration {
     }
 
     /**
-     * Step 1: Aggregate ticks into WindowedOHLCV
+     * Shared tick transformation: Read ticks and convert cum->delta ONCE
+     * This stream is then consumed by all timeframe aggregations
      */
-    private void buildTickAggregation(StreamsBuilder builder, Timeframe tf) {
-        String tfLabel = tf.getLabel();
-        String intermediateOHLCVTopic = getIntermediateTopic("ohlcv", tfLabel);
+    private KStream<String, TickData> buildSharedTickTransformation(StreamsBuilder builder) {
+        log.info("🔧 Building SHARED tick transformation (cum->delta)");
 
-        log.info("  [{}] Building tick aggregation → {}", tfLabel, intermediateOHLCVTopic);
-
-        // State store for cum->delta conversion
-        String deltaVolumeStoreName = "tick-delta-volume-store-" + tfLabel;
+        // State store for cum->delta conversion (SHARED across all timeframes)
+        String deltaVolumeStoreName = "shared-tick-delta-volume-store";
         builder.addStateStore(
             Stores.keyValueStoreBuilder(
                 Stores.persistentKeyValueStore(deltaVolumeStoreName),
@@ -116,8 +117,8 @@ public class TopologyConfiguration {
                 .withTimestampExtractor(new com.kotsin.consumer.time.MarketAlignedTimestampExtractor())
         );
 
-        // Transform cum->delta
-        KStream<String, TickData> ticks = ticksRaw
+        // Transform cum->delta ONCE
+        return ticksRaw
             .transform(
                 () -> new com.kotsin.consumer.transformers.CumToDeltaTransformer(deltaVolumeStoreName),
                 deltaVolumeStoreName
@@ -125,14 +126,25 @@ public class TopologyConfiguration {
             .filter((key, tick) -> tick != null && tick.getDeltaVolume() != null)
             .filter((key, tick) -> !Boolean.TRUE.equals(tick.getResetFlag()))
             .selectKey((k, tick) -> tick.getScripCode());  // Key by scripCode
+    }
 
-        // Window and aggregate
+    /**
+     * Step 1: Aggregate ticks into WindowedOHLCV
+     * Uses pre-processed ticks (cum->delta already done)
+     */
+    private void buildTickAggregation(StreamsBuilder builder, Timeframe tf, KStream<String, TickData> processedTicks) {
+        String tfLabel = tf.getLabel();
+        String intermediateOHLCVTopic = getIntermediateTopic("ohlcv", tfLabel);
+
+        log.info("  [{}] Building tick aggregation → {}", tfLabel, intermediateOHLCVTopic);
+
+        // Window and aggregate (use pre-processed ticks)
         TimeWindows windows = TimeWindows.ofSizeAndGrace(
             Duration.ofMinutes(1),
             Duration.ofSeconds(gracePeriodSeconds)
         );
 
-        KTable<Windowed<String>, TickWindowState> tickAggregated = ticks
+        KTable<Windowed<String>, TickWindowState> tickAggregated = processedTicks
             .groupByKey(Grouped.with(Serdes.String(), TickData.serde()))
             .windowedBy(windows)
             .aggregate(
