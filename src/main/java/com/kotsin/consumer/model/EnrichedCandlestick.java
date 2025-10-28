@@ -76,6 +76,27 @@ public class EnrichedCandlestick {
     private static final double PRICE_TICK_SIZE = 0.05;
     private static final double VALUE_AREA_PERCENTAGE = 0.70;
 
+    // ========== VPIN State (Volume-Synchronized PIN) ==========
+    private static final int VPIN_MAX_BUCKETS = 50;
+    private static final double VPIN_INITIAL_BUCKET_SIZE = 10000.0;
+    private static final double VPIN_ADAPTIVE_ALPHA = 0.05;
+
+    private double vpinBucketSize = VPIN_INITIAL_BUCKET_SIZE;
+    private java.util.List<VPINBucket> vpinBuckets = new java.util.ArrayList<>();
+    private double vpinCurrentBucketVolume = 0.0;
+    private double vpinCurrentBucketBuyVolume = 0.0;
+    private double vpin = 0.0;
+
+    // ========== Imbalance Bar Emission Tracking ==========
+    private boolean vibTriggered = false;
+    private boolean dibTriggered = false;
+    private boolean trbTriggered = false;
+    private boolean vrbTriggered = false;
+    private long lastVibTriggerTime = 0L;
+    private long lastDibTriggerTime = 0L;
+    private long lastTrbTriggerTime = 0L;
+    private long lastVrbTriggerTime = 0L;
+
     // ========== Transient Processing Fields ==========
     @JsonIgnore
     private transient long firstTs = Long.MAX_VALUE;
@@ -148,7 +169,10 @@ public class EnrichedCandlestick {
 
             // ========== Volume Profile Update ==========
             updateVolumeProfile(px, dv);
-            
+
+            // ========== VPIN Update ==========
+            updateVPIN(dv, isBuy);
+
             // ========== Calculate VWAP ==========
             vwap = volume > 0 ? priceVolumeSum / volume : 0.0;
         }
@@ -226,10 +250,15 @@ public class EnrichedCandlestick {
 
     /**
      * Check imbalance bar thresholds and update EWMA estimates
+     * NOW WITH BAR EMISSION TRACKING!
      */
     private void checkAndUpdateThresholds() {
+        long currentTime = System.currentTimeMillis();
+
         // VIB threshold check
         if (Math.abs(volumeImbalance) >= expectedVolumeImbalance) {
+            vibTriggered = true;  // NEW: Mark that VIB bar was triggered
+            lastVibTriggerTime = currentTime;  // NEW: Track when
             expectedVolumeImbalance = EWMA_ALPHA * Math.abs(volumeImbalance)
                                     + (1 - EWMA_ALPHA) * expectedVolumeImbalance;
             volumeImbalance = 0L;  // Reset after bar emission
@@ -237,6 +266,8 @@ public class EnrichedCandlestick {
 
         // DIB threshold check
         if (Math.abs(dollarImbalance) >= expectedDollarImbalance) {
+            dibTriggered = true;  // NEW: Mark that DIB bar was triggered
+            lastDibTriggerTime = currentTime;  // NEW: Track when
             expectedDollarImbalance = EWMA_ALPHA * Math.abs(dollarImbalance)
                                     + (1 - EWMA_ALPHA) * expectedDollarImbalance;
             dollarImbalance = 0L;
@@ -244,6 +275,8 @@ public class EnrichedCandlestick {
 
         // TRB threshold check
         if (Math.abs(tickRuns) >= expectedTickRuns) {
+            trbTriggered = true;  // NEW: Mark that TRB bar was triggered
+            lastTrbTriggerTime = currentTime;  // NEW: Track when
             expectedTickRuns = EWMA_ALPHA * Math.abs(tickRuns)
                              + (1 - EWMA_ALPHA) * expectedTickRuns;
             tickRuns = 0;
@@ -251,6 +284,8 @@ public class EnrichedCandlestick {
 
         // VRB threshold check
         if (Math.abs(volumeRuns) >= expectedVolumeRuns) {
+            vrbTriggered = true;  // NEW: Mark that VRB bar was triggered
+            lastVrbTriggerTime = currentTime;  // NEW: Track when
             expectedVolumeRuns = EWMA_ALPHA * Math.abs(volumeRuns)
                                + (1 - EWMA_ALPHA) * expectedVolumeRuns;
             volumeRuns = 0L;
@@ -410,6 +445,114 @@ public class EnrichedCandlestick {
             this.high = high;
             this.low = low;
             this.volume = volume;
+        }
+    }
+
+    /**
+     * Update VPIN calculation with new trade
+     * VPIN Algorithm (Easley, López de Prado, O'Hara 2012):
+     * 1. Accumulate volume into buckets
+     * 2. Track buy/sell volume per bucket
+     * 3. VPIN = average of |buy - sell| / total over last 50 buckets
+     */
+    private void updateVPIN(int deltaVolume, boolean isBuy) {
+        if (deltaVolume <= 0) return;
+
+        // Add volume to current bucket
+        vpinCurrentBucketVolume += deltaVolume;
+        if (isBuy) {
+            vpinCurrentBucketBuyVolume += deltaVolume;
+        }
+
+        // Check if bucket is full
+        if (vpinCurrentBucketVolume >= vpinBucketSize) {
+            // Create new bucket
+            double sellVolume = vpinCurrentBucketVolume - vpinCurrentBucketBuyVolume;
+            VPINBucket bucket = new VPINBucket(
+                vpinCurrentBucketVolume,
+                vpinCurrentBucketBuyVolume,
+                sellVolume
+            );
+
+            // Add to bucket list
+            vpinBuckets.add(bucket);
+
+            // Keep only last VPIN_MAX_BUCKETS (50) buckets
+            if (vpinBuckets.size() > VPIN_MAX_BUCKETS) {
+                vpinBuckets.remove(0);
+            }
+
+            // Reset current bucket
+            vpinCurrentBucketVolume = 0.0;
+            vpinCurrentBucketBuyVolume = 0.0;
+
+            // Recalculate VPIN
+            calculateVPIN();
+
+            // Adaptive bucket sizing (EWMA of actual bucket volumes)
+            vpinBucketSize = VPIN_ADAPTIVE_ALPHA * bucket.totalVolume
+                           + (1 - VPIN_ADAPTIVE_ALPHA) * vpinBucketSize;
+        }
+    }
+
+    /**
+     * Calculate VPIN as average of order flow imbalance over buckets
+     */
+    private void calculateVPIN() {
+        if (vpinBuckets.isEmpty()) {
+            vpin = 0.0;
+            return;
+        }
+
+        double sumImbalance = 0.0;
+        double sumVolume = 0.0;
+
+        for (VPINBucket bucket : vpinBuckets) {
+            sumImbalance += Math.abs(bucket.buyVolume - bucket.sellVolume);
+            sumVolume += bucket.totalVolume;
+        }
+
+        // VPIN = average imbalance ratio
+        vpin = sumVolume > 0 ? sumImbalance / sumVolume : 0.0;
+    }
+
+    /**
+     * Get VPIN value
+     */
+    public double getVpin() {
+        return vpin;
+    }
+
+    /**
+     * Get number of VPIN buckets accumulated
+     */
+    public int getVpinBucketCount() {
+        return vpinBuckets.size();
+    }
+
+    /**
+     * Get current VPIN bucket size
+     */
+    public double getVpinBucketSize() {
+        return vpinBucketSize;
+    }
+
+    /**
+     * VPIN Bucket data structure
+     */
+    public static class VPINBucket {
+        public final double totalVolume;
+        public final double buyVolume;
+        public final double sellVolume;
+
+        public VPINBucket(double totalVolume, double buyVolume, double sellVolume) {
+            this.totalVolume = totalVolume;
+            this.buyVolume = buyVolume;
+            this.sellVolume = sellVolume;
+        }
+
+        public double getImbalance() {
+            return Math.abs(buyVolume - sellVolume) / totalVolume;
         }
     }
 

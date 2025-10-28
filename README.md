@@ -1,99 +1,259 @@
-# Streamingcandle - Real-time Market Data Aggregation
+# StreamingCandle - Real-Time Market Microstructure Pipeline
+## BRUTAL ASSESSMENT: Quantitative Finance & Production Systems Analysis
+
+---
 
 ## Table of Contents
-- [Overview](#overview)
-- [Architecture](#architecture)
-- [Data Flow](#data-flow)
-- [Output Topics](#output-topics)
-- [Technical Implementation](#technical-implementation)
-- [Configuration](#configuration)
-- [Running the Module](#running-the-module)
-- [Development Guide](#development-guide)
-- [Troubleshooting](#troubleshooting)
+1. [Executive Summary](#executive-summary)
+2. [System Architecture](#system-architecture)
+3. [Technology Stack](#technology-stack)
+4. [Data Flow & Processing](#data-flow--processing)
+5. [Critical Issues & Missing Features](#critical-issues--missing-features)
+6. [Quantitative Finance Gaps](#quantitative-finance-gaps)
+7. [Production Readiness Assessment](#production-readiness-assessment)
+8. [Recommendations](#recommendations)
+9. [Setup & Configuration](#setup--configuration)
+10. [API Reference](#api-reference)
 
 ---
 
-## Overview
+## Executive Summary
 
-**Streamingcandle** is a high-performance Kafka Streams application that aggregates real-time market data from Indian stock exchanges (NSE/MCX) into multi-timeframe candles with enriched market microstructure metrics.
+### What This System Claims To Do
+StreamingCandle is a Kafka Streams application for aggregating Indian exchange market data (NSE/MCX) into multi-timeframe candles with market microstructure metrics including:
+- OHLCV candlesticks (1m, 2m, 3m, 5m, 15m, 30m)
+- Volume Profile with Point of Control (POC) and Value Area
+- Imbalance Bars (VIB, DIB, TRB, VRB)
+- Order Flow Imbalance (OFI)
+- VPIN (Volume-Synchronized Probability of Informed Trading)
+- Kyle's Lambda (price impact coefficient)
+- Iceberg and Spoofing Detection
 
-### Business Problem
+### What It Actually Delivers
+A functional data aggregation pipeline that:
+- ✅ Correctly aggregates OHLCV candles with market-aligned windows (9:15 AM NSE, 9:00 AM MCX)
+- ✅ Implements buy/sell volume separation using quote-rule and tick-rule
+- ✅ Calculates basic volume profile metrics
+- ✅ Tracks cumulative-to-delta volume conversion
+- ❌ **DOES NOT IMPLEMENT VPIN** (empty state variables only)
+- ❌ **DOES NOT IMPLEMENT Kyle's Lambda** (placeholder code)
+- ❌ **INCOMPLETE Imbalance Bars** (thresholds calculated but bars never emitted)
+- ⚠️ **NAIVE OFI implementation** (no tick size adjustment, no exchange quirks)
+- ⚠️ **TOY-LEVEL spoofing detection** (5-second threshold, catches nothing)
 
-Traders need aggregated market data across multiple timeframes (1m, 2m, 3m, 5m, 15m, 30m) with:
-- OHLCV candles from trade ticks
-- Orderbook depth and microstructure signals
-- Open Interest metrics (for derivatives)
-- All synchronized and aligned to market hours (9:15 AM IST)
-
-### Key Features
-
-- **3 Independent Streams** - No merging/joining to avoid lateness issues
-- **Market-Aligned Windows** - Windows start from market open (9:15 AM IST), not clock hours
-- **6 Timeframes** - 1m, 2m, 3m, 5m, 15m, 30m
-- **Enriched Data** - OHLCV + orderbook depth + microstructure + OI + volume profile
-- **High Performance** - Per-instrument aggregation, optimized state stores
-- **Fault Tolerant** - Kafka Streams guarantees, state store backups
-
----
-
-## Architecture
-
-### High-Level Design
-
+### Code Quality Metrics
 ```
-┌────────────────────────────────────────────────────────────────┐
-│                  INPUT TOPICS (3)                              │
-├────────────────────────────────────────────────────────────────┤
-│ 1. forwardtesting-data  →  Key: {token}        (Trade Ticks)  │
-│ 2. Orderbook            →  Key: {exch}|{token} (Depth)        │
-│ 3. OpenInterest         →  Key: {exch}|{token} (OI)           │
-└────────────────────────────────────────────────────────────────┘
-                              ↓
-┌────────────────────────────────────────────────────────────────┐
-│         3 INDEPENDENT KAFKA STREAMS TOPOLOGIES                 │
-├────────────────────────────────────────────────────────────────┤
-│                                                                 │
-│  Stream 1: Ticks → OHLCV Candles                               │
-│    • CumToDeltaTransformer (cumulative → delta volume)         │
-│    • Market-aligned windowing (9:15 AM base)                   │
-│    • Per-instrument state accumulation                         │
-│    • CandleAccumulator, VolumeProfileAccumulator               │
-│                                                                 │
-│  Stream 2: Orderbook → Orderbook Signals                       │
-│    • Key normalization (exch|token → token)                    │
-│    • Market-aligned windowing                                  │
-│    • OrderbookDepthAccumulator, MicrostructureAccumulator      │
-│    • Iceberg/spoofing detection                                │
-│                                                                 │
-│  Stream 3: OpenInterest → OI Metrics                           │
-│    • Key normalization (exch|token → token)                    │
-│    • Market-aligned windowing                                  │
-│    • OiAccumulator (OI OHLC tracking)                          │
-│                                                                 │
-└────────────────────────────────────────────────────────────────┘
-                              ↓
-┌────────────────────────────────────────────────────────────────┐
-│                  OUTPUT TOPICS (18)                             │
-├────────────────────────────────────────────────────────────────┤
-│ • candle-ohlcv-{1m,2m,3m,5m,15m,30m}         (6 topics)       │
-│ • orderbook-signals-{1m,2m,3m,5m,15m,30m}    (6 topics)       │
-│ • oi-metrics-{1m,2m,3m,5m,15m,30m}           (6 topics)       │
-└────────────────────────────────────────────────────────────────┘
+Total Lines of Code:     5,509 (Java source)
+Classes/Interfaces:      58
+Test Files:              1 (ONE!)
+Test Coverage:           Required 90%, Actual: ~5%
+Production Dependencies: Spring Boot 3.2.2, Kafka Streams 3.x
+Documentation:           7 MD files (now consolidated to this one)
 ```
 
-### Why 3 Independent Streams?
+### Verdict
+**Grade: C+ (Data Pipeline) / F (Quantitative Finance)**
 
-**Problem with Merging**: When different data sources (ticks, orderbook, OI) are merged, stream time advances based on the latest event. This causes earlier events to be marked as "late" and dropped.
-
-**Solution**: Process each stream independently with its own event time, then let downstream consumers join data as needed.
+This is a competent data aggregation system but fails as a quantitative trading infrastructure. It's Kafka Streams plumbing with aspirational metric names. Use it for basic OHLCV aggregation, not for informed trading decisions.
 
 ---
 
-## Data Flow
+## System Architecture
 
-### Stream 1: Ticks → OHLCV Candles
+### High-Level Component Diagram
 
-**Input**: `forwardtesting-data` topic
+```
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                        STREAMINGCANDLE ARCHITECTURE                          │
+└─────────────────────────────────────────────────────────────────────────────┘
+
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                             INPUT LAYER                                      │
+├─────────────────────────────────────────────────────────────────────────────┤
+│                                                                              │
+│  ┌──────────────────────┐  ┌──────────────────────┐  ┌───────────────────┐│
+│  │ forwardtesting-data  │  │     Orderbook        │  │   OpenInterest    ││
+│  │   (Trade Ticks)      │  │   (L2 Snapshots)     │  │   (OI Updates)    ││
+│  │  Key: token          │  │ Key: exch|token      │  │ Key: exch|token   ││
+│  └──────────────────────┘  └──────────────────────┘  └───────────────────┘│
+│           ▼                          ▼                         ▼            │
+└─────────────────────────────────────────────────────────────────────────────┘
+                                       │
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                          PROCESSING LAYER                                    │
+│                    (3 Independent Kafka Streams)                             │
+├─────────────────────────────────────────────────────────────────────────────┤
+│                                                                              │
+│  ┌───────────────────────────────────────────────────────────────────────┐ │
+│  │  STREAM 1: CandlestickProcessor                                       │ │
+│  ├───────────────────────────────────────────────────────────────────────┤ │
+│  │  1. TickTimestampExtractor (event time from /Date(millis)/)          │ │
+│  │  2. CumToDeltaTransformer (cumulative → delta volume)                │ │
+│  │  3. TradingHoursFilter (NSE: 9:15-15:30, MCX: 9:00-23:30)           │ │
+│  │  4. GroupByKey(token)                                                 │ │
+│  │  5. WindowedBy(1m, grace=1s)                                          │ │
+│  │  6. Aggregate(EnrichedCandlestick::updateWithDelta)                  │ │
+│  │     - OHLC (by event time, deterministic)                            │ │
+│  │     - Buy/Sell volume (quote-rule + tick-rule)                       │ │
+│  │     - VWAP, tick count                                                │ │
+│  │     - Imbalance Bars (VIB, DIB, TRB, VRB with EWMA thresholds)      │ │
+│  │     - Volume Profile (POC, Value Area)                                │ │
+│  │  7. Suppress(untilWindowCloses) → candle-ohlcv-1m                   │ │
+│  │  8. Multi-minute aggregation (2m, 3m, 5m, 15m, 30m)                 │ │
+│  │     - Read candle-ohlcv-1m                                            │ │
+│  │     - MultiMinuteOffsetTimestampExtractor (NSE alignment)            │ │
+│  │     - Aggregate(EnrichedCandlestick::updateCandle)                   │ │
+│  │     - Output: candle-ohlcv-{2m,3m,5m,15m,30m}                       │ │
+│  └───────────────────────────────────────────────────────────────────────┘ │
+│                                                                              │
+│  ┌───────────────────────────────────────────────────────────────────────┐ │
+│  │  STREAM 2: OrderbookProcessor                                         │ │
+│  ├───────────────────────────────────────────────────────────────────────┤ │
+│  │  1. Read Orderbook snapshots                                          │ │
+│  │  2. KeyNormalization (exch|token → token)                            │ │
+│  │  3. Filter(isValid)                                                   │ │
+│  │  4. GroupByKey(token)                                                 │ │
+│  │  5. WindowedBy(1m, grace=1s)                                          │ │
+│  │  6. Aggregate(OrderbookAggregate::updateWithSnapshot)                │ │
+│  │     - OFI (full depth, Cont-Kukanov-Stoikov 2014)                    │ │
+│  │     - Depth metrics (bid/ask VWAP, imbalances, spreads)              │ │
+│  │     - Weighted depth imbalance (distance-weighted)                    │ │
+│  │     - Iceberg detection (CV < 0.1, history=20 snapshots)             │ │
+│  │     - Spoofing detection (5s threshold, 30% depth threshold)         │ │
+│  │     ⚠️  VPIN: PLACEHOLDER ONLY - NOT IMPLEMENTED                     │ │
+│  │     ⚠️  Kyle's Lambda: PLACEHOLDER ONLY - NOT IMPLEMENTED            │ │
+│  │  7. Suppress(untilWindowCloses) → orderbook-signals-1m              │ │
+│  │  8. Multi-minute: Keep LATEST aggregate per window                   │ │
+│  │     - Output: orderbook-signals-{2m,3m,5m,15m,30m}                  │ │
+│  └───────────────────────────────────────────────────────────────────────┘ │
+│                                                                              │
+│  ┌───────────────────────────────────────────────────────────────────────┐ │
+│  │  STREAM 3: OIProcessor                                                │ │
+│  ├───────────────────────────────────────────────────────────────────────┤ │
+│  │  1. Read OpenInterest updates                                         │ │
+│  │  2. KeyNormalization (exch|token → token)                            │ │
+│  │  3. GroupByKey(token)                                                 │ │
+│  │  4. WindowedBy(1m, grace=1s)                                          │ │
+│  │  5. Aggregate(OIAggregate::updateWithOI)                             │ │
+│  │     - OI OHLC (track OI like price)                                   │ │
+│  │     - Put/Call OI separation                                          │ │
+│  │     - OI change (absolute, percentage)                                │ │
+│  │     - Put/Call ratio                                                  │ │
+│  │  6. Suppress(untilWindowCloses) → oi-metrics-1m                     │ │
+│  │  7. Multi-minute aggregation                                          │ │
+│  │     - Output: oi-metrics-{2m,3m,5m,15m,30m}                         │ │
+│  └───────────────────────────────────────────────────────────────────────┘ │
+│                                                                              │
+└─────────────────────────────────────────────────────────────────────────────┘
+                                       │
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                            OUTPUT LAYER                                      │
+├─────────────────────────────────────────────────────────────────────────────┤
+│                                                                              │
+│  ┌─────────────────────────────────────────────────────────────────────┐   │
+│  │  CANDLE TOPICS (6)                                                   │   │
+│  │  - candle-ohlcv-1m, -2m, -3m, -5m, -15m, -30m                       │   │
+│  │    EnrichedCandlestick (OHLC, volume, buy/sell, VWAP, profile)      │   │
+│  └─────────────────────────────────────────────────────────────────────┘   │
+│                                                                              │
+│  ┌─────────────────────────────────────────────────────────────────────┐   │
+│  │  ORDERBOOK SIGNAL TOPICS (6)                                         │   │
+│  │  - orderbook-signals-1m, -2m, -3m, -5m, -15m, -30m                  │   │
+│  │    OrderbookAggregate (OFI, depth, iceberg, spoofing)               │   │
+│  └─────────────────────────────────────────────────────────────────────┘   │
+│                                                                              │
+│  ┌─────────────────────────────────────────────────────────────────────┐   │
+│  │  OI METRICS TOPICS (6)                                               │   │
+│  │  - oi-metrics-1m, -2m, -3m, -5m, -15m, -30m                         │   │
+│  │    OIAggregate (OI OHLC, Put/Call, changes)                         │   │
+│  └─────────────────────────────────────────────────────────────────────┘   │
+│                                                                              │
+│  TOTAL: 18 OUTPUT TOPICS (3 streams × 6 timeframes)                         │
+└─────────────────────────────────────────────────────────────────────────────┘
+                                       │
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                         MONITORING & CONTROL                                 │
+├─────────────────────────────────────────────────────────────────────────────┤
+│                                                                              │
+│  REST API (Port 8081)                                                        │
+│  ├── GET /api/v1/health         - Detailed health with stream states        │
+│  ├── GET /api/v1/health/live    - Kubernetes liveness probe                 │
+│  ├── GET /api/v1/health/ready   - Kubernetes readiness probe                │
+│  └── GET /api/v1/health/metrics - Prometheus-style metrics                  │
+│                                                                              │
+│  SystemMonitor (Scheduled @60s)                                              │
+│  └── Heap memory, stream metrics, alert cooldown                            │
+│                                                                              │
+└─────────────────────────────────────────────────────────────────────────────┘
+
+STATE STORES (RocksDB + Changelog Topics)
+├── max-cum-vol-per-sym          - CumToDelta state (cumulative volume tracking)
+├── tick-candlestick-store       - 1m candle aggregation state
+├── agg-candle-store-{2m..30m}   - Multi-minute candle state
+├── orderbook-aggregate-store    - 1m orderbook aggregation state
+├── agg-orderbook-store-{2m..30m}- Multi-minute orderbook state
+├── oi-aggregate-store           - 1m OI aggregation state
+└── agg-oi-store-{2m..30m}       - Multi-minute OI state
+
+CRITICAL DESIGN DECISIONS:
+1. THREE INDEPENDENT STREAMS - Avoids event-time merging issues
+2. MARKET-ALIGNED WINDOWS - NSE: 9:15 AM base, MCX: 9:00 AM base
+   MarketTimeAligner.getWindowOffsetMinutes(exchange, windowSize)
+3. SUPPRESS UNTIL WINDOW CLOSES - Only emit final values
+4. 1-MINUTE BASE → MULTI-MINUTE - Proven aggregation pattern
+5. GRACE PERIOD = 1 SECOND - Optimized for low latency (10s in config)
+```
+
+---
+
+## Technology Stack
+
+### Core Framework
+```
+Spring Boot:        3.2.2
+Java:               17
+Build Tool:         Maven
+```
+
+### Streaming & Messaging
+```
+Apache Kafka:       3.x (managed by Spring Boot BOM)
+Kafka Streams:      3.x
+Spring Kafka:       3.x
+State Store:        RocksDB (via Kafka Streams)
+```
+
+### Data & Serialization
+```
+Jackson:            Managed by Spring Boot
+Lombok:             1.18.36 (code generation)
+Serdes:             JSON (Spring JsonSerde)
+```
+
+### Testing (INADEQUATE)
+```
+JUnit:              5
+Mockito:            Latest
+TestContainers:     1.19.0
+JaCoCo:             0.8.12 (90% coverage REQUIRED but NOT ENFORCED)
+Actual Test Files:  1 (CumToDeltaTransformerTest.java)
+```
+
+### Logging & Monitoring
+```
+SLF4J + Logback:    Standard Spring Boot
+Metrics:            Basic (no Prometheus export)
+Alerting:           None
+APM:                None
+```
+
+---
+
+## Data Flow & Processing
+
+### Stream 1: Tick Data → Enriched Candles
+
+#### Input: `forwardtesting-data` Topic
 ```json
 {
   "Token": 96955,
@@ -113,45 +273,90 @@ Traders need aggregated market data across multiple timeframes (1m, 2m, 3m, 5m, 
 }
 ```
 
-**Processing**:
-1. Convert cumulative volume to delta volume (`CumToDeltaTransformer`)
-2. Group by token (scripCode)
-3. Window by timeframe (market-aligned)
-4. Accumulate OHLCV (`CandleAccumulator`)
-5. Calculate volume profile, imbalance bars
-6. Emit completed window
+#### Processing Steps
 
-**Output**: `candle-ohlcv-{timeframe}` topics
-```json
-{
-  "scripCode": "96955",
-  "companyName": "INDUSINDBK 28 OCT 2025 PE 760.00",
-  "timeframe": "1m",
-  "windowStartMillis": 1761034560000,
-  "windowEndMillis": 1761034620000,
-  "candle": {
-    "open": 10.5,
-    "high": 11.2,
-    "low": 10.1,
-    "close": 10.8,
-    "volume": 12600,
-    "buyVolume": 7200,
-    "sellVolume": 5400,
-    "vwap": 10.65,
-    "tickCount": 42,
-    "isComplete": true
-  },
-  "volumeProfile": {
-    "poc": 10.6,
-    "valueAreaHigh": 11.0,
-    "valueAreaLow": 10.3
-  }
+**1. Timestamp Extraction**
+- `TickTimestampExtractor` parses `/Date(epochMillis)/` format
+- Validates timestamps (rejects future, handles fallback)
+
+**2. Cumulative → Delta Conversion**
+```java
+// CumToDeltaTransformer.java
+deltaVolume = currentCumulativeVolume - previousCumulativeVolume
+if (deltaVolume < 0) {
+    // Market reset detected (new day, producer restart)
+    tick.setResetFlag(true)
+    deltaVolume = currentCumulativeVolume
 }
 ```
 
-### Stream 2: Orderbook → Orderbook Signals
+**3. Trading Hours Filter**
+- NSE: 9:15 AM - 3:30 PM IST
+- MCX: 9:00 AM - 11:30 PM IST
 
-**Input**: `Orderbook` topic
+**4. 1-Minute Windowed Aggregation**
+```java
+// EnrichedCandlestick::updateWithDelta
+- OHLC by event time (open = min(ts), close = max(ts))
+- Volume: sum of delta volumes
+- Buy/Sell classification:
+    * Quote-rule: compare to bid/ask (1bp threshold)
+    * Tick-rule: compare to last price
+    * Default: SELL (to avoid buy inflation)
+- VWAP: Σ(price × volume) / Σ(volume)
+- Imbalance Bars: VIB, DIB, TRB, VRB with EWMA thresholds (α=0.1)
+- Volume Profile:
+    * Round prices to 0.05 tick size
+    * Accumulate volume at each price level
+    * Calculate POC (price with max volume)
+    * Calculate Value Area (70% of volume around POC)
+```
+
+**5. Multi-Minute Aggregation**
+```java
+// Read candle-ohlcv-1m
+// Apply NSE alignment offset via MultiMinuteOffsetTimestampExtractor
+offset_minutes = MarketTimeAligner.getWindowOffsetMinutes(exchange, windowSize)
+// NSE: 15 minutes for all windows (9:15 AM = 555 minutes since midnight)
+// MCX: 0 minutes (9:00 AM = 540 minutes = 0 mod all window sizes)
+
+// Aggregate via EnrichedCandlestick::updateCandle
+- open: take first candle's open
+- high: max of all highs
+- low: min of all lows
+- close: take last candle's close
+- volume: sum of all volumes
+- Merge volume profiles, imbalance bars
+```
+
+#### Output: `candle-ohlcv-{1m,2m,3m,5m,15m,30m}` Topics
+```json
+{
+  "open": 10.5,
+  "high": 11.2,
+  "low": 10.1,
+  "close": 10.8,
+  "volume": 12600,
+  "buyVolume": 7200,
+  "sellVolume": 5400,
+  "vwap": 10.65,
+  "tickCount": 42,
+  "volumeImbalance": 1800,
+  "dollarImbalance": 19170,
+  "volumeAtPrice": {"10.5": 3200, "10.6": 4500, ...},
+  "scripCode": "96955",
+  "companyName": "INDUSINDBK 28 OCT 2025 PE 760.00",
+  "exchange": "N",
+  "windowStartMillis": 1761034560000,
+  "windowEndMillis": 1761034620000,
+  "humanReadableStartTime": "2025-10-28 09:16:00.000",
+  "humanReadableEndTime": "2025-10-28 09:17:00.000"
+}
+```
+
+### Stream 2: Orderbook Snapshots → Microstructure Signals
+
+#### Input: `Orderbook` Topic
 ```json
 {
   "Token": 92960,
@@ -172,487 +377,902 @@ Traders need aggregated market data across multiple timeframes (1m, 2m, 3m, 5m, 
 }
 ```
 
-**Processing**:
-1. Extract token from composite key (`N|92960` → `92960`)
-2. Group by token
-3. Window by timeframe (market-aligned)
-4. Accumulate orderbook depth metrics
-5. Calculate OFI, VPIN, microstructure indicators
-6. Detect icebergs and spoofing
-7. Emit completed window
+#### Processing: `OrderbookAggregate::updateWithSnapshot`
 
-**Output**: `orderbook-signals-{timeframe}` topics
+**Order Flow Imbalance (OFI) - Cont, Kukanov, Stoikov (2014)**
+```
+ΔBid(t) = Σ{p ≥ p_bid(t-1)} Q_bid(t, p) - Σ{p ≥ p_bid(t)} Q_bid(t-1, p)
+ΔAsk(t) = Σ{p ≤ p_ask(t-1)} Q_ask(t, p) - Σ{p ≤ p_ask(t)} Q_ask(t-1, p)
+
+OFI(t) = ΔBid(t) - ΔAsk(t)
+```
+
+**Depth Metrics**
+```
+depthImbalance = (totalBidQty - totalAskQty) / (totalBidQty + totalAskQty)
+weightedImbalance = Σ(qty_i × weight_i) where weight_i = 1 / (1 + distance_from_mid)
+bidVWAP = Σ(price_i × qty_i) / Σ(qty_i) for top 10 bid levels
+askVWAP = Σ(price_i × qty_i) / Σ(qty_i) for top 10 ask levels
+```
+
+**Iceberg Detection**
+```
+Track last 20 best bid/ask quantities
+Calculate coefficient of variation: CV = σ / μ
+If CV < 0.1 AND mean > 1000: ICEBERG DETECTED
+```
+
+**Spoofing Detection**
+```
+For each large order (> 30% of depth):
+  Track first_seen_time
+  If order disappears within 5 seconds:
+    SPOOFING EVENT
+```
+
+**VPIN (PLACEHOLDER - NOT IMPLEMENTED)**
+```
+// OrderbookAggregate.java lines 53-60
+// State variables exist but NO calculation logic
+// Should implement:
+// 1. Bucketing by volume (not time)
+// 2. Classification of buy vs sell volume per bucket
+// 3. VPIN = Σ|V_buy - V_sell| / Σ(V_buy + V_sell) over last 50 buckets
+```
+
+**Kyle's Lambda (PLACEHOLDER - NOT IMPLEMENTED)**
+```
+// OrderbookAggregate.java lines 62-65
+// State variables exist but NO regression logic
+// Should implement:
+// λ = Cov(Δp, q) / Var(q)
+// where Δp = price change, q = signed order flow
+```
+
+#### Output: `orderbook-signals-{1m,2m,3m,5m,15m,30m}` Topics
 ```json
 {
   "scripCode": "92960",
-  "timeframe": "1m",
-  "orderbookSignals": {
-    "depthImbalance": 0.59,
-    "depthBuyImbalanced": true,
-    "ofi": 25600,
-    "vpinLevel": "MODERATE",
-    "spreadAvg": 0.2,
-    "bidDepthSum": 426400,
-    "askDepthSum": 109600,
-    "icebergBid": true,
-    "icebergAsk": false,
-    "spoofingCount": 0
-  }
+  "companyName": "INFY 28 OCT 2025 PE 1460.00",
+  "exchange": "N",
+  "ofi": 25600.0,
+  "depthImbalance": 0.59,
+  "weightedImbalanceSum": 45.3,
+  "averageSpread": 0.2,
+  "midPrice": 20.3,
+  "microprice": 20.28,
+  "averageBidVWAP": 20.18,
+  "averageAskVWAP": 20.42,
+  "icebergBid": true,
+  "icebergAsk": false,
+  "spoofingCount": 0,
+  "vpin": 0.0,
+  "kyleLambda": 0.0,
+  "windowStartMillis": 1761034560000,
+  "windowEndMillis": 1761034620000
 }
 ```
 
-### Stream 3: OI → OI Metrics
+### Stream 3: Open Interest → OI Metrics
 
-**Input**: `OpenInterest` topic
-```json
-{
-  "Token": 126978,
-  "companyName": "ITC 25 NOV 2025 CE 412.50",
-  "Exch": "N",
-  "ExchType": "D",
-  "receivedTimestamp": 1761034638963,
-  "OpenInterest": 59200
-}
-```
-
-**Processing**:
-1. Extract token from composite key
-2. Group by token
-3. Window by timeframe
-4. Track OI changes (OHLC for OI)
-5. Emit completed window
-
-**Output**: `oi-metrics-{timeframe}` topics
-```json
-{
-  "scripCode": "126978",
-  "timeframe": "1m",
-  "openInterest": {
-    "oiClose": 59200,
-    "oiChange": 1200,
-    "oiChangePercent": 2.07
-  }
-}
-```
+Simple aggregation of OI changes per window. Output: `oi-metrics-{1m..30m}`.
 
 ---
 
-## Output Topics
+## Critical Issues & Missing Features
 
-### Topic Naming Convention
+### 🔴 CRITICAL: Production-Breaking Issues
 
-All output topics follow the pattern: `{type}-{timeframe}`
+#### 1. VPIN is COMPLETELY UNIMPLEMENTED
+**Location:** `OrderbookAggregate.java:53-60`
 
-| Stream Type | Timeframes | Topic Names |
-|------------|-----------|-------------|
-| OHLCV Candles | 1m, 2m, 3m, 5m, 15m, 30m | `candle-ohlcv-1m`, `candle-ohlcv-2m`, ... |
-| Orderbook Signals | 1m, 2m, 3m, 5m, 15m, 30m | `orderbook-signals-1m`, `orderbook-signals-2m`, ... |
-| OI Metrics | 1m, 2m, 3m, 5m, 15m, 30m | `oi-metrics-1m`, `oi-metrics-2m`, ... |
-
-**Total**: 18 output topics (3 types × 6 timeframes)
-
-### Message Format
-
-All output topics use `UnifiedWindowMessage` wrapper:
-- **Key**: `scripCode` (token as string)
-- **Value**: JSON with sections for candle, orderbook, OI, volume profile
-
----
-
-## Technical Implementation
-
-### Key Components
-
-#### 1. TopologyConfiguration
-Creates 3 independent Kafka Streams topologies:
-- `createTicksTopology()` - OHLCV candle aggregation
-- `createOrderbookTopology()` - Orderbook signal generation
-- `createOITopology()` - OI metrics aggregation
-
-#### 2. InstrumentStateManager
-Manages per-instrument state accumulation across all timeframes:
-- `CandleAccumulator` - OHLCV calculation
-- `MicrostructureAccumulator` - Orderbook microstructure
-- `ImbalanceBarAccumulator` - Volume imbalance bars
-- `OrderbookDepthAccumulator` - Depth metrics
-- `VolumeProfileAccumulator` - POC and value area
-
-#### 3. MarketAlignedTimestampExtractor
-Aligns all windows to market open (9:15 AM IST):
+**What Exists:**
 ```java
-// Example: 9:17:35 → Align to 2-minute window [9:16:00 - 9:18:00]
-long marketOpenMillis = 1761034500000L; // 9:15 AM IST
-long elapsedSinceOpen = timestamp - marketOpenMillis;
-long windowIndex = elapsedSinceOpen / windowDurationMillis;
-return windowIndex * windowDurationMillis;
+private static final int VPIN_BUCKET_COUNT = 50;
+private double adaptiveBucketSize = 10000.0;
+private List<VPINBucket> vpinBuckets = new ArrayList<>();
+private double vpin = 0.0;
 ```
 
-#### 4. CumToDeltaTransformer
-Converts cumulative volume to delta volume:
-- Tracks previous cumulative volume per instrument
-- Calculates delta: `deltaVolume = currentVolume - previousVolume`
-- Handles reset scenarios (next day, market restart)
+**What's Missing:**
+- Zero bucketing logic
+- Zero buy/sell volume classification per bucket
+- Zero VPIN calculation
+- **This is false advertising in documentation**
 
-### Windowing Strategy
-
-**Market-Aligned Windows** (NOT clock-based):
-
-```
-NSE Open: 9:15:00 AM IST
-
-1-minute windows:
-  [9:15:00 - 9:16:00]
-  [9:16:00 - 9:17:00]
-  [9:17:00 - 9:18:00]
-  ...
-
-30-minute windows:
-  [9:15:00 - 9:45:00]  ✅ Correct
-  [9:45:00 - 10:15:00]
-  [10:15:00 - 10:45:00]
-  ...
+**Fix Required:**
+```java
+// Real VPIN implementation (Easley, López de Prado, O'Hara 2012)
+1. Bucket trades by volume (not time)
+2. Classify each bucket as buy-heavy or sell-heavy
+3. VPIN = Σ|V_buy_i - V_sell_i| / (2 × V_total) over last 50 buckets
+4. Requires trade-level data, not just orderbook snapshots
 ```
 
-**Grace Period**: 10 seconds (configurable via `unified.streams.window.grace.period.seconds`)
+#### 2. Kyle's Lambda is VAPORWARE
+**Location:** `OrderbookAggregate.java:62-65`
 
-### State Stores
+**What Exists:**
+```java
+private List<PriceImpactObservation> priceImpactHistory = new ArrayList<>();
+private double kyleLambda = 0.0;
+```
 
-Each topology uses persistent state stores for windowing:
-- `tick-state-{timeframe}` - Tick aggregation state
-- `orderbook-depth-{timeframe}` - Orderbook accumulation state
-- `oi-state-{timeframe}` - OI tracking state
+**What's Missing:**
+- Zero regression implementation
+- Zero price impact calculation
+- Zero signed order flow tracking
 
-State stores are backed up to changelog topics for fault tolerance.
+**Fix Required:**
+```java
+// Kyle's Lambda = dP/dQ (price impact per unit signed flow)
+1. Track (Δprice, signed_volume) pairs
+2. Run OLS regression: Δprice = λ × signed_volume + ε
+3. λ = Cov(Δp, Q) / Var(Q)
+4. Update every N observations with rolling window
+```
+
+#### 3. Imbalance Bars NEVER EMITTED
+**Location:** `EnrichedCandlestick.java:194-258`
+
+**Problem:** Imbalance thresholds are calculated and updated, but bars are NEVER emitted. The entire point of imbalance bars (Prado 2018) is to create non-time-based bars when thresholds cross.
+
+**Current Behavior:**
+- Calculates `volumeImbalance`, `dollarImbalance`, etc.
+- Updates EWMA thresholds
+- Resets counters when threshold crossed
+- **BUT: Never creates a new bar/candle**
+
+**Fix Required:**
+```java
+// When threshold crossed:
+if (Math.abs(volumeImbalance) >= expectedVolumeImbalance) {
+    emitImbalan ceBar("VIB", candle.snapshot());  // NEW: Emit bar
+    expectedVolumeImbalance = EWMA_ALPHA * ...;
+    volumeImbalance = 0L;
+}
+```
+
+#### 4. ONLY 1 TEST FOR 5,500 LINES OF CODE
+**Location:** `src/test/`
+
+**Coverage:**
+- Required: 90% (pom.xml:144)
+- Actual: ~5% (1 test file)
+- JaCoCo enforces 90% but build still succeeds
+
+**Missing Tests:**
+- EnrichedCandlestick aggregation
+- OrderbookAggregate OFI calculation
+- OIAggregate updates
+- Multi-minute aggregation logic
+- Trading hours validation
+- Market alignment offset calculation
+- Buy/sell classification
+- Volume profile calculation
+- Iceberg/spoofing detection
+
+**Risk:** Production bugs guaranteed.
+
+### ⚠️ MAJOR: Quantitative Finance Gaps
+
+#### 5. Naive Trade Classification
+**Location:** `EnrichedCandlestick.java:168-191`
+
+**Current:** Basic quote-rule → tick-rule with 1bp threshold
+
+**Problems:**
+- 1bp threshold is arbitrary (doesn't adapt to volatility)
+- No Lee-Ready algorithm (adjust for reporting delay)
+- No bulk volume classification
+- Indian options have variable tick sizes by strike
+- Near-the-money options will be massively misclassified
+
+**Impact:** Buy/sell volume metrics are unreliable.
+
+#### 6. No Tick Size Adjustment
+**Location:** All price comparisons
+
+**Problem:** Code assumes uniform price levels. Indian exchanges have:
+- NSE equity: ₹0.05 tick for < ₹1000, ₹0.10 for ≥ ₹1000
+- Options: Variable by strike price
+- OFI calculation assumes uniform depth levels (false)
+
+#### 7. Zero Backtesting Infrastructure
+**Location:** Nowhere
+
+**What's Missing:**
+- Historical replay capability
+- Performance metrics (Sharpe, Sortino, max drawdown)
+- Signal validation (do imbalance bars predict returns?)
+- Walk-forward optimization
+- Out-of-sample testing
+
+**You have NO IDEA if these metrics work.**
+
+#### 8. No Transaction Cost Modeling
+**Missing:**
+- Slippage estimates
+- Market impact models (sqrt law, linear impact)
+- Execution shortfall calculation
+- Exchange fees, STT (Securities Transaction Tax for India)
+
+**Impact:** Can't build profitable strategies without cost modeling.
+
+#### 9. Hardcoded Magic Numbers
+**Examples:**
+```java
+EWMA_ALPHA = 0.1                    // Why? No justification
+VALUE_AREA_PERCENTAGE = 0.70        // Standard but never validated
+ICEBERG_CV_THRESHOLD = 0.1          // Completely arbitrary
+SPOOF_DURATION_THRESHOLD_MS = 5000  // Real spoofing is milliseconds
+PRICE_TICK_SIZE = 0.05              // Wrong for many instruments
+```
+
+**Fix:** Should be configurable parameters optimized via backtesting.
+
+#### 10. Broken Value Area Calculation
+**Location:** `EnrichedCandlestick.java:361-399`
+
+**Problem:**
+```java
+// Line 375: Comment says "Sort by proximity to POC"
+// Line 387: Actual code uses completely different algorithm
+// Result: Value Area does NOT contain 70% of volume as claimed
+```
+
+**Fix:** Proper implementation:
+```java
+1. Sort price levels by proximity to POC
+2. Accumulate volume until reaching 70% of total
+3. Return (min_price, max_price) of accumulated range
+```
+
+### ⚠️ MODERATE: Production Engineering Issues
+
+#### 11. Thread.sleep() in Production Code
+**Location:** `CandlestickProcessor.java:313-327`
+
+```java
+process("realtime-candle-1min", ...);
+Thread.sleep(1000);  // 🤮
+process("realtime-candle-2min", ...);
+Thread.sleep(1000);  // 🤮
+```
+
+**Problem:** Blocks main thread during initialization.
+
+**Fix:** Use `CompletableFuture.allOf()` or `@DependsOn` annotations.
+
+#### 12. No Monitoring/Alerting
+**What Exists:** Basic SystemMonitor with console logging
+
+**What's Missing:**
+- Prometheus metrics export
+- Grafana dashboards
+- PagerDuty integration
+- SLA tracking (latency p50/p95/p99)
+- Lag monitoring (consumer lag per partition)
+- State store size alerts
+- Memory leak detection
+
+#### 13. Configuration Chaos
+**Location:** `pom.xml:18-20`
+
+```xml
+<groupId>com.example</groupId>
+<artifactId>demo</artifactId>
+```
+
+Production code still using Spring Initializr defaults. Unprofessional.
+
+#### 14. Spoofing Detection is Toy-Level
+**Location:** `OrderbookAggregate.java:340-397`
+
+**Current:** 5-second threshold for large orders appearing/disappearing
+
+**Problem:**
+- Professional spoofing happens in milliseconds (HFT speeds)
+- 30% depth threshold is too high (smart spoofers use 10-15%)
+- No cross-exchange spoofing detection
+- No layering detection (multiple orders at different prices)
+
+**This will catch ZERO real manipulation.**
+
+#### 15. No Order Replay
+**Problem:** For market data systems, you MUST be able to replay historical days for:
+- Backtesting strategies
+- Debugging production issues
+- Validating refactors
+
+**Fix:** Add Kafka offset management tools and historical replay mode.
+
+#### 16. Grace Period Too Aggressive
+**Location:** `CandlestickProcessor.java:171`
+
+```java
+Duration.ofSeconds(1)  // 1 second grace
+```
+
+For Indian exchanges with network latency, this will drop late events. Should be 10-30 seconds.
+
+#### 17. No Anomaly Detection
+**Missing:**
+- Outlier detection (prices > 5σ from mean)
+- Data quality checks (missing timestamps, null values)
+- Cross-validation (tick price vs OHLC consistency)
 
 ---
 
-## Configuration
+## Quantitative Finance Gaps
 
-### Core Configuration
+### What Professional HFT/Quant Firms Have That This Doesn't
 
-```properties
-# Application
-spring.application.name=streamingcandle
-server.port=8081
+#### 1. Microstructure Models
+- PIN (Probability of Informed Trading) - actual implementation
+- VPIN - actual implementation, not placeholder
+- Kyle's Lambda - with proper regression
+- Amihud illiquidity ratio
+- Roll's spread estimator
+- Hasbrouck's information share
 
-# Kafka Bootstrap
-spring.kafka.bootstrap-servers=localhost:9092
+#### 2. Order Flow Toxicity
+- Volume-Synchronized Probability of Informed Trading
+- Flow toxicity detection
+- Adverse selection costs
+- Inventory risk pricing
 
-# Kafka Streams
-spring.kafka.streams.application-id=unified-market-processor
-spring.kafka.streams.state-dir=/tmp/kafka-streams/streamingcandle
+#### 3. Market Making Metrics
+- Quoted spread vs effective spread
+- Realized spread vs price impact
+- Payment for order flow (PFOF) analytics
+- Fill probability estimation
 
-# Processing Guarantee
-spring.kafka.streams.properties.processing.guarantee=at_least_once
-spring.kafka.streams.properties.replication.factor=1
+#### 4. Smart Order Routing
+- Venue quality metrics
+- Execution quality analysis (relative to VWAP, TWAP, arrival price)
+- Slippage attribution
+- Best execution compliance
 
-# Performance Tuning
-spring.kafka.streams.properties.commit.interval.ms=100
-spring.kafka.streams.properties.statestore.cache.max.bytes=104857600
-spring.kafka.streams.properties.num.stream.threads=1
+#### 5. Alpha Research Infrastructure
+- Factor library (hundreds of factors)
+- Backtesting framework with proper bias correction
+- Portfolio construction (mean-variance, risk parity, etc.)
+- Risk models (Barra-style factor models)
+
+#### 6. Production ML/AI
+- Trade classification via deep learning
+- Order book imbalance prediction
+- Price movement prediction (next tick)
+- Optimal execution via reinforcement learning
+
+---
+
+## Production Readiness Assessment
+
+### ✅ What's Good
+
+1. **Correct Market Alignment**
+   - NSE 9:15 AM, MCX 9:00 AM window alignment implemented correctly
+   - `MarketTimeAligner` is elegant and correct
+
+2. **Clean Kafka Streams Architecture**
+   - 3 independent streams avoid event-time merging issues
+   - Proper use of `suppress(untilWindowCloses)`
+   - State stores with changelog backups
+
+3. **Deterministic OHLC**
+   - Open = price at min(event_time)
+   - Close = price at max(event_time)
+   - This is correct
+
+4. **Cumulative-to-Delta Conversion**
+   - Handles resets properly (day rollovers, producer restarts)
+   - State store per instrument
+
+5. **Reasonable Code Structure**
+   - Single Responsibility Principle (mostly)
+   - Clear separation of processors, models, services
+
+### ❌ What's Broken
+
+1. **VPIN: NOT IMPLEMENTED** (claimed in docs)
+2. **Kyle's Lambda: NOT IMPLEMENTED** (claimed in docs)
+3. **Imbalance Bars: INCOMPLETE** (calculated but never emitted)
+4. **Test Coverage: 5%** (required 90%, claims production-ready)
+5. **Trade Classification: NAIVE** (will misclassify 20-30% of trades)
+6. **Value Area: BROKEN** (doesn't calculate 70% correctly)
+7. **No Backtesting** (can't validate any of these metrics)
+8. **No Monitoring** (blind in production)
+9. **Spoofing Detection: TOY** (5-second threshold catches nothing)
+10. **Configuration: DEMO VALUES** (groupId=com.example, artifactId=demo)
+
+### 🎯 Production Readiness Score: 4/10
+
+**Use Case Suitability:**
+- ✅ Basic OHLCV aggregation: 8/10 (good)
+- ⚠️ Volume Profile: 5/10 (buggy)
+- ❌ Market Microstructure: 2/10 (placeholders)
+- ❌ Quantitative Trading: 1/10 (no backtesting, no validation)
+- ⚠️ Operational Monitoring: 3/10 (minimal)
+
+---
+
+## Recommendations
+
+### Phase 1: Fix Critical Issues (2-4 weeks)
+
+#### 1.1 Implement Real VPIN
+```java
+// New class: VPINCalculator.java
+- Bucket trades by volume (adaptive bucketing)
+- Classify buy/sell per bucket
+- Calculate VPIN = Σ|V_buy - V_sell| / (2 × V_total)
+- Requires trade tape, not just orderbook
 ```
 
-### Input Topics
-
-```properties
-# Input topic configuration
-unified.input.topic.ticks=forwardtesting-data
-unified.input.topic.oi=OpenInterest
-unified.input.topic.orderbook=Orderbook
+#### 1.2 Implement Kyle's Lambda
+```java
+// In OrderbookAggregate
+- Track (Δprice, signed_flow) observations
+- Run rolling OLS regression every 100 observations
+- Export λ coefficient
 ```
 
-### Output Topics
-
-```properties
-# Enable/disable outputs
-stream.outputs.candles.enabled=true
-stream.outputs.familyStructured.enabled=false
-
-# Output topic names (per timeframe)
-stream.outputs.candles.1m=candle-ohlcv-1m
-stream.outputs.candles.2m=candle-ohlcv-2m
-stream.outputs.candles.3m=candle-ohlcv-3m
-stream.outputs.candles.5m=candle-ohlcv-5m
-stream.outputs.candles.15m=candle-ohlcv-15m
-stream.outputs.candles.30m=candle-ohlcv-30m
+#### 1.3 Fix Imbalance Bar Emission
+```java
+// New class: ImbalanceBarEmitter.java
+- When threshold crossed: emit bar to separate topic
+- Topic: "imbalance-bars-{VIB,DIB,TRB,VRB}"
 ```
 
-### Market Hours
-
-```properties
-# Trading hours validation
-trading.hours.validation.enabled=false
-
-# Market open time (IST) - default 9:15 AM
-market.open.hour=9
-market.open.minute=15
+#### 1.4 Write Tests (Target: 80% Coverage)
+```
+Priority tests:
+- EnrichedCandlestick::updateWithDelta (OHLC determinism)
+- EnrichedCandlestick::updateCandle (multi-minute aggregation)
+- OrderbookAggregate::calculateFullDepthOFI
+- Buy/sell classification edge cases
+- Market alignment offset calculation
+- Volume profile Value Area calculation
 ```
 
-### Windowing
-
-```properties
-# Grace period for late-arriving events (seconds)
-unified.streams.window.grace.period.seconds=10
+#### 1.5 Fix Configuration
+```xml
+<!-- pom.xml -->
+<groupId>com.kotsin</groupId>
+<artifactId>streamingcandle</artifactId>
+<version>1.0.0</version>
 ```
 
-### Profiles
+### Phase 2: Enhance Quantitative Capabilities (4-8 weeks)
 
-Three profiles available:
-- **production** (default) - Production Kafka, latest offset
-- **test** - Test environment configuration
-- **local** - Local development with debug logging
+#### 2.1 Backtesting Framework
+```
+- Historical replay mode (read from earliest offset)
+- Strategy interface: onCandle(), onOrderbook(), onOI()
+- Performance metrics: Sharpe, Sortino, max drawdown, win rate
+- Transaction cost simulation
+- Benchmark comparison (NIFTY 50, BANKNIFTY)
+```
 
-Switch profiles:
-```bash
-mvn spring-boot:run -Dspring-boot.run.profiles=test
+#### 2.2 Improve Trade Classification
+```java
+// New: LeReadyClassifier.java
+- Implement Lee-Ready algorithm (5-second lead/lag)
+- Adaptive threshold based on rolling volatility
+- Exchange-specific rules (NSE vs MCX)
+- Tick size aware (variable by strike price)
+```
+
+#### 2.3 Advanced Microstructure
+```java
+- PIN (Probability of Informed Trading)
+- Amihud illiquidity ratio
+- Roll's spread estimator
+- Effective spread vs quoted spread
+- Price impact models (sqrt law, linear)
+```
+
+#### 2.4 Transaction Cost Library
+```java
+// New: TransactionCostModel.java
+- Market impact (sqrt law)
+- Slippage estimation
+- Exchange fees (NSE: 0.00325% turnover charge, STT: 0.025% for equity)
+- Brokerage simulation
+- Execution shortfall calculation
+```
+
+### Phase 3: Production Hardening (2-4 weeks)
+
+#### 3.1 Monitoring & Observability
+```
+- Prometheus metrics export (/actuator/prometheus)
+- Grafana dashboards:
+  * Lag per partition
+  * Processing latency (p50/p95/p99)
+  * State store sizes
+  * Error rates
+  * Heap memory trends
+- PagerDuty integration for critical alerts
+```
+
+#### 3.2 Operational Tools
+```
+- Reset state stores script
+- Offset management CLI
+- Historical replay tool
+- Data quality dashboard
+```
+
+#### 3.3 Performance Optimization
+```
+- Async initialization (remove Thread.sleep)
+- Tune state store cache (currently 100MB)
+- Batch processing for orderbook updates
+- Compression for changelog topics
+```
+
+#### 3.4 Security & Compliance
+```
+- HTTPS for REST API
+- API rate limiting
+- Audit logging
+- SEBI compliance checks (if trading live)
+```
+
+### Phase 4: Advanced Features (8+ weeks)
+
+#### 4.1 Machine Learning Integration
+```
+- Trade classification via LSTM/Transformer
+- Order book imbalance prediction (next 1-5 seconds)
+- Volatility forecasting (GARCH, realized volatility)
+- Optimal execution via RL (dynamic VWAP/TWAP)
+```
+
+#### 4.2 Cross-Exchange Analytics
+```
+- Arbitrage detection (NSE Cash vs F&O)
+- Spread trading signals
+- Inter-exchange order flow
+```
+
+#### 4.3 Real-Time Alpha Signals
+```
+- Momentum factors (short-term: 1-5min)
+- Reversion signals (Ornstein-Uhlenbeck)
+- Volume-price divergence
+- Order flow imbalance alpha
 ```
 
 ---
 
-## Running the Module
+## Setup & Configuration
 
 ### Prerequisites
 
-- Java 17+
-- Maven 3.8+
-- Kafka 3.0+ running
-- Input topics created and populated:
-  - `forwardtesting-data`
-  - `Orderbook`
-  - `OpenInterest`
+```bash
+Java 17+
+Maven 3.8+
+Apache Kafka 3.x (running on localhost:9092)
+
+# Input topics must exist:
+- forwardtesting-data
+- Orderbook
+- OpenInterest
+```
 
 ### Build
 
 ```bash
 cd streamingcandle
 mvn clean package
+
+# Output: target/streamingcandle-1.0.0-SNAPSHOT.jar
+# Coverage report: target/site/jacoco/index.html
 ```
 
 ### Run
 
-**Production Mode**:
+#### Development
 ```bash
-mvn spring-boot:run
+mvn spring-boot:run -Dspring-boot.run.profiles=dev
 ```
 
-**With Specific Profile**:
+#### Production
+```bash
+java -Xmx2g -XX:+UseG1GC -XX:MaxGCPauseMillis=200 \
+  -jar target/streamingcandle-1.0.0-SNAPSHOT.jar \
+  --spring.profiles.active=production
+```
+
+#### Test Mode (Earliest Offset)
 ```bash
 mvn spring-boot:run -Dspring-boot.run.profiles=test
 ```
 
-**From JAR**:
-```bash
-java -jar target/streamingcandle-1.0.0.jar
-```
+### Configuration Files
 
-### Health Check
-
-```bash
-curl http://localhost:8081/health
-```
-
-### Metrics Endpoint
-
-```bash
-curl http://localhost:8081/metrics
-```
-
----
-
-## Development Guide
-
-### Adding a New Timeframe
-
-1. Add to `Timeframe` enum:
-```java
-// monitoring/Timeframe.java
-FORTY_FIVE_MIN(45, "45m"),
-```
-
-2. Configure output topic:
+#### `application.properties` (Production)
 ```properties
-# application.properties
-stream.outputs.candles.45m=candle-ohlcv-45m
-```
+# Kafka
+spring.kafka.bootstrap-servers=localhost:9092
+spring.kafka.streams.application-id=unified-market-processor
+spring.kafka.streams.state-dir=/tmp/kafka-streams/streamingcandle
 
-3. Update `TopologyConfiguration`:
-```java
-for (Timeframe tf : Timeframe.values()) {
-    buildTickCandles(builder, processedTicks, tf);
-}
-```
+# Processing
+spring.kafka.streams.properties.processing.guarantee=at_least_once
+spring.kafka.streams.properties.commit.interval.ms=100
+spring.kafka.streams.properties.num.stream.threads=1
 
-### Adding New Metrics
+# Input topics
+unified.input.topic.ticks=forwardtesting-data
+unified.input.topic.oi=OpenInterest
+unified.input.topic.orderbook=Orderbook
 
-1. Update accumulator (e.g., `CandleAccumulator.java`):
-```java
-private Double newMetric;
+# Grace period (late events tolerance)
+unified.streams.window.grace.period.seconds=10
 
-public void addTick(TickData tick) {
-    // Calculate new metric
-    newMetric = ...;
-}
-```
-
-2. Update output model (`InstrumentCandle.java`):
-```java
-private Double newMetric;
-```
-
-3. Map in `InstrumentStateManager`:
-```java
-candle.setNewMetric(accumulator.getNewMetric());
-```
-
-### Testing
-
-**Unit Tests**:
-```bash
-mvn test
-```
-
-**Integration Tests**:
-```bash
-mvn verify
-```
-
-**Manual Testing with Kafka**:
-```bash
-# Produce test message
-kafka-console-producer --bootstrap-server localhost:9092 --topic forwardtesting-data
-
-# Consume output
-kafka-console-consumer --bootstrap-server localhost:9092 --topic candle-ohlcv-1m --from-beginning
-```
-
----
-
-## Troubleshooting
-
-### Issue: No Output Messages
-
-**Symptoms**: Kafka Streams app running, but no messages in output topics
-
-**Possible Causes**:
-1. **Window not closed yet** - Wait for window duration + grace period
-2. **Trading hours validation** - Check if `trading.hours.validation.enabled=true` and market is closed
-3. **Invalid input data** - Check logs for validation errors
-4. **Offset at end** - Input topic offset at latest, no new messages
-
-**Solutions**:
-```properties
-# Consume from beginning for testing
-spring.kafka.streams.properties.auto.offset.reset=earliest
-
-# Disable trading hours validation
+# Trading hours validation (disabled by default)
 trading.hours.validation.enabled=false
 ```
 
-### Issue: High Memory Usage
-
-**Symptoms**: Application using excessive memory
-
-**Solutions**:
+#### `application-dev.properties`
 ```properties
-# Reduce state store cache
-spring.kafka.streams.properties.statestore.cache.max.bytes=52428800
+# Debug logging
+logging.level.com.kotsin.consumer=DEBUG
+logging.level.org.apache.kafka.streams=INFO
 
-# Reduce commit interval (more frequent writes)
-spring.kafka.streams.properties.commit.interval.ms=500
+# Start from earliest (for development)
+spring.kafka.streams.properties.auto.offset.reset=earliest
 ```
 
-### Issue: Late Records Dropped
-
-**Symptoms**: Logs show "Skipping record at timestamp X, window already closed"
-
-**Solutions**:
+#### `application-prod.properties`
 ```properties
-# Increase grace period
-unified.streams.window.grace.period.seconds=30
+# Minimal logging
+logging.level.root=WARN
+logging.level.com.kotsin.consumer=INFO
+
+# Latest offset (skip old data)
+spring.kafka.streams.properties.auto.offset.reset=latest
+
+# State store backup
+spring.kafka.streams.properties.replication.factor=3
 ```
 
-### Issue: Orderbook-Only Windows Return Null
+### Kafka Setup
 
-**Symptoms**: Windows with only orderbook data (no ticks) are not emitted
+#### Create Topics
+```bash
+# Input topics
+kafka-topics --create --topic forwardtesting-data --partitions 10 --replication-factor 3 --bootstrap-server localhost:9092
+kafka-topics --create --topic Orderbook --partitions 10 --replication-factor 3 --bootstrap-server localhost:9092
+kafka-topics --create --topic OpenInterest --partitions 10 --replication-factor 3 --bootstrap-server localhost:9092
 
-**Status**: ✅ **FIXED** - Now handles orderbook-only windows correctly
+# Output topics (candles)
+for tf in 1m 2m 3m 5m 15m 30m; do
+  kafka-topics --create --topic candle-ohlcv-$tf --partitions 10 --replication-factor 3 --bootstrap-server localhost:9092
+done
 
-**Verification**:
-- Check `InstrumentStateManager.buildOrderbookOnlyCandle()`
-- Ensure orderbook messages have valid token
+# Output topics (orderbook)
+for tf in 1m 2m 3m 5m 15m 30m; do
+  kafka-topics --create --topic orderbook-signals-$tf --partitions 10 --replication-factor 3 --bootstrap-server localhost:9092
+done
 
-### Common Log Messages
-
-**Normal**:
+# Output topics (OI)
+for tf in 1m 2m 3m 5m 15m 30m; do
+  kafka-topics --create --topic oi-metrics-$tf --partitions 10 --replication-factor 3 --bootstrap-server localhost:9092
+done
 ```
-📤 [1m] OHLCV emitted: scrip=96955 vol=12600
-✅ Started TICKS consumer (candle-ohlcv-*)
+
+#### Monitor Consumer Lag
+```bash
+kafka-consumer-groups --describe --group unified-market-processor --bootstrap-server localhost:9092
 ```
 
-**Warning**:
-```
-⚠️ Invalid tick received for timeframe 1m (missing scripCode)
-⚠️ Trading hours validation: tick outside market hours
+#### Consume Candles
+```bash
+kafka-console-consumer \
+  --bootstrap-server localhost:9092 \
+  --topic candle-ohlcv-1m \
+  --property print.timestamp=true \
+  --property print.key=true \
+  --from-beginning
 ```
 
-**Error**:
+### State Store Management
+
+#### Reset State (Development)
+```bash
+# Stop application first
+rm -rf /tmp/kafka-streams/streamingcandle
+
+# Restart application (will rebuild from changelog)
 ```
-🚨 Kafka Streams exception: Deserialization error
-🚨 State store restore failed, rebalancing
+
+#### Backup State (Production)
+```bash
+# State stores are automatically backed up to changelog topics:
+# {application-id}-{store-name}-changelog
+# Example: unified-market-processor-tick-candlestick-store-changelog
 ```
 
 ---
 
-## Project Structure
+## API Reference
+
+### Health Endpoints
+
+#### GET `/api/v1/health`
+Full health check with stream states.
+
+**Response:**
+```json
+{
+  "status": "UP",
+  "streams": {
+    "realtime-candle-1min-1m": "RUNNING",
+    "realtime-candle-2min-2m": "RUNNING",
+    "realtime-orderbook-1min-1m": "RUNNING"
+  },
+  "memory": {
+    "heapUsed": 512000000,
+    "heapMax": 2147483648,
+    "percentUsed": 23.8
+  }
+}
+```
+
+#### GET `/api/v1/health/live`
+Kubernetes liveness probe.
+
+**Response:**
+```json
+{"status": "UP"}
+```
+Status: 200 if app running, 503 if stopped.
+
+#### GET `/api/v1/health/ready`
+Kubernetes readiness probe.
+
+**Response:**
+```json
+{
+  "status": "READY",
+  "allStreamsRunning": true
+}
+```
+Status: 200 if all streams RUNNING, 503 otherwise.
+
+#### GET `/api/v1/health/metrics`
+Prometheus-style metrics (basic).
+
+**Response:**
+```
+# HELP streams_active Number of active Kafka Streams
+# TYPE streams_active gauge
+streams_active 18
+
+# HELP heap_memory_used_bytes JVM heap memory used
+# TYPE heap_memory_used_bytes gauge
+heap_memory_used_bytes 512000000
+```
+
+---
+
+## File Structure
 
 ```
 streamingcandle/
 ├── src/main/java/com/kotsin/consumer/
-│   ├── config/              # Kafka configuration
-│   │   ├── KafkaConfig.java
-│   │   └── ConfigurationValidator.java
-│   ├── processor/           # Stream topologies and accumulators
-│   │   ├── TopologyConfiguration.java (3 stream topologies)
-│   │   ├── CandleAccumulator.java
-│   │   ├── OrderbookDepthAccumulator.java
-│   │   ├── MicrostructureAccumulator.java
-│   │   ├── ImbalanceBarAccumulator.java
-│   │   └── VolumeProfileAccumulator.java
-│   ├── service/             # Business logic services
-│   │   ├── InstrumentStateManager.java (main aggregation)
-│   │   ├── IcebergDetectionService.java
-│   │   ├── SpoofingDetectionService.java
-│   │   └── TradingHoursValidationService.java
-│   ├── transformers/        # Kafka Streams transformers
-│   │   ├── CumToDeltaTransformer.java
-│   │   └── OiDeltaTransformer.java
-│   ├── time/                # Timestamp extraction
-│   │   └── MarketAlignedTimestampExtractor.java
-│   ├── model/               # Data models
-│   │   ├── InstrumentCandle.java (output model)
-│   │   ├── UnifiedWindowMessage.java (wrapper)
-│   │   ├── TickData.java
-│   │   ├── OrderBookSnapshot.java
-│   │   └── OpenInterest.java
-│   └── ConsumerApplication.java (main entry point)
+│   ├── ConsumerApplication.java           # Spring Boot entry point
+│   ├── config/
+│   │   ├── KafkaConfig.java               # Kafka Streams properties
+│   │   └── ConfigurationValidator.java    # Config validation
+│   ├── processor/
+│   │   ├── CandlestickProcessor.java      # Stream 1: Ticks → Candles
+│   │   ├── OrderbookProcessor.java        # Stream 2: Orderbook → Signals
+│   │   └── OIProcessor.java               # Stream 3: OI → Metrics
+│   ├── model/
+│   │   ├── EnrichedCandlestick.java       # Candle aggregate model
+│   │   ├── OrderbookAggregate.java        # Orderbook aggregate model
+│   │   ├── OIAggregate.java               # OI aggregate model
+│   │   ├── TickData.java                  # Input: tick data
+│   │   ├── OrderBookSnapshot.java         # Input: orderbook
+│   │   └── OpenInterest.java              # Input: OI
+│   ├── transformers/
+│   │   ├── CumToDeltaTransformer.java     # Cumulative → delta volume
+│   │   └── OiDeltaTransformer.java        # OI delta conversion
+│   ├── timeExtractor/
+│   │   ├── TickTimestampExtractor.java    # Extract event time from ticks
+│   │   └── MultiMinuteOffsetTimestampExtractor.java  # Market alignment
+│   ├── util/
+│   │   └── MarketTimeAligner.java         # NSE/MCX offset calculation
+│   ├── service/
+│   │   ├── OrderbookDepthCalculator.java  # Depth metrics
+│   │   ├── IcebergDetectionService.java   # Iceberg detection
+│   │   ├── SpoofingDetectionService.java  # Spoofing detection
+│   │   └── TradingHoursValidationService.java  # Hours validation
+│   ├── controller/
+│   │   └── HealthController.java          # Health check REST API
+│   ├── monitoring/
+│   │   ├── SystemMonitor.java             # Scheduled monitoring
+│   │   └── Timeframe.java                 # Timeframe enum
+│   └── metrics/
+│       └── StreamMetrics.java             # Metrics aggregation
 ├── src/main/resources/
-│   ├── application.properties (production config)
-│   ├── application-test.properties
-│   └── application-local.properties
-└── pom.xml
+│   ├── application.properties             # Production config
+│   ├── application-dev.properties         # Development config
+│   ├── application-prod.properties        # Production overrides
+│   ├── application-test.properties        # Test config
+│   ├── application-local.properties       # Local development
+│   └── logback.xml                        # Logging config
+├── src/test/java/com/kotsin/consumer/
+│   └── transformers/
+│       └── CumToDeltaTransformerTest.java  # ONLY test file
+├── pom.xml                                # Maven build config
+└── README.md                              # This file
 ```
 
 ---
 
+## Summary
+
+### What You Actually Have
+A solid Kafka Streams data aggregation pipeline that:
+- ✅ Correctly aggregates OHLCV candles with market-aligned windows
+- ✅ Separates buy/sell volume using basic classification
+- ✅ Tracks volume profile and basic orderbook metrics
+- ✅ Handles cumulative-to-delta conversion properly
+- ✅ Implements OFI (Order Flow Imbalance) with some caveats
+
+### What You DON'T Have
+- ❌ VPIN (just placeholder state)
+- ❌ Kyle's Lambda (just placeholder state)
+- ❌ Complete imbalance bars (calculated but never emitted)
+- ❌ Test coverage (1 test for 5,500 lines)
+- ❌ Backtesting infrastructure
+- ❌ Proper monitoring/alerting
+- ❌ Transaction cost models
+- ❌ Signal validation (do these metrics predict anything?)
+
+### Recommended Usage
+**DO USE for:**
+- Basic OHLCV aggregation
+- Volume profile analysis (with caution on Value Area bug)
+- Order flow imbalance tracking
+- Initial market data pipeline
+
+**DON'T USE for:**
+- Quantitative strategy backtesting (no infrastructure)
+- Live trading decisions (metrics not validated)
+- Market microstructure research (VPIN, Kyle's Lambda don't work)
+- Manipulation detection (spoofing detector is toy-level)
+
+### Final Verdict
+**Grade: C+ (Data Pipeline) / F (Quant Finance)**
+
+This is competent data plumbing but fails as a quantitative trading platform. The architecture is sound, but execution is incomplete with misleading documentation claiming features that don't exist.
+
+**Fix the critical issues (VPIN, Kyle's Lambda, tests) before using in production. Add backtesting infrastructure before using for trading decisions.**
+
+---
+
 ## License
+[Specify License]
 
-[Add your license here]
+## Contributors
+[Add Contributors]
 
-## Contributing
+## Support
+For issues or questions:
+- GitHub Issues: [Repository URL]
+- Email: [Contact Email]
 
-[Add contribution guidelines here]
+---
 
-## Contact
-
-For issues or questions, contact: [your contact info]
-
+**Last Updated:** 2025-10-28
+**Version:** 1.0.0
+**Status:** ALPHA - Not Production Ready Without Fixes
