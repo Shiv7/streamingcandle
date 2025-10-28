@@ -45,8 +45,9 @@ A functional data aggregation pipeline that:
 ```
 Total Lines of Code:     5,600+ (Java source)
 Classes/Interfaces:      58
-Test Files:              2
-Test Coverage:           Required 90%, Actual: ~10%
+Test Files:              3 (CumToDelta, Kyle's Lambda, VPIN)
+Test Count:              19 tests (all passing)
+Test Coverage:           Required 90%, Actual: ~15%
 Production Dependencies: Spring Boot 3.2.2, Kafka Streams 3.x
 Documentation:           7 MD files (now consolidated to this one)
 ```
