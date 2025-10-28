@@ -1,5 +1,6 @@
 package com.kotsin.consumer.model;
 
+import com.fasterxml.jackson.annotation.JsonIgnoreProperties;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.kotsin.consumer.service.IcebergDetectionService;
 import com.kotsin.consumer.service.OrderbookDepthCalculator;
@@ -29,6 +30,7 @@ import java.util.*;
  * - Spoofing detection (market manipulation)
  */
 @Data
+@JsonIgnoreProperties(ignoreUnknown = true)
 public class OrderbookAggregate {
 
     // ========== Metadata ==========

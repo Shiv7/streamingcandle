@@ -1,6 +1,7 @@
 package com.kotsin.consumer.model;
 
 import com.fasterxml.jackson.annotation.JsonIgnore;
+import com.fasterxml.jackson.annotation.JsonIgnoreProperties;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import lombok.Data;
 import org.apache.kafka.common.serialization.Deserializer;
@@ -27,6 +28,7 @@ import java.util.Map;
  * - Volume Profile (POC, Value Area)
  */
 @Data
+@JsonIgnoreProperties(ignoreUnknown = true)
 public class EnrichedCandlestick {
 
     // ========== Basic OHLCV ==========
@@ -52,6 +54,7 @@ public class EnrichedCandlestick {
     private long buyVolume;
     private long sellVolume;
     private double priceVolumeSum;  // For VWAP calculation
+    private double vwap;  // Volume-Weighted Average Price (cached)
     private int tickCount;
 
     // ========== Imbalance Bars State ==========
@@ -93,6 +96,7 @@ public class EnrichedCandlestick {
         this.buyVolume = 0;
         this.sellVolume = 0;
         this.priceVolumeSum = 0.0;
+        this.vwap = 0.0;
         this.tickCount = 0;
     }
 
@@ -144,6 +148,9 @@ public class EnrichedCandlestick {
 
             // ========== Volume Profile Update ==========
             updateVolumeProfile(px, dv);
+            
+            // ========== Calculate VWAP ==========
+            vwap = volume > 0 ? priceVolumeSum / volume : 0.0;
         }
 
         // ========== Metadata (idempotent) ==========
@@ -293,6 +300,9 @@ public class EnrichedCandlestick {
         this.sellVolume += other.sellVolume;
         this.priceVolumeSum += other.priceVolumeSum;
         this.tickCount += other.tickCount;
+        
+        // Recalculate VWAP after merge
+        this.vwap = this.volume > 0 ? this.priceVolumeSum / this.volume : 0.0;
 
         // Merge imbalance bars
         this.volumeImbalance += other.volumeImbalance;
@@ -317,13 +327,6 @@ public class EnrichedCandlestick {
         }
         this.companyName = other.companyName;
         this.scripCode = other.scripCode;
-    }
-
-    /**
-     * Calculate VWAP (Volume Weighted Average Price)
-     */
-    public double getVwap() {
-        return volume > 0 ? priceVolumeSum / volume : 0.0;
     }
 
     /**

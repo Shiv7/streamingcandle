@@ -1,5 +1,6 @@
 package com.kotsin.consumer.model;
 
+import com.fasterxml.jackson.annotation.JsonIgnoreProperties;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import lombok.Data;
 import org.apache.kafka.common.serialization.Deserializer;
@@ -23,6 +24,7 @@ import java.time.format.DateTimeFormatter;
  * - Volume correlation
  */
 @Data
+@JsonIgnoreProperties(ignoreUnknown = true)
 public class OIAggregate {
 
     // ========== Metadata ==========
