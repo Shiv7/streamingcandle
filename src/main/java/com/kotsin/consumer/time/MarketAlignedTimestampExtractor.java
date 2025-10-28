@@ -6,48 +6,42 @@ import org.apache.kafka.clients.consumer.ConsumerRecord;
 import org.apache.kafka.streams.processor.TimestampExtractor;
 
 /**
- * Aligns event timestamps to market open (09:15 AM IST) by applying a 15-minute offset for NSE.
- * This makes Kafka Streams windows start at 09:15-based boundaries rather than wall-clock hours.
+ * CLEAN & SIMPLE: Use Kafka record timestamp when event timestamp is invalid.
+ *
+ * Philosophy: Kafka timestamps are reliable, always present, and guaranteed valid.
+ * When our data has bad timestamps, just use Kafka's instead.
  */
 public class MarketAlignedTimestampExtractor implements TimestampExtractor {
-    private static final long OFFSET_MS_15_MIN = 15L * 60L * 1000L; // currently unused (market-shift disabled)
+
+    private static final long YEAR_2020_MS = 1577836800000L; // Jan 1, 2020
+    private static final long YEAR_2050_MS = 2524608000000L; // Jan 1, 2050
 
     @Override
     public long extract(ConsumerRecord<Object, Object> record, long partitionTime) {
         Object value = record.value();
-        long ts = record.timestamp();
-        String exch = null;
+        long kafkaTimestamp = record.timestamp(); // Always valid and reliable
 
+        // Extract timestamp from the event data
+        long eventTimestamp = 0;
         if (value instanceof TickData) {
-            TickData t = (TickData) value;
-            exch = t.getExchange();
-            long vts = t.getTimestamp();
-            // Validate timestamp is reasonable before using it
-            if (vts > 0 && isValidTimestamp(vts)) {
-                ts = vts;
-            } else if (vts > 0) {
-                // Invalid timestamp - use Kafka record timestamp instead
-                System.err.println("Invalid timestamp from TickData: " + vts + ", using record timestamp: " + ts);
-            }
+            eventTimestamp = ((TickData) value).getTimestamp();
         } else if (value instanceof OrderBookSnapshot) {
-            OrderBookSnapshot ob = (OrderBookSnapshot) value;
-            exch = ob.getExchange();
-            long vts = ob.getTimestamp();
-            if (vts > 0 && isValidTimestamp(vts)) {
-                ts = vts;
-            }
+            eventTimestamp = ((OrderBookSnapshot) value).getTimestamp();
         }
 
-        // Market-aligned shift disabled for now — return raw event-time
-        return ts;
+        // Simple decision: Valid event timestamp? Use it. Otherwise? Kafka time.
+        if (eventTimestamp > 0 && isValidTimestamp(eventTimestamp)) {
+            return eventTimestamp;
+        }
+
+        // Fallback: Use Kafka record timestamp (always works)
+        return kafkaTimestamp;
     }
-    
+
     /**
      * Validate timestamp is within reasonable range (year 2020-2050)
      */
     private boolean isValidTimestamp(long timestamp) {
-        long year2020 = 1577836800000L; // Jan 1, 2020
-        long year2050 = 2524608000000L; // Jan 1, 2050
-        return timestamp >= year2020 && timestamp <= year2050;
+        return timestamp >= YEAR_2020_MS && timestamp <= YEAR_2050_MS;
     }
 }

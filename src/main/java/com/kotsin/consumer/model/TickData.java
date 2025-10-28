@@ -102,30 +102,27 @@ public class TickData {
      * CRITICAL: Never uses System.currentTimeMillis() to handle lag correctly.
      */
     public void parseTimestamp() {
-        if (tickDt != null && tickDt.startsWith("/Date(")) {
-            try {
-                // Extract timestamp using proper regex to avoid concatenating multiple numbers
-                String timestampStr = tickDt.replaceFirst("/Date\\(([0-9]+)\\)/.*", "$1");
-                long parsedTimestamp = Long.parseLong(timestampStr);
-                
-                // Validate timestamp is reasonable (between year 2020 and 2050)
-                long year2020 = 1577836800000L; // Jan 1, 2020
-                long year2050 = 2524608000000L; // Jan 1, 2050
-                
-                if (parsedTimestamp >= year2020 && parsedTimestamp <= year2050) {
-                    this.timestamp = parsedTimestamp;
-                } else {
-                    System.err.println("Invalid timestamp parsed from TickDt: " + parsedTimestamp + " (" + tickDt + "). Using record timestamp.");
-                    this.timestamp = 0; // Let TimestampExtractor use record timestamp
-                }
-            } catch (NumberFormatException e) {
-                // CRITICAL: Set to 0 (not current time) and let TimestampExtractor handle it
-                this.timestamp = 0;
-                System.err.println("Failed to parse TickDt: " + tickDt + ". Timestamp set to 0.");
-            }
+        if (tickDt == null || !tickDt.startsWith("/Date(")) {
+            return; // Leave at default 0 - Kafka time will be used
         }
-        // REMOVED: else clause that was setting System.currentTimeMillis()
+
+        try {
+            // Extract the number from /Date(1234567890)/
+            String timestampStr = tickDt.replaceFirst("/Date\\(([0-9]+)\\)/.*", "$1");
+            long parsedTimestamp = Long.parseLong(timestampStr);
+
+            // Simple sanity check: is it roughly reasonable?
+            // Year 2020 = 1577836800000, Year 2050 = 2524608000000
+            if (parsedTimestamp >= 1577836800000L && parsedTimestamp <= 2524608000000L) {
+                this.timestamp = parsedTimestamp;
+            }
+            // If outside range, leave at 0 - Kafka time will be used
+
+        } catch (NumberFormatException e) {
+            // Parse failed - leave at 0, Kafka time will be used
+        }
     }
+
 
     /**
      * Get scrip code, using token as fallback if not available.
