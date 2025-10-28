@@ -1,9 +1,12 @@
 package com.kotsin.consumer.controller;
 
 import com.kotsin.consumer.monitoring.SystemMonitor;
-import com.kotsin.consumer.processor.UnifiedMarketDataProcessor;
+import com.kotsin.consumer.processor.CandlestickProcessor;
+import com.kotsin.consumer.processor.OrderbookProcessor;
+import com.kotsin.consumer.processor.OIProcessor;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
+import org.apache.kafka.streams.KafkaStreams;
 import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.RequestMapping;
@@ -17,6 +20,8 @@ import java.util.Map;
  * 
  * OBSERVABILITY: Expose health and metrics for monitoring
  * KUBERNETES READY: Provides liveness and readiness probes
+ * 
+ * Updated: Now monitors 3 independent processors
  */
 @RestController
 @RequestMapping("/api/v1/health")
@@ -25,7 +30,9 @@ import java.util.Map;
 public class HealthController {
 
     private final SystemMonitor systemMonitor;
-    private final UnifiedMarketDataProcessor processor;
+    private final CandlestickProcessor candlestickProcessor;
+    private final OrderbookProcessor orderbookProcessor;
+    private final OIProcessor oiProcessor;
 
     /**
      * Liveness probe - Is the application running?
@@ -45,7 +52,8 @@ public class HealthController {
     public ResponseEntity<Map<String, Object>> readiness() {
         Map<String, Object> response = new HashMap<>();
         
-        boolean isReady = systemMonitor.isSystemHealthy() && processor.isHealthy();
+        boolean isReady = systemMonitor.isSystemHealthy() && 
+                         areAllProcessorsHealthy();
         
         response.put("status", isReady ? "UP" : "DOWN");
         response.put("timestamp", System.currentTimeMillis());
@@ -57,6 +65,24 @@ public class HealthController {
         
         return ResponseEntity.ok(response);
     }
+    
+    /**
+     * Check if all processors are healthy
+     */
+    private boolean areAllProcessorsHealthy() {
+        Map<String, KafkaStreams.State> candleStates = candlestickProcessor.getStreamStates();
+        Map<String, KafkaStreams.State> obStates = orderbookProcessor.getStreamStates();
+        Map<String, KafkaStreams.State> oiStates = oiProcessor.getStreamStates();
+        
+        boolean candlesHealthy = candleStates.values().stream()
+            .allMatch(state -> state == KafkaStreams.State.RUNNING);
+        boolean orderbookHealthy = obStates.values().stream()
+            .allMatch(state -> state == KafkaStreams.State.RUNNING);
+        boolean oiHealthy = oiStates.values().stream()
+            .allMatch(state -> state == KafkaStreams.State.RUNNING);
+            
+        return candlesHealthy && orderbookHealthy && oiHealthy;
+    }
 
     /**
      * Detailed health check
@@ -65,13 +91,18 @@ public class HealthController {
     public ResponseEntity<Map<String, Object>> health() {
         Map<String, Object> response = new HashMap<>();
         
-        boolean isHealthy = systemMonitor.isSystemHealthy();
+        boolean isHealthy = systemMonitor.isSystemHealthy() && areAllProcessorsHealthy();
         
         response.put("status", isHealthy ? "HEALTHY" : "UNHEALTHY");
         response.put("timestamp", System.currentTimeMillis());
         response.put("systemMetrics", systemMonitor.getSystemMetrics());
-        response.put("streamStates", processor.getStreamStates());
-        response.put("streamStats", processor.getStreamStats());
+        
+        // Stream states from all 3 processors
+        Map<String, Object> allStreamStates = new HashMap<>();
+        allStreamStates.put("candlesticks", candlestickProcessor.getStreamStates());
+        allStreamStates.put("orderbook", orderbookProcessor.getStreamStates());
+        allStreamStates.put("oi", oiProcessor.getStreamStates());
+        response.put("streamStates", allStreamStates);
         
         if (!isHealthy) {
             return ResponseEntity.status(503).body(response);
