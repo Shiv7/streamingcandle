@@ -60,9 +60,13 @@ public class OrderbookAggregate {
     private int totalBucketsCreated = 0;
 
     // ========== Kyle's Lambda State ==========
+    private static final int LAMBDA_WINDOW_SIZE = 100;  // Rolling window size
+    private static final int LAMBDA_CALC_FREQUENCY = 20;  // Recalculate every N updates
+    private static final int LAMBDA_MIN_OBSERVATIONS = 30;  // Statistical minimum
     private List<PriceImpactObservation> priceImpactHistory = new ArrayList<>();
     private double kyleLambda = 0.0;
     private double lastMidPrice = 0.0;
+    private int updatesSinceLastLambdaCalc = 0;
 
     // ========== Depth Metrics (Averaged) ==========
     private double depthImbalance = 0.0;
@@ -184,6 +188,20 @@ public class OrderbookAggregate {
         prevBestBid = bestBid;
         prevBestAsk = bestAsk;
 
+        // ========== Track Price Impact for Kyle's Lambda ==========
+        if (lastMidPrice > 0 && midPrice > 0 && ofi != 0.0) {
+            double priceChange = midPrice - lastMidPrice;
+            priceImpactHistory.add(new PriceImpactObservation(priceChange, ofi, orderbook.getTimestamp()));
+            
+            // Maintain rolling window (bounded list to prevent memory leaks)
+            if (priceImpactHistory.size() > LAMBDA_WINDOW_SIZE) {
+                priceImpactHistory.remove(0);
+            }
+            
+            updatesSinceLastLambdaCalc++;
+        }
+        lastMidPrice = midPrice;
+
         // ========== Calculate Weighted Depth Imbalance ==========
         if (orderbook.getAllBids() != null && orderbook.getAllAsks() != null) {
             double weightedImb = calculateWeightedDepthImbalance(
@@ -214,6 +232,12 @@ public class OrderbookAggregate {
         
         previousOrderbook = orderbook;
         updateCount++;
+
+        // ========== Recalculate Kyle's Lambda Periodically ==========
+        if (updatesSinceLastLambdaCalc >= LAMBDA_CALC_FREQUENCY && 
+            priceImpactHistory.size() >= LAMBDA_MIN_OBSERVATIONS) {
+            calculateKyleLambda();
+        }
     }
 
     /**
@@ -312,6 +336,64 @@ public class OrderbookAggregate {
         }
 
         return totalQty > 0 ? totalValue / totalQty : 0.0;
+    }
+
+    /**
+     * Calculate Kyle's Lambda using OLS regression.
+     * λ = Cov(Δp, OFI) / Var(OFI)
+     * 
+     * Interpretation: λ represents price impact per unit of signed order flow.
+     * Higher λ = more illiquid market (large flows move price more).
+     * 
+     * References:
+     * - Kyle, A. S. (1985). "Continuous Auctions and Insider Trading"
+     * - Hasbrouck, J. (2007). "Empirical Market Microstructure"
+     */
+    private void calculateKyleLambda() {
+        int n = priceImpactHistory.size();
+        
+        // Check minimum observations for statistical validity
+        if (n < LAMBDA_MIN_OBSERVATIONS) {
+            return;
+        }
+
+        // Calculate means
+        double meanPriceChange = 0.0;
+        double meanOFI = 0.0;
+        
+        for (PriceImpactObservation obs : priceImpactHistory) {
+            meanPriceChange += obs.priceChange;
+            meanOFI += obs.signedVolume;
+        }
+        
+        meanPriceChange /= n;
+        meanOFI /= n;
+
+        // Calculate covariance and variance
+        double covariance = 0.0;
+        double variance = 0.0;
+        
+        for (PriceImpactObservation obs : priceImpactHistory) {
+            double priceDeviation = obs.priceChange - meanPriceChange;
+            double ofiDeviation = obs.signedVolume - meanOFI;
+            
+            covariance += priceDeviation * ofiDeviation;
+            variance += ofiDeviation * ofiDeviation;
+        }
+        
+        covariance /= n;
+        variance /= n;
+
+        // Calculate lambda = Cov(Δp, OFI) / Var(OFI)
+        // Handle edge case: if variance is near zero, set lambda to 0
+        if (Math.abs(variance) < 1e-10) {
+            kyleLambda = 0.0;
+        } else {
+            kyleLambda = covariance / variance;
+        }
+
+        // Reset counter
+        updatesSinceLastLambdaCalc = 0;
     }
 
     /**
@@ -477,6 +559,28 @@ public class OrderbookAggregate {
      */
     public int getSpoofingCount() {
         return spoofingEvents.size();
+    }
+
+    /**
+     * Get Kyle's Lambda (price impact coefficient).
+     * Returns 0.0 if not yet calculated or insufficient data.
+     * 
+     * Interpretation:
+     * - λ > 0: Positive order flow (buying) increases price (normal market)
+     * - λ < 0: Negative correlation (may indicate market manipulation or unusual dynamics)
+     * - λ ≈ 0: No measurable price impact (highly liquid market)
+     */
+    public double getKyleLambda() {
+        return kyleLambda;
+    }
+
+    /**
+     * Get number of observations used for Kyle's Lambda.
+     * Useful for validating statistical significance.
+     * Minimum 30 observations required for calculation.
+     */
+    public int getKyleLambdaObservations() {
+        return priceImpactHistory.size();
     }
 
     /**
