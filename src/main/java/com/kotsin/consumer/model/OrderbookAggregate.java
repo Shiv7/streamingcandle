@@ -525,6 +525,8 @@ public class OrderbookAggregate {
      * VPIN Bucket data structure
      */
     @Data
+    @lombok.NoArgsConstructor
+    @lombok.AllArgsConstructor
     public static class VPINBucket {
         public double totalVolume;
         public double buyVolume;
@@ -539,6 +541,8 @@ public class OrderbookAggregate {
      * Price impact observation for Kyle's Lambda
      */
     @Data
+    @lombok.NoArgsConstructor
+    @lombok.AllArgsConstructor
     public static class PriceImpactObservation {
         public double priceChange;
         public double signedVolume;
@@ -549,34 +553,25 @@ public class OrderbookAggregate {
      * Spoofing event
      */
     @Data
+    @lombok.NoArgsConstructor
+    @lombok.AllArgsConstructor
     public static class SpoofingEvent {
         public long timestamp;
         public String side;
         public double price;
         public int quantity;
         public long durationMs;
-
-        public SpoofingEvent(long timestamp, String side, double price, int quantity, long durationMs) {
-            this.timestamp = timestamp;
-            this.side = side;
-            this.price = price;
-            this.quantity = quantity;
-            this.durationMs = durationMs;
-        }
     }
 
     /**
      * Spoof tracking state
      */
     @Data
+    @lombok.NoArgsConstructor
+    @lombok.AllArgsConstructor
     public static class SpoofState {
         public long firstSeenTime;
         public int quantity;
-
-        public SpoofState(long firstSeenTime, int quantity) {
-            this.firstSeenTime = firstSeenTime;
-            this.quantity = quantity;
-        }
     }
 
     /**
