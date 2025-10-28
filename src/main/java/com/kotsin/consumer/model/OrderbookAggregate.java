@@ -1,5 +1,6 @@
 package com.kotsin.consumer.model;
 
+import com.fasterxml.jackson.annotation.JsonIgnore;
 import com.fasterxml.jackson.annotation.JsonIgnoreProperties;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.kotsin.consumer.service.IcebergDetectionService;
@@ -63,9 +64,12 @@ public class OrderbookAggregate {
     private static final int LAMBDA_WINDOW_SIZE = 100;  // Rolling window size
     private static final int LAMBDA_CALC_FREQUENCY = 20;  // Recalculate every N updates
     private static final int LAMBDA_MIN_OBSERVATIONS = 30;  // Statistical minimum
+    @JsonIgnore
     private List<PriceImpactObservation> priceImpactHistory = new ArrayList<>();
     private double kyleLambda = 0.0;
+    @JsonIgnore
     private double lastMidPrice = 0.0;
+    @JsonIgnore
     private int updatesSinceLastLambdaCalc = 0;
 
     // ========== Depth Metrics (Averaged) ==========

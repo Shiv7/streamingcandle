@@ -82,8 +82,11 @@ public class EnrichedCandlestick {
     private static final double VPIN_ADAPTIVE_ALPHA = 0.05;
 
     private double vpinBucketSize = VPIN_INITIAL_BUCKET_SIZE;
+    @JsonIgnore
     private java.util.List<VPINBucket> vpinBuckets = new java.util.ArrayList<>();
+    @JsonIgnore
     private double vpinCurrentBucketVolume = 0.0;
+    @JsonIgnore
     private double vpinCurrentBucketBuyVolume = 0.0;
     private double vpin = 0.0;
 
