@@ -83,11 +83,11 @@ public class EnrichedCandlestick {
 
     private double vpinBucketSize = VPIN_INITIAL_BUCKET_SIZE;
     @JsonIgnore
-    private java.util.List<VPINBucket> vpinBuckets = new java.util.ArrayList<>();
+    private transient java.util.List<VPINBucket> vpinBuckets = new java.util.concurrent.CopyOnWriteArrayList<>();
     @JsonIgnore
-    private double vpinCurrentBucketVolume = 0.0;
+    private transient double vpinCurrentBucketVolume = 0.0;
     @JsonIgnore
-    private double vpinCurrentBucketBuyVolume = 0.0;
+    private transient double vpinCurrentBucketBuyVolume = 0.0;
     private double vpin = 0.0;
 
     // ========== Imbalance Bar Emission Tracking ==========
@@ -395,6 +395,7 @@ public class EnrichedCandlestick {
 
     /**
      * Calculate Value Area (70% of volume around POC)
+     * Fixed algorithm: Properly expands from POC by alternating between higher and lower price levels
      */
     public ValueArea getValueArea() {
         if (volumeAtPrice.isEmpty() || volume == 0) {
@@ -405,31 +406,53 @@ public class EnrichedCandlestick {
         if (poc == null) return new ValueArea(null, null, 0L);
 
         long targetVolume = (long) (volume * VALUE_AREA_PERCENTAGE);
-        long accumulatedVolume = 0L;
+        
+        // Start with POC volume
+        long accumulatedVolume = volumeAtPrice.getOrDefault(poc, 0L);
 
         double vaHigh = poc;
         double vaLow = poc;
 
-        // Sort by proximity to POC
-        volumeAtPrice.entrySet().stream()
-            .sorted((e1, e2) -> Double.compare(
-                Math.abs(e1.getKey() - poc),
-                Math.abs(e2.getKey() - poc)
-            ))
-            .forEach(entry -> {
-                // This is inefficient but Java doesn't allow mutation in forEach easily
-                // We'll refactor with a traditional loop if needed
-            });
+        // Sort all prices
+        java.util.List<Double> sortedPrices = new java.util.ArrayList<>(volumeAtPrice.keySet());
+        java.util.Collections.sort(sortedPrices);
 
-        // Traditional loop for value area calculation
-        for (Map.Entry<Double, Long> entry : volumeAtPrice.entrySet()) {
-            if (accumulatedVolume >= targetVolume) break;
-            
-            double price = entry.getKey();
-            if (Math.abs(price - poc) <= Math.max(Math.abs(vaHigh - poc), Math.abs(vaLow - poc)) * 1.5) {
-                accumulatedVolume += entry.getValue();
-                if (price > vaHigh) vaHigh = price;
-                if (price < vaLow) vaLow = price;
+        // Find POC index in sorted list
+        int pocIndex = -1;
+        for (int i = 0; i < sortedPrices.size(); i++) {
+            if (Math.abs(sortedPrices.get(i) - poc) < 0.0001) {
+                pocIndex = i;
+                break;
+            }
+        }
+
+        if (pocIndex == -1) {
+            // Shouldn't happen, but fallback
+            return new ValueArea(poc, poc, accumulatedVolume);
+        }
+
+        // Expand value area by alternating between price levels above and below POC
+        int aboveIndex = pocIndex + 1;
+        int belowIndex = pocIndex - 1;
+
+        while (accumulatedVolume < targetVolume && (aboveIndex < sortedPrices.size() || belowIndex >= 0)) {
+            long aboveVolume = (aboveIndex < sortedPrices.size()) ? 
+                volumeAtPrice.getOrDefault(sortedPrices.get(aboveIndex), 0L) : 0L;
+            long belowVolume = (belowIndex >= 0) ? 
+                volumeAtPrice.getOrDefault(sortedPrices.get(belowIndex), 0L) : 0L;
+
+            // Add the price level with higher volume first (standard Volume Profile algorithm)
+            if (aboveVolume >= belowVolume && aboveIndex < sortedPrices.size()) {
+                accumulatedVolume += aboveVolume;
+                vaHigh = sortedPrices.get(aboveIndex);
+                aboveIndex++;
+            } else if (belowIndex >= 0) {
+                accumulatedVolume += belowVolume;
+                vaLow = sortedPrices.get(belowIndex);
+                belowIndex--;
+            } else {
+                // Only one direction left
+                break;
             }
         }
 
