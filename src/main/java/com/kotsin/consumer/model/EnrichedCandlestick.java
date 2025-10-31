@@ -316,6 +316,7 @@ public class EnrichedCandlestick {
      * Used when building multi-minute candles from smaller timeframe candles.
      * 
      * CRITICAL: This aggregates pre-computed candles (2m from 1m, 5m from 1m, etc.)
+     * FIXED: Now tracks window end time to handle out-of-order candles correctly
      *
      * @param other The candle to merge into this one
      */
@@ -329,8 +330,11 @@ public class EnrichedCandlestick {
         this.high = Math.max(this.high, other.high);
         this.low = Math.min(this.low, other.low);
 
-        // Always update close to the latest candle's close
-        this.close = other.close;
+        // FIXED: Update close only if this candle is chronologically later (by window end time)
+        // This handles out-of-order arrival correctly
+        if (this.windowEndMillis == 0 || other.windowEndMillis >= this.windowEndMillis) {
+            this.close = other.close;
+        }
 
         // Accumulate volumes
         this.volume += other.volume;

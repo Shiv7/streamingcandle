@@ -54,32 +54,32 @@ public class ImbalanceBarData {
             .cumulative(volumeImb)
             .direction(direction)
             .threshold((long)expVolImb)
-            .progress(Math.abs(volumeImb) / expVolImb)
-            .isComplete(Math.abs(volumeImb) >= expVolImb)
+            .progress(expVolImb > 0 ? Math.abs(volumeImb) / expVolImb : 0.0)
+            .isComplete(expVolImb > 0 && Math.abs(volumeImb) >= expVolImb)
             .build();
 
         DollarImbalanceData dib = DollarImbalanceData.builder()
             .cumulative(dollarImb)
             .direction(direction)
             .threshold((long)expDollarImb)
-            .progress(Math.abs(dollarImb) / expDollarImb)
-            .isComplete(Math.abs(dollarImb) >= expDollarImb)
+            .progress(expDollarImb > 0 ? Math.abs(dollarImb) / expDollarImb : 0.0)
+            .isComplete(expDollarImb > 0 && Math.abs(dollarImb) >= expDollarImb)
             .build();
 
         TickRunsData trb = TickRunsData.builder()
             .currentRun(tickRuns)
             .direction(direction)
             .threshold((int)expTickRuns)
-            .progress(Math.abs(tickRuns) / expTickRuns)
-            .isComplete(Math.abs(tickRuns) >= expTickRuns)
+            .progress(expTickRuns > 0 ? Math.abs(tickRuns) / expTickRuns : 0.0)
+            .isComplete(expTickRuns > 0 && Math.abs(tickRuns) >= expTickRuns)
             .build();
 
         VolumeRunsData vrb = VolumeRunsData.builder()
             .currentRun(volumeRuns)
             .direction(direction)
             .threshold((long)expVolRuns)
-            .progress(Math.abs(volumeRuns) / expVolRuns)
-            .isComplete(Math.abs(volumeRuns) >= expVolRuns)
+            .progress(expVolRuns > 0 ? Math.abs(volumeRuns) / expVolRuns : 0.0)
+            .isComplete(expVolRuns > 0 && Math.abs(volumeRuns) >= expVolRuns)
             .build();
 
         return ImbalanceBarData.builder()

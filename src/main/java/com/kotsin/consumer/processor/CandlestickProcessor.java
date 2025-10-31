@@ -148,11 +148,12 @@ public class CandlestickProcessor {
                 Stores.persistentKeyValueStore(DELTA_STORE),
                 Serdes.String(), Serdes.Long()));
 
-        // 1) Read raw ticks with true event time
+        // 1) Read raw ticks with true event time AND apply NSE alignment offset
+        // CRITICAL FIX: Use MultiMinuteOffsetTimestampExtractor even for 1-minute to align with market hours
         KStream<String, TickData> raw = builder.stream(
                 inputTopic,
                 Consumed.with(Serdes.String(), TickData.serde())
-                        .withTimestampExtractor(new TickTimestampExtractor())
+                        .withTimestampExtractor(new TickTimestampExtractorWithOffset())
         );
 
         // 2) Stable key (scripCode or token)
@@ -186,12 +187,19 @@ public class CandlestickProcessor {
                                 .withKeySerde(Serdes.String())
                                 .withValueSerde(EnrichedCandlestick.serde())
                 )
-                .suppress(Suppressed.untilWindowCloses(Suppressed.BufferConfig.unbounded()));
+                .suppress(Suppressed.untilWindowCloses(
+                        Suppressed.BufferConfig.maxRecords(100_000).emitEarlyWhenFull()
+                ));
 
         candlestickTable.toStream()
                 .map((windowedKey, candle) -> {
-                    candle.setWindowStartMillis(windowedKey.window().start());
-                    candle.setWindowEndMillis(windowedKey.window().end());
+                    // Remove the alignment shift for display/start-end correctness
+                    String exchange = candle.getExchange();
+                    int offsetMinutes = MarketTimeAligner.getWindowOffsetMinutes(exchange, 1);
+                    long offsetMs = offsetMinutes * 60_000L;
+                    
+                    candle.setWindowStartMillis(windowedKey.window().start() - offsetMs);
+                    candle.setWindowEndMillis(windowedKey.window().end() - offsetMs);
                     logCandleDetails(candle, 1);
                     return KeyValue.pair(windowedKey.key(), candle);
                 })
@@ -261,7 +269,9 @@ public class CandlestickProcessor {
                                 .withKeySerde(Serdes.String())
                                 .withValueSerde(EnrichedCandlestick.serde())
                 )
-                .suppress(Suppressed.untilWindowCloses(Suppressed.BufferConfig.unbounded()));
+                .suppress(Suppressed.untilWindowCloses(
+                        Suppressed.BufferConfig.maxRecords(100_000).emitEarlyWhenFull()
+                ));
 
         aggregated.toStream()
                 .map((wk, c) -> {
