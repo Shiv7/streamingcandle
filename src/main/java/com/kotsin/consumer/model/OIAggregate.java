@@ -173,6 +173,14 @@ public class OIAggregate {
             this.callOI = other.callOI;
         }
 
+        // Preserve starting put/call OI from earliest minute in the window
+        if (this.putOIStart == null && other.putOIStart != null) {
+            this.putOIStart = other.putOIStart;
+        }
+        if (this.callOIStart == null && other.callOIStart != null) {
+            this.callOIStart = other.callOIStart;
+        }
+
         // Update metadata
         this.exchange = other.exchange;
         this.exchangeType = other.exchangeType;
@@ -255,4 +263,3 @@ public class OIAggregate {
         }
     }
 }
-

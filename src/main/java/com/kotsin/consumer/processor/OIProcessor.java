@@ -139,6 +139,14 @@ public class OIProcessor {
 
         // 2) Extract token from composite key (e.g., "N|52343" -> "52343")
         KStream<String, OpenInterest> keyed = raw
+                .mapValues(oi -> {
+                    if (oi != null && oi.getOpenInterest() != null && oiValueScale != 1.0) {
+                        long v = oi.getOpenInterest();
+                        long scaled = (long) Math.round(v * oiValueScale);
+                        oi.setOpenInterest(scaled);
+                    }
+                    return oi;
+                })
                 .selectKey((k, oi) -> {
                     if (oi == null) return k;
                     String exch = oi.getExchange() == null ? "-" : oi.getExchange();

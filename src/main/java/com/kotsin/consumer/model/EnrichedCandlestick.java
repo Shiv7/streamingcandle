@@ -109,10 +109,10 @@ public class EnrichedCandlestick {
     private long closeSourceTs = Long.MIN_VALUE;
     private int priceTickCount = 0;
     // EWMA stats for adaptive quantile thresholds
-    private double vibEwmaMean = 0.0, vibEwmaSq = 0.0;
-    private double dibEwmaMean = 0.0, dibEwmaSq = 0.0;
-    private double trbEwmaMean = 0.0, trbEwmaSq = 0.0;
-    private double vrbEwmaMean = 0.0, vrbEwmaSq = 0.0;
+    @JsonIgnore private double vibEwmaMean = 0.0, vibEwmaSq = 0.0;
+    @JsonIgnore private double dibEwmaMean = 0.0, dibEwmaSq = 0.0;
+    @JsonIgnore private double trbEwmaMean = 0.0, trbEwmaSq = 0.0;
+    @JsonIgnore private double vrbEwmaMean = 0.0, vrbEwmaSq = 0.0;
 
     /**
      * Creates a new empty enriched candlestick with default values.

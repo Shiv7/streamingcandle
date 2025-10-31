@@ -41,11 +41,11 @@ public class VpinFinalizer implements ValueTransformerWithKey<Windowed<String>, 
         if (s == null) s = new VpinState();
         if (s.bucketSize <= 0) s.bucketSize = initialBucketSize;
 
-        // Merge finalized buckets from candle
+        // Merge finalized buckets from candle, normalizing to fixed-size buckets
         if (candle.getVpinBucketCount() > 0) {
             List<EnrichedCandlestick.VPINBucket> src = candle.getVpinBuckets();
             if (src != null && !src.isEmpty()) {
-                s.buckets.addAll(src);
+                normalizeAndAppendBuckets(src, s);
             }
         }
 
@@ -108,6 +108,37 @@ public class VpinFinalizer implements ValueTransformerWithKey<Windowed<String>, 
         if (madeBucket) {
             EnrichedCandlestick.VPINBucket last = s.buckets.get(s.buckets.size() - 1);
             s.bucketSize = adaptiveAlpha * last.totalVolume + (1 - adaptiveAlpha) * s.bucketSize;
+        }
+    }
+
+    private void normalizeAndAppendBuckets(List<EnrichedCandlestick.VPINBucket> src, VpinState s) {
+        for (EnrichedCandlestick.VPINBucket b : src) {
+            double total = b.totalVolume;
+            if (total <= 0) continue;
+            double buy = b.buyVolume;
+            double ratioBuy = buy / total;
+
+            while (total >= s.bucketSize && s.bucketSize > 0) {
+                double vol = s.bucketSize;
+                double buyVol = ratioBuy * vol;
+                double sellVol = vol - buyVol;
+                s.buckets.add(new EnrichedCandlestick.VPINBucket(vol, buyVol, sellVol));
+                total -= vol;
+                buy -= buyVol;
+                if (s.buckets.size() > maxBuckets) {
+                    int excess = s.buckets.size() - maxBuckets;
+                    for (int i = 0; i < excess; i++) s.buckets.remove(0);
+                }
+            }
+            if (total > 0) {
+                double buyVol = Math.max(0.0, Math.min(buy, total));
+                double sellVol = total - buyVol;
+                s.buckets.add(new EnrichedCandlestick.VPINBucket(total, buyVol, sellVol));
+                if (s.buckets.size() > maxBuckets) {
+                    int excess = s.buckets.size() - maxBuckets;
+                    for (int i = 0; i < excess; i++) s.buckets.remove(0);
+                }
+            }
         }
     }
 
