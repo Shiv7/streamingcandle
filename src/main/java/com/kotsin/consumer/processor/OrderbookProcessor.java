@@ -18,6 +18,9 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.stereotype.Component;
+import org.springframework.beans.factory.annotation.Value;
+import com.kotsin.consumer.timeExtractor.OrderbookTimestampExtractorWithOffset;
+import com.kotsin.consumer.timeExtractor.MultiMinuteOffsetTimestampExtractorForOrderbook;
 
 import java.time.*;
 import java.time.format.DateTimeFormatter;
@@ -48,6 +51,19 @@ public class OrderbookProcessor {
     private KafkaConfig kafkaConfig;
 
     private final Map<String, KafkaStreams> streamsInstances = new HashMap<>();
+
+    // Grace + filter configuration
+    @Value("${orderbook.window.grace.seconds.1m:5}")
+    private int graceSeconds1m;
+
+    @Value("${orderbook.window.grace.seconds.multi:10}")
+    private int graceSecondsMulti;
+
+    @Value("${orderbook.filter.enabled:false}")
+    private boolean filterEnabled;
+
+    @Value("${orderbook.filter.token:123257}")
+    private String filterToken;
 
     /**
      * Initializes and starts the orderbook microstructure pipeline.
@@ -121,26 +137,32 @@ public class OrderbookProcessor {
         KStream<String, OrderBookSnapshot> raw = builder.stream(
                 inputTopic,
                 Consumed.with(Serdes.String(), OrderBookSnapshot.serde())
+                        .withTimestampExtractor(new OrderbookTimestampExtractorWithOffset())
         );
 
-        // 2) Extract token from composite key (e.g., "N|48817" -> "48817")
+        // 2) Composite key exch:exchType:token to avoid collisions
         KStream<String, OrderBookSnapshot> keyed = raw
                 .selectKey((k, ob) -> {
-                    if (ob != null && ob.getToken() != null) {
-                        return String.valueOf(ob.getToken());
-                    }
-                    if (k != null && k.contains("|")) {
-                        String[] parts = k.split("\\|");
-                        return parts.length > 1 ? parts[1] : k;
-                    }
-                    return k;
+                    if (ob == null) return k;
+                    String exch = ob.getExch() == null ? "-" : ob.getExch();
+                    String ext = ob.getExchType() == null ? "-" : ob.getExchType();
+                    String tok = ob.getToken() == null ? "-" : ob.getToken();
+                    return exch + ":" + ext + ":" + tok;
                 })
                 .filter((k, ob) -> ob != null && ob.isValid());
+
+        // 2.5) Optional: filter to single token for testing
+        if (filterEnabled) {
+            keyed = keyed.filter((k, ob) -> {
+                if (ob == null || ob.getToken() == null) return false;
+                return ob.getToken().equals(filterToken);
+            });
+        }
 
         // 3) Window & aggregate microstructure metrics
         TimeWindows windows = TimeWindows.ofSizeAndGrace(
                 Duration.ofMinutes(1),
-                Duration.ofSeconds(1)
+                Duration.ofSeconds(Math.max(0, graceSeconds1m))
         );
 
         KTable<Windowed<String>, OrderbookAggregate> orderbookTable = keyed
@@ -160,8 +182,12 @@ public class OrderbookProcessor {
 
         orderbookTable.toStream()
                 .map((windowedKey, aggregate) -> {
-                    aggregate.setWindowStartMillis(windowedKey.window().start());
-                    aggregate.setWindowEndMillis(windowedKey.window().end());
+                    // Remove alignment shift for display
+                    String exch = aggregate.getExchange();
+                    int offMin = com.kotsin.consumer.util.MarketTimeAligner.getWindowOffsetMinutes(exch, 1);
+                    long offMs = offMin * 60_000L;
+                    aggregate.setWindowStartMillis(windowedKey.window().start() - offMs);
+                    aggregate.setWindowEndMillis(windowedKey.window().end() - offMs);
                     logOrderbookDetails(aggregate, 1);
                     return KeyValue.pair(windowedKey.key(), aggregate);
                 })
@@ -180,11 +206,12 @@ public class OrderbookProcessor {
         KStream<String, OrderbookAggregate> mins = builder.stream(
                 inputTopic,
                 Consumed.with(Serdes.String(), OrderbookAggregate.serde())
+                        .withTimestampExtractor(new MultiMinuteOffsetTimestampExtractorForOrderbook(windowSize))
         );
 
         TimeWindows windows = TimeWindows.ofSizeAndGrace(
                 Duration.ofMinutes(windowSize),
-                Duration.ofSeconds(1)
+                Duration.ofSeconds(Math.max(0, graceSecondsMulti))
         );
 
         // For orderbook: keep LATEST aggregate (most recent microstructure state)
@@ -201,8 +228,10 @@ public class OrderbookProcessor {
 
         aggregated.toStream()
                 .map((wk, aggregate) -> {
-                    aggregate.setWindowStartMillis(wk.window().start());
-                    aggregate.setWindowEndMillis(wk.window().end());
+                    int offMin = com.kotsin.consumer.util.MarketTimeAligner.getWindowOffsetMinutes(aggregate.getExchange(), windowSize);
+                    long offMs = offMin * 60_000L;
+                    aggregate.setWindowStartMillis(wk.window().start() - offMs);
+                    aggregate.setWindowEndMillis(wk.window().end() - offMs);
                     logOrderbookDetails(aggregate, windowSize);
                     return KeyValue.pair(wk.key(), aggregate);
                 })
@@ -337,4 +366,3 @@ public class OrderbookProcessor {
         LOGGER.info("✅ All orderbook streams stopped");
     }
 }
-

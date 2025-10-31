@@ -18,6 +18,9 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.stereotype.Component;
+import org.springframework.beans.factory.annotation.Value;
+import com.kotsin.consumer.timeExtractor.OITimestampExtractorWithOffset;
+import com.kotsin.consumer.timeExtractor.MultiMinuteOffsetTimestampExtractorForOI;
 
 import java.time.*;
 import java.time.format.DateTimeFormatter;
@@ -45,6 +48,19 @@ public class OIProcessor {
     private KafkaConfig kafkaConfig;
 
     private final Map<String, KafkaStreams> streamsInstances = new HashMap<>();
+
+    // Grace + filter configuration
+    @Value("${oi.window.grace.seconds.1m:5}")
+    private int graceSeconds1m;
+
+    @Value("${oi.window.grace.seconds.multi:10}")
+    private int graceSecondsMulti;
+
+    @Value("${oi.filter.enabled:false}")
+    private boolean filterEnabled;
+
+    @Value("${oi.filter.token:123257}")
+    private int filterToken;
 
     /**
      * Initializes and starts the OI metrics pipeline.
@@ -118,26 +134,28 @@ public class OIProcessor {
         KStream<String, OpenInterest> raw = builder.stream(
                 inputTopic,
                 Consumed.with(Serdes.String(), OpenInterest.serde())
+                        .withTimestampExtractor(new OITimestampExtractorWithOffset())
         );
 
         // 2) Extract token from composite key (e.g., "N|52343" -> "52343")
         KStream<String, OpenInterest> keyed = raw
                 .selectKey((k, oi) -> {
-                    if (oi != null && oi.getToken() != 0) {
-                        return String.valueOf(oi.getToken());
-                    }
-                    if (k != null && k.contains("|")) {
-                        String[] parts = k.split("\\|");
-                        return parts.length > 1 ? parts[1] : k;
-                    }
-                    return k;
+                    if (oi == null) return k;
+                    String exch = oi.getExchange() == null ? "-" : oi.getExchange();
+                    String ext = oi.getExchangeType() == null ? "-" : oi.getExchangeType();
+                    String tok = String.valueOf(oi.getToken());
+                    return exch + ":" + ext + ":" + tok;
                 })
                 .filter((k, oi) -> oi != null && oi.getOpenInterest() != null);
+
+        if (filterEnabled) {
+            keyed = keyed.filter((k, oi) -> oi != null && oi.getToken() == filterToken);
+        }
 
         // 3) Window & aggregate OI metrics
         TimeWindows windows = TimeWindows.ofSizeAndGrace(
                 Duration.ofMinutes(1),
-                Duration.ofSeconds(3)  // OI updates slower than ticks
+                Duration.ofSeconds(Math.max(0, graceSeconds1m))
         );
 
         KTable<Windowed<String>, OIAggregate> oiTable = keyed
@@ -159,8 +177,10 @@ public class OIProcessor {
                 .mapValues((windowedKey, aggregate) -> {
                     // Calculate derived metrics on window close
                     aggregate.calculateDerivedMetrics();
-                    aggregate.setWindowStartMillis(windowedKey.window().start());
-                    aggregate.setWindowEndMillis(windowedKey.window().end());
+                    int offMin = com.kotsin.consumer.util.MarketTimeAligner.getWindowOffsetMinutes(aggregate.getExchange(), 1);
+                    long offMs = offMin * 60_000L;
+                    aggregate.setWindowStartMillis(windowedKey.window().start() - offMs);
+                    aggregate.setWindowEndMillis(windowedKey.window().end() - offMs);
                     return aggregate;
                 })
                 .map((windowedKey, aggregate) -> {
@@ -181,11 +201,12 @@ public class OIProcessor {
         KStream<String, OIAggregate> mins = builder.stream(
                 inputTopic,
                 Consumed.with(Serdes.String(), OIAggregate.serde())
+                        .withTimestampExtractor(new MultiMinuteOffsetTimestampExtractorForOI(windowSize))
         );
 
         TimeWindows windows = TimeWindows.ofSizeAndGrace(
                 Duration.ofMinutes(windowSize),
-                Duration.ofSeconds(3)
+                Duration.ofSeconds(Math.max(0, graceSecondsMulti))
         );
 
         KTable<Windowed<String>, OIAggregate> aggregated = mins
@@ -206,8 +227,10 @@ public class OIProcessor {
         aggregated.toStream()
                 .mapValues((windowedKey, aggregate) -> {
                     aggregate.calculateDerivedMetrics();
-                    aggregate.setWindowStartMillis(windowedKey.window().start());
-                    aggregate.setWindowEndMillis(windowedKey.window().end());
+                    int offMin = com.kotsin.consumer.util.MarketTimeAligner.getWindowOffsetMinutes(aggregate.getExchange(), windowSize);
+                    long offMs = offMin * 60_000L;
+                    aggregate.setWindowStartMillis(windowedKey.window().start() - offMs);
+                    aggregate.setWindowEndMillis(windowedKey.window().end() - offMs);
                     return aggregate;
                 })
                 .map((wk, aggregate) -> {
@@ -344,4 +367,3 @@ public class OIProcessor {
         LOGGER.info("✅ All OI streams stopped");
     }
 }
-
