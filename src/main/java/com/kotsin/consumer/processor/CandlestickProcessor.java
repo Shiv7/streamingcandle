@@ -62,6 +62,38 @@ public class CandlestickProcessor {
     @Value("${candles.window.grace.seconds.multi:10}")
     private int graceSecondsMulti;
 
+    // VPIN configuration
+    @Value("${candles.vpin.initial.bucket.size:10000.0}")
+    private double vpinInitialBucketSize;
+    @Value("${candles.vpin.adaptive.alpha:0.05}")
+    private double vpinAdaptiveAlpha;
+    @Value("${candles.vpin.max.buckets:50}")
+    private int vpinMaxBuckets;
+
+    // Imbalance + classification + tick size configuration
+    @Value("${candles.imbalance.ewma.alpha:0.1}")
+    private double imbEwmaAlpha;
+    @Value("${candles.imbalance.initial.vib:1000.0}")
+    private double imbInitVib;
+    @Value("${candles.imbalance.initial.dib:100000.0}")
+    private double imbInitDib;
+    @Value("${candles.imbalance.initial.trb:10.0}")
+    private double imbInitTrb;
+    @Value("${candles.imbalance.initial.vrb:5000.0}")
+    private double imbInitVrb;
+    @Value("${candles.classify.min.absolute:0.01}")
+    private double classifyMinAbs;
+    @Value("${candles.classify.bps:0.0001}")
+    private double classifyBps;
+    @Value("${candles.classify.spread.multiplier:0.15}")
+    private double classifySpreadMult;
+    @Value("${candles.ticksize.default:0.05}")
+    private double defaultTickSize;
+    @Value("${candles.ticksize.derivatives:0.05}")
+    private double derivTickSize;
+    @Value("${candles.imbalance.q.zscore:1.645}")
+    private double imbZScore;
+
     // Optional single-instrument filter (testing)
     @Value("${candles.filter.enabled:false}")
     private boolean filterEnabled;
@@ -159,11 +191,23 @@ public class CandlestickProcessor {
      * CRITICAL: Uses proper grace period and NSE alignment.
      */
     private void processTickData(StreamsBuilder builder, String inputTopic, String outputTopic) {
+        // Configure adaptive parameters for the candle model (once per JVM)
+        EnrichedCandlestick.configure(
+                imbEwmaAlpha,
+                imbInitVib, imbInitDib, imbInitTrb, imbInitVrb,
+                classifyMinAbs, classifyBps, classifySpreadMult,
+                defaultTickSize, derivTickSize,
+                imbZScore
+        );
         // State store: max cumulative volume per symbol (for delta conversion)
         final String DELTA_STORE = "max-cum-vol-per-sym";
+        final String VPIN_STORE = "vpin-state-store";
         builder.addStateStore(Stores.keyValueStoreBuilder(
                 Stores.persistentKeyValueStore(DELTA_STORE),
                 Serdes.String(), Serdes.Long()));
+        builder.addStateStore(Stores.keyValueStoreBuilder(
+                Stores.persistentKeyValueStore(VPIN_STORE),
+                Serdes.String(), com.kotsin.consumer.model.VpinState.serde()));
 
         // 1) Read raw ticks with true event time AND apply NSE alignment offset
         // CRITICAL FIX: Use MultiMinuteOffsetTimestampExtractor even for 1-minute to align with market hours
@@ -216,17 +260,10 @@ public class CandlestickProcessor {
                 ));
 
         candlestickTable.toStream()
-                .map((windowedKey, candle) -> {
-                    // Remove the alignment shift for display/start-end correctness
-                    String exchange = candle.getExchange();
-                    int offsetMinutes = MarketTimeAligner.getWindowOffsetMinutes(exchange, 1);
-                    long offsetMs = offsetMinutes * 60_000L;
-                    
-                    candle.setWindowStartMillis(windowedKey.window().start() - offsetMs);
-                    candle.setWindowEndMillis(windowedKey.window().end() - offsetMs);
-                    logCandleDetails(candle, 1);
-                    return KeyValue.pair(windowedKey.key(), candle);
-                })
+                .transformValues(() -> new com.kotsin.consumer.transformers.VpinFinalizer(
+                        VPIN_STORE, vpinInitialBucketSize, vpinAdaptiveAlpha, vpinMaxBuckets
+                ), VPIN_STORE)
+                .map((windowedKey, candle) -> KeyValue.pair(windowedKey.key(), candle))
                 .to(outputTopic, Produced.with(Serdes.String(), EnrichedCandlestick.serde()));
     }
 

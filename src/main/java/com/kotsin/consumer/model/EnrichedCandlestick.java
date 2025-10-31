@@ -67,13 +67,15 @@ public class EnrichedCandlestick {
     private double expectedDollarImbalance = 100000.0;
     private double expectedTickRuns = 10.0;
     private double expectedVolumeRuns = 5000.0;
-    private static final double EWMA_ALPHA = 0.1;
+    private static volatile double IMB_EWMA_ALPHA = 0.1;
+    private static volatile double IMB_Q_ZSCORE = 1.645; // ~Q95
 
     // ========== Volume Profile State ==========
     private Map<Double, Long> volumeAtPrice = new HashMap<>();
     private Double lowestPrice;
     private Double highestPrice;
-    private static final double DEFAULT_TICK_SIZE = 0.05;
+    private static volatile double DEFAULT_TICK_SIZE = 0.05;
+    private static volatile double DERIV_TICK_SIZE = 0.05;
     private static final double VALUE_AREA_PERCENTAGE = 0.70;
 
     // ========== VPIN State (Volume-Synchronized PIN) ==========
@@ -106,6 +108,11 @@ public class EnrichedCandlestick {
     private long openSourceTs = Long.MAX_VALUE;
     private long closeSourceTs = Long.MIN_VALUE;
     private int priceTickCount = 0;
+    // EWMA stats for adaptive quantile thresholds
+    private double vibEwmaMean = 0.0, vibEwmaSq = 0.0;
+    private double dibEwmaMean = 0.0, dibEwmaSq = 0.0;
+    private double trbEwmaMean = 0.0, trbEwmaSq = 0.0;
+    private double vrbEwmaMean = 0.0, vrbEwmaSq = 0.0;
 
     /**
      * Creates a new empty enriched candlestick with default values.
@@ -121,7 +128,42 @@ public class EnrichedCandlestick {
         this.priceVolumeSum = 0.0;
         this.vwap = 0.0;
         this.tickCount = 0;
+        // initialize expected thresholds from configured defaults
+        this.expectedVolumeImbalance = INIT_EXPECTED_VIB;
+        this.expectedDollarImbalance = INIT_EXPECTED_DIB;
+        this.expectedTickRuns = INIT_EXPECTED_TRB;
+        this.expectedVolumeRuns = INIT_EXPECTED_VRB;
     }
+
+    // ---------------------- Adaptive configuration ----------------------
+    private static volatile double CLASSIFY_MIN_ABS = 0.01;
+    private static volatile double CLASSIFY_BPS = 0.0001;
+    private static volatile double CLASSIFY_SPREAD_MULT = 0.15;
+
+    public static void configure(double ewmaAlpha,
+                                 double initVib, double initDib, double initTrb, double initVrb,
+                                 double classifyMinAbs, double classifyBps, double classifySpreadMult,
+                                 double defaultTick, double derivTick,
+                                 double imbZScore) {
+        IMB_EWMA_ALPHA = ewmaAlpha;
+        // per-instance fields' defaults update for new instances only
+        INIT_EXPECTED_VIB = initVib;
+        INIT_EXPECTED_DIB = initDib;
+        INIT_EXPECTED_TRB = initTrb;
+        INIT_EXPECTED_VRB = initVrb;
+        CLASSIFY_MIN_ABS = classifyMinAbs;
+        CLASSIFY_BPS = classifyBps;
+        CLASSIFY_SPREAD_MULT = classifySpreadMult;
+        DEFAULT_TICK_SIZE = defaultTick;
+        DERIV_TICK_SIZE = derivTick;
+        IMB_Q_ZSCORE = imbZScore;
+    }
+
+    // Initial expected values as static so constructor can use current config
+    private static volatile double INIT_EXPECTED_VIB = 1000.0;
+    private static volatile double INIT_EXPECTED_DIB = 100000.0;
+    private static volatile double INIT_EXPECTED_TRB = 10.0;
+    private static volatile double INIT_EXPECTED_VRB = 5000.0;
 
     /**
      * Update using event-time and delta volume (for raw TickData → 1m).
@@ -154,7 +196,7 @@ public class EnrichedCandlestick {
         // ========== OHLC by event time ==========
         if (hasTrade || allowPriceOnlyOhlc) {
             // Count price tick when price changes materially or first observation
-            if (lastPrice == null || Math.abs(px - lastPrice) >= getClassificationThreshold(px)) {
+            if (lastPrice == null || Math.abs(px - lastPrice) >= getClassificationThreshold(px, tick)) {
                 priceTickCount++;
             }
             if (!openInitialized || (ts > 0 && ts < openSourceTs)) {
@@ -229,7 +271,7 @@ public class EnrichedCandlestick {
         double bidPrice = tick.getBidRate();
         double askPrice = tick.getOfferRate();
 
-        double threshold = getClassificationThreshold(currentPrice);
+        double threshold = getClassificationThreshold(currentPrice, tick);
 
         // Quote rule: compare to bid/ask
         if (bidPrice > 0 && askPrice > 0) {
@@ -249,9 +291,15 @@ public class EnrichedCandlestick {
         return false;
     }
 
-    private double getClassificationThreshold(double currentPrice) {
-        // Threshold: 1bp or 0.01 minimum; options can have wider spread. Keep simple for now.
-        return Math.max(0.01, Math.abs(currentPrice) * 0.0001);
+    private double getClassificationThreshold(double currentPrice, TickData tick) {
+        double base = Math.max(CLASSIFY_MIN_ABS, Math.abs(currentPrice) * CLASSIFY_BPS);
+        double spreadTerm = 0.0;
+        if (tick != null && tick.getOfferRate() > 0 && tick.getBidRate() > 0) {
+            double spread = Math.max(0.0, tick.getOfferRate() - tick.getBidRate());
+            spreadTerm = CLASSIFY_SPREAD_MULT * spread;
+        }
+        double tickTerm = getTickSize();
+        return Math.max(base, Math.max(spreadTerm, tickTerm));
     }
 
     /**
@@ -295,12 +343,17 @@ public class EnrichedCandlestick {
     private void checkAndUpdateThresholds(long eventTime) {
         long currentTime = eventTime > 0 ? eventTime : System.currentTimeMillis();
 
+        // Recompute thresholds using EWMA quantile (Q95 approx)
+        expectedVolumeImbalance = quantileThreshold(updateEwma(Math.abs((double) volumeImbalance), vibEwmaMean, vibEwmaSq), INIT_EXPECTED_VIB);
+        vibEwmaMean = expectedVolumeImbalance > 0 ? (vibEwmaMean * 1.0) : vibEwmaMean; // keep fields updated in updateEwma helper
+        expectedDollarImbalance = quantileThreshold(updateEwma(Math.abs(dollarImbalance), dibEwmaMean, dibEwmaSq), INIT_EXPECTED_DIB);
+        expectedTickRuns = quantileThreshold(updateEwma(Math.abs((double) tickRuns), trbEwmaMean, trbEwmaSq), INIT_EXPECTED_TRB);
+        expectedVolumeRuns = quantileThreshold(updateEwma(Math.abs((double) volumeRuns), vrbEwmaMean, vrbEwmaSq), INIT_EXPECTED_VRB);
+
         // VIB threshold check
         if (Math.abs(volumeImbalance) >= expectedVolumeImbalance) {
             vibTriggered = true;  // NEW: Mark that VIB bar was triggered
             lastVibTriggerTime = currentTime;  // NEW: Track when
-            expectedVolumeImbalance = EWMA_ALPHA * Math.abs(volumeImbalance)
-                                    + (1 - EWMA_ALPHA) * expectedVolumeImbalance;
             volumeImbalance = 0L;  // Reset after bar emission
         }
 
@@ -308,8 +361,6 @@ public class EnrichedCandlestick {
         if (Math.abs(dollarImbalance) >= expectedDollarImbalance) {
             dibTriggered = true;  // NEW: Mark that DIB bar was triggered
             lastDibTriggerTime = currentTime;  // NEW: Track when
-            expectedDollarImbalance = EWMA_ALPHA * Math.abs(dollarImbalance)
-                                    + (1 - EWMA_ALPHA) * expectedDollarImbalance;
             dollarImbalance = 0L;
         }
 
@@ -317,8 +368,6 @@ public class EnrichedCandlestick {
         if (Math.abs(tickRuns) >= expectedTickRuns) {
             trbTriggered = true;  // NEW: Mark that TRB bar was triggered
             lastTrbTriggerTime = currentTime;  // NEW: Track when
-            expectedTickRuns = EWMA_ALPHA * Math.abs(tickRuns)
-                             + (1 - EWMA_ALPHA) * expectedTickRuns;
             tickRuns = 0;
         }
 
@@ -326,10 +375,29 @@ public class EnrichedCandlestick {
         if (Math.abs(volumeRuns) >= expectedVolumeRuns) {
             vrbTriggered = true;  // NEW: Mark that VRB bar was triggered
             lastVrbTriggerTime = currentTime;  // NEW: Track when
-            expectedVolumeRuns = EWMA_ALPHA * Math.abs(volumeRuns)
-                               + (1 - EWMA_ALPHA) * expectedVolumeRuns;
             volumeRuns = 0L;
         }
+    }
+
+    // Update EWMA(m, s2) for a stream; returns {mean, var} and writes back via fields
+    private double[] updateEwma(double x, double mean, double s2) {
+        double m = IMB_EWMA_ALPHA * x + (1 - IMB_EWMA_ALPHA) * mean;
+        double ss = IMB_EWMA_ALPHA * x * x + (1 - IMB_EWMA_ALPHA) * s2;
+        double var = Math.max(0.0, ss - m * m);
+        // assign back to correct fields based on references
+        if (mean == vibEwmaMean && s2 == vibEwmaSq) { vibEwmaMean = m; vibEwmaSq = ss; }
+        else if (mean == dibEwmaMean && s2 == dibEwmaSq) { dibEwmaMean = m; dibEwmaSq = ss; }
+        else if (mean == trbEwmaMean && s2 == trbEwmaSq) { trbEwmaMean = m; trbEwmaSq = ss; }
+        else if (mean == vrbEwmaMean && s2 == vrbEwmaSq) { vrbEwmaMean = m; vrbEwmaSq = ss; }
+        return new double[]{m, var};
+    }
+
+    private double quantileThreshold(double[] meanVar, double floor) {
+        double m = meanVar[0];
+        double v = Math.max(0.0, meanVar[1]);
+        double sigma = Math.sqrt(v);
+        double q = m + IMB_Q_ZSCORE * sigma;
+        return Math.max(floor, q);
     }
 
     /**
@@ -359,7 +427,7 @@ public class EnrichedCandlestick {
      */
     private double getTickSize() {
         if ("D".equalsIgnoreCase(exchangeType) || "F".equalsIgnoreCase(exchangeType) || "O".equalsIgnoreCase(exchangeType)) {
-            return 0.05; // common for derivatives/options
+            return DERIV_TICK_SIZE; // common for derivatives/options
         }
         return DEFAULT_TICK_SIZE;
     }
@@ -485,6 +553,40 @@ public class EnrichedCandlestick {
         this.vpinCurrentBucketVolume += other.vpinCurrentBucketVolume;
         this.vpinCurrentBucketBuyVolume += other.vpinCurrentBucketBuyVolume;
         this.priceTickCount += other.priceTickCount;
+
+        // Normalize: flush any full VPIN buckets from accumulated current volume
+        flushFullVPINBucketsFromCurrent();
+    }
+
+    /**
+     * Convert any full VPIN buckets from the accumulated current-bucket volume into
+     * finalized buckets, preserving the buy/sell ratio, so multi-minute rollups don't
+     * lose bucketization due to 1m resets.
+     */
+    private void flushFullVPINBucketsFromCurrent() {
+        if (vpinCurrentBucketVolume <= 0 || vpinBucketSize <= 0) return;
+
+        double ratioBuy = vpinCurrentBucketVolume > 0 ? (vpinCurrentBucketBuyVolume / vpinCurrentBucketVolume) : 0.0;
+
+        while (vpinCurrentBucketVolume >= vpinBucketSize) {
+            double bucketVol = vpinBucketSize;
+            double buyVol = ratioBuy * bucketVol;
+            double sellVol = bucketVol - buyVol;
+            vpinBuckets.add(new VPINBucket(bucketVol, buyVol, sellVol));
+
+            // Truncate to last N buckets
+            if (vpinBuckets.size() > VPIN_MAX_BUCKETS) {
+                int excess = vpinBuckets.size() - VPIN_MAX_BUCKETS;
+                for (int i = 0; i < excess; i++) vpinBuckets.remove(0);
+            }
+
+            // Remove from current bucket proportionally
+            vpinCurrentBucketVolume -= bucketVol;
+            vpinCurrentBucketBuyVolume -= buyVol;
+        }
+
+        // Recalculate VPIN from finalized buckets
+        calculateVPIN();
     }
 
     /**
