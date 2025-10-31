@@ -145,35 +145,39 @@ public class EnrichedCandlestick {
         long ts = tick.getTimestamp();
         double px = tick.getLastRate();
 
-        // ========== OHLC by event time ==========
-        if (!openInitialized || (ts > 0 && ts < openSourceTs)) {
-            open = px;
-            openInitialized = true;
-            if (ts > 0) {
-                openSourceTs = ts;
+        Integer dv = tick.getDeltaVolume();
+        boolean hasTrade = (dv != null && dv > 0) || tick.getLastQuantity() > 0;
+
+        // ========== OHLC by event time (only on real trades) ==========
+        if (hasTrade) {
+            if (!openInitialized || (ts > 0 && ts < openSourceTs)) {
+                open = px;
+                openInitialized = true;
+                if (ts > 0) {
+                    openSourceTs = ts;
+                }
+            } else if (!openInitialized) {
+                open = px;
+                openInitialized = true;
             }
-        } else if (!openInitialized) {
-            open = px;
-            openInitialized = true;
-        }
 
-        if (ts >= closeSourceTs) {
-            close = px;
-            closeSourceTs = ts;
-        }
+            if (ts >= closeSourceTs) {
+                close = px;
+                closeSourceTs = ts;
+            }
 
-        if (!highInitialized || px > high) {
-            high = px;
-            highInitialized = true;
-        }
+            if (!highInitialized || px > high) {
+                high = px;
+                highInitialized = true;
+            }
 
-        if (!lowInitialized || px < low) {
-            low = px;
-            lowInitialized = true;
+            if (!lowInitialized || px < low) {
+                low = px;
+                lowInitialized = true;
+            }
         }
 
         // ========== Volume (delta, buy/sell separation) ==========
-        Integer dv = tick.getDeltaVolume();
         if (dv != null && dv > 0) {
             volume += dv;
             priceVolumeSum += px * dv;
@@ -206,7 +210,9 @@ public class EnrichedCandlestick {
         exchange = tick.getExchange();
         if (exchangeType == null) exchangeType = tick.getExchangeType();
 
-        lastPrice = px;
+        if (hasTrade) {
+            lastPrice = px;
+        }
     }
 
     /**

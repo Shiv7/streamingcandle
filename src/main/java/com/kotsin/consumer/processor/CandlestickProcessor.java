@@ -4,7 +4,6 @@ import com.kotsin.consumer.config.KafkaConfig;
 import com.kotsin.consumer.model.EnrichedCandlestick;
 import com.kotsin.consumer.model.TickData;
 import com.kotsin.consumer.timeExtractor.MultiMinuteOffsetTimestampExtractor;
-import com.kotsin.consumer.timeExtractor.TickTimestampExtractor;
 import com.kotsin.consumer.timeExtractor.TickTimestampExtractorWithOffset;
 import com.kotsin.consumer.transformers.CumToDeltaTransformer;
 import com.kotsin.consumer.util.MarketTimeAligner;
@@ -23,6 +22,7 @@ import org.apache.kafka.streams.state.Stores;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Component;
 
 import java.time.*;
@@ -54,6 +54,20 @@ public class CandlestickProcessor {
     private KafkaConfig kafkaConfig;
 
     private final Map<String, KafkaStreams> streamsInstances = new HashMap<>();
+
+    // Grace period configuration (seconds)
+    @Value("${candles.window.grace.seconds.1m:5}")
+    private int graceSeconds1m;
+
+    @Value("${candles.window.grace.seconds.multi:10}")
+    private int graceSecondsMulti;
+
+    // Optional single-instrument filter (testing)
+    @Value("${candles.filter.enabled:false}")
+    private boolean filterEnabled;
+
+    @Value("${candles.filter.token:999920000}")
+    private long filterToken;
 
     /**
      * Initializes and starts the enriched candlestick aggregation pipeline.
@@ -157,20 +171,27 @@ public class CandlestickProcessor {
                         .withTimestampExtractor(new TickTimestampExtractorWithOffset())
         );
 
-        // 2) Stable key (scripCode or token)
-        KStream<String, TickData> keyed = raw.selectKey((k, t) ->
-                (t.getScripCode() != null && !t.getScripCode().isEmpty()) ?
-                        t.getScripCode() : String.valueOf(t.getToken()));
+        // 2) Stable, collision-free key per instrument: exch:exchType:token
+        KStream<String, TickData> keyed = raw.selectKey((k, t) -> {
+            String exch = t.getExchange() == null ? "-" : t.getExchange();
+            String ext = t.getExchangeType() == null ? "-" : t.getExchangeType();
+            return exch + ":" + ext + ":" + t.getToken();
+        });
+
+        // 2.5) Optional: filter only one instrument for testing
+        if (filterEnabled) {
+            keyed = keyed.filter((k, t) -> t != null && t.getToken() == filterToken);
+        }
 
         // 3) Convert cumulative → delta (order-safe)
         KStream<String, TickData> ticks = keyed.transform(
                 () -> new CumToDeltaTransformer(DELTA_STORE), DELTA_STORE);
 
         // 4) Window & aggregate with deterministic OHLC and enriched features
-        // Optimized: 1 second grace period
+        // Configurable grace period (default 5s) to cap 1m bar delay
         TimeWindows windows = TimeWindows.ofSizeAndGrace(
                 Duration.ofMinutes(1),
-                Duration.ofSeconds(1)
+                Duration.ofSeconds(Math.max(0, graceSeconds1m))
         );
 
         KTable<Windowed<String>, EnrichedCandlestick> candlestickTable = ticks
@@ -250,10 +271,21 @@ public class CandlestickProcessor {
                         .withTimestampExtractor(new MultiMinuteOffsetTimestampExtractor(windowSize))
         );
 
-        // Grace period for lag handling
+        // Optional: filter to a single token using key suffix (exch:exchType:token)
+        if (filterEnabled) {
+            mins = mins.filter((k, c) -> {
+                if (k == null) return false;
+                int last = k.lastIndexOf(':');
+                if (last < 0 || last == k.length() - 1) return false;
+                String tokenStr = k.substring(last + 1);
+                return tokenStr.equals(Long.toString(filterToken));
+            });
+        }
+
+        // Grace period for lag handling (multi-minute)
         TimeWindows windows = TimeWindows.ofSizeAndGrace(
                 Duration.ofMinutes(windowSize),
-                Duration.ofSeconds(1)
+                Duration.ofSeconds(Math.max(0, graceSecondsMulti))
         );
 
         KTable<Windowed<String>, EnrichedCandlestick> aggregated = mins
@@ -319,22 +351,22 @@ public class CandlestickProcessor {
             LOGGER.info("🚀 Starting Enriched Candlestick Processor with bootstrap servers: {}",
                     kafkaConfig.getBootstrapServers());
 
-            process("realtime-candle-1min", "forwardtesting-data", "candle-ohlcv-1m", 1);
+            process("prod-999920000-ohlcv", "forwardtesting-data", "candle-ohlcv-1m", 1);
             Thread.sleep(1000);
 
-            process("realtime-candle-2min", "candle-ohlcv-1m", "candle-ohlcv-2m", 2);
+            process("prod-999920000-ohlcv", "candle-ohlcv-1m", "candle-ohlcv-2m", 2);
             Thread.sleep(1000);
 
-            process("realtime-candle-3min", "candle-ohlcv-1m", "candle-ohlcv-3m", 3);
+            process("prod-999920000-ohlcv", "candle-ohlcv-1m", "candle-ohlcv-3m", 3);
             Thread.sleep(1000);
 
-            process("realtime-candle-5min", "candle-ohlcv-1m", "candle-ohlcv-5m", 5);
+            process("prod-999920000-ohlcv", "candle-ohlcv-1m", "candle-ohlcv-5m", 5);
             Thread.sleep(1000);
 
-            process("realtime-candle-15min", "candle-ohlcv-1m", "candle-ohlcv-15m", 15);
+            process("prod-999920000-ohlcv", "candle-ohlcv-1m", "candle-ohlcv-15m", 15);
             Thread.sleep(1000);
 
-            process("realtime-candle-30min", "candle-ohlcv-1m", "candle-ohlcv-30m", 30);
+            process("prod-999920000-ohlcv", "candle-ohlcv-1m", "candle-ohlcv-30m", 30);
 
             LOGGER.info("✅ All Enriched Candlestick Processors started successfully");
             logStreamStates();

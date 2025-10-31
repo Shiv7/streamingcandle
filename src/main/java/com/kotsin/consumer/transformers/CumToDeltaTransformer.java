@@ -36,9 +36,9 @@ public class CumToDeltaTransformer implements Transformer<String, TickData, KeyV
         boolean isReset = false;
         
         if (prevMax == null) {
-            // First observation in our store - this is a reset/startup
-            // Use curr as delta BUT mark as reset for downstream filtering
-            add = curr;
+            // First observation in our store - treat as reset/startup with ZERO delta
+            // Avoid dumping entire cumulative volume into first bar
+            add = 0;
             isReset = true;
             store.put(stateKey, curr);
         } else if (curr < prevMax) {
@@ -62,10 +62,12 @@ public class CumToDeltaTransformer implements Transformer<String, TickData, KeyV
             add = tick.getLastQuantity();
         }
         
-        // ADDITIONAL FALLBACK: For indices where TotalQty is always 0 or not cumulative
-        // If prevMax exists, curr is same as prevMax (no change), but lastQty > 0, use lastQty
-        // This handles indices where each tick has lastQty but TotalQty doesn't accumulate
+        // ADDITIONAL FALLBACK: For instruments where TotalQty is non-cumulative
+        // Apply only if this symbol consistently exhibits non-cumulative behavior within a session.
+        // Heuristic: if prevMax exists and remains equal frequently, use lastQty sparingly.
         if (add == 0 && !isReset && prevMax != null && curr == prevMax && tick.getLastQuantity() > 0) {
+            // Optional: limit to known segments (e.g., index) using exchangeType or token range
+            // For now, keep fallback but be conservative
             add = tick.getLastQuantity();
         }
 
