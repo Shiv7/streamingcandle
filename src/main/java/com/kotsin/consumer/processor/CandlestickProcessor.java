@@ -5,6 +5,7 @@ import com.kotsin.consumer.model.EnrichedCandlestick;
 import com.kotsin.consumer.model.TickData;
 import com.kotsin.consumer.timeExtractor.MultiMinuteOffsetTimestampExtractor;
 import com.kotsin.consumer.timeExtractor.TickTimestampExtractor;
+import com.kotsin.consumer.timeExtractor.TickTimestampExtractorWithOffset;
 import com.kotsin.consumer.transformers.CumToDeltaTransformer;
 import com.kotsin.consumer.util.MarketTimeAligner;
 
@@ -188,7 +189,7 @@ public class CandlestickProcessor {
                                 .withValueSerde(EnrichedCandlestick.serde())
                 )
                 .suppress(Suppressed.untilWindowCloses(
-                        Suppressed.BufferConfig.maxRecords(100_000).emitEarlyWhenFull()
+                        Suppressed.BufferConfig.unbounded()
                 ));
 
         candlestickTable.toStream()
@@ -270,7 +271,7 @@ public class CandlestickProcessor {
                                 .withValueSerde(EnrichedCandlestick.serde())
                 )
                 .suppress(Suppressed.untilWindowCloses(
-                        Suppressed.BufferConfig.maxRecords(100_000).emitEarlyWhenFull()
+                        Suppressed.BufferConfig.unbounded()
                 ));
 
         aggregated.toStream()
