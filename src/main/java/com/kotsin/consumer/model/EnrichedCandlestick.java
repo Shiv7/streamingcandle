@@ -59,7 +59,7 @@ public class EnrichedCandlestick {
 
     // ========== Imbalance Bars State ==========
     private long volumeImbalance;
-    private long dollarImbalance;
+    private double dollarImbalance;
     private int tickRuns;
     private long volumeRuns;
     private String currentDirection = "NEUTRAL";
@@ -73,7 +73,7 @@ public class EnrichedCandlestick {
     private Map<Double, Long> volumeAtPrice = new HashMap<>();
     private Double lowestPrice;
     private Double highestPrice;
-    private static final double PRICE_TICK_SIZE = 0.05;
+    private static final double DEFAULT_TICK_SIZE = 0.05;
     private static final double VALUE_AREA_PERCENTAGE = 0.70;
 
     // ========== VPIN State (Volume-Synchronized PIN) ==========
@@ -82,12 +82,9 @@ public class EnrichedCandlestick {
     private static final double VPIN_ADAPTIVE_ALPHA = 0.05;
 
     private double vpinBucketSize = VPIN_INITIAL_BUCKET_SIZE;
-    @JsonIgnore
-    private transient java.util.List<VPINBucket> vpinBuckets = new java.util.concurrent.CopyOnWriteArrayList<>();
-    @JsonIgnore
-    private transient double vpinCurrentBucketVolume = 0.0;
-    @JsonIgnore
-    private transient double vpinCurrentBucketBuyVolume = 0.0;
+    private java.util.List<VPINBucket> vpinBuckets = new java.util.ArrayList<>();
+    private double vpinCurrentBucketVolume = 0.0;
+    private double vpinCurrentBucketBuyVolume = 0.0;
     private double vpin = 0.0;
 
     // ========== Imbalance Bar Emission Tracking ==========
@@ -108,6 +105,7 @@ public class EnrichedCandlestick {
     private boolean lowInitialized = false;
     private long openSourceTs = Long.MAX_VALUE;
     private long closeSourceTs = Long.MIN_VALUE;
+    private int priceTickCount = 0;
 
     /**
      * Creates a new empty enriched candlestick with default values.
@@ -155,6 +153,10 @@ public class EnrichedCandlestick {
 
         // ========== OHLC by event time ==========
         if (hasTrade || allowPriceOnlyOhlc) {
+            // Count price tick when price changes materially or first observation
+            if (lastPrice == null || Math.abs(px - lastPrice) >= getClassificationThreshold(px)) {
+                priceTickCount++;
+            }
             if (!openInitialized || (ts > 0 && ts < openSourceTs)) {
                 open = px;
                 openInitialized = true;
@@ -197,7 +199,7 @@ public class EnrichedCandlestick {
             }
 
             // ========== Imbalance Bars Update ==========
-            updateImbalanceBars(tick, px, dv, isBuy);
+            updateImbalanceBars(tick, px, dv, isBuy, ts);
 
             // ========== Volume Profile Update ==========
             updateVolumeProfile(px, dv);
@@ -215,7 +217,7 @@ public class EnrichedCandlestick {
         exchange = tick.getExchange();
         if (exchangeType == null) exchangeType = tick.getExchangeType();
 
-        if (hasTrade) {
+        if (hasTrade || allowPriceOnlyOhlc) {
             lastPrice = px;
         }
     }
@@ -227,8 +229,7 @@ public class EnrichedCandlestick {
         double bidPrice = tick.getBidRate();
         double askPrice = tick.getOfferRate();
 
-        // Threshold: 1bp of price or 0.01 minimum
-        double threshold = Math.max(0.01, Math.abs(currentPrice) * 0.0001);
+        double threshold = getClassificationThreshold(currentPrice);
 
         // Quote rule: compare to bid/ask
         if (bidPrice > 0 && askPrice > 0) {
@@ -248,10 +249,15 @@ public class EnrichedCandlestick {
         return false;
     }
 
+    private double getClassificationThreshold(double currentPrice) {
+        // Threshold: 1bp or 0.01 minimum; options can have wider spread. Keep simple for now.
+        return Math.max(0.01, Math.abs(currentPrice) * 0.0001);
+    }
+
     /**
      * Update imbalance bars (VIB, DIB, TRB, VRB) with EWMA thresholds
      */
-    private void updateImbalanceBars(TickData tick, double price, int deltaVolume, boolean isBuy) {
+    private void updateImbalanceBars(TickData tick, double price, int deltaVolume, boolean isBuy, long eventTime) {
         String direction = isBuy ? "BUY" : "SELL";
         int directionSign = isBuy ? 1 : -1;
 
@@ -260,7 +266,7 @@ public class EnrichedCandlestick {
         volumeImbalance += signedVolume;
 
         // Dollar Imbalance (DIB)
-        long dollarVolume = (long)(deltaVolume * price);
+        double dollarVolume = (double) deltaVolume * price;
         dollarImbalance += dollarVolume * directionSign;
 
         // Tick Runs (TRB)
@@ -279,15 +285,15 @@ public class EnrichedCandlestick {
         }
 
         // Check thresholds and update EWMA
-        checkAndUpdateThresholds();
+        checkAndUpdateThresholds(eventTime);
     }
 
     /**
      * Check imbalance bar thresholds and update EWMA estimates
      * NOW WITH BAR EMISSION TRACKING!
      */
-    private void checkAndUpdateThresholds() {
-        long currentTime = System.currentTimeMillis();
+    private void checkAndUpdateThresholds(long eventTime) {
+        long currentTime = eventTime > 0 ? eventTime : System.currentTimeMillis();
 
         // VIB threshold check
         if (Math.abs(volumeImbalance) >= expectedVolumeImbalance) {
@@ -332,14 +338,30 @@ public class EnrichedCandlestick {
     private void updateVolumeProfile(double price, long volume) {
         if (volume <= 0) return;
 
-        // Round price to tick size
-        double rounded = Math.round(price / PRICE_TICK_SIZE) * PRICE_TICK_SIZE;
+        // Round price to instrument tick size using BigDecimal to avoid float artifacts
+        double tickSize = getTickSize();
+        java.math.BigDecimal p = java.math.BigDecimal.valueOf(price);
+        java.math.BigDecimal step = java.math.BigDecimal.valueOf(tickSize);
+        java.math.BigDecimal roundedBd = p.divide(step, 0, java.math.RoundingMode.HALF_UP)
+                .multiply(step)
+                .setScale(2, java.math.RoundingMode.HALF_UP);
+        double rounded = roundedBd.doubleValue();
 
         volumeAtPrice.merge(rounded, volume, Long::sum);
 
         // Update price range
         if (lowestPrice == null || rounded < lowestPrice) lowestPrice = rounded;
         if (highestPrice == null || rounded > highestPrice) highestPrice = rounded;
+    }
+
+    /**
+     * Determine tick size for instrument.
+     */
+    private double getTickSize() {
+        if ("D".equalsIgnoreCase(exchangeType) || "F".equalsIgnoreCase(exchangeType) || "O".equalsIgnoreCase(exchangeType)) {
+            return 0.05; // common for derivatives/options
+        }
+        return DEFAULT_TICK_SIZE;
     }
 
     /**
@@ -438,6 +460,31 @@ public class EnrichedCandlestick {
         }
         this.companyName = other.companyName;
         this.scripCode = other.scripCode;
+
+        // Propagate imbalance triggers and last times
+        this.vibTriggered = this.vibTriggered || other.vibTriggered;
+        this.dibTriggered = this.dibTriggered || other.dibTriggered;
+        this.trbTriggered = this.trbTriggered || other.trbTriggered;
+        this.vrbTriggered = this.vrbTriggered || other.vrbTriggered;
+        this.lastVibTriggerTime = Math.max(this.lastVibTriggerTime, other.lastVibTriggerTime);
+        this.lastDibTriggerTime = Math.max(this.lastDibTriggerTime, other.lastDibTriggerTime);
+        this.lastTrbTriggerTime = Math.max(this.lastTrbTriggerTime, other.lastTrbTriggerTime);
+        this.lastVrbTriggerTime = Math.max(this.lastVrbTriggerTime, other.lastVrbTriggerTime);
+
+        // Merge VPIN buckets: append and truncate to last 50; recalc VPIN
+        if (other.vpinBuckets != null && !other.vpinBuckets.isEmpty()) {
+            this.vpinBuckets.addAll(other.vpinBuckets);
+            if (this.vpinBuckets.size() > VPIN_MAX_BUCKETS) {
+                int excess = this.vpinBuckets.size() - VPIN_MAX_BUCKETS;
+                for (int i = 0; i < excess; i++) this.vpinBuckets.remove(0);
+            }
+            calculateVPIN();
+        }
+
+        // Merge current VPIN bucket state and price tick count
+        this.vpinCurrentBucketVolume += other.vpinCurrentBucketVolume;
+        this.vpinCurrentBucketBuyVolume += other.vpinCurrentBucketBuyVolume;
+        this.priceTickCount += other.priceTickCount;
     }
 
     /**
@@ -635,6 +682,11 @@ public class EnrichedCandlestick {
     public double getVpinBucketSize() {
         return vpinBucketSize;
     }
+
+    /**
+     * Get count of price updates (including price-only ticks)
+     */
+    public int getPriceTickCount() { return priceTickCount; }
 
     /**
      * VPIN Bucket data structure
