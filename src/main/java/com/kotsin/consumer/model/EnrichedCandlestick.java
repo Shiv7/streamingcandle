@@ -142,14 +142,24 @@ public class EnrichedCandlestick {
      * - Volume Profile
      */
     public void updateWithDelta(TickData tick) {
+        // Always allow price-only OHLC updates to support instruments
+        // that do not provide reliable per-tick volumes (e.g., some ETFs/indices)
+        updateWithDelta(tick, true);
+    }
+
+    /**
+     * Update using event-time and delta volume, with option to allow price-only OHLC updates
+     * for instruments that do not carry trade sizes (e.g., indices).
+     */
+    public void updateWithDelta(TickData tick, boolean allowPriceOnlyOhlc) {
         long ts = tick.getTimestamp();
         double px = tick.getLastRate();
 
         Integer dv = tick.getDeltaVolume();
         boolean hasTrade = (dv != null && dv > 0) || tick.getLastQuantity() > 0;
 
-        // ========== OHLC by event time (only on real trades) ==========
-        if (hasTrade) {
+        // ========== OHLC by event time ==========
+        if (hasTrade || allowPriceOnlyOhlc) {
             if (!openInitialized || (ts > 0 && ts < openSourceTs)) {
                 open = px;
                 openInitialized = true;

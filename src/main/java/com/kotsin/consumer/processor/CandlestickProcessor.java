@@ -69,6 +69,8 @@ public class CandlestickProcessor {
     @Value("${candles.filter.token:999920000}")
     private long filterToken;
 
+    // No per-token price-only list needed; OHLC always updates from price
+
     /**
      * Initializes and starts the enriched candlestick aggregation pipeline.
      */
@@ -201,6 +203,7 @@ public class CandlestickProcessor {
                 .aggregate(
                         EnrichedCandlestick::new,
                         (sym, tick, candle) -> {
+                            // Always update OHLC from price; volume remains accurate from delta
                             candle.updateWithDelta(tick);
                             return candle;
                         },
