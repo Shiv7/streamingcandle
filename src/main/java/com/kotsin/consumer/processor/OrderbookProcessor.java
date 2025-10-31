@@ -272,22 +272,23 @@ public class OrderbookProcessor {
             LOGGER.info("🚀 Starting Orderbook Microstructure Processor with bootstrap servers: {}",
                     kafkaConfig.getBootstrapServers());
 
-            process("realtime-orderbook-1min", "Orderbook", "orderbook-signals-1m", 1);
+            String baseAppId = "prod-123257-orderbook";
+            process(baseAppId, "Orderbook", "orderbook-signals-1m", 1);
             Thread.sleep(1000);
 
-            process("realtime-orderbook-2min", "orderbook-signals-1m", "orderbook-signals-2m", 2);
+            process(baseAppId, "orderbook-signals-1m", "orderbook-signals-2m", 2);
             Thread.sleep(1000);
 
-            process("realtime-orderbook-3min", "orderbook-signals-1m", "orderbook-signals-3m", 3);
+            process(baseAppId, "orderbook-signals-1m", "orderbook-signals-3m", 3);
             Thread.sleep(1000);
 
-            process("realtime-orderbook-5min", "orderbook-signals-1m", "orderbook-signals-5m", 5);
+            process(baseAppId, "orderbook-signals-1m", "orderbook-signals-5m", 5);
             Thread.sleep(1000);
 
-            process("realtime-orderbook-15min", "orderbook-signals-1m", "orderbook-signals-15m", 15);
+            process(baseAppId, "orderbook-signals-1m", "orderbook-signals-15m", 15);
             Thread.sleep(1000);
 
-            process("realtime-orderbook-30min", "orderbook-signals-1m", "orderbook-signals-30m", 30);
+            process(baseAppId, "orderbook-signals-1m", "orderbook-signals-30m", 30);
 
             LOGGER.info("✅ All Orderbook Processors started successfully");
             logStreamStates();

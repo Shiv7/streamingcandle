@@ -354,22 +354,22 @@ public class CandlestickProcessor {
             LOGGER.info("🚀 Starting Enriched Candlestick Processor with bootstrap servers: {}",
                     kafkaConfig.getBootstrapServers());
 
-            process("prod-999920000-ohlcv", "forwardtesting-data", "candle-ohlcv-1m", 1);
+            process("prod-123257-ohlcv", "forwardtesting-data", "candle-ohlcv-1m", 1);
             Thread.sleep(1000);
 
-            process("prod-999920000-ohlcv", "candle-ohlcv-1m", "candle-ohlcv-2m", 2);
+            process("prod-123257-ohlcv", "candle-ohlcv-1m", "candle-ohlcv-2m", 2);
             Thread.sleep(1000);
 
-            process("prod-999920000-ohlcv", "candle-ohlcv-1m", "candle-ohlcv-3m", 3);
+            process("prod-123257-ohlcv", "candle-ohlcv-1m", "candle-ohlcv-3m", 3);
             Thread.sleep(1000);
 
-            process("prod-999920000-ohlcv", "candle-ohlcv-1m", "candle-ohlcv-5m", 5);
+            process("prod-123257-ohlcv", "candle-ohlcv-1m", "candle-ohlcv-5m", 5);
             Thread.sleep(1000);
 
-            process("prod-999920000-ohlcv", "candle-ohlcv-1m", "candle-ohlcv-15m", 15);
+            process("prod-123257-ohlcv", "candle-ohlcv-1m", "candle-ohlcv-15m", 15);
             Thread.sleep(1000);
 
-            process("prod-999920000-ohlcv", "candle-ohlcv-1m", "candle-ohlcv-30m", 30);
+            process("prod-123257-ohlcv", "candle-ohlcv-1m", "candle-ohlcv-30m", 30);
 
             LOGGER.info("✅ All Enriched Candlestick Processors started successfully");
             logStreamStates();

@@ -273,22 +273,23 @@ public class OIProcessor {
             LOGGER.info("🚀 Starting OI Metrics Processor with bootstrap servers: {}",
                     kafkaConfig.getBootstrapServers());
 
-            process("realtime-oi-1min", "OpenInterest", "oi-metrics-1m", 1);
+            String baseAppId = "prod-123257-oi";
+            process(baseAppId, "OpenInterest", "oi-metrics-1m", 1);
             Thread.sleep(1000);
 
-            process("realtime-oi-2min", "oi-metrics-1m", "oi-metrics-2m", 2);
+            process(baseAppId, "oi-metrics-1m", "oi-metrics-2m", 2);
             Thread.sleep(1000);
 
-            process("realtime-oi-3min", "oi-metrics-1m", "oi-metrics-3m", 3);
+            process(baseAppId, "oi-metrics-1m", "oi-metrics-3m", 3);
             Thread.sleep(1000);
 
-            process("realtime-oi-5min", "oi-metrics-1m", "oi-metrics-5m", 5);
+            process(baseAppId, "oi-metrics-1m", "oi-metrics-5m", 5);
             Thread.sleep(1000);
 
-            process("realtime-oi-15min", "oi-metrics-1m", "oi-metrics-15m", 15);
+            process(baseAppId, "oi-metrics-1m", "oi-metrics-15m", 15);
             Thread.sleep(1000);
 
-            process("realtime-oi-30min", "oi-metrics-1m", "oi-metrics-30m", 30);
+            process(baseAppId, "oi-metrics-1m", "oi-metrics-30m", 30);
 
             LOGGER.info("✅ All OI Processors started successfully");
             logStreamStates();
