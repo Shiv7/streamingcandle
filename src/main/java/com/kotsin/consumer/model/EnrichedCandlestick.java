@@ -691,6 +691,7 @@ public class EnrichedCandlestick {
     /**
      * VPIN Bucket data structure
      */
+    @JsonIgnoreProperties(ignoreUnknown = true)
     public static class VPINBucket {
         public double totalVolume;
         public double buyVolume;
@@ -708,6 +709,7 @@ public class EnrichedCandlestick {
             this.sellVolume = sellVolume;
         }
 
+        @JsonIgnore
         public double getImbalance() {
             return totalVolume > 0 ? Math.abs(buyVolume - sellVolume) / totalVolume : 0.0;
         }
