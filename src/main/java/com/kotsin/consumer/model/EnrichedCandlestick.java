@@ -100,19 +100,14 @@ public class EnrichedCandlestick {
     private long lastTrbTriggerTime = 0L;
     private long lastVrbTriggerTime = 0L;
 
-    // ========== Transient Processing Fields ==========
+    // ========== Processing State (persisted to state store) ==========
     @JsonIgnore
-    private transient Double lastPrice;
-    @JsonIgnore
-    private transient boolean openInitialized = false;
-    @JsonIgnore
-    private transient boolean highInitialized = false;
-    @JsonIgnore
-    private transient boolean lowInitialized = false;
-    @JsonIgnore
-    private transient long openSourceTs = Long.MAX_VALUE;
-    @JsonIgnore
-    private transient long closeSourceTs = Long.MIN_VALUE;
+    private transient Double lastPrice; // kept transient (only for classification heuristics)
+    private boolean openInitialized = false;
+    private boolean highInitialized = false;
+    private boolean lowInitialized = false;
+    private long openSourceTs = Long.MAX_VALUE;
+    private long closeSourceTs = Long.MIN_VALUE;
 
     /**
      * Creates a new empty enriched candlestick with default values.
