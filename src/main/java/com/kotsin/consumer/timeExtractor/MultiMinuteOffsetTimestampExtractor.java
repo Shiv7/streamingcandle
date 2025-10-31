@@ -30,11 +30,12 @@ public final class MultiMinuteOffsetTimestampExtractor implements TimestampExtra
 
         Object v = record.value();
         if (v instanceof EnrichedCandlestick c) {
-            // Prefer END time for faster window closure; fall back to START, then record/partition time
-            if (c.getWindowEndMillis() > 0L) {
-                baseTs = c.getWindowEndMillis();
-            } else if (c.getWindowStartMillis() > 0L) {
+            // Prefer START time to ensure consistent roll-up grouping across offsets (e.g., 2m on NSE)
+            // Using END can split adjacent 1m candles into different 2m windows when offset != 0
+            if (c.getWindowStartMillis() > 0L) {
                 baseTs = c.getWindowStartMillis();
+            } else if (c.getWindowEndMillis() > 0L) {
+                baseTs = c.getWindowEndMillis();
             } else if (record.timestamp() > 0L) {
                 baseTs = record.timestamp();
             } else {
@@ -60,4 +61,3 @@ public final class MultiMinuteOffsetTimestampExtractor implements TimestampExtra
         return Math.max(partitionTime, 0L);
     }
 }
-
