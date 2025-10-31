@@ -33,7 +33,7 @@ public class TickTimestampExtractorWithOffset implements TimestampExtractor {
         }
 
         TickData tick = (TickData) value;
-        long baseTs = extractBaseTimestamp(tick, record);
+        long baseTs = extractBaseTimestamp(tick, record, previousTimestamp);
 
         // CRITICAL: Apply market-specific offset to align windows
         // For NSE: +15 minutes to align windows at :15, :16, :17, etc.
@@ -42,18 +42,30 @@ public class TickTimestampExtractorWithOffset implements TimestampExtractor {
         int offsetMinutes = MarketTimeAligner.getWindowOffsetMinutes(exchange, 1);
         long offsetMs = offsetMinutes * 60_000L;
 
-        return baseTs + offsetMs;
+        long alignedTs = baseTs + offsetMs;
+
+        if (baseTs > 0) {
+            tick.setTimestamp(baseTs);
+        } else {
+            long fallback = record.timestamp() > 0 ? record.timestamp() : previousTimestamp;
+            tick.setTimestamp(Math.max(fallback, 0L));
+        }
+
+        return alignedTs;
     }
 
     /**
      * Extract base timestamp from TickData
      */
-    private long extractBaseTimestamp(TickData tick, ConsumerRecord<Object, Object> record) {
+    private long extractBaseTimestamp(TickData tick,
+                                      ConsumerRecord<Object, Object> record,
+                                      long previousTimestamp) {
         String tickDt = tick.getTickDt();
 
         if (tickDt == null || tickDt.isBlank()) {
             LOGGER.warn("Tick has null or empty timestamp, using Kafka record timestamp for token {}", tick.getToken());
-            return record.timestamp();
+            long fallback = record.timestamp() > 0 ? record.timestamp() : previousTimestamp;
+            return Math.max(fallback, 0L);
         }
 
         try {
@@ -72,18 +84,30 @@ public class TickTimestampExtractorWithOffset implements TimestampExtractor {
                     LOGGER.warn("Timestamp {} is more than 1 year old for token {}. Using as-is (historical data).", ts, tick.getToken());
                 }
 
+                if (ts <= 0) {
+                    LOGGER.error("Parsed non-positive timestamp {} for token {}. Using record timestamp fallback.", ts, tick.getToken());
+                    long fallback = record.timestamp() > 0 ? record.timestamp() : previousTimestamp;
+                    return Math.max(fallback, 0L);
+                }
+
                 return ts;
             }
 
             // Handle standard format
             ZonedDateTime zdt = ZonedDateTime.parse(tickDt, DT_FORMATTER);
-            return zdt.toInstant().toEpochMilli();
+            long parsed = zdt.toInstant().toEpochMilli();
+            if (parsed <= 0) {
+                LOGGER.error("Parsed non-positive timestamp {} for token {}. Using record timestamp fallback.", parsed, tick.getToken());
+                long fallback = record.timestamp() > 0 ? record.timestamp() : previousTimestamp;
+                return Math.max(fallback, 0L);
+            }
+            return parsed;
 
         } catch (DateTimeParseException | NumberFormatException e) {
             LOGGER.error("Could not parse timestamp '{}' for token {}. Using Kafka record timestamp.", tickDt, tick.getToken(), e);
             // CRITICAL: Use record.timestamp(), NEVER System.currentTimeMillis()
-            return record.timestamp();
+            long fallback = record.timestamp() > 0 ? record.timestamp() : previousTimestamp;
+            return Math.max(fallback, 0L);
         }
     }
 }
-

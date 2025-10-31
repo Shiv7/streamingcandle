@@ -102,19 +102,25 @@ public class EnrichedCandlestick {
 
     // ========== Transient Processing Fields ==========
     @JsonIgnore
-    private transient long firstTs = Long.MAX_VALUE;
-    @JsonIgnore
-    private transient long lastTs = Long.MIN_VALUE;
-    @JsonIgnore
     private transient Double lastPrice;
+    @JsonIgnore
+    private transient boolean openInitialized = false;
+    @JsonIgnore
+    private transient boolean highInitialized = false;
+    @JsonIgnore
+    private transient boolean lowInitialized = false;
+    @JsonIgnore
+    private transient long openSourceTs = Long.MAX_VALUE;
+    @JsonIgnore
+    private transient long closeSourceTs = Long.MIN_VALUE;
 
     /**
      * Creates a new empty enriched candlestick with default values.
      */
     public EnrichedCandlestick() {
         this.open = 0;
-        this.high = Double.MIN_VALUE;
-        this.low = Double.MAX_VALUE;
+        this.high = 0.0;
+        this.low = 0.0;
         this.close = 0;
         this.volume = 0;
         this.buyVolume = 0;
@@ -140,17 +146,31 @@ public class EnrichedCandlestick {
         double px = tick.getLastRate();
 
         // ========== OHLC by event time ==========
-        if (ts < firstTs) {
-            firstTs = ts;
+        if (!openInitialized || (ts > 0 && ts < openSourceTs)) {
             open = px;
-        }
-        if (ts >= lastTs) {
-            lastTs = ts;
-            close = px;
+            openInitialized = true;
+            if (ts > 0) {
+                openSourceTs = ts;
+            }
+        } else if (!openInitialized) {
+            open = px;
+            openInitialized = true;
         }
 
-        high = (high == Double.MIN_VALUE) ? px : Math.max(high, px);
-        low = (low == Double.MAX_VALUE) ? px : Math.min(low, px);
+        if (ts >= closeSourceTs) {
+            close = px;
+            closeSourceTs = ts;
+        }
+
+        if (!highInitialized || px > high) {
+            high = px;
+            highInitialized = true;
+        }
+
+        if (!lowInitialized || px < low) {
+            low = px;
+            lowInitialized = true;
+        }
 
         // ========== Volume (delta, buy/sell separation) ==========
         Integer dv = tick.getDeltaVolume();
@@ -321,48 +341,86 @@ public class EnrichedCandlestick {
      * @param other The candle to merge into this one
      */
     public void updateCandle(EnrichedCandlestick other) {
-        // Set open price only for the first candle in the window
-        if (this.open == 0) {
+        if (other == null) {
+            return;
+        }
+
+        boolean otherHasPrice = !(Double.compare(other.high, 0.0) == 0
+                && Double.compare(other.low, 0.0) == 0
+                && Double.compare(other.open, 0.0) == 0
+                && Double.compare(other.close, 0.0) == 0);
+
+        long otherStart = other.windowStartMillis;
+        long otherEnd = other.windowEndMillis;
+
+        if (otherStart > 0 && (this.windowStartMillis == 0 || otherStart < this.windowStartMillis)) {
+            this.windowStartMillis = otherStart;
+            this.humanReadableStartTime = other.humanReadableStartTime;
+        } else if (this.windowStartMillis == 0 && otherStart > 0) {
+            this.windowStartMillis = otherStart;
+            this.humanReadableStartTime = other.humanReadableStartTime;
+        }
+
+        if (otherEnd > 0 && (this.windowEndMillis == 0 || otherEnd > this.windowEndMillis)) {
+            this.windowEndMillis = otherEnd;
+            this.humanReadableEndTime = other.humanReadableEndTime;
+        } else if (this.windowEndMillis == 0 && otherEnd > 0) {
+            this.windowEndMillis = otherEnd;
+            this.humanReadableEndTime = other.humanReadableEndTime;
+        }
+
+        long candidateOpenTs = otherStart > 0 ? otherStart : otherEnd;
+        if (otherHasPrice && (!this.openInitialized
+                || (candidateOpenTs > 0 && candidateOpenTs < this.openSourceTs))) {
             this.open = other.open;
+            this.openInitialized = true;
+            if (candidateOpenTs > 0) {
+                this.openSourceTs = candidateOpenTs;
+            }
         }
 
-        // Take highest high and lowest low
-        this.high = Math.max(this.high, other.high);
-        this.low = Math.min(this.low, other.low);
-
-        // FIXED: Update close only if this candle is chronologically later (by window end time)
-        // This handles out-of-order arrival correctly
-        if (this.windowEndMillis == 0 || other.windowEndMillis >= this.windowEndMillis) {
+        long candidateCloseTs = otherEnd > 0 ? otherEnd : otherStart;
+        if (otherHasPrice && (candidateCloseTs >= this.closeSourceTs)) {
             this.close = other.close;
+            this.closeSourceTs = candidateCloseTs;
         }
 
-        // Accumulate volumes
+        if (otherHasPrice) {
+            if (!this.highInitialized || other.high > this.high) {
+                this.high = other.high;
+                this.highInitialized = true;
+            }
+            if (!this.lowInitialized || other.low < this.low) {
+                this.low = other.low;
+                this.lowInitialized = true;
+            }
+        }
+
         this.volume += other.volume;
         this.buyVolume += other.buyVolume;
         this.sellVolume += other.sellVolume;
         this.priceVolumeSum += other.priceVolumeSum;
         this.tickCount += other.tickCount;
-        
-        // Recalculate VWAP after merge
+
         this.vwap = this.volume > 0 ? this.priceVolumeSum / this.volume : 0.0;
 
-        // Merge imbalance bars
         this.volumeImbalance += other.volumeImbalance;
         this.dollarImbalance += other.dollarImbalance;
-        // Note: tickRuns and volumeRuns are per-window, not cumulative across windows
 
-        // Merge volume profile
-        other.volumeAtPrice.forEach((price, vol) -> 
-            this.volumeAtPrice.merge(price, vol, Long::sum));
-        
+        other.volumeAtPrice.forEach((price, vol) ->
+                this.volumeAtPrice.merge(price, vol, Long::sum));
+
         if (other.lowestPrice != null) {
-            this.lowestPrice = (this.lowestPrice == null) ? other.lowestPrice : Math.min(this.lowestPrice, other.lowestPrice);
+            this.lowestPrice = (this.lowestPrice == null)
+                    ? other.lowestPrice
+                    : Math.min(this.lowestPrice, other.lowestPrice);
         }
         if (other.highestPrice != null) {
-            this.highestPrice = (this.highestPrice == null) ? other.highestPrice : Math.max(this.highestPrice, other.highestPrice);
+            this.highestPrice = (this.highestPrice == null)
+                    ? other.highestPrice
+                    : Math.max(this.highestPrice, other.highestPrice);
         }
 
-        // Update metadata
         this.exchange = other.exchange;
         if (other.exchangeType != null) {
             this.exchangeType = other.exchangeType;
@@ -667,4 +725,3 @@ public class EnrichedCandlestick {
         }
     }
 }
-

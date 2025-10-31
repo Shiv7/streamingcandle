@@ -175,7 +175,6 @@ public class CandlestickProcessor {
 
         KTable<Windowed<String>, EnrichedCandlestick> candlestickTable = ticks
                 .filter((sym, tick) -> withinTradingHours(tick))
-                .filter((sym, tick) -> !Boolean.TRUE.equals(tick.getResetFlag()))  // Filter reset ticks
                 .groupByKey(Grouped.with(Serdes.String(), TickData.serde()))
                 .windowedBy(windows)
                 .aggregate(
@@ -414,4 +413,3 @@ public class CandlestickProcessor {
         LOGGER.info("✅ All streams stopped");
     }
 }
-

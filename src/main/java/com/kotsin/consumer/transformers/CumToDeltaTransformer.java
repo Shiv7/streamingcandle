@@ -55,9 +55,17 @@ public class CumToDeltaTransformer implements Transformer<String, TickData, KeyV
             store.put(stateKey, curr);
         }
 
-        // Fallback: if cumulative delta is zero but we have a last trade size, use it
+        // Fallback for INDEX data (NIFTY, BANKNIFTY, etc.) where TotalQty is not meaningful
+        // If cumulative delta is zero but we have a last trade size, use it
         // BUT only if this is NOT a reset
         if (add == 0 && !isReset && tick.getLastQuantity() > 0) {
+            add = tick.getLastQuantity();
+        }
+        
+        // ADDITIONAL FALLBACK: For indices where TotalQty is always 0 or not cumulative
+        // If prevMax exists, curr is same as prevMax (no change), but lastQty > 0, use lastQty
+        // This handles indices where each tick has lastQty but TotalQty doesn't accumulate
+        if (add == 0 && !isReset && prevMax != null && curr == prevMax && tick.getLastQuantity() > 0) {
             add = tick.getLastQuantity();
         }
 
