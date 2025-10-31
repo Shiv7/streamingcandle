@@ -692,18 +692,24 @@ public class EnrichedCandlestick {
      * VPIN Bucket data structure
      */
     public static class VPINBucket {
-        public final double totalVolume;
-        public final double buyVolume;
-        public final double sellVolume;
+        public double totalVolume;
+        public double buyVolume;
+        public double sellVolume;
 
-        public VPINBucket(double totalVolume, double buyVolume, double sellVolume) {
+        public VPINBucket() {}
+
+        @com.fasterxml.jackson.annotation.JsonCreator
+        public VPINBucket(
+                @com.fasterxml.jackson.annotation.JsonProperty("totalVolume") double totalVolume,
+                @com.fasterxml.jackson.annotation.JsonProperty("buyVolume") double buyVolume,
+                @com.fasterxml.jackson.annotation.JsonProperty("sellVolume") double sellVolume) {
             this.totalVolume = totalVolume;
             this.buyVolume = buyVolume;
             this.sellVolume = sellVolume;
         }
 
         public double getImbalance() {
-            return Math.abs(buyVolume - sellVolume) / totalVolume;
+            return totalVolume > 0 ? Math.abs(buyVolume - sellVolume) / totalVolume : 0.0;
         }
     }
 
