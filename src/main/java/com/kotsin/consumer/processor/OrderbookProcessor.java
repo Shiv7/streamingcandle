@@ -314,7 +314,7 @@ public class OrderbookProcessor {
             LOGGER.info("🚀 Starting Orderbook Microstructure Processor with bootstrap servers: {}",
                     kafkaConfig.getBootstrapServers());
 
-            String baseAppId = "prod-123257-orderbook";
+            String baseAppId = "prod-unified-orderbook";
             process(baseAppId, "Orderbook", "orderbook-signals-1m", 1);
             Thread.sleep(1000);
 

@@ -300,7 +300,7 @@ public class OIProcessor {
             LOGGER.info("🚀 Starting OI Metrics Processor with bootstrap servers: {}",
                     kafkaConfig.getBootstrapServers());
 
-            String baseAppId = "prod-123257-oi";
+            String baseAppId = "prod-unified-oi";
             process(baseAppId, "OpenInterest", "oi-metrics-1m", 1);
             Thread.sleep(1000);
 
