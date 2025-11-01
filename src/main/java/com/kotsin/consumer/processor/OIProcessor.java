@@ -20,6 +20,7 @@ import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.stereotype.Component;
 import org.springframework.beans.factory.annotation.Value;
 import com.kotsin.consumer.timeExtractor.OITimestampExtractorWithOffset;
+import com.kotsin.consumer.service.InstrumentMetadataService;
 import com.kotsin.consumer.timeExtractor.MultiMinuteOffsetTimestampExtractorForOI;
 
 import java.time.*;
@@ -61,6 +62,8 @@ public class OIProcessor {
 
     @Value("${oi.filter.token:123257}")
     private int filterToken;
+    @Value("${oi.scale.use.lots:false}")
+    private boolean oiScaleUseLots;
 
     /**
      * Initializes and starts the OI metrics pipeline.
@@ -129,6 +132,12 @@ public class OIProcessor {
     /**
      * Process raw OI data into 1-minute OI metrics.
      */
+    private final InstrumentMetadataService instrumentMetadataService;
+
+    public OIProcessor(InstrumentMetadataService instrumentMetadataService) {
+        this.instrumentMetadataService = instrumentMetadataService;
+    }
+
     private void processOIData(StreamsBuilder builder, String inputTopic, String outputTopic) {
         // 1) Read OI updates
         KStream<String, OpenInterest> raw = builder.stream(
@@ -140,8 +149,16 @@ public class OIProcessor {
         // 2) Extract token from composite key (e.g., "N|52343" -> "52343")
         KStream<String, OpenInterest> keyed = raw
                 .mapValues(oi -> {
-                    if (oi != null && oi.getOpenInterest() != null && oiValueScale != 1.0) {
-                        long v = oi.getOpenInterest();
+                    if (oi == null || oi.getOpenInterest() == null) return oi;
+                    long v = oi.getOpenInterest();
+                    if (oiScaleUseLots) {
+                        long lot = instrumentMetadataService.getLotSize(oi.getExchange(), oi.getExchangeType(), String.valueOf(oi.getToken()), oi.getCompanyName(), 1L);
+                        if (lot > 1) {
+                            oi.setOpenInterest(v * lot);
+                            return oi;
+                        }
+                    }
+                    if (oiValueScale != 1.0) {
                         long scaled = (long) Math.round(v * oiValueScale);
                         oi.setOpenInterest(scaled);
                     }

@@ -19,8 +19,10 @@ import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.stereotype.Component;
 import org.springframework.beans.factory.annotation.Value;
+import org.springframework.beans.factory.annotation.Value;
 import com.kotsin.consumer.timeExtractor.OrderbookTimestampExtractorWithOffset;
 import com.kotsin.consumer.timeExtractor.MultiMinuteOffsetTimestampExtractorForOrderbook;
+import com.kotsin.consumer.service.InstrumentMetadataService;
 
 import java.time.*;
 import java.time.format.DateTimeFormatter;
@@ -51,6 +53,23 @@ public class OrderbookProcessor {
     private KafkaConfig kafkaConfig;
 
     private final Map<String, KafkaStreams> streamsInstances = new HashMap<>();
+    private final InstrumentMetadataService instrumentMetadataService;
+
+    // Configurable parameters
+    @Value("${orderbook.ticksize:0.05}")
+    private double orderbookTickSize;
+    @Value("${orderbook.spoof.size.threshold.ratio:0.3}")
+    private double spoofSizeThresholdRatio;
+    @Value("${orderbook.spoof.confirmation.snapshots:2}")
+    private int spoofConfirmSnapshots;
+    @Value("${orderbook.lambda.min.observations:10}")
+    private int lambdaMinObservations;
+    @Value("${orderbook.lambda.calc.frequency:5}")
+    private int lambdaCalcFrequency;
+    @Value("${orderbook.lambda.ofi.epsilon:1.0}")
+    private double lambdaOfiEpsilon;
+    @Value("${orderbook.spoof.price.epsilon.ticks:1.0}")
+    private double spoofPriceEpsilonTicks;
 
     // Grace + filter configuration
     @Value("${orderbook.window.grace.seconds.1m:5}")
@@ -68,6 +87,10 @@ public class OrderbookProcessor {
     /**
      * Initializes and starts the orderbook microstructure pipeline.
      */
+    public OrderbookProcessor(InstrumentMetadataService instrumentMetadataService) {
+        this.instrumentMetadataService = instrumentMetadataService;
+    }
+
     public void process(String appId, String inputTopic, String outputTopic, int windowSize) {
 
         String instanceKey = appId + "-" + windowSize + "m";
@@ -78,6 +101,17 @@ public class OrderbookProcessor {
 
         Properties props = kafkaConfig.getStreamProperties(appId + "-" + windowSize + "m");
         StreamsBuilder builder = new StreamsBuilder();
+
+        // Apply configurable parameters to the aggregate model
+        com.kotsin.consumer.model.OrderbookAggregate.configure(
+                orderbookTickSize,
+                spoofSizeThresholdRatio,
+                spoofConfirmSnapshots,
+                lambdaMinObservations,
+                lambdaCalcFrequency,
+                lambdaOfiEpsilon
+        );
+        com.kotsin.consumer.model.OrderbookAggregate.setSpoofPriceEpsilonTicks(spoofPriceEpsilonTicks);
 
         if (windowSize == 1) {
             processOrderbookData(builder, inputTopic, outputTopic);
@@ -171,6 +205,10 @@ public class OrderbookProcessor {
                 .aggregate(
                         OrderbookAggregate::new,
                         (token, snapshot, aggregate) -> {
+                            double tick = instrumentMetadataService.getTickSize(snapshot.getExch(), snapshot.getExchType(), snapshot.getToken(), snapshot.getCompanyName(), orderbookTickSize);
+                            aggregate.setInstrumentTickSize(tick);
+                            instrumentMetadataService.getSpoofSizeRatio(snapshot.getExch(), snapshot.getExchType(), snapshot.getToken(), snapshot.getCompanyName()).ifPresent(aggregate::setInstrumentSpoofSizeRatio);
+                            instrumentMetadataService.getSpoofEpsilonTicks(snapshot.getExch(), snapshot.getExchType(), snapshot.getToken(), snapshot.getCompanyName()).ifPresent(aggregate::setInstrumentSpoofEpsilonTicks);
                             aggregate.updateWithSnapshot(snapshot);
                             return aggregate;
                         },
@@ -214,12 +252,16 @@ public class OrderbookProcessor {
                 Duration.ofSeconds(Math.max(0, graceSecondsMulti))
         );
 
-        // For orderbook: keep LATEST aggregate (most recent microstructure state)
+        // For orderbook: aggregate by merging accumulators across 1m into multi-minute
         KTable<Windowed<String>, OrderbookAggregate> aggregated = mins
                 .groupByKey(Grouped.with(Serdes.String(), OrderbookAggregate.serde()))
                 .windowedBy(windows)
-                .reduce(
-                        (oldValue, newValue) -> newValue,  // Keep latest
+                .aggregate(
+                        OrderbookAggregate::new,
+                        (key, value, aggregate) -> {
+                            aggregate.merge(value);
+                            return aggregate;
+                        },
                         Materialized.<String, OrderbookAggregate, WindowStore<Bytes, byte[]>>as("agg-orderbook-store-" + windowSize + "m")
                                 .withKeySerde(Serdes.String())
                                 .withValueSerde(OrderbookAggregate.serde())

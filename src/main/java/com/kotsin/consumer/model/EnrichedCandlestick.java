@@ -433,6 +433,33 @@ public class EnrichedCandlestick {
     }
 
     /**
+     * Re-bin volume profile to a new tick size (post-aggregation normalization).
+     */
+    public void rebinVolumeProfile(double newTickSize) {
+        if (newTickSize <= 0 || volumeAtPrice.isEmpty()) return;
+        java.util.Map<Double, Long> rebinned = new java.util.HashMap<>();
+        for (java.util.Map.Entry<Double, Long> e : volumeAtPrice.entrySet()) {
+            double price = e.getKey();
+            long vol = e.getValue();
+            java.math.BigDecimal p = java.math.BigDecimal.valueOf(price);
+            java.math.BigDecimal step = java.math.BigDecimal.valueOf(newTickSize);
+            java.math.BigDecimal roundedBd = p.divide(step, 0, java.math.RoundingMode.HALF_UP)
+                    .multiply(step)
+                    .setScale(2, java.math.RoundingMode.HALF_UP);
+            double rounded = roundedBd.doubleValue();
+            rebinned.merge(rounded, vol, Long::sum);
+        }
+        this.volumeAtPrice = rebinned;
+        // Update range
+        this.lowestPrice = null;
+        this.highestPrice = null;
+        for (Double pr : rebinned.keySet()) {
+            if (lowestPrice == null || pr < lowestPrice) lowestPrice = pr;
+            if (highestPrice == null || pr > highestPrice) highestPrice = pr;
+        }
+    }
+
+    /**
      * Merges another EnrichedCandlestick into this one.
      * Used when building multi-minute candles from smaller timeframe candles.
      * 

@@ -52,29 +52,29 @@ public class OrderbookAggregate {
     private double prevBestAsk = 0.0;
 
     // ========== VPIN State (Volume-Synchronized PIN) ==========
-    private static final int VPIN_BUCKET_COUNT = 50;
-    private double adaptiveBucketSize = 10000.0;
-    private List<VPINBucket> vpinBuckets = new ArrayList<>();
-    private double currentBucketVolume = 0.0;
-    private double currentBucketBuyVolume = 0.0;
-    private double vpin = 0.0;
-    private int totalBucketsCreated = 0;
+    @JsonIgnore private static final int VPIN_BUCKET_COUNT = 50;
+    @JsonIgnore private double adaptiveBucketSize = 10000.0;
+    @JsonIgnore private List<VPINBucket> vpinBuckets = new ArrayList<>();
+    @JsonIgnore private double currentBucketVolume = 0.0;
+    @JsonIgnore private double currentBucketBuyVolume = 0.0;
+    @JsonIgnore private double vpin = 0.0;
+    @JsonIgnore private int totalBucketsCreated = 0;
 
     // ========== Kyle's Lambda State ==========
     private static final int LAMBDA_WINDOW_SIZE = 100;  // Rolling window size
     private static final int LAMBDA_CALC_FREQUENCY = 20;  // Recalculate every N updates
     private static final int LAMBDA_MIN_OBSERVATIONS = 30;  // Statistical minimum
-    @JsonIgnore
-    private List<PriceImpactObservation> priceImpactHistory = new ArrayList<>();
+    @JsonIgnore private List<PriceImpactObservation> priceImpactHistory = new ArrayList<>(); // retained for debug but not used
     private double kyleLambda = 0.0;
-    @JsonIgnore
-    private double lastMidPrice = 0.0;
-    @JsonIgnore
-    private int updatesSinceLastLambdaCalc = 0;
+    @JsonIgnore private double lastMidPrice = 0.0;
+    @JsonIgnore private int updatesSinceLastLambdaCalc = 0;
+    // Rolling stats for Welford-style mergeable lambda
+    @JsonIgnore private long lambdaObsCount = 0;
+    @JsonIgnore private double sumOFI = 0.0, sumDP = 0.0, sumOFI2 = 0.0, sumDP2 = 0.0, sumOFIDP = 0.0;
 
     // ========== Depth Metrics (Averaged) ==========
     private double depthImbalance = 0.0;
-    private double effectiveSpread = 0.0;
+    @JsonIgnore private double effectiveSpread = 0.0;
     private double midPrice = 0.0;
     private double microprice = 0.0;
     private double bidAskSpread = 0.0;
@@ -110,7 +110,42 @@ public class OrderbookAggregate {
     // ========== Processing State ==========
     private int updateCount = 0;
     private static final int MIN_OBSERVATIONS = 20;
-    private OrderBookSnapshot previousOrderbook;
+    @JsonIgnore private OrderBookSnapshot previousOrderbook;
+
+    // ========== Configurable Parameters ==========
+    @JsonIgnore private static volatile double TICK_SIZE = 0.05; // fallback default
+    @JsonIgnore private double instrumentTickSize = 0.0; // per-instance tick size
+    @JsonIgnore private static volatile double SPOOF_SIZE_RATIO = 0.3; // fraction of side depth
+    @JsonIgnore private static volatile int SPOOF_CONFIRM_SNAPSHOTS = 2;
+    @JsonIgnore private static volatile double SPOOF_PRICE_EPSILON_TICKS = 1.0;
+    @JsonIgnore private Double instrumentSpoofSizeRatio = null;
+    @JsonIgnore private Double instrumentSpoofEpsilonTicks = null;
+    @JsonIgnore private static volatile int LAMBDA_MIN_OBS = 10;
+    @JsonIgnore private static volatile int LAMBDA_FREQ = 5;
+    @JsonIgnore private static volatile double LAMBDA_OFI_EPS = 1.0;
+
+    public static void configure(double tickSize,
+                                 double spoofSizeRatio,
+                                 int spoofConfirmSnapshots,
+                                 int lambdaMinObs,
+                                 int lambdaCalcFreq,
+                                 double lambdaOfiEps) {
+        TICK_SIZE = tickSize;
+        SPOOF_SIZE_RATIO = spoofSizeRatio;
+        SPOOF_CONFIRM_SNAPSHOTS = spoofConfirmSnapshots;
+        LAMBDA_MIN_OBS = lambdaMinObs;
+        LAMBDA_FREQ = lambdaCalcFreq;
+        LAMBDA_OFI_EPS = lambdaOfiEps;
+    }
+
+    public static void setSpoofPriceEpsilonTicks(double v) { SPOOF_PRICE_EPSILON_TICKS = v; }
+
+    public void setInstrumentTickSize(double tick) { this.instrumentTickSize = tick; }
+    public double getEffectiveTickSize() { return instrumentTickSize > 0 ? instrumentTickSize : TICK_SIZE; }
+    public void setInstrumentSpoofSizeRatio(Double v) { this.instrumentSpoofSizeRatio = v; }
+    public void setInstrumentSpoofEpsilonTicks(Double v) { this.instrumentSpoofEpsilonTicks = v; }
+    public double getEffectiveSpoofSizeRatio() { return instrumentSpoofSizeRatio != null ? instrumentSpoofSizeRatio : SPOOF_SIZE_RATIO; }
+    public double getEffectiveSpoofEpsilonTicks() { return instrumentSpoofEpsilonTicks != null ? instrumentSpoofEpsilonTicks : SPOOF_PRICE_EPSILON_TICKS; }
 
     /**
      * Creates a new empty orderbook aggregate
@@ -176,7 +211,7 @@ public class OrderbookAggregate {
             Map<Double, Integer> currentBidDepth = buildDepthMap(orderbook.getAllBids());
             Map<Double, Integer> currentAskDepth = buildDepthMap(orderbook.getAllAsks());
             
-            ofi = calculateFullDepthOFI(
+            ofi += calculateFullDepthOFI(
                 prevBidDepth, currentBidDepth, prevBestBid, bestBid,
                 prevAskDepth, currentAskDepth, prevBestAsk, bestAsk
             );
@@ -193,15 +228,10 @@ public class OrderbookAggregate {
         prevBestAsk = bestAsk;
 
         // ========== Track Price Impact for Kyle's Lambda ==========
-        if (lastMidPrice > 0 && midPrice > 0 && ofi != 0.0) {
-            double priceChange = midPrice - lastMidPrice;
-            priceImpactHistory.add(new PriceImpactObservation(priceChange, ofi, orderbook.getTimestamp()));
-            
-            // Maintain rolling window (bounded list to prevent memory leaks)
-            if (priceImpactHistory.size() > LAMBDA_WINDOW_SIZE) {
-                priceImpactHistory.remove(0);
-            }
-            
+        if (lastMidPrice > 0 && midPrice > 0 && Math.abs(ofi) > LAMBDA_OFI_EPS) {
+            double dp = midPrice - lastMidPrice;
+            lambdaObsCount++;
+            sumOFI += ofi; sumDP += dp; sumOFI2 += ofi * ofi; sumDP2 += dp * dp; sumOFIDP += ofi * dp;
             updatesSinceLastLambdaCalc++;
         }
         lastMidPrice = midPrice;
@@ -238,10 +268,47 @@ public class OrderbookAggregate {
         updateCount++;
 
         // ========== Recalculate Kyle's Lambda Periodically ==========
-        if (updatesSinceLastLambdaCalc >= LAMBDA_CALC_FREQUENCY && 
-            priceImpactHistory.size() >= LAMBDA_MIN_OBSERVATIONS) {
+        if (updatesSinceLastLambdaCalc >= LAMBDA_FREQ && lambdaObsCount >= LAMBDA_MIN_OBS) {
             calculateKyleLambda();
         }
+    }
+
+    /**
+     * Merge another aggregate into this one for multi-minute windows.
+     * Sums accumulators and keeps latest point-in-time fields.
+     */
+    public void merge(OrderbookAggregate other) {
+        if (other == null) return;
+
+        // Sum OFI and accumulators
+        this.ofi += other.ofi;
+        this.spreadSum += other.spreadSum; this.spreadCount += other.spreadCount;
+        this.totalBidDepthSum += other.totalBidDepthSum; this.totalBidDepthCount += other.totalBidDepthCount;
+        this.totalAskDepthSum += other.totalAskDepthSum; this.totalAskDepthCount += other.totalAskDepthCount;
+        this.weightedImbalanceSum += other.weightedImbalanceSum; this.weightedImbalanceCount += other.weightedImbalanceCount;
+
+        // Merge lambda rolling sums
+        this.lambdaObsCount += other.lambdaObsCount;
+        this.sumOFI += other.sumOFI;
+        this.sumDP += other.sumDP;
+        this.sumOFI2 += other.sumOFI2;
+        this.sumDP2 += other.sumDP2;
+        this.sumOFIDP += other.sumOFIDP;
+
+        // Latest market snapshot style fields
+        this.midPrice = other.midPrice;
+        this.microprice = other.microprice;
+        this.bidAskSpread = other.bidAskSpread;
+        this.depthImbalance = other.depthImbalance;
+
+        // Metadata
+        this.exchange = other.exchange;
+        this.exchangeType = other.exchangeType;
+        this.companyName = other.companyName;
+        this.scripCode = other.scripCode;
+
+        // Window times (outer aggregator sets window times)
+        this.updateCount += other.updateCount;
     }
 
     /**
@@ -252,11 +319,19 @@ public class OrderbookAggregate {
         if (levels != null) {
             for (OrderBookSnapshot.OrderBookLevel level : levels) {
                 if (level.getPrice() > 0 && level.getQuantity() > 0) {
-                    depthMap.put(level.getPrice(), level.getQuantity());
+                    double qPrice = quantize(level.getPrice(), getEffectiveTickSize());
+                    depthMap.merge(qPrice, level.getQuantity(), Integer::sum);
                 }
             }
         }
         return depthMap;
+    }
+
+    private double quantize(double price, double step) {
+        if (step <= 0) return price;
+        java.math.BigDecimal p = java.math.BigDecimal.valueOf(price);
+        java.math.BigDecimal s = java.math.BigDecimal.valueOf(step);
+        return p.divide(s, 0, java.math.RoundingMode.HALF_UP).multiply(s).doubleValue();
     }
 
     /**
@@ -269,26 +344,29 @@ public class OrderbookAggregate {
         double deltaBid = 0.0;
         double deltaAsk = 0.0;
         
-        // Calculate bid side: sum over prices >= prev_best_bid
+        double bidBand = Math.min(prevBestBid, currBestBid);
+        double askBand = Math.max(prevBestAsk, currBestAsk);
+
         for (Map.Entry<Double, Integer> entry : currBid.entrySet()) {
-            if (entry.getKey() >= prevBestBid) {
-                deltaBid += entry.getValue();
+            if (entry.getKey() >= bidBand) {
+                int prevQty = prevBid.getOrDefault(entry.getKey(), 0);
+                deltaBid += (entry.getValue() - prevQty);
             }
         }
         for (Map.Entry<Double, Integer> entry : prevBid.entrySet()) {
-            if (entry.getKey() >= currBestBid) {
+            if (entry.getKey() >= bidBand && !currBid.containsKey(entry.getKey())) {
                 deltaBid -= entry.getValue();
             }
         }
-        
-        // Calculate ask side: sum over prices <= prev_best_ask
+
         for (Map.Entry<Double, Integer> entry : currAsk.entrySet()) {
-            if (entry.getKey() <= prevBestAsk) {
-                deltaAsk += entry.getValue();
+            if (entry.getKey() <= askBand) {
+                int prevQty = prevAsk.getOrDefault(entry.getKey(), 0);
+                deltaAsk += (entry.getValue() - prevQty);
             }
         }
         for (Map.Entry<Double, Integer> entry : prevAsk.entrySet()) {
-            if (entry.getKey() <= currBestAsk) {
+            if (entry.getKey() <= askBand && !currAsk.containsKey(entry.getKey())) {
                 deltaAsk -= entry.getValue();
             }
         }
@@ -354,49 +432,13 @@ public class OrderbookAggregate {
      * - Hasbrouck, J. (2007). "Empirical Market Microstructure"
      */
     private void calculateKyleLambda() {
-        int n = priceImpactHistory.size();
-        
-        // Check minimum observations for statistical validity
-        if (n < LAMBDA_MIN_OBSERVATIONS) {
-            return;
-        }
-
-        // Calculate means
-        double meanPriceChange = 0.0;
-        double meanOFI = 0.0;
-        
-        for (PriceImpactObservation obs : priceImpactHistory) {
-            meanPriceChange += obs.priceChange;
-            meanOFI += obs.signedVolume;
-        }
-        
-        meanPriceChange /= n;
-        meanOFI /= n;
-
-        // Calculate covariance and variance
-        double covariance = 0.0;
-        double variance = 0.0;
-        
-        for (PriceImpactObservation obs : priceImpactHistory) {
-            double priceDeviation = obs.priceChange - meanPriceChange;
-            double ofiDeviation = obs.signedVolume - meanOFI;
-            
-            covariance += priceDeviation * ofiDeviation;
-            variance += ofiDeviation * ofiDeviation;
-        }
-        
-        covariance /= n;
-        variance /= n;
-
-        // Calculate lambda = Cov(Δp, OFI) / Var(OFI)
-        // Handle edge case: if variance is near zero, set lambda to 0
-        if (Math.abs(variance) < 1e-10) {
-            kyleLambda = 0.0;
-        } else {
-            kyleLambda = covariance / variance;
-        }
-
-        // Reset counter
+        long n = lambdaObsCount;
+        if (n < LAMBDA_MIN_OBS) return;
+        double meanOFI = sumOFI / n;
+        double meanDP = sumDP / n;
+        double varOFI = (sumOFI2 - sumOFI * sumOFI / n) / n;
+        double cov = (sumOFIDP - sumOFI * sumDP / n) / n;
+        kyleLambda = (Math.abs(varOFI) < 1e-10) ? 0.0 : (cov / varOFI);
         updatesSinceLastLambdaCalc = 0;
     }
 
@@ -426,13 +468,14 @@ public class OrderbookAggregate {
      */
     private void detectSpoofing(OrderBookSnapshot prev, OrderBookSnapshot curr) {
         long currentTime = curr.getTimestamp();
+        long prevTime = prev.getTimestamp();
         
         if (prev.getAllBids() != null && curr.getAllBids() != null) {
-            detectSpoofingOneSide(prev.getAllBids(), curr.getAllBids(), "BID", currentTime, bidSpoofTracking);
+            detectSpoofingOneSide(prev.getAllBids(), curr.getAllBids(), "BID", prevTime, currentTime, bidSpoofTracking);
         }
         
         if (prev.getAllAsks() != null && curr.getAllAsks() != null) {
-            detectSpoofingOneSide(prev.getAllAsks(), curr.getAllAsks(), "ASK", currentTime, askSpoofTracking);
+            detectSpoofingOneSide(prev.getAllAsks(), curr.getAllAsks(), "ASK", prevTime, currentTime, askSpoofTracking);
         }
 
         // Clean up old events (older than 1 minute)
@@ -447,6 +490,7 @@ public class OrderbookAggregate {
         List<OrderBookSnapshot.OrderBookLevel> prevLevels,
         List<OrderBookSnapshot.OrderBookLevel> currLevels,
         String side,
+        long prevTime,
         long currentTime,
         Map<Double, SpoofState> tracking
     ) {
@@ -459,24 +503,28 @@ public class OrderbookAggregate {
             int quantity = prevLevel.getQuantity();
 
             // Is this a large order?
-            if (quantity > totalDepth * SPOOF_SIZE_THRESHOLD) {
+            if (totalDepth > 0 && quantity > totalDepth * getEffectiveSpoofSizeRatio()) {
                 if (!tracking.containsKey(price)) {
-                    tracking.put(price, new SpoofState(currentTime, quantity));
+                    tracking.put(price, new SpoofState(prevTime, quantity, 0));
                 }
 
                 // Check if it disappeared
                 boolean foundInCurrent = currLevels.stream()
-                    .anyMatch(level -> Math.abs(level.getPrice() - price) < 0.01 &&
+                    .anyMatch(level -> Math.abs(level.getPrice() - price) <= (getEffectiveTickSize() * getEffectiveSpoofEpsilonTicks()) &&
                                       level.getQuantity() >= quantity * 0.5);
 
                 if (!foundInCurrent) {
                     SpoofState state = tracking.get(price);
-                    long duration = currentTime - state.firstSeenTime;
-
-                    if (duration < SPOOF_DURATION_THRESHOLD_MS) {
-                        spoofingEvents.add(new SpoofingEvent(currentTime, side, price, quantity, duration));
+                    state.missCount += 1;
+                    if (state.missCount >= SPOOF_CONFIRM_SNAPSHOTS) {
+                        long duration = currentTime - state.firstSeenTime;
+                        if (duration < SPOOF_DURATION_THRESHOLD_MS) {
+                            spoofingEvents.add(new SpoofingEvent(currentTime, side, price, quantity, duration));
+                        }
+                        tracking.remove(price);
+                    } else {
+                        tracking.put(price, state);
                     }
-                    tracking.remove(price);
                 }
             }
         }
@@ -583,9 +631,7 @@ public class OrderbookAggregate {
      * Useful for validating statistical significance.
      * Minimum 30 observations required for calculation.
      */
-    public int getKyleLambdaObservations() {
-        return priceImpactHistory.size();
-    }
+    public int getKyleLambdaObservations() { return (int) lambdaObsCount; }
 
     /**
      * Check if complete (enough observations)
@@ -680,6 +726,7 @@ public class OrderbookAggregate {
     public static class SpoofState {
         public long firstSeenTime;
         public int quantity;
+        public int missCount;
     }
 
     /**
@@ -720,4 +767,3 @@ public class OrderbookAggregate {
         }
     }
 }
-

@@ -263,6 +263,11 @@ public class CandlestickProcessor {
                 .transformValues(() -> new com.kotsin.consumer.transformers.VpinFinalizer(
                         VPIN_STORE, vpinInitialBucketSize, vpinAdaptiveAlpha, vpinMaxBuckets
                 ), VPIN_STORE)
+                .mapValues((windowedKey, candle) -> {
+                    double tick = instrumentMetadataService.getTickSize(candle.getExchange(), candle.getExchangeType(), candle.getScripCode(), candle.getCompanyName(), defaultTickSize);
+                    candle.rebinVolumeProfile(tick);
+                    return candle;
+                })
                 .map((windowedKey, candle) -> KeyValue.pair(windowedKey.key(), candle))
                 .to(outputTopic, Produced.with(Serdes.String(), EnrichedCandlestick.serde()));
     }
@@ -353,6 +358,9 @@ public class CandlestickProcessor {
 
                     c.setWindowStartMillis(wk.window().start() - offMs);
                     c.setWindowEndMillis(wk.window().end() - offMs);
+                    // Re-bin volume profile to instrument tick size from DB
+                    double tick = instrumentMetadataService.getTickSize(c.getExchange(), c.getExchangeType(), c.getScripCode(), c.getCompanyName(), defaultTickSize);
+                    c.rebinVolumeProfile(tick);
                     logCandleDetails(c, windowSize);
                     return KeyValue.pair(wk.key(), c);
                 })
