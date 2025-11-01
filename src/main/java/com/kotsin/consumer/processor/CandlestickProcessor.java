@@ -266,6 +266,18 @@ public class CandlestickProcessor {
                 ));
 
         candlestickTable.toStream()
+                // Ensure 1m candles carry true (de-offset) window boundaries for downstream consumers
+                .mapValues((wk, candle) -> {
+                    try {
+                        int offMin = MarketTimeAligner.getWindowOffsetMinutes(candle.getExchange(), 1);
+                        long offMs = offMin * 60_000L;
+                        candle.setWindowStartMillis(wk.window().start() - offMs);
+                        candle.setWindowEndMillis(wk.window().end() - offMs);
+                    } catch (Exception e) {
+                        LOGGER.debug("Failed to set window boundaries on 1m candle: {}", e.toString());
+                    }
+                    return candle;
+                })
                 .transformValues(() -> new com.kotsin.consumer.transformers.VpinFinalizer(
                         VPIN_STORE, vpinInitialBucketSize, vpinAdaptiveAlpha, vpinMaxBuckets
                 ), VPIN_STORE)
