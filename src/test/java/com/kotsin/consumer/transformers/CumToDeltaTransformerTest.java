@@ -64,7 +64,9 @@ public class CumToDeltaTransformerTest {
 
         KeyValue<String, TickData> r1 = out.readKeyValue();
         assertEquals("EQ1", r1.key);
-        assertEquals(100, r1.value.getDeltaVolume());
+        // On the first observation, delta should be 0 to avoid
+        // dumping historical cumulative volume into a single bar.
+        assertEquals(0, r1.value.getDeltaVolume());
 
         TickData b2 = new TickData();
         b2.setScripCode("EQ1");
@@ -83,4 +85,3 @@ public class CumToDeltaTransformerTest {
         assertEquals(0, r3.value.getDeltaVolume());
     }
 }
-

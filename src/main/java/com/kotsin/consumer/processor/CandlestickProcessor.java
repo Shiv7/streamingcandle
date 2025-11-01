@@ -3,6 +3,7 @@ package com.kotsin.consumer.processor;
 import com.kotsin.consumer.config.KafkaConfig;
 import com.kotsin.consumer.model.EnrichedCandlestick;
 import com.kotsin.consumer.model.TickData;
+import com.kotsin.consumer.service.InstrumentMetadataService;
 import com.kotsin.consumer.timeExtractor.MultiMinuteOffsetTimestampExtractor;
 import com.kotsin.consumer.timeExtractor.TickTimestampExtractorWithOffset;
 import com.kotsin.consumer.transformers.CumToDeltaTransformer;
@@ -54,6 +55,7 @@ public class CandlestickProcessor {
     private KafkaConfig kafkaConfig;
 
     private final Map<String, KafkaStreams> streamsInstances = new HashMap<>();
+    private final InstrumentMetadataService instrumentMetadataService;
 
     // Grace period configuration (seconds)
     @Value("${candles.window.grace.seconds.1m:5}")
@@ -102,6 +104,10 @@ public class CandlestickProcessor {
     private long filterToken;
 
     // No per-token price-only list needed; OHLC always updates from price
+
+    public CandlestickProcessor(InstrumentMetadataService instrumentMetadataService) {
+        this.instrumentMetadataService = instrumentMetadataService;
+    }
 
     /**
      * Initializes and starts the enriched candlestick aggregation pipeline.

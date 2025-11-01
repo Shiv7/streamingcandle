@@ -64,7 +64,7 @@ public class OrderbookAggregate {
     private static final int LAMBDA_WINDOW_SIZE = 100;  // Rolling window size
     private static final int LAMBDA_CALC_FREQUENCY = 20;  // Recalculate every N updates
     private static final int LAMBDA_MIN_OBSERVATIONS = 30;  // Statistical minimum
-    @JsonIgnore private List<PriceImpactObservation> priceImpactHistory = new ArrayList<>(); // retained for debug but not used
+    @JsonIgnore private Deque<PriceImpactObservation> priceImpactHistory = new ArrayDeque<>(); // ring buffer for rolling window
     private double kyleLambda = 0.0;
     @JsonIgnore private double lastMidPrice = 0.0;
     @JsonIgnore private int updatesSinceLastLambdaCalc = 0;
@@ -230,8 +230,22 @@ public class OrderbookAggregate {
         // ========== Track Price Impact for Kyle's Lambda ==========
         if (lastMidPrice > 0 && midPrice > 0 && Math.abs(ofi) > LAMBDA_OFI_EPS) {
             double dp = midPrice - lastMidPrice;
+
+            // Add new observation (dp, ofi) and update rolling sums
+            PriceImpactObservation obs = new PriceImpactObservation(dp, ofi, orderbook.getReceivedTimestamp());
+            priceImpactHistory.addLast(obs);
             lambdaObsCount++;
             sumOFI += ofi; sumDP += dp; sumOFI2 += ofi * ofi; sumDP2 += dp * dp; sumOFIDP += ofi * dp;
+
+            // Enforce rolling window: remove oldest while above capacity
+            while (lambdaObsCount > LAMBDA_WINDOW_SIZE && !priceImpactHistory.isEmpty()) {
+                PriceImpactObservation old = priceImpactHistory.removeFirst();
+                lambdaObsCount--;
+                double oDP = old.priceChange;
+                double oOFI = old.signedVolume;
+                sumOFI -= oOFI; sumDP -= oDP; sumOFI2 -= oOFI * oOFI; sumDP2 -= oDP * oDP; sumOFIDP -= oOFI * oDP;
+            }
+
             updatesSinceLastLambdaCalc++;
         }
         lastMidPrice = midPrice;

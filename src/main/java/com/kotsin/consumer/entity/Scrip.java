@@ -5,7 +5,7 @@ import lombok.Data;
 import lombok.NoArgsConstructor;
 import lombok.ToString;
 import org.springframework.data.mongodb.core.mapping.Document;
-import org.springframework.data.mongodb.core.mapping.MongoId;
+import org.springframework.data.annotation.Id;
 
 import java.util.Date;
 
@@ -15,7 +15,7 @@ import java.util.Date;
 @AllArgsConstructor
 @Document(collection = "scripData")
 public class Scrip {
-    @MongoId
+    @Id
     private String id;
     private String scriptTypeKotsin;
     private String Exch;
@@ -41,4 +41,3 @@ public class Scrip {
     private String SpoofSizeRatio;           // e.g., "0.25"
     private String SpoofPriceEpsilonTicks;   // e.g., "2"
 }
-

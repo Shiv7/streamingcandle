@@ -64,6 +64,8 @@ public class OIProcessor {
     private int filterToken;
     @Value("${oi.scale.use.lots:false}")
     private boolean oiScaleUseLots;
+    @Value("${oi.value.scale:1.0}")
+    private double oiValueScale;
 
     /**
      * Initializes and starts the OI metrics pipeline.
