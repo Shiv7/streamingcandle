@@ -229,10 +229,132 @@ public class OrderbookProcessor {
     }
 
     /**
-     * Aggregate multi-minute orderbook signals from 1-minute signals.
-     * Note: Orderbook aggregates don't merge like candles - we keep the latest snapshot per window
+     * Wrapper to start multi-minute orderbook aggregation from 1-minute orderbook metrics.
      */
-    // Multi-minute from 1m rollup is no longer used (Option A)
+    public void processMultiMinuteOrderbook(String appId, String inputTopic, String outputTopic, int windowSize) {
+        String instanceKey = appId + "-" + windowSize + "m";
+        if (streamsInstances.containsKey(instanceKey)) {
+            LOGGER.warn("Streams app {} already running. Skipping duplicate start.", instanceKey);
+            return;
+        }
+
+        Properties props = kafkaConfig.getStreamProperties(appId + "-" + windowSize + "m");
+        StreamsBuilder builder = new StreamsBuilder();
+
+        // Build multi-minute orderbook from 1-minute orderbook metrics
+        buildMultiMinuteOrderbook(builder, inputTopic, outputTopic, windowSize);
+
+        KafkaStreams streams = new KafkaStreams(builder.build(), props);
+        streamsInstances.put(instanceKey, streams);
+
+        // State listener
+        streams.setStateListener((newState, oldState) -> {
+            LOGGER.info("Orderbook Streams state transition for {}-minute (cascaded): {} -> {}",
+                    windowSize, oldState, newState);
+
+            if (newState == KafkaStreams.State.ERROR) {
+                LOGGER.error("❌ Orderbook Stream {} entered ERROR state!", instanceKey);
+            } else if (newState == KafkaStreams.State.RUNNING) {
+                LOGGER.info("✅ Orderbook Stream {} is now RUNNING (cascaded)", instanceKey);
+            }
+        });
+
+        // Exception handler
+        streams.setUncaughtExceptionHandler((Throwable exception) -> {
+            LOGGER.error("❌ Uncaught exception in Orderbook {}-minute stream (cascaded): ", windowSize, exception);
+
+            String msg = exception.getMessage();
+            if (msg != null && (msg.contains("timestamp") || msg.contains("Serialization"))) {
+                LOGGER.error("🔥 CRITICAL: Timestamp or serialization error. Shutting down.");
+                try {
+                    streamsInstances.remove(instanceKey);
+                } catch (Exception e) {
+                    LOGGER.error("Error during cleanup: ", e);
+                }
+                return StreamsUncaughtExceptionHandler.StreamThreadExceptionResponse.SHUTDOWN_APPLICATION;
+            }
+
+            LOGGER.warn("⚠️ Attempting to recover by replacing stream thread...");
+            return StreamsUncaughtExceptionHandler.StreamThreadExceptionResponse.REPLACE_THREAD;
+        });
+
+        // Start streams
+        try {
+            streams.start();
+            LOGGER.info("✅ Started Orderbook Streams (cascaded): {}, window size: {}m", instanceKey, windowSize);
+        } catch (Exception e) {
+            LOGGER.error("❌ Failed to start Orderbook Streams for {}: ", instanceKey, e);
+            streamsInstances.remove(instanceKey);
+            throw new RuntimeException("Failed to start orderbook streams for " + instanceKey, e);
+        }
+
+        // Shutdown hook
+        Runtime.getRuntime().addShutdownHook(new Thread(() -> {
+            LOGGER.info("🛑 Shutting down Orderbook {}-minute stream (cascaded)", windowSize);
+            try {
+                streams.close(Duration.ofSeconds(30));
+                streamsInstances.remove(instanceKey);
+                LOGGER.info("✅ Successfully shut down Orderbook {}-minute stream (cascaded)", windowSize);
+            } catch (Exception e) {
+                LOGGER.error("❌ Error during shutdown: ", e);
+            }
+        }, "shutdown-hook-orderbook-cascaded-" + instanceKey));
+    }
+
+    /**
+     * Aggregate multi-minute orderbook signals from 1-minute signals with CORRECT NSE alignment.
+     */
+    private void buildMultiMinuteOrderbook(StreamsBuilder builder, String inputTopic, String outputTopic, int windowSize) {
+        KStream<String, OrderbookAggregate> mins = builder.stream(
+                inputTopic,
+                Consumed.with(Serdes.String(), OrderbookAggregate.serde())
+                        .withTimestampExtractor(new com.kotsin.consumer.timeExtractor.MultiMinuteOffsetTimestampExtractorForOrderbook(windowSize))
+        );
+
+        // Optional: filter to a single token
+        if (filterEnabled) {
+            mins = mins.filter((k, agg) -> {
+                if (k == null) return false;
+                int last = k.lastIndexOf(':');
+                if (last < 0 || last == k.length() - 1) return false;
+                String tokenStr = k.substring(last + 1);
+                return tokenStr.equals(String.valueOf(filterToken));
+            });
+        }
+
+        // Grace period for lag handling (multi-minute)
+        TimeWindows windows = TimeWindows.ofSizeAndGrace(
+                Duration.ofMinutes(windowSize),
+                Duration.ofSeconds(Math.max(0, graceSecondsMulti))
+        );
+
+        KTable<Windowed<String>, OrderbookAggregate> aggregated = mins
+                .groupByKey(Grouped.with(Serdes.String(), OrderbookAggregate.serde()))
+                .windowedBy(windows)
+                .aggregate(
+                        OrderbookAggregate::new,
+                        (sym, agg, total) -> {
+                            total.merge(agg);
+                            return total;
+                        },
+                        Materialized.<String, OrderbookAggregate, WindowStore<Bytes, byte[]>>as("agg-orderbook-store-" + windowSize + "m")
+                                .withKeySerde(Serdes.String())
+                                .withValueSerde(OrderbookAggregate.serde())
+                )
+                .suppress(Suppressed.untilWindowCloses(Suppressed.BufferConfig.unbounded()));
+
+        aggregated.toStream()
+                .map((wk, agg) -> {
+                    // Remove the alignment shift for display/start-end correctness
+                    int offMin = com.kotsin.consumer.util.MarketTimeAligner.getWindowOffsetMinutes(agg.getExchange(), windowSize);
+                    long offMs = offMin * 60_000L;
+                    agg.setWindowStartMillis(wk.window().start() - offMs);
+                    agg.setWindowEndMillis(wk.window().end() - offMs);
+                    logOrderbookDetails(agg, windowSize);
+                    return KeyValue.pair(wk.key(), agg);
+                })
+                .to(outputTopic, Produced.with(Serdes.String(), OrderbookAggregate.serde()));
+    }
 
     /**
      * Log orderbook details for debugging.
@@ -269,24 +391,28 @@ public class OrderbookProcessor {
                     kafkaConfig.getBootstrapServers());
 
             String baseAppId = "prod-unified-orderbook";
+
+            // Build ONLY 1-minute orderbook metrics from raw orderbook snapshots (high precision, low grace period)
             process(baseAppId, "Orderbook", "orderbook-signals-1m", 1);
             Thread.sleep(500);
 
-            process(baseAppId, "Orderbook", "orderbook-signals-2m", 2);
+            // Build multi-minute orderbook metrics from 1-minute orderbook metrics (cascading aggregation)
+            // This ensures accurate aggregation without tick-level lag issues
+            processMultiMinuteOrderbook(baseAppId, "orderbook-signals-1m", "orderbook-signals-2m", 2);
             Thread.sleep(500);
 
-            process(baseAppId, "Orderbook", "orderbook-signals-3m", 3);
+            processMultiMinuteOrderbook(baseAppId, "orderbook-signals-1m", "orderbook-signals-3m", 3);
             Thread.sleep(500);
 
-            process(baseAppId, "Orderbook", "orderbook-signals-5m", 5);
+            processMultiMinuteOrderbook(baseAppId, "orderbook-signals-1m", "orderbook-signals-5m", 5);
             Thread.sleep(500);
 
-            process(baseAppId, "Orderbook", "orderbook-signals-15m", 15);
+            processMultiMinuteOrderbook(baseAppId, "orderbook-signals-1m", "orderbook-signals-15m", 15);
             Thread.sleep(500);
 
-            process(baseAppId, "Orderbook", "orderbook-signals-30m", 30);
+            processMultiMinuteOrderbook(baseAppId, "orderbook-signals-1m", "orderbook-signals-30m", 30);
 
-            LOGGER.info("✅ All Orderbook Processors started successfully");
+            LOGGER.info("✅ All Orderbook Processors started successfully (1m from raw snapshots, rest cascaded)");
             logStreamStates();
 
         } catch (Exception e) {

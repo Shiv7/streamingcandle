@@ -216,9 +216,133 @@ public class OIProcessor {
     }
 
     /**
-     * Aggregate multi-minute OI metrics from 1-minute metrics.
+     * Wrapper to start multi-minute OI aggregation from 1-minute OI metrics.
      */
-    // Multi-minute from 1m rollup is no longer used (Option A)
+    public void processMultiMinuteOI(String appId, String inputTopic, String outputTopic, int windowSize) {
+        String instanceKey = appId + "-" + windowSize + "m";
+        if (streamsInstances.containsKey(instanceKey)) {
+            LOGGER.warn("Streams app {} already running. Skipping duplicate start.", instanceKey);
+            return;
+        }
+
+        Properties props = kafkaConfig.getStreamProperties(appId + "-" + windowSize + "m");
+        StreamsBuilder builder = new StreamsBuilder();
+
+        // Build multi-minute OI from 1-minute OI metrics
+        buildMultiMinuteOI(builder, inputTopic, outputTopic, windowSize);
+
+        KafkaStreams streams = new KafkaStreams(builder.build(), props);
+        streamsInstances.put(instanceKey, streams);
+
+        // State listener
+        streams.setStateListener((newState, oldState) -> {
+            LOGGER.info("OI Streams state transition for {}-minute (cascaded): {} -> {}",
+                    windowSize, oldState, newState);
+
+            if (newState == KafkaStreams.State.ERROR) {
+                LOGGER.error("❌ OI Stream {} entered ERROR state!", instanceKey);
+            } else if (newState == KafkaStreams.State.RUNNING) {
+                LOGGER.info("✅ OI Stream {} is now RUNNING (cascaded)", instanceKey);
+            }
+        });
+
+        // Exception handler
+        streams.setUncaughtExceptionHandler((Throwable exception) -> {
+            LOGGER.error("❌ Uncaught exception in OI {}-minute stream (cascaded): ", windowSize, exception);
+
+            String msg = exception.getMessage();
+            if (msg != null && (msg.contains("timestamp") || msg.contains("Serialization"))) {
+                LOGGER.error("🔥 CRITICAL: Timestamp or serialization error. Shutting down.");
+                try {
+                    streamsInstances.remove(instanceKey);
+                } catch (Exception e) {
+                    LOGGER.error("Error during cleanup: ", e);
+                }
+                return StreamsUncaughtExceptionHandler.StreamThreadExceptionResponse.SHUTDOWN_APPLICATION;
+            }
+
+            LOGGER.warn("⚠️ Attempting to recover by replacing stream thread...");
+            return StreamsUncaughtExceptionHandler.StreamThreadExceptionResponse.REPLACE_THREAD;
+        });
+
+        // Start streams
+        try {
+            streams.start();
+            LOGGER.info("✅ Started OI Streams (cascaded): {}, window size: {}m", instanceKey, windowSize);
+        } catch (Exception e) {
+            LOGGER.error("❌ Failed to start OI Streams for {}: ", instanceKey, e);
+            streamsInstances.remove(instanceKey);
+            throw new RuntimeException("Failed to start OI streams for " + instanceKey, e);
+        }
+
+        // Shutdown hook
+        Runtime.getRuntime().addShutdownHook(new Thread(() -> {
+            LOGGER.info("🛑 Shutting down OI {}-minute stream (cascaded)", windowSize);
+            try {
+                streams.close(Duration.ofSeconds(30));
+                streamsInstances.remove(instanceKey);
+                LOGGER.info("✅ Successfully shut down OI {}-minute stream (cascaded)", windowSize);
+            } catch (Exception e) {
+                LOGGER.error("❌ Error during shutdown: ", e);
+            }
+        }, "shutdown-hook-oi-cascaded-" + instanceKey));
+    }
+
+    /**
+     * Aggregate multi-minute OI metrics from 1-minute metrics with CORRECT NSE alignment.
+     */
+    private void buildMultiMinuteOI(StreamsBuilder builder, String inputTopic, String outputTopic, int windowSize) {
+        KStream<String, OIAggregate> mins = builder.stream(
+                inputTopic,
+                Consumed.with(Serdes.String(), OIAggregate.serde())
+                        .withTimestampExtractor(new MultiMinuteOffsetTimestampExtractorForOI(windowSize))
+        );
+
+        // Optional: filter to a single token
+        if (filterEnabled) {
+            mins = mins.filter((k, agg) -> {
+                if (k == null) return false;
+                int last = k.lastIndexOf(':');
+                if (last < 0 || last == k.length() - 1) return false;
+                String tokenStr = k.substring(last + 1);
+                return tokenStr.equals(String.valueOf(filterToken));
+            });
+        }
+
+        // Grace period for lag handling (multi-minute)
+        TimeWindows windows = TimeWindows.ofSizeAndGrace(
+                Duration.ofMinutes(windowSize),
+                Duration.ofSeconds(Math.max(0, graceSecondsMulti))
+        );
+
+        KTable<Windowed<String>, OIAggregate> aggregated = mins
+                .groupByKey(Grouped.with(Serdes.String(), OIAggregate.serde()))
+                .windowedBy(windows)
+                .aggregate(
+                        OIAggregate::new,
+                        (sym, agg, total) -> {
+                            total.updateAggregate(agg);
+                            return total;
+                        },
+                        Materialized.<String, OIAggregate, WindowStore<Bytes, byte[]>>as("agg-oi-store-" + windowSize + "m")
+                                .withKeySerde(Serdes.String())
+                                .withValueSerde(OIAggregate.serde())
+                )
+                .suppress(Suppressed.untilWindowCloses(Suppressed.BufferConfig.unbounded()));
+
+        aggregated.toStream()
+                .map((wk, agg) -> {
+                    // Remove the alignment shift for display/start-end correctness
+                    int offMin = com.kotsin.consumer.util.MarketTimeAligner.getWindowOffsetMinutes(agg.getExchange(), windowSize);
+                    long offMs = offMin * 60_000L;
+                    agg.setWindowStartMillis(wk.window().start() - offMs);
+                    agg.setWindowEndMillis(wk.window().end() - offMs);
+                    agg.calculateDerivedMetrics();
+                    logOIDetails(agg, windowSize);
+                    return KeyValue.pair(wk.key(), agg);
+                })
+                .to(outputTopic, Produced.with(Serdes.String(), OIAggregate.serde()));
+    }
 
     /**
      * Log OI details for debugging.
@@ -254,24 +378,28 @@ public class OIProcessor {
                     kafkaConfig.getBootstrapServers());
 
             String baseAppId = "prod-unified-oi";
+
+            // Build ONLY 1-minute OI metrics from raw OI updates (high precision, low grace period)
             process(baseAppId, "OpenInterest", "oi-metrics-1m", 1);
             Thread.sleep(500);
 
-            process(baseAppId, "OpenInterest", "oi-metrics-2m", 2);
+            // Build multi-minute OI metrics from 1-minute OI metrics (cascading aggregation)
+            // This ensures accurate open/close values without tick-level lag issues
+            processMultiMinuteOI(baseAppId, "oi-metrics-1m", "oi-metrics-2m", 2);
             Thread.sleep(500);
 
-            process(baseAppId, "OpenInterest", "oi-metrics-3m", 3);
+            processMultiMinuteOI(baseAppId, "oi-metrics-1m", "oi-metrics-3m", 3);
             Thread.sleep(500);
 
-            process(baseAppId, "OpenInterest", "oi-metrics-5m", 5);
+            processMultiMinuteOI(baseAppId, "oi-metrics-1m", "oi-metrics-5m", 5);
             Thread.sleep(500);
 
-            process(baseAppId, "OpenInterest", "oi-metrics-15m", 15);
+            processMultiMinuteOI(baseAppId, "oi-metrics-1m", "oi-metrics-15m", 15);
             Thread.sleep(500);
 
-            process(baseAppId, "OpenInterest", "oi-metrics-30m", 30);
+            processMultiMinuteOI(baseAppId, "oi-metrics-1m", "oi-metrics-30m", 30);
 
-            LOGGER.info("✅ All OI Processors started successfully");
+            LOGGER.info("✅ All OI Processors started successfully (1m from raw OI, rest cascaded)");
             logStreamStates();
 
         } catch (Exception e) {
