@@ -22,7 +22,8 @@ public class OITimestampExtractorWithWindowOffset implements TimestampExtractor 
     public long extract(ConsumerRecord<Object, Object> record, long partitionTime) {
         Object v = record.value();
         if (v instanceof OpenInterest oi) {
-            long ts = oi.getTimestamp() > 0 ? oi.getTimestamp() : (record.timestamp() > 0 ? record.timestamp() : partitionTime);
+            Long rts = oi.getReceivedTimestamp();
+            long ts = (rts != null && rts > 0) ? rts : (record.timestamp() > 0 ? record.timestamp() : partitionTime);
             String exch = oi.getExchange();
             int offMin = MarketTimeAligner.getWindowOffsetMinutes(exch, windowSizeMinutes);
             return ts + offMin * 60_000L;
@@ -31,4 +32,3 @@ public class OITimestampExtractorWithWindowOffset implements TimestampExtractor 
         return rt > 0 ? rt : Math.max(partitionTime, 0L);
     }
 }
-
