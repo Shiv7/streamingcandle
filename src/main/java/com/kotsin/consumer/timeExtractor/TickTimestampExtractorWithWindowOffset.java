@@ -37,7 +37,19 @@ public class TickTimestampExtractorWithWindowOffset implements TimestampExtracto
         }
 
         TickData tick = (TickData) value;
-        long baseTs = extractBaseTimestamp(tick, record, previousTimestamp);
+
+        // SIMPLIFIED: Use Kafka record timestamp as the single source of truth
+        // For live data, this is the most reliable timestamp
+        long baseTs = record.timestamp() > 0 ? record.timestamp() : previousTimestamp;
+
+        // Ensure we have a valid timestamp
+        if (baseTs <= 0) {
+            LOGGER.warn("Invalid Kafka timestamp for tick (token={}). Using previousTimestamp.", tick.getToken());
+            baseTs = Math.max(previousTimestamp, 0L);
+        }
+
+        // Store the base timestamp in the tick for reference
+        tick.setTimestamp(baseTs);
 
         // Apply market-specific offset to align N-minute boundaries
         String exchange = tick.getExchange();
@@ -46,59 +58,7 @@ public class TickTimestampExtractorWithWindowOffset implements TimestampExtracto
 
         long alignedTs = baseTs + offsetMs;
 
-        if (baseTs > 0) {
-            tick.setTimestamp(baseTs);
-        } else {
-            long fallback = record.timestamp() > 0 ? record.timestamp() : previousTimestamp;
-            tick.setTimestamp(Math.max(fallback, 0L));
-        }
-
         return alignedTs;
-    }
-
-    private long extractBaseTimestamp(TickData tick,
-                                      ConsumerRecord<Object, Object> record,
-                                      long previousTimestamp) {
-        if (tick.getTimestamp() > 0) {
-            return tick.getTimestamp();
-        }
-
-        long timeField = tick.getTime();
-        if (timeField > 0) {
-            long candidate = (timeField < 1000_000_000_000L) ? timeField * 1000L : timeField;
-            return candidate;
-        }
-
-        String tickDt = tick.getTickDt();
-        if (tickDt == null || tickDt.isBlank()) {
-            long fallback = record.timestamp() > 0 ? record.timestamp() : previousTimestamp;
-            return Math.max(fallback, 0L);
-        }
-
-        try {
-            if (tickDt.startsWith("/Date(") && tickDt.endsWith(")/")) {
-                String millisStr = tickDt.substring(6, tickDt.length() - 2);
-                long ts = Long.parseLong(millisStr);
-                long now = System.currentTimeMillis();
-                if (ts > now + 60000L || ts <= 0) {
-                    long fb = record.timestamp() > 0 ? record.timestamp() : previousTimestamp;
-                    return Math.max(fb, 0L);
-                }
-                return ts;
-            }
-
-            ZonedDateTime zdt = LocalDateTime.parse(tickDt, FLEX_DTF).atZone(IST);
-            long parsed = zdt.toInstant().toEpochMilli();
-            if (parsed <= 0) {
-                long fb = record.timestamp() > 0 ? record.timestamp() : previousTimestamp;
-                return Math.max(fb, 0L);
-            }
-            return parsed;
-
-        } catch (DateTimeParseException | NumberFormatException e) {
-            long fallback = record.timestamp() > 0 ? record.timestamp() : previousTimestamp;
-            return Math.max(fallback, 0L);
-        }
     }
 }
 

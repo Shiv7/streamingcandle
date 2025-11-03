@@ -30,14 +30,19 @@ public final class MultiMinuteOffsetTimestampExtractor implements TimestampExtra
 
         Object v = record.value();
         if (v instanceof EnrichedCandlestick c) {
-            // Prefer START time to ensure consistent roll-up grouping across offsets (e.g., 2m on NSE)
-            // Using END can split adjacent 1m candles into different 2m windows when offset != 0
-            if (c.getWindowStartMillis() > 0L) {
-                baseTs = c.getWindowStartMillis();
-            } else if (c.getWindowEndMillis() > 0L) {
-                baseTs = c.getWindowEndMillis();
-            } else if (record.timestamp() > 0L) {
+            // FIXED: Use Kafka record timestamp directly!
+            // When a 1m candle window closes, Kafka Streams assigns the record timestamp = window END time
+            // This is exactly what we need for immediate window closure in multi-minute aggregation
+            // No more 60-second wait for the next candle!
+
+            if (record.timestamp() > 0L) {
                 baseTs = record.timestamp();
+            } else if (c.getWindowEndMillis() > 0L) {
+                // Fallback to candle's END time if Kafka timestamp missing
+                baseTs = c.getWindowEndMillis();
+            } else if (c.getWindowStartMillis() > 0L) {
+                // Last resort: START time
+                baseTs = c.getWindowStartMillis();
             } else {
                 baseTs = partitionTime;
             }
