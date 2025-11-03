@@ -5,7 +5,6 @@ import com.kotsin.consumer.model.EnrichedCandlestick;
 import com.kotsin.consumer.model.TickData;
 import com.kotsin.consumer.service.InstrumentMetadataService;
 import com.kotsin.consumer.timeExtractor.MultiMinuteOffsetTimestampExtractor;
-import com.kotsin.consumer.timeExtractor.TickTimestampExtractorWithOffset;
 import com.kotsin.consumer.timeExtractor.TickTimestampExtractorWithWindowOffset;
 import com.kotsin.consumer.transformers.CumToDeltaTransformer;
 import com.kotsin.consumer.util.MarketTimeAligner;

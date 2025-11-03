@@ -8,19 +8,10 @@ import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Component;
 
 import java.io.File;
-import java.time.ZoneId;
-import java.time.ZonedDateTime;
 import java.util.Properties;
 
 @Component
 public class KafkaConfig {
-
-    public static final ZonedDateTime START_3RD_APRIL_915 = ZonedDateTime.of(
-            2025, 4, 3, 9, 15, 0, 0, ZoneId.of("Asia/Kolkata")
-    );
-    public static final ZonedDateTime END_3RD_APRIL_1530 = ZonedDateTime.of(
-            2025, 4, 3, 15, 30, 0, 0, ZoneId.of("Asia/Kolkata")
-    );
 
     // All configuration injected from application.properties
     @Value("${spring.kafka.bootstrap-servers:localhost:9092}")

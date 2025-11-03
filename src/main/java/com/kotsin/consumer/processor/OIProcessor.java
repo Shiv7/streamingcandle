@@ -19,7 +19,6 @@ import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.stereotype.Component;
 import org.springframework.beans.factory.annotation.Value;
-import com.kotsin.consumer.timeExtractor.OITimestampExtractorWithOffset;
 import com.kotsin.consumer.timeExtractor.OITimestampExtractorWithWindowOffset;
 import com.kotsin.consumer.service.InstrumentMetadataService;
 import com.kotsin.consumer.timeExtractor.MultiMinuteOffsetTimestampExtractorForOI;
