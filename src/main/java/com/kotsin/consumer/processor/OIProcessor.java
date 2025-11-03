@@ -20,6 +20,7 @@ import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.stereotype.Component;
 import org.springframework.beans.factory.annotation.Value;
 import com.kotsin.consumer.timeExtractor.OITimestampExtractorWithOffset;
+import com.kotsin.consumer.timeExtractor.OITimestampExtractorWithWindowOffset;
 import com.kotsin.consumer.service.InstrumentMetadataService;
 import com.kotsin.consumer.timeExtractor.MultiMinuteOffsetTimestampExtractorForOI;
 
@@ -81,11 +82,8 @@ public class OIProcessor {
         Properties props = kafkaConfig.getStreamProperties(appId + "-" + windowSize + "m");
         StreamsBuilder builder = new StreamsBuilder();
 
-        if (windowSize == 1) {
-            processOIData(builder, inputTopic, outputTopic);
-        } else {
-            processMultiMinuteOI(builder, inputTopic, outputTopic, windowSize);
-        }
+        // Build all timeframes directly from OI updates (Option A)
+        processOIData(builder, inputTopic, outputTopic, windowSize);
 
         KafkaStreams streams = new KafkaStreams(builder.build(), props);
         streamsInstances.put(instanceKey, streams);
@@ -140,12 +138,12 @@ public class OIProcessor {
         this.instrumentMetadataService = instrumentMetadataService;
     }
 
-    private void processOIData(StreamsBuilder builder, String inputTopic, String outputTopic) {
+    private void processOIData(StreamsBuilder builder, String inputTopic, String outputTopic, int windowSizeMinutes) {
         // 1) Read OI updates
         KStream<String, OpenInterest> raw = builder.stream(
                 inputTopic,
                 Consumed.with(Serdes.String(), OpenInterest.serde())
-                        .withTimestampExtractor(new OITimestampExtractorWithOffset())
+                        .withTimestampExtractor(new OITimestampExtractorWithWindowOffset(windowSizeMinutes))
         );
 
         // 2) Extract token from composite key (e.g., "N|52343" -> "52343")
@@ -181,8 +179,8 @@ public class OIProcessor {
 
         // 3) Window & aggregate OI metrics
         TimeWindows windows = TimeWindows.ofSizeAndGrace(
-                Duration.ofMinutes(1),
-                Duration.ofSeconds(Math.max(0, graceSeconds1m))
+                Duration.ofMinutes(windowSizeMinutes),
+                Duration.ofSeconds(Math.max(0, windowSizeMinutes == 1 ? graceSeconds1m : graceSecondsMulti))
         );
 
         KTable<Windowed<String>, OIAggregate> oiTable = keyed
@@ -194,7 +192,7 @@ public class OIProcessor {
                             aggregate.updateWithOI(oi);
                             return aggregate;
                         },
-                        Materialized.<String, OIAggregate, WindowStore<Bytes, byte[]>>as("oi-aggregate-store")
+                        Materialized.<String, OIAggregate, WindowStore<Bytes, byte[]>>as("oi-aggregate-store-" + windowSizeMinutes + "m")
                                 .withKeySerde(Serdes.String())
                                 .withValueSerde(OIAggregate.serde())
                 )
@@ -204,14 +202,14 @@ public class OIProcessor {
                 .mapValues((windowedKey, aggregate) -> {
                     // Calculate derived metrics on window close
                     aggregate.calculateDerivedMetrics();
-                    int offMin = com.kotsin.consumer.util.MarketTimeAligner.getWindowOffsetMinutes(aggregate.getExchange(), 1);
+                    int offMin = com.kotsin.consumer.util.MarketTimeAligner.getWindowOffsetMinutes(aggregate.getExchange(), windowSizeMinutes);
                     long offMs = offMin * 60_000L;
                     aggregate.setWindowStartMillis(windowedKey.window().start() - offMs);
                     aggregate.setWindowEndMillis(windowedKey.window().end() - offMs);
                     return aggregate;
                 })
                 .map((windowedKey, aggregate) -> {
-                    logOIDetails(aggregate, 1);
+                    logOIDetails(aggregate, windowSizeMinutes);
                     return KeyValue.pair(windowedKey.key(), aggregate);
                 })
                 .to(outputTopic, Produced.with(Serdes.String(), OIAggregate.serde()));
@@ -220,52 +218,7 @@ public class OIProcessor {
     /**
      * Aggregate multi-minute OI metrics from 1-minute metrics.
      */
-    private void processMultiMinuteOI(StreamsBuilder builder,
-                                      String inputTopic,
-                                      String outputTopic,
-                                      int windowSize) {
-
-        KStream<String, OIAggregate> mins = builder.stream(
-                inputTopic,
-                Consumed.with(Serdes.String(), OIAggregate.serde())
-                        .withTimestampExtractor(new MultiMinuteOffsetTimestampExtractorForOI(windowSize))
-        );
-
-        TimeWindows windows = TimeWindows.ofSizeAndGrace(
-                Duration.ofMinutes(windowSize),
-                Duration.ofSeconds(Math.max(0, graceSecondsMulti))
-        );
-
-        KTable<Windowed<String>, OIAggregate> aggregated = mins
-                .groupByKey(Grouped.with(Serdes.String(), OIAggregate.serde()))
-                .windowedBy(windows)
-                .aggregate(
-                        OIAggregate::new,
-                        (token, oiAgg, aggregate) -> {
-                            aggregate.updateAggregate(oiAgg);
-                            return aggregate;
-                        },
-                        Materialized.<String, OIAggregate, WindowStore<Bytes, byte[]>>as("agg-oi-store-" + windowSize + "m")
-                                .withKeySerde(Serdes.String())
-                                .withValueSerde(OIAggregate.serde())
-                )
-                .suppress(Suppressed.untilWindowCloses(Suppressed.BufferConfig.unbounded()));
-
-        aggregated.toStream()
-                .mapValues((windowedKey, aggregate) -> {
-                    aggregate.calculateDerivedMetrics();
-                    int offMin = com.kotsin.consumer.util.MarketTimeAligner.getWindowOffsetMinutes(aggregate.getExchange(), windowSize);
-                    long offMs = offMin * 60_000L;
-                    aggregate.setWindowStartMillis(windowedKey.window().start() - offMs);
-                    aggregate.setWindowEndMillis(windowedKey.window().end() - offMs);
-                    return aggregate;
-                })
-                .map((wk, aggregate) -> {
-                    logOIDetails(aggregate, windowSize);
-                    return KeyValue.pair(wk.key(), aggregate);
-                })
-                .to(outputTopic, Produced.with(Serdes.String(), OIAggregate.serde()));
-    }
+    // Multi-minute from 1m rollup is no longer used (Option A)
 
     /**
      * Log OI details for debugging.
@@ -302,21 +255,21 @@ public class OIProcessor {
 
             String baseAppId = "prod-unified-oi";
             process(baseAppId, "OpenInterest", "oi-metrics-1m", 1);
-            Thread.sleep(1000);
+            Thread.sleep(500);
 
-            process(baseAppId, "oi-metrics-1m", "oi-metrics-2m", 2);
-            Thread.sleep(1000);
+            process(baseAppId, "OpenInterest", "oi-metrics-2m", 2);
+            Thread.sleep(500);
 
-            process(baseAppId, "oi-metrics-1m", "oi-metrics-3m", 3);
-            Thread.sleep(1000);
+            process(baseAppId, "OpenInterest", "oi-metrics-3m", 3);
+            Thread.sleep(500);
 
-            process(baseAppId, "oi-metrics-1m", "oi-metrics-5m", 5);
-            Thread.sleep(1000);
+            process(baseAppId, "OpenInterest", "oi-metrics-5m", 5);
+            Thread.sleep(500);
 
-            process(baseAppId, "oi-metrics-1m", "oi-metrics-15m", 15);
-            Thread.sleep(1000);
+            process(baseAppId, "OpenInterest", "oi-metrics-15m", 15);
+            Thread.sleep(500);
 
-            process(baseAppId, "oi-metrics-1m", "oi-metrics-30m", 30);
+            process(baseAppId, "OpenInterest", "oi-metrics-30m", 30);
 
             LOGGER.info("✅ All OI Processors started successfully");
             logStreamStates();

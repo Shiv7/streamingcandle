@@ -20,8 +20,7 @@ import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.stereotype.Component;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.beans.factory.annotation.Value;
-import com.kotsin.consumer.timeExtractor.OrderbookTimestampExtractorWithOffset;
-import com.kotsin.consumer.timeExtractor.MultiMinuteOffsetTimestampExtractorForOrderbook;
+import com.kotsin.consumer.timeExtractor.OrderbookTimestampExtractorWithWindowOffset;
 import com.kotsin.consumer.service.InstrumentMetadataService;
 
 import java.time.*;
@@ -113,11 +112,8 @@ public class OrderbookProcessor {
         );
         com.kotsin.consumer.model.OrderbookAggregate.setSpoofPriceEpsilonTicks(spoofPriceEpsilonTicks);
 
-        if (windowSize == 1) {
-            processOrderbookData(builder, inputTopic, outputTopic);
-        } else {
-            processMultiMinuteOrderbook(builder, inputTopic, outputTopic, windowSize);
-        }
+        // Build all timeframes directly from orderbook snapshots (Option A)
+        processOrderbookData(builder, inputTopic, outputTopic, windowSize);
 
         KafkaStreams streams = new KafkaStreams(builder.build(), props);
         streamsInstances.put(instanceKey, streams);
@@ -166,12 +162,12 @@ public class OrderbookProcessor {
     /**
      * Process raw orderbook snapshots into 1-minute microstructure signals.
      */
-    private void processOrderbookData(StreamsBuilder builder, String inputTopic, String outputTopic) {
+    private void processOrderbookData(StreamsBuilder builder, String inputTopic, String outputTopic, int windowSizeMinutes) {
         // 1) Read orderbook snapshots
         KStream<String, OrderBookSnapshot> raw = builder.stream(
                 inputTopic,
                 Consumed.with(Serdes.String(), OrderBookSnapshot.serde())
-                        .withTimestampExtractor(new OrderbookTimestampExtractorWithOffset())
+                        .withTimestampExtractor(new OrderbookTimestampExtractorWithWindowOffset(windowSizeMinutes))
         );
 
         // 2) Composite key exch:exchType:token to avoid collisions
@@ -195,8 +191,8 @@ public class OrderbookProcessor {
 
         // 3) Window & aggregate microstructure metrics
         TimeWindows windows = TimeWindows.ofSizeAndGrace(
-                Duration.ofMinutes(1),
-                Duration.ofSeconds(Math.max(0, graceSeconds1m))
+                Duration.ofMinutes(windowSizeMinutes),
+                Duration.ofSeconds(Math.max(0, windowSizeMinutes == 1 ? graceSeconds1m : graceSecondsMulti))
         );
 
         KTable<Windowed<String>, OrderbookAggregate> orderbookTable = keyed
@@ -212,7 +208,7 @@ public class OrderbookProcessor {
                             aggregate.updateWithSnapshot(snapshot);
                             return aggregate;
                         },
-                        Materialized.<String, OrderbookAggregate, WindowStore<Bytes, byte[]>>as("orderbook-aggregate-store")
+                        Materialized.<String, OrderbookAggregate, WindowStore<Bytes, byte[]>>as("orderbook-aggregate-store-" + windowSizeMinutes + "m")
                                 .withKeySerde(Serdes.String())
                                 .withValueSerde(OrderbookAggregate.serde())
                 )
@@ -222,11 +218,11 @@ public class OrderbookProcessor {
                 .map((windowedKey, aggregate) -> {
                     // Remove alignment shift for display
                     String exch = aggregate.getExchange();
-                    int offMin = com.kotsin.consumer.util.MarketTimeAligner.getWindowOffsetMinutes(exch, 1);
+                    int offMin = com.kotsin.consumer.util.MarketTimeAligner.getWindowOffsetMinutes(exch, windowSizeMinutes);
                     long offMs = offMin * 60_000L;
                     aggregate.setWindowStartMillis(windowedKey.window().start() - offMs);
                     aggregate.setWindowEndMillis(windowedKey.window().end() - offMs);
-                    logOrderbookDetails(aggregate, 1);
+                    logOrderbookDetails(aggregate, windowSizeMinutes);
                     return KeyValue.pair(windowedKey.key(), aggregate);
                 })
                 .to(outputTopic, Produced.with(Serdes.String(), OrderbookAggregate.serde()));
@@ -236,49 +232,7 @@ public class OrderbookProcessor {
      * Aggregate multi-minute orderbook signals from 1-minute signals.
      * Note: Orderbook aggregates don't merge like candles - we keep the latest snapshot per window
      */
-    private void processMultiMinuteOrderbook(StreamsBuilder builder,
-                                             String inputTopic,
-                                             String outputTopic,
-                                             int windowSize) {
-
-        KStream<String, OrderbookAggregate> mins = builder.stream(
-                inputTopic,
-                Consumed.with(Serdes.String(), OrderbookAggregate.serde())
-                        .withTimestampExtractor(new MultiMinuteOffsetTimestampExtractorForOrderbook(windowSize))
-        );
-
-        TimeWindows windows = TimeWindows.ofSizeAndGrace(
-                Duration.ofMinutes(windowSize),
-                Duration.ofSeconds(Math.max(0, graceSecondsMulti))
-        );
-
-        // For orderbook: aggregate by merging accumulators across 1m into multi-minute
-        KTable<Windowed<String>, OrderbookAggregate> aggregated = mins
-                .groupByKey(Grouped.with(Serdes.String(), OrderbookAggregate.serde()))
-                .windowedBy(windows)
-                .aggregate(
-                        OrderbookAggregate::new,
-                        (key, value, aggregate) -> {
-                            aggregate.merge(value);
-                            return aggregate;
-                        },
-                        Materialized.<String, OrderbookAggregate, WindowStore<Bytes, byte[]>>as("agg-orderbook-store-" + windowSize + "m")
-                                .withKeySerde(Serdes.String())
-                                .withValueSerde(OrderbookAggregate.serde())
-                )
-                .suppress(Suppressed.untilWindowCloses(Suppressed.BufferConfig.unbounded()));
-
-        aggregated.toStream()
-                .map((wk, aggregate) -> {
-                    int offMin = com.kotsin.consumer.util.MarketTimeAligner.getWindowOffsetMinutes(aggregate.getExchange(), windowSize);
-                    long offMs = offMin * 60_000L;
-                    aggregate.setWindowStartMillis(wk.window().start() - offMs);
-                    aggregate.setWindowEndMillis(wk.window().end() - offMs);
-                    logOrderbookDetails(aggregate, windowSize);
-                    return KeyValue.pair(wk.key(), aggregate);
-                })
-                .to(outputTopic, Produced.with(Serdes.String(), OrderbookAggregate.serde()));
-    }
+    // Multi-minute from 1m rollup is no longer used (Option A)
 
     /**
      * Log orderbook details for debugging.
@@ -316,21 +270,21 @@ public class OrderbookProcessor {
 
             String baseAppId = "prod-unified-orderbook";
             process(baseAppId, "Orderbook", "orderbook-signals-1m", 1);
-            Thread.sleep(1000);
+            Thread.sleep(500);
 
-            process(baseAppId, "orderbook-signals-1m", "orderbook-signals-2m", 2);
-            Thread.sleep(1000);
+            process(baseAppId, "Orderbook", "orderbook-signals-2m", 2);
+            Thread.sleep(500);
 
-            process(baseAppId, "orderbook-signals-1m", "orderbook-signals-3m", 3);
-            Thread.sleep(1000);
+            process(baseAppId, "Orderbook", "orderbook-signals-3m", 3);
+            Thread.sleep(500);
 
-            process(baseAppId, "orderbook-signals-1m", "orderbook-signals-5m", 5);
-            Thread.sleep(1000);
+            process(baseAppId, "Orderbook", "orderbook-signals-5m", 5);
+            Thread.sleep(500);
 
-            process(baseAppId, "orderbook-signals-1m", "orderbook-signals-15m", 15);
-            Thread.sleep(1000);
+            process(baseAppId, "Orderbook", "orderbook-signals-15m", 15);
+            Thread.sleep(500);
 
-            process(baseAppId, "orderbook-signals-1m", "orderbook-signals-30m", 30);
+            process(baseAppId, "Orderbook", "orderbook-signals-30m", 30);
 
             LOGGER.info("✅ All Orderbook Processors started successfully");
             logStreamStates();

@@ -6,6 +6,7 @@ import com.kotsin.consumer.model.TickData;
 import com.kotsin.consumer.service.InstrumentMetadataService;
 import com.kotsin.consumer.timeExtractor.MultiMinuteOffsetTimestampExtractor;
 import com.kotsin.consumer.timeExtractor.TickTimestampExtractorWithOffset;
+import com.kotsin.consumer.timeExtractor.TickTimestampExtractorWithWindowOffset;
 import com.kotsin.consumer.transformers.CumToDeltaTransformer;
 import com.kotsin.consumer.util.MarketTimeAligner;
 
@@ -124,11 +125,8 @@ public class CandlestickProcessor {
         Properties props = kafkaConfig.getStreamProperties(appId + "-" + windowSize + "m");
         StreamsBuilder builder = new StreamsBuilder();
 
-        if (windowSize == 1) {
-            processTickData(builder, inputTopic, outputTopic);
-        } else {
-            processMultiMinuteCandlestick(builder, inputTopic, outputTopic, windowSize);
-        }
+        // Option A: build all timeframes directly from ticks
+        processTickData(builder, inputTopic, outputTopic, windowSize);
 
         KafkaStreams streams = new KafkaStreams(builder.build(), props);
 
@@ -196,7 +194,7 @@ public class CandlestickProcessor {
      * Process raw tick data into 1-minute ENRICHED candles.
      * CRITICAL: Uses proper grace period and NSE alignment.
      */
-    private void processTickData(StreamsBuilder builder, String inputTopic, String outputTopic) {
+    private void processTickData(StreamsBuilder builder, String inputTopic, String outputTopic, int windowSizeMinutes) {
         // Configure adaptive parameters for the candle model (once per JVM)
         EnrichedCandlestick.configure(
                 imbEwmaAlpha,
@@ -206,8 +204,8 @@ public class CandlestickProcessor {
                 imbZScore
         );
         // State store: max cumulative volume per symbol (for delta conversion)
-        final String DELTA_STORE = "max-cum-vol-per-sym";
-        final String VPIN_STORE = "vpin-state-store";
+        final String DELTA_STORE = "max-cum-vol-per-sym-" + windowSizeMinutes + "m";
+        final String VPIN_STORE = "vpin-state-store-" + windowSizeMinutes + "m";
         builder.addStateStore(Stores.keyValueStoreBuilder(
                 Stores.persistentKeyValueStore(DELTA_STORE),
                 Serdes.String(), Serdes.Long()));
@@ -220,7 +218,7 @@ public class CandlestickProcessor {
         KStream<String, TickData> raw = builder.stream(
                 inputTopic,
                 Consumed.with(Serdes.String(), TickData.serde())
-                        .withTimestampExtractor(new TickTimestampExtractorWithOffset())
+                        .withTimestampExtractor(new TickTimestampExtractorWithWindowOffset(windowSizeMinutes))
         );
 
         // 2) Stable, collision-free key per instrument: exch:exchType:token
@@ -242,8 +240,8 @@ public class CandlestickProcessor {
         // 4) Window & aggregate with deterministic OHLC and enriched features
         // Configurable grace period (default 5s) to cap 1m bar delay
         TimeWindows windows = TimeWindows.ofSizeAndGrace(
-                Duration.ofMinutes(1),
-                Duration.ofSeconds(Math.max(0, graceSeconds1m))
+                Duration.ofMinutes(windowSizeMinutes),
+                Duration.ofSeconds(Math.max(0, windowSizeMinutes == 1 ? graceSeconds1m : graceSecondsMulti))
         );
 
         KTable<Windowed<String>, EnrichedCandlestick> candlestickTable = ticks
@@ -257,7 +255,7 @@ public class CandlestickProcessor {
                             candle.updateWithDelta(tick);
                             return candle;
                         },
-                        Materialized.<String, EnrichedCandlestick, WindowStore<Bytes, byte[]>>as("tick-candlestick-store")
+                        Materialized.<String, EnrichedCandlestick, WindowStore<Bytes, byte[]>>as("tick-candlestick-store-" + windowSizeMinutes + "m")
                                 .withKeySerde(Serdes.String())
                                 .withValueSerde(EnrichedCandlestick.serde())
                 )
@@ -266,20 +264,8 @@ public class CandlestickProcessor {
                 ));
 
         candlestickTable.toStream()
-                // Ensure 1m candles carry true (de-offset) window boundaries for downstream consumers
-                .mapValues((wk, candle) -> {
-                    try {
-                        int offMin = MarketTimeAligner.getWindowOffsetMinutes(candle.getExchange(), 1);
-                        long offMs = offMin * 60_000L;
-                        candle.setWindowStartMillis(wk.window().start() - offMs);
-                        candle.setWindowEndMillis(wk.window().end() - offMs);
-                    } catch (Exception e) {
-                        LOGGER.debug("Failed to set window boundaries on 1m candle: {}", e.toString());
-                    }
-                    return candle;
-                })
                 .transformValues(() -> new com.kotsin.consumer.transformers.VpinFinalizer(
-                        VPIN_STORE, vpinInitialBucketSize, vpinAdaptiveAlpha, vpinMaxBuckets
+                        VPIN_STORE, vpinInitialBucketSize, vpinAdaptiveAlpha, vpinMaxBuckets, windowSizeMinutes
                 ), VPIN_STORE)
                 .mapValues((windowedKey, candle) -> {
                     double tick = instrumentMetadataService.getTickSize(candle.getExchange(), candle.getExchangeType(), candle.getScripCode(), candle.getCompanyName(), defaultTickSize);
@@ -417,22 +403,23 @@ public class CandlestickProcessor {
             LOGGER.info("🚀 Starting Enriched Candlestick Processor with bootstrap servers: {}",
                     kafkaConfig.getBootstrapServers());
 
+            // Build all timeframes directly from ticks (Option A)
             process("prod-unified-ohlcv", "forwardtesting-data", "candle-ohlcv-1m", 1);
-            Thread.sleep(1000);
+            Thread.sleep(500);
 
-            process("prod-unified-ohlcv", "candle-ohlcv-1m", "candle-ohlcv-2m", 2);
-            Thread.sleep(1000);
+            process("prod-unified-ohlcv", "forwardtesting-data", "candle-ohlcv-2m", 2);
+            Thread.sleep(500);
 
-            process("prod-unified-ohlcv", "candle-ohlcv-1m", "candle-ohlcv-3m", 3);
-            Thread.sleep(1000);
+            process("prod-unified-ohlcv", "forwardtesting-data", "candle-ohlcv-3m", 3);
+            Thread.sleep(500);
 
-            process("prod-unified-ohlcv", "candle-ohlcv-1m", "candle-ohlcv-5m", 5);
-            Thread.sleep(1000);
+            process("prod-unified-ohlcv", "forwardtesting-data", "candle-ohlcv-5m", 5);
+            Thread.sleep(500);
 
-            process("prod-unified-ohlcv", "candle-ohlcv-1m", "candle-ohlcv-15m", 15);
-            Thread.sleep(1000);
+            process("prod-unified-ohlcv", "forwardtesting-data", "candle-ohlcv-15m", 15);
+            Thread.sleep(500);
 
-            process("prod-unified-ohlcv", "candle-ohlcv-1m", "candle-ohlcv-30m", 30);
+            process("prod-unified-ohlcv", "forwardtesting-data", "candle-ohlcv-30m", 30);
 
             LOGGER.info("✅ All Enriched Candlestick Processors started successfully");
             logStreamStates();

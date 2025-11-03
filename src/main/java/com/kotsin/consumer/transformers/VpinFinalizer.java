@@ -17,6 +17,7 @@ public class VpinFinalizer implements ValueTransformerWithKey<Windowed<String>, 
     private final double adaptiveAlpha;
     private final int maxBuckets;
     private KeyValueStore<String, VpinState> store;
+    private final int windowSizeMinutes;
 
     public VpinFinalizer(String storeName, double initialBucketSize, double adaptiveAlpha, int maxBuckets) {
         this.store = null;
@@ -24,6 +25,16 @@ public class VpinFinalizer implements ValueTransformerWithKey<Windowed<String>, 
         this.initialBucketSize = initialBucketSize;
         this.adaptiveAlpha = adaptiveAlpha;
         this.maxBuckets = maxBuckets;
+        this.windowSizeMinutes = 1; // Backward compatibility default
+    }
+
+    public VpinFinalizer(String storeName, double initialBucketSize, double adaptiveAlpha, int maxBuckets, int windowSizeMinutes) {
+        this.store = null;
+        this.storeName = storeName;
+        this.initialBucketSize = initialBucketSize;
+        this.adaptiveAlpha = adaptiveAlpha;
+        this.maxBuckets = maxBuckets;
+        this.windowSizeMinutes = windowSizeMinutes <= 0 ? 1 : windowSizeMinutes;
     }
 
     @Override
@@ -79,7 +90,7 @@ public class VpinFinalizer implements ValueTransformerWithKey<Windowed<String>, 
         candle.setVpinCurrentBucketBuyVolume(s.currentBucketBuyVolume);
 
         // Remove exchange offset from window times for display
-        int offMin = MarketTimeAligner.getWindowOffsetMinutes(candle.getExchange(), 1);
+        int offMin = MarketTimeAligner.getWindowOffsetMinutes(candle.getExchange(), windowSizeMinutes);
         long offMs = offMin * 60_000L;
         candle.setWindowStartMillis(windowedKey.window().start() - offMs);
         candle.setWindowEndMillis(windowedKey.window().end() - offMs);
