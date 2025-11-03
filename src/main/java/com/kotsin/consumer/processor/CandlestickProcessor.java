@@ -191,6 +191,85 @@ public class CandlestickProcessor {
     }
 
     /**
+     * Wrapper to start multi-minute candlestick aggregation from 1-minute candles.
+     */
+    public void processMultiMinuteCandlestick(String appId, String inputTopic, String outputTopic, int windowSize) {
+        // Ensure there will be no duplicate streams
+        String instanceKey = appId + "-" + windowSize + "m";
+        if (streamsInstances.containsKey(instanceKey)) {
+            LOGGER.warn("Streams app {} already running. Skipping duplicate start.", instanceKey);
+            return;
+        }
+
+        Properties props = kafkaConfig.getStreamProperties(appId + "-" + windowSize + "m");
+        StreamsBuilder builder = new StreamsBuilder();
+
+        // Build multi-minute candles from 1-minute candles
+        buildMultiMinuteCandlestick(builder, inputTopic, outputTopic, windowSize);
+
+        KafkaStreams streams = new KafkaStreams(builder.build(), props);
+
+        // Store streams instance BEFORE starting
+        streamsInstances.put(instanceKey, streams);
+
+        // State listener for monitoring
+        streams.setStateListener((newState, oldState) -> {
+            LOGGER.info("Kafka Streams state transition for {}-minute candles (cascaded): {} -> {}",
+                    windowSize, oldState, newState);
+
+            if (newState == KafkaStreams.State.ERROR) {
+                LOGGER.error("❌ Stream {} entered ERROR state!", instanceKey);
+            } else if (newState == KafkaStreams.State.RUNNING) {
+                LOGGER.info("✅ Stream {} is now RUNNING (cascaded)", instanceKey);
+            } else if (newState == KafkaStreams.State.REBALANCING) {
+                LOGGER.warn("⚠️ Stream {} is REBALANCING", instanceKey);
+            }
+        });
+
+        // Exception handler
+        streams.setUncaughtExceptionHandler((Throwable exception) -> {
+            LOGGER.error("❌ Uncaught exception in {}-minute candle stream (cascaded): ", windowSize, exception);
+
+            String msg = exception.getMessage();
+            if (msg != null && (msg.contains("timestamp") || msg.contains("Serialization"))) {
+                LOGGER.error("🔥 CRITICAL: Timestamp or serialization error. Shutting down.");
+                try {
+                    streamsInstances.remove(instanceKey);
+                } catch (Exception e) {
+                    LOGGER.error("Error during cleanup: ", e);
+                }
+                return StreamsUncaughtExceptionHandler.StreamThreadExceptionResponse.SHUTDOWN_APPLICATION;
+            }
+
+            // For other exceptions, try to recover
+            LOGGER.warn("⚠️ Attempting to recover by replacing stream thread...");
+            return StreamsUncaughtExceptionHandler.StreamThreadExceptionResponse.REPLACE_THREAD;
+        });
+
+        // Start streams
+        try {
+            streams.start();
+            LOGGER.info("✅ Started Kafka Streams application (cascaded): {}, window size: {}m", instanceKey, windowSize);
+        } catch (Exception e) {
+            LOGGER.error("❌ Failed to start Kafka Streams for {}: ", instanceKey, e);
+            streamsInstances.remove(instanceKey);
+            throw new RuntimeException("Failed to start Kafka Streams for " + instanceKey, e);
+        }
+
+        // Shutdown hook
+        Runtime.getRuntime().addShutdownHook(new Thread(() -> {
+            LOGGER.info("🛑 Shutting down {}-minute candle stream (cascaded)", windowSize);
+            try {
+                streams.close(Duration.ofSeconds(30));
+                streamsInstances.remove(instanceKey);
+                LOGGER.info("✅ Successfully shut down {}-minute candle stream (cascaded)", windowSize);
+            } catch (Exception e) {
+                LOGGER.error("❌ Error during shutdown: ", e);
+            }
+        }, "shutdown-hook-cascaded-" + instanceKey));
+    }
+
+    /**
      * Process raw tick data into 1-minute ENRICHED candles.
      * CRITICAL: Uses proper grace period and NSE alignment.
      */
@@ -309,10 +388,10 @@ public class CandlestickProcessor {
      * Aggregates multi-minute candles from 1-minute candles with CORRECT NSE alignment.
      * CRITICAL: Uses MarketTimeAligner for NSE 9:15 AM alignment
      */
-    private void processMultiMinuteCandlestick(StreamsBuilder builder,
-                                               String inputTopic,
-                                               String outputTopic,
-                                               int windowSize) {
+    private void buildMultiMinuteCandlestick(StreamsBuilder builder,
+                                             String inputTopic,
+                                             String outputTopic,
+                                             int windowSize) {
 
         KStream<String, EnrichedCandlestick> mins = builder.stream(
                 inputTopic,
@@ -403,25 +482,27 @@ public class CandlestickProcessor {
             LOGGER.info("🚀 Starting Enriched Candlestick Processor with bootstrap servers: {}",
                     kafkaConfig.getBootstrapServers());
 
-            // Build all timeframes directly from ticks (Option A)
+            // Build ONLY 1-minute candles from raw ticks (high precision, low grace period)
             process("prod-unified-ohlcv", "forwardtesting-data", "candle-ohlcv-1m", 1);
             Thread.sleep(500);
 
-            process("prod-unified-ohlcv", "forwardtesting-data", "candle-ohlcv-2m", 2);
+            // Build multi-minute candles from 1-minute candles (cascading aggregation)
+            // This ensures accurate open/close values without tick-level lag issues
+            processMultiMinuteCandlestick("prod-unified-2m", "candle-ohlcv-1m", "candle-ohlcv-2m", 2);
             Thread.sleep(500);
 
-            process("prod-unified-ohlcv", "forwardtesting-data", "candle-ohlcv-3m", 3);
+            processMultiMinuteCandlestick("prod-unified-3m", "candle-ohlcv-1m", "candle-ohlcv-3m", 3);
             Thread.sleep(500);
 
-            process("prod-unified-ohlcv", "forwardtesting-data", "candle-ohlcv-5m", 5);
+            processMultiMinuteCandlestick("prod-unified-5m", "candle-ohlcv-1m", "candle-ohlcv-5m", 5);
             Thread.sleep(500);
 
-            process("prod-unified-ohlcv", "forwardtesting-data", "candle-ohlcv-15m", 15);
+            processMultiMinuteCandlestick("prod-unified-15m", "candle-ohlcv-1m", "candle-ohlcv-15m", 15);
             Thread.sleep(500);
 
-            process("prod-unified-ohlcv", "forwardtesting-data", "candle-ohlcv-30m", 30);
+            processMultiMinuteCandlestick("prod-unified-30m", "candle-ohlcv-1m", "candle-ohlcv-30m", 30);
 
-            LOGGER.info("✅ All Enriched Candlestick Processors started successfully");
+            LOGGER.info("✅ All Enriched Candlestick Processors started successfully (1m from ticks, rest cascaded)");
             logStreamStates();
 
         } catch (Exception e) {
