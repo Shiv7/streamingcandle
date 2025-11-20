@@ -323,6 +323,13 @@ public class CandlestickProcessor {
         );
 
         KTable<Windowed<String>, EnrichedCandlestick> candlestickTable = ticks
+                .peek((sym, tick) -> {
+                    // 🎯 OPTION TRACKING: Log every derivative tick
+                    if (tick != null && "D".equalsIgnoreCase(tick.getExchangeType())) {
+                        LOGGER.info("🎫 [TICK-RECV] Derivative tick | scrip={} name={} price={} vol={}", 
+                            tick.getScripCode(), tick.getCompanyName(), tick.getLastRate(), tick.getDeltaVolume());
+                    }
+                })
                 .filter((sym, tick) -> withinTradingHours(tick))
                 .groupByKey(Grouped.with(Serdes.String(), TickData.serde()))
                 .windowedBy(windows)
@@ -349,6 +356,13 @@ public class CandlestickProcessor {
                     double tick = instrumentMetadataService.getTickSize(candle.getExchange(), candle.getExchangeType(), candle.getScripCode(), candle.getCompanyName(), defaultTickSize);
                     candle.rebinVolumeProfile(tick);
                     return candle;
+                })
+                .peek((windowedKey, candle) -> {
+                    // 🎯 OPTION TRACKING: Log before Kafka emission
+                    if (candle != null && "D".equalsIgnoreCase(candle.getExchangeType())) {
+                        LOGGER.info("📤 [KAFKA-EMIT] Emitting to {} | scrip={} name={} close={}", 
+                            outputTopic, candle.getScripCode(), candle.getCompanyName(), candle.getClose());
+                    }
                 })
                 .map((windowedKey, candle) -> KeyValue.pair(windowedKey.key(), candle))
                 .to(outputTopic, Produced.with(Serdes.String(), EnrichedCandlestick.serde()));
@@ -470,6 +484,14 @@ public class CandlestickProcessor {
                 windowEnd.format(DateTimeFormatter.ofPattern("HH:mm:ss")),
                 candle.getOpen(), candle.getHigh(), candle.getLow(), candle.getClose(), 
                 candle.getVolume(), candle.getBuyVolume(), candle.getSellVolume(), candle.getVwap());
+        
+        // 🎯 OPTION TRACKING: Log option candles
+        if ("D".equalsIgnoreCase(candle.getExchangeType())) {
+            LOGGER.info("📊 [CANDLE-EMIT] Derivative candle | scrip={} name={} OHLC={}/{}/{}/{} vol={}", 
+                candle.getScripCode(), candle.getCompanyName(), 
+                candle.getOpen(), candle.getHigh(), candle.getLow(), candle.getClose(),
+                candle.getVolume());
+        }
     }
 
     /**
