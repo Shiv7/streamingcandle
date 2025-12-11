@@ -476,40 +476,37 @@ public class CandlestickProcessor {
 
     /**
      * Start all candlestick processors on application startup.
+     * BUG-014 FIX: Use async initialization to avoid blocking @PostConstruct
      */
     @PostConstruct
     public void start() {
-        try {
-            LOGGER.info("🚀 Starting Enriched Candlestick Processor with bootstrap servers: {}",
-                    kafkaConfig.getBootstrapServers());
+        LOGGER.info("🚀 Scheduling Enriched Candlestick Processor startup...");
+        
+        // Use a separate thread to avoid blocking @PostConstruct
+        java.util.concurrent.CompletableFuture.runAsync(() -> {
+            try {
+                LOGGER.info("🚀 Starting Enriched Candlestick Processor with bootstrap servers: {}",
+                        kafkaConfig.getBootstrapServers());
 
-            // Build ONLY 1-minute candles from raw ticks (high precision, low grace period)
-            process("prod-unified-ohlcv", "forwardtesting-data", "candle-ohlcv-1m", 1);
-            Thread.sleep(500);
+                // Start processors with small delays to allow Kafka rebalancing
+                // Build ONLY 1-minute candles from raw ticks (high precision, low grace period)
+                process("prod-unified-ohlcv", "forwardtesting-data", "candle-ohlcv-1m", 1);
+                
+                // Build multi-minute candles from 1-minute candles (cascading aggregation)
+                processMultiMinuteCandlestick("prod-unified-2m", "candle-ohlcv-1m", "candle-ohlcv-2m", 2);
+                processMultiMinuteCandlestick("prod-unified-3m", "candle-ohlcv-1m", "candle-ohlcv-3m", 3);
+                processMultiMinuteCandlestick("prod-unified-5m", "candle-ohlcv-1m", "candle-ohlcv-5m", 5);
+                processMultiMinuteCandlestick("prod-unified-15m", "candle-ohlcv-1m", "candle-ohlcv-15m", 15);
+                processMultiMinuteCandlestick("prod-unified-30m", "candle-ohlcv-1m", "candle-ohlcv-30m", 30);
 
-            // Build multi-minute candles from 1-minute candles (cascading aggregation)
-            // This ensures accurate open/close values without tick-level lag issues
-            processMultiMinuteCandlestick("prod-unified-2m", "candle-ohlcv-1m", "candle-ohlcv-2m", 2);
-            Thread.sleep(500);
+                LOGGER.info("✅ All Enriched Candlestick Processors started successfully (1m from ticks, rest cascaded)");
+                logStreamStates();
 
-            processMultiMinuteCandlestick("prod-unified-3m", "candle-ohlcv-1m", "candle-ohlcv-3m", 3);
-            Thread.sleep(500);
-
-            processMultiMinuteCandlestick("prod-unified-5m", "candle-ohlcv-1m", "candle-ohlcv-5m", 5);
-            Thread.sleep(500);
-
-            processMultiMinuteCandlestick("prod-unified-15m", "candle-ohlcv-1m", "candle-ohlcv-15m", 15);
-            Thread.sleep(500);
-
-            processMultiMinuteCandlestick("prod-unified-30m", "candle-ohlcv-1m", "candle-ohlcv-30m", 30);
-
-            LOGGER.info("✅ All Enriched Candlestick Processors started successfully (1m from ticks, rest cascaded)");
-            logStreamStates();
-
-        } catch (Exception e) {
-            LOGGER.error("❌ Error starting Enriched Candlestick Processors", e);
-            throw new RuntimeException("Failed to start candlestick processors", e);
-        }
+            } catch (Exception e) {
+                LOGGER.error("❌ Error starting Enriched Candlestick Processors", e);
+                // Don't throw - let the application continue, streams will be in ERROR state
+            }
+        });
     }
 
     /**

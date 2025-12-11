@@ -363,42 +363,38 @@ public class OIProcessor {
 
     /**
      * Start all OI processors on application startup.
+     * BUG-044 FIX: Use async initialization to avoid blocking @PostConstruct
      */
     @PostConstruct
     public void start() {
-        try {
-            LOGGER.info("🚀 Starting OI Metrics Processor with bootstrap servers: {}",
-                    kafkaConfig.getBootstrapServers());
+        LOGGER.info("🚀 Scheduling OI Metrics Processor startup...");
+        
+        // Use a separate thread to avoid blocking @PostConstruct
+        java.util.concurrent.CompletableFuture.runAsync(() -> {
+            try {
+                LOGGER.info("🚀 Starting OI Metrics Processor with bootstrap servers: {}",
+                        kafkaConfig.getBootstrapServers());
 
-            String baseAppId = "prod-unified-oi";
+                String baseAppId = "prod-unified-oi";
 
-            // Build ONLY 1-minute OI metrics from raw OI updates (high precision, low grace period)
-            process(baseAppId, "OpenInterest", "oi-metrics-1m", 1);
-            Thread.sleep(500);
+                // Build ONLY 1-minute OI metrics from raw OI updates (high precision, low grace period)
+                process(baseAppId, "OpenInterest", "oi-metrics-1m", 1);
 
-            // Build multi-minute OI metrics from 1-minute OI metrics (cascading aggregation)
-            // This ensures accurate open/close values without tick-level lag issues
-            processMultiMinuteOI(baseAppId, "oi-metrics-1m", "oi-metrics-2m", 2);
-            Thread.sleep(500);
+                // Build multi-minute OI metrics from 1-minute OI metrics (cascading aggregation)
+                processMultiMinuteOI(baseAppId, "oi-metrics-1m", "oi-metrics-2m", 2);
+                processMultiMinuteOI(baseAppId, "oi-metrics-1m", "oi-metrics-3m", 3);
+                processMultiMinuteOI(baseAppId, "oi-metrics-1m", "oi-metrics-5m", 5);
+                processMultiMinuteOI(baseAppId, "oi-metrics-1m", "oi-metrics-15m", 15);
+                processMultiMinuteOI(baseAppId, "oi-metrics-1m", "oi-metrics-30m", 30);
 
-            processMultiMinuteOI(baseAppId, "oi-metrics-1m", "oi-metrics-3m", 3);
-            Thread.sleep(500);
+                LOGGER.info("✅ All OI Processors started successfully (1m from raw OI, rest cascaded)");
+                logStreamStates();
 
-            processMultiMinuteOI(baseAppId, "oi-metrics-1m", "oi-metrics-5m", 5);
-            Thread.sleep(500);
-
-            processMultiMinuteOI(baseAppId, "oi-metrics-1m", "oi-metrics-15m", 15);
-            Thread.sleep(500);
-
-            processMultiMinuteOI(baseAppId, "oi-metrics-1m", "oi-metrics-30m", 30);
-
-            LOGGER.info("✅ All OI Processors started successfully (1m from raw OI, rest cascaded)");
-            logStreamStates();
-
-        } catch (Exception e) {
-            LOGGER.error("❌ Error starting OI Processors", e);
-            throw new RuntimeException("Failed to start OI processors", e);
-        }
+            } catch (Exception e) {
+                LOGGER.error("❌ Error starting OI Processors", e);
+                // Don't throw - let the application continue, streams will be in ERROR state
+            }
+        });
     }
 
     /**

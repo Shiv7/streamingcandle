@@ -99,15 +99,25 @@ public class OIAggregate {
         }
 
         // ========== Put/Call Tracking ==========
-        // Determine if this is a Put or Call based on company name
+        // BUG-042 FIX: Robust option type detection using multiple patterns
         if (companyName != null) {
-            if (companyName.contains(" CE ")) {
+            String upperName = companyName.toUpperCase();
+            boolean isCall = upperName.contains(" CE ") || 
+                            upperName.endsWith("CE") ||
+                            upperName.contains("-CE-") ||
+                            upperName.contains("CALL");
+            boolean isPut = upperName.contains(" PE ") || 
+                           upperName.endsWith("PE") ||
+                           upperName.contains("-PE-") ||
+                           upperName.contains("PUT");
+            
+            if (isCall) {
                 // Call option
                 if (callOIStart == null) {
                     callOIStart = currentOI;
                 }
                 callOI = currentOI;
-            } else if (companyName.contains(" PE ")) {
+            } else if (isPut) {
                 // Put option
                 if (putOIStart == null) {
                     putOIStart = currentOI;
@@ -234,15 +244,16 @@ public class OIAggregate {
 
     // ---------------------------------------------------
     // Internal Serializer/Deserializer
+    // BUG-046 FIX: Share ObjectMapper for better performance
     // ---------------------------------------------------
+    private static final ObjectMapper SHARED_OBJECT_MAPPER = new ObjectMapper();
+    
     public static class OIAggregateSerializer implements Serializer<OIAggregate> {
-        private final ObjectMapper objectMapper = new ObjectMapper();
-
         @Override
         public byte[] serialize(String topic, OIAggregate data) {
             if (data == null) return null;
             try {
-                return objectMapper.writeValueAsBytes(data);
+                return SHARED_OBJECT_MAPPER.writeValueAsBytes(data);
             } catch (Exception e) {
                 throw new RuntimeException("Serialization failed for OIAggregate", e);
             }
@@ -250,13 +261,11 @@ public class OIAggregate {
     }
 
     public static class OIAggregateDeserializer implements Deserializer<OIAggregate> {
-        private final ObjectMapper objectMapper = new ObjectMapper();
-
         @Override
         public OIAggregate deserialize(String topic, byte[] bytes) {
             if (bytes == null) return null;
             try {
-                return objectMapper.readValue(bytes, OIAggregate.class);
+                return SHARED_OBJECT_MAPPER.readValue(bytes, OIAggregate.class);
             } catch (Exception e) {
                 throw new RuntimeException("Deserialization failed for OIAggregate", e);
             }

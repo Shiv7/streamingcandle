@@ -726,21 +726,7 @@ public class OrderbookAggregate {
         updateHumanReadableTimestamps();
     }
 
-    /**
-     * VPIN Bucket data structure
-     */
-    @Data
-    @lombok.NoArgsConstructor
-    @lombok.AllArgsConstructor
-    public static class VPINBucket {
-        public double totalVolume;
-        public double buyVolume;
-        public double sellVolume;
-        
-        public double getImbalance() {
-            return Math.abs(buyVolume - sellVolume);
-        }
-    }
+    // BUG-022 FIX: Removed VPINBucket class (VPIN is in EnrichedCandlestick, not here)
 
     /**
      * Price impact observation for Kyle's Lambda
