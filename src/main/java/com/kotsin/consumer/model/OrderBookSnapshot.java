@@ -257,13 +257,8 @@ public class OrderBookSnapshot {
         if (bidRate != null && bidQty != null) bidLevels = Math.max(bidLevels, Math.min(bidRate.size(), bidQty.size()));
         if (offRate != null && offQty != null) askLevels = Math.max(askLevels, Math.min(offRate.size(), offQty.size()));
 
-        // Minimum depth threshold (design calls for 20 levels; accept >=5 to be resilient)
-        boolean sufficientDepth = bidLevels >= 5 && askLevels >= 5;
-
-        // Or accept if totals exist as a fallback signal of presence
-        boolean hasTotals = (totalBidQty != null && totalBidQty > 0) || (totalOffQty != null && totalOffQty > 0);
-
-        return sufficientDepth || hasTotals;
+        // BUG-012 FIX: Accept any book with at least 1 level on each side (more lenient for illiquid instruments)
+        return bidLevels >= 1 && askLevels >= 1;
     }
 
     /**

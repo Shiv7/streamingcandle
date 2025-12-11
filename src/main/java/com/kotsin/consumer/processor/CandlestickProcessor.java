@@ -176,17 +176,7 @@ public class CandlestickProcessor {
             throw new RuntimeException("Failed to start Kafka Streams for " + instanceKey, e);
         }
 
-        // Shutdown hook
-        Runtime.getRuntime().addShutdownHook(new Thread(() -> {
-            LOGGER.info("🛑 Shutting down {}-minute candle stream", windowSize);
-            try {
-                streams.close(Duration.ofSeconds(30));
-                streamsInstances.remove(instanceKey);
-                LOGGER.info("✅ Successfully shut down {}-minute candle stream", windowSize);
-            } catch (Exception e) {
-                LOGGER.error("❌ Error during shutdown: ", e);
-            }
-        }, "shutdown-hook-" + instanceKey));
+        // BUG-018 FIX: Removed shutdown hook - cleanup handled by @PreDestroy stopAllStreams()
     }
 
     /**
@@ -255,17 +245,7 @@ public class CandlestickProcessor {
             throw new RuntimeException("Failed to start Kafka Streams for " + instanceKey, e);
         }
 
-        // Shutdown hook
-        Runtime.getRuntime().addShutdownHook(new Thread(() -> {
-            LOGGER.info("🛑 Shutting down {}-minute candle stream (cascaded)", windowSize);
-            try {
-                streams.close(Duration.ofSeconds(30));
-                streamsInstances.remove(instanceKey);
-                LOGGER.info("✅ Successfully shut down {}-minute candle stream (cascaded)", windowSize);
-            } catch (Exception e) {
-                LOGGER.error("❌ Error during shutdown: ", e);
-            }
-        }, "shutdown-hook-cascaded-" + instanceKey));
+        // BUG-018 FIX: Removed shutdown hook - cleanup handled by @PreDestroy stopAllStreams()
     }
 
     /**

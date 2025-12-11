@@ -48,14 +48,7 @@ public class OrderbookAggregate {
     private double prevBestBid = 0.0;
     private double prevBestAsk = 0.0;
 
-    // ========== VPIN State (Volume-Synchronized PIN) ==========
-    @JsonIgnore private static final int VPIN_BUCKET_COUNT = 50;
-    @JsonIgnore private double adaptiveBucketSize = 10000.0;
-    @JsonIgnore private List<VPINBucket> vpinBuckets = new ArrayList<>();
-    @JsonIgnore private double currentBucketVolume = 0.0;
-    @JsonIgnore private double currentBucketBuyVolume = 0.0;
-    @JsonIgnore private double vpin = 0.0;
-    @JsonIgnore private int totalBucketsCreated = 0;
+    // BUG-022 FIX: Removed unused VPIN fields (VPIN is calculated in EnrichedCandlestick, not here)
 
     // ========== Kyle's Lambda State ==========
     private static final int LAMBDA_WINDOW_SIZE = 100;  // Rolling window size
@@ -110,16 +103,41 @@ public class OrderbookAggregate {
     @JsonIgnore private OrderBookSnapshot previousOrderbook;
 
     // ========== Configurable Parameters ==========
-    @JsonIgnore private static volatile double TICK_SIZE = 0.05; // fallback default
     @JsonIgnore private double instrumentTickSize = 0.0; // per-instance tick size
-    @JsonIgnore private static volatile double SPOOF_SIZE_RATIO = 0.3; // fraction of side depth
-    @JsonIgnore private static volatile int SPOOF_CONFIRM_SNAPSHOTS = 2;
-    @JsonIgnore private static volatile double SPOOF_PRICE_EPSILON_TICKS = 1.0;
     @JsonIgnore private Double instrumentSpoofSizeRatio = null;
     @JsonIgnore private Double instrumentSpoofEpsilonTicks = null;
-    @JsonIgnore private static volatile int LAMBDA_MIN_OBS = 10;
-    @JsonIgnore private static volatile int LAMBDA_FREQ = 5;
-    @JsonIgnore private static volatile double LAMBDA_OFI_EPS = 1.0;
+
+    // BUG-013 FIX: Use AtomicReference for thread-safe configuration
+    private static final java.util.concurrent.atomic.AtomicReference<OrderbookConfig> CONFIG =
+        new java.util.concurrent.atomic.AtomicReference<>(new OrderbookConfig());
+
+    /**
+     * Thread-safe configuration holder
+     */
+    public static class OrderbookConfig {
+        public final double tickSize;
+        public final double spoofSizeRatio;
+        public final int spoofConfirmSnapshots;
+        public final double spoofPriceEpsilonTicks;
+        public final int lambdaMinObs;
+        public final int lambdaFreq;
+        public final double lambdaOfiEps;
+
+        public OrderbookConfig() {
+            this(0.05, 0.3, 2, 1.0, 10, 5, 1.0);
+        }
+
+        public OrderbookConfig(double tickSize, double spoofSizeRatio, int spoofConfirmSnapshots,
+                               double spoofPriceEpsilonTicks, int lambdaMinObs, int lambdaFreq, double lambdaOfiEps) {
+            this.tickSize = tickSize;
+            this.spoofSizeRatio = spoofSizeRatio;
+            this.spoofConfirmSnapshots = spoofConfirmSnapshots;
+            this.spoofPriceEpsilonTicks = spoofPriceEpsilonTicks;
+            this.lambdaMinObs = lambdaMinObs;
+            this.lambdaFreq = lambdaFreq;
+            this.lambdaOfiEps = lambdaOfiEps;
+        }
+    }
 
     public static void configure(double tickSize,
                                  double spoofSizeRatio,
@@ -127,22 +145,33 @@ public class OrderbookAggregate {
                                  int lambdaMinObs,
                                  int lambdaCalcFreq,
                                  double lambdaOfiEps) {
-        TICK_SIZE = tickSize;
-        SPOOF_SIZE_RATIO = spoofSizeRatio;
-        SPOOF_CONFIRM_SNAPSHOTS = spoofConfirmSnapshots;
-        LAMBDA_MIN_OBS = lambdaMinObs;
-        LAMBDA_FREQ = lambdaCalcFreq;
-        LAMBDA_OFI_EPS = lambdaOfiEps;
+        OrderbookConfig cfg = CONFIG.get();
+        CONFIG.set(new OrderbookConfig(tickSize, spoofSizeRatio, spoofConfirmSnapshots,
+                                       cfg.spoofPriceEpsilonTicks, lambdaMinObs, lambdaCalcFreq, lambdaOfiEps));
     }
 
-    public static void setSpoofPriceEpsilonTicks(double v) { SPOOF_PRICE_EPSILON_TICKS = v; }
+    public static void setSpoofPriceEpsilonTicks(double v) {
+        OrderbookConfig cfg = CONFIG.get();
+        CONFIG.set(new OrderbookConfig(cfg.tickSize, cfg.spoofSizeRatio, cfg.spoofConfirmSnapshots,
+                                       v, cfg.lambdaMinObs, cfg.lambdaFreq, cfg.lambdaOfiEps));
+    }
+
+    private static OrderbookConfig getConfig() {
+        return CONFIG.get();
+    }
 
     public void setInstrumentTickSize(double tick) { this.instrumentTickSize = tick; }
-    public double getEffectiveTickSize() { return instrumentTickSize > 0 ? instrumentTickSize : TICK_SIZE; }
+    public double getEffectiveTickSize() {
+        return instrumentTickSize > 0 ? instrumentTickSize : getConfig().tickSize;
+    }
     public void setInstrumentSpoofSizeRatio(Double v) { this.instrumentSpoofSizeRatio = v; }
     public void setInstrumentSpoofEpsilonTicks(Double v) { this.instrumentSpoofEpsilonTicks = v; }
-    public double getEffectiveSpoofSizeRatio() { return instrumentSpoofSizeRatio != null ? instrumentSpoofSizeRatio : SPOOF_SIZE_RATIO; }
-    public double getEffectiveSpoofEpsilonTicks() { return instrumentSpoofEpsilonTicks != null ? instrumentSpoofEpsilonTicks : SPOOF_PRICE_EPSILON_TICKS; }
+    public double getEffectiveSpoofSizeRatio() {
+        return instrumentSpoofSizeRatio != null ? instrumentSpoofSizeRatio : getConfig().spoofSizeRatio;
+    }
+    public double getEffectiveSpoofEpsilonTicks() {
+        return instrumentSpoofEpsilonTicks != null ? instrumentSpoofEpsilonTicks : getConfig().spoofPriceEpsilonTicks;
+    }
 
     /**
      * Creates a new empty orderbook aggregate
@@ -225,22 +254,23 @@ public class OrderbookAggregate {
         prevBestAsk = bestAsk;
 
         // ========== Track Price Impact for Kyle's Lambda ==========
-        if (lastMidPrice > 0 && midPrice > 0 && Math.abs(ofi) > LAMBDA_OFI_EPS) {
+        OrderbookConfig cfg = getConfig();
+        if (lastMidPrice > 0 && midPrice > 0 && Math.abs(ofi) > cfg.lambdaOfiEps) {
             double dp = midPrice - lastMidPrice;
 
             // Add new observation (dp, ofi) and update rolling sums
             PriceImpactObservation obs = new PriceImpactObservation(dp, ofi, orderbook.getReceivedTimestamp());
             priceImpactHistory.addLast(obs);
-            lambdaObsCount++;
             sumOFI += ofi; sumDP += dp; sumOFI2 += ofi * ofi; sumDP2 += dp * dp; sumOFIDP += ofi * dp;
+            lambdaObsCount++;
 
-            // Enforce rolling window: remove oldest while above capacity
-            while (lambdaObsCount > LAMBDA_WINDOW_SIZE && !priceImpactHistory.isEmpty()) {
+            // BUG-009 FIX: Use priceImpactHistory.size() as source of truth
+            while (priceImpactHistory.size() > LAMBDA_WINDOW_SIZE) {
                 PriceImpactObservation old = priceImpactHistory.removeFirst();
-                lambdaObsCount--;
                 double oDP = old.priceChange;
                 double oOFI = old.signedVolume;
                 sumOFI -= oOFI; sumDP -= oDP; sumOFI2 -= oOFI * oOFI; sumDP2 -= oDP * oDP; sumOFIDP -= oOFI * oDP;
+                lambdaObsCount--;  // Keep in sync
             }
 
             updatesSinceLastLambdaCalc++;
@@ -279,7 +309,8 @@ public class OrderbookAggregate {
         updateCount++;
 
         // ========== Recalculate Kyle's Lambda Periodically ==========
-        if (updatesSinceLastLambdaCalc >= LAMBDA_FREQ && lambdaObsCount >= LAMBDA_MIN_OBS) {
+        OrderbookConfig config = getConfig();
+        if (updatesSinceLastLambdaCalc >= config.lambdaFreq && lambdaObsCount >= config.lambdaMinObs) {
             calculateKyleLambda();
         }
     }
@@ -444,7 +475,8 @@ public class OrderbookAggregate {
      */
     private void calculateKyleLambda() {
         long n = lambdaObsCount;
-        if (n < LAMBDA_MIN_OBS) return;
+        OrderbookConfig cfg = getConfig();
+        if (n < cfg.lambdaMinObs) return;
         double meanOFI = sumOFI / n;
         double meanDP = sumDP / n;
         double varOFI = (sumOFI2 - sumOFI * sumOFI / n) / n;
@@ -527,13 +559,21 @@ public class OrderbookAggregate {
                 if (!foundInCurrent) {
                     SpoofState state = tracking.get(price);
                     state.missCount += 1;
-                    if (state.missCount >= SPOOF_CONFIRM_SNAPSHOTS) {
+                    OrderbookConfig cfg = getConfig();
+                    if (state.missCount >= cfg.spoofConfirmSnapshots) {
                         long duration = currentTime - state.firstSeenTime;
                         if (duration < SPOOF_DURATION_THRESHOLD_MS) {
                             spoofingEvents.add(new SpoofingEvent(currentTime, side, price, quantity, duration));
                         }
                         tracking.remove(price);
                     } else {
+                        tracking.put(price, state);
+                    }
+                } else {
+                    // BUG-010 FIX: Reset miss count if order reappears
+                    if (tracking.containsKey(price)) {
+                        SpoofState state = tracking.get(price);
+                        state.missCount = 0;  // Reset - order is back
                         tracking.put(price, state);
                     }
                 }
@@ -750,14 +790,17 @@ public class OrderbookAggregate {
     // ---------------------------------------------------
     // Internal Serializer/Deserializer
     // ---------------------------------------------------
-    public static class OrderbookAggregateSerializer implements Serializer<OrderbookAggregate> {
-        private final ObjectMapper objectMapper = new ObjectMapper();
+    // BUG-015 FIX: Shared, thread-safe ObjectMapper
+    private static final ObjectMapper SHARED_OBJECT_MAPPER = new ObjectMapper()
+        .configure(com.fasterxml.jackson.databind.DeserializationFeature.FAIL_ON_UNKNOWN_PROPERTIES, false)
+        .setSerializationInclusion(com.fasterxml.jackson.annotation.JsonInclude.Include.NON_NULL);
 
+    public static class OrderbookAggregateSerializer implements Serializer<OrderbookAggregate> {
         @Override
         public byte[] serialize(String topic, OrderbookAggregate data) {
             if (data == null) return null;
             try {
-                return objectMapper.writeValueAsBytes(data);
+                return SHARED_OBJECT_MAPPER.writeValueAsBytes(data);
             } catch (Exception e) {
                 throw new RuntimeException("Serialization failed for OrderbookAggregate", e);
             }
@@ -765,13 +808,11 @@ public class OrderbookAggregate {
     }
 
     public static class OrderbookAggregateDeserializer implements Deserializer<OrderbookAggregate> {
-        private final ObjectMapper objectMapper = new ObjectMapper();
-
         @Override
         public OrderbookAggregate deserialize(String topic, byte[] bytes) {
             if (bytes == null) return null;
             try {
-                return objectMapper.readValue(bytes, OrderbookAggregate.class);
+                return SHARED_OBJECT_MAPPER.readValue(bytes, OrderbookAggregate.class);
             } catch (Exception e) {
                 throw new RuntimeException("Deserialization failed for OrderbookAggregate", e);
             }

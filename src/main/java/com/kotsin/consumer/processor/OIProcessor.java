@@ -115,17 +115,7 @@ public class OIProcessor {
             throw new RuntimeException("Failed to start OI Streams for " + instanceKey, e);
         }
 
-        // Shutdown hook
-        Runtime.getRuntime().addShutdownHook(new Thread(() -> {
-            LOGGER.info("🛑 Shutting down {}-minute OI stream", windowSize);
-            try {
-                streams.close(Duration.ofSeconds(30));
-                streamsInstances.remove(instanceKey);
-                LOGGER.info("✅ Successfully shut down {}-minute OI stream", windowSize);
-            } catch (Exception e) {
-                LOGGER.error("❌ Error during shutdown: ", e);
-            }
-        }, "shutdown-hook-oi-" + instanceKey));
+        // BUG-018 FIX: Removed shutdown hook - cleanup handled by @PreDestroy
     }
 
     /**
@@ -146,7 +136,21 @@ public class OIProcessor {
         );
 
         // 2) Extract token from composite key (e.g., "N|52343" -> "52343")
+        // BUG-011 FIX: Filter out records with future timestamps (clock skew protection)
         KStream<String, OpenInterest> keyed = raw
+                .filter((k, oi) -> {
+                    if (oi == null || oi.getReceivedTimestamp() == null) return false;
+
+                    long now = System.currentTimeMillis();
+                    long oiTs = oi.getReceivedTimestamp();
+
+                    // Skip records with future timestamps (allow 1 minute tolerance for clock skew)
+                    if (oiTs > now + 60_000) {
+                        LOGGER.warn("Skipping OI record with future timestamp: {} (now: {})", oiTs, now);
+                        return false;
+                    }
+                    return true;
+                })
                 .mapValues(oi -> {
                     if (oi == null || oi.getOpenInterest() == null) return oi;
                     long v = oi.getOpenInterest();
@@ -274,17 +278,7 @@ public class OIProcessor {
             throw new RuntimeException("Failed to start OI streams for " + instanceKey, e);
         }
 
-        // Shutdown hook
-        Runtime.getRuntime().addShutdownHook(new Thread(() -> {
-            LOGGER.info("🛑 Shutting down OI {}-minute stream (cascaded)", windowSize);
-            try {
-                streams.close(Duration.ofSeconds(30));
-                streamsInstances.remove(instanceKey);
-                LOGGER.info("✅ Successfully shut down OI {}-minute stream (cascaded)", windowSize);
-            } catch (Exception e) {
-                LOGGER.error("❌ Error during shutdown: ", e);
-            }
-        }, "shutdown-hook-oi-cascaded-" + instanceKey));
+        // BUG-018 FIX: Removed shutdown hook - cleanup handled by @PreDestroy
     }
 
     /**

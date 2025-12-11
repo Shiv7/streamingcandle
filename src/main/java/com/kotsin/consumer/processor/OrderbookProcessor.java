@@ -145,17 +145,7 @@ public class OrderbookProcessor {
             throw new RuntimeException("Failed to start Orderbook Streams for " + instanceKey, e);
         }
 
-        // Shutdown hook
-        Runtime.getRuntime().addShutdownHook(new Thread(() -> {
-            LOGGER.info("🛑 Shutting down {}-minute orderbook stream", windowSize);
-            try {
-                streams.close(Duration.ofSeconds(30));
-                streamsInstances.remove(instanceKey);
-                LOGGER.info("✅ Successfully shut down {}-minute orderbook stream", windowSize);
-            } catch (Exception e) {
-                LOGGER.error("❌ Error during shutdown: ", e);
-            }
-        }, "shutdown-hook-ob-" + instanceKey));
+        // BUG-018 FIX: Removed shutdown hook - cleanup handled by @PreDestroy
     }
 
     /**
@@ -287,17 +277,7 @@ public class OrderbookProcessor {
             throw new RuntimeException("Failed to start orderbook streams for " + instanceKey, e);
         }
 
-        // Shutdown hook
-        Runtime.getRuntime().addShutdownHook(new Thread(() -> {
-            LOGGER.info("🛑 Shutting down Orderbook {}-minute stream (cascaded)", windowSize);
-            try {
-                streams.close(Duration.ofSeconds(30));
-                streamsInstances.remove(instanceKey);
-                LOGGER.info("✅ Successfully shut down Orderbook {}-minute stream (cascaded)", windowSize);
-            } catch (Exception e) {
-                LOGGER.error("❌ Error during shutdown: ", e);
-            }
-        }, "shutdown-hook-orderbook-cascaded-" + instanceKey));
+        // BUG-018 FIX: Removed shutdown hook - cleanup handled by @PreDestroy
     }
 
     /**

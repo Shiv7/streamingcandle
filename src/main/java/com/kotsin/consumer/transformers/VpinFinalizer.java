@@ -8,6 +8,10 @@ import org.apache.kafka.streams.processor.ProcessorContext;
 import org.apache.kafka.streams.state.KeyValueStore;
 import org.apache.kafka.streams.kstream.Windowed;
 
+import java.time.Instant;
+import java.time.LocalDate;
+import java.time.LocalTime;
+import java.time.ZoneId;
 import java.util.ArrayList;
 import java.util.List;
 
@@ -51,6 +55,15 @@ public class VpinFinalizer implements ValueTransformerWithKey<Windowed<String>, 
         VpinState s = store.get(key);
         if (s == null) s = new VpinState();
         if (s.bucketSize <= 0) s.bucketSize = initialBucketSize;
+
+        // BUG-002 FIX: Detect trading day boundary and reset VPIN state
+        long windowStart = windowedKey.window().start();
+        if (s.lastUpdateTime > 0 && isDifferentTradingDay(s.lastUpdateTime, windowStart, candle.getExchange())) {
+            // New trading day - reset VPIN state
+            s = new VpinState();
+            s.bucketSize = initialBucketSize;
+        }
+        s.lastUpdateTime = windowStart;
 
         // Merge finalized buckets from candle, normalizing to fixed-size buckets
         if (candle.getVpinBucketCount() > 0) {
@@ -161,6 +174,38 @@ public class VpinFinalizer implements ValueTransformerWithKey<Windowed<String>, 
             sumVol += b.totalVolume;
         }
         return sumVol > 0 ? sumImb / sumVol : 0.0;
+    }
+
+    /**
+     * BUG-002 FIX: Detect if we've crossed into a different trading day
+     * Handles both calendar day changes and market close -> next day open transitions
+     */
+    private boolean isDifferentTradingDay(long prevTs, long currTs, String exchange) {
+        ZoneId zone = ZoneId.of("Asia/Kolkata");
+        LocalDate prevDate = Instant.ofEpochMilli(prevTs).atZone(zone).toLocalDate();
+        LocalDate currDate = Instant.ofEpochMilli(currTs).atZone(zone).toLocalDate();
+
+        // Different calendar date = different trading day
+        if (!prevDate.equals(currDate)) {
+            return true;
+        }
+
+        // Check for market close -> next day open gap on same calendar date
+        LocalTime prevTime = Instant.ofEpochMilli(prevTs).atZone(zone).toLocalTime();
+        LocalTime currTime = Instant.ofEpochMilli(currTs).atZone(zone).toLocalTime();
+
+        // Determine market close time based on exchange
+        LocalTime marketClose;
+        if ("N".equalsIgnoreCase(exchange) || "B".equalsIgnoreCase(exchange)) {
+            marketClose = LocalTime.of(15, 30); // NSE/BSE closes at 15:30
+        } else if ("M".equalsIgnoreCase(exchange)) {
+            marketClose = LocalTime.of(23, 30); // MCX closes at 23:30
+        } else {
+            marketClose = LocalTime.of(15, 30); // Default to NSE hours
+        }
+
+        // If previous was after close and current is before close (new session started)
+        return prevTime.isAfter(marketClose) && currTime.isBefore(marketClose);
     }
 
     @Override

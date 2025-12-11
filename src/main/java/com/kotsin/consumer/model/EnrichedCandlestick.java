@@ -100,8 +100,8 @@ public class EnrichedCandlestick {
     private long lastVrbTriggerTime = 0L;
 
     // ========== Processing State (persisted to state store) ==========
-    @JsonIgnore
-    private transient Double lastPrice; // kept transient (only for classification heuristics)
+    // BUG-008 FIX: Remove transient to preserve lastPrice for tick-rule classification
+    private Double lastPrice; // needed for trade classification across state store operations
     private boolean openInitialized = false;
     private boolean highInitialized = false;
     private boolean lowInitialized = false;
@@ -109,10 +109,19 @@ public class EnrichedCandlestick {
     private long closeSourceTs = Long.MIN_VALUE;
     private int priceTickCount = 0;
     // EWMA stats for adaptive quantile thresholds
-    @JsonIgnore private double vibEwmaMean = 0.0, vibEwmaSq = 0.0;
-    @JsonIgnore private double dibEwmaMean = 0.0, dibEwmaSq = 0.0;
-    @JsonIgnore private double trbEwmaMean = 0.0, trbEwmaSq = 0.0;
-    @JsonIgnore private double vrbEwmaMean = 0.0, vrbEwmaSq = 0.0;
+    // BUG-007 FIX: Remove @JsonIgnore to persist EWMA state across windows
+    private double vibEwmaMean = 0.0, vibEwmaSq = 0.0;
+    private double dibEwmaMean = 0.0, dibEwmaSq = 0.0;
+    private double trbEwmaMean = 0.0, trbEwmaSq = 0.0;
+    private double vrbEwmaMean = 0.0, vrbEwmaSq = 0.0;
+
+    // BUG-006 FIX: Add instance-level tick size
+    private double instrumentTickSize = 0.0;
+
+    // BUG-016 FIX: Add latency tracking fields
+    private long processingLatencyMs = 0;  // Time from tick to candle emission
+    private long maxTickAgeMs = 0;         // Age of oldest tick in window
+    private long minTickAgeMs = 0;         // Age of newest tick in window
 
     /**
      * Creates a new empty enriched candlestick with default values.
@@ -136,27 +145,60 @@ public class EnrichedCandlestick {
     }
 
     // ---------------------- Adaptive configuration ----------------------
-    private static volatile double CLASSIFY_MIN_ABS = 0.01;
-    private static volatile double CLASSIFY_BPS = 0.0001;
-    private static volatile double CLASSIFY_SPREAD_MULT = 0.15;
+    // BUG-013 FIX: Use AtomicReference for thread-safe configuration
+    private static final java.util.concurrent.atomic.AtomicReference<ImbalanceConfig> CONFIG =
+        new java.util.concurrent.atomic.AtomicReference<>(new ImbalanceConfig());
+
+    /**
+     * Thread-safe configuration holder
+     */
+    public static class ImbalanceConfig {
+        public final double ewmaAlpha;
+        public final double initVib;
+        public final double initDib;
+        public final double initTrb;
+        public final double initVrb;
+        public final double classifyMinAbs;
+        public final double classifyBps;
+        public final double classifySpreadMult;
+        public final double defaultTickSize;
+        public final double derivTickSize;
+        public final double imbZScore;
+
+        public ImbalanceConfig() {
+            this(0.1, 1000.0, 100000.0, 10.0, 5000.0, 0.01, 0.0001, 0.15, 0.05, 0.05, 1.645);
+        }
+
+        public ImbalanceConfig(double ewmaAlpha, double initVib, double initDib, double initTrb, double initVrb,
+                              double classifyMinAbs, double classifyBps, double classifySpreadMult,
+                              double defaultTickSize, double derivTickSize, double imbZScore) {
+            this.ewmaAlpha = ewmaAlpha;
+            this.initVib = initVib;
+            this.initDib = initDib;
+            this.initTrb = initTrb;
+            this.initVrb = initVrb;
+            this.classifyMinAbs = classifyMinAbs;
+            this.classifyBps = classifyBps;
+            this.classifySpreadMult = classifySpreadMult;
+            this.defaultTickSize = defaultTickSize;
+            this.derivTickSize = derivTickSize;
+            this.imbZScore = imbZScore;
+        }
+    }
 
     public static void configure(double ewmaAlpha,
                                  double initVib, double initDib, double initTrb, double initVrb,
                                  double classifyMinAbs, double classifyBps, double classifySpreadMult,
                                  double defaultTick, double derivTick,
                                  double imbZScore) {
-        IMB_EWMA_ALPHA = ewmaAlpha;
-        // per-instance fields' defaults update for new instances only
-        INIT_EXPECTED_VIB = initVib;
-        INIT_EXPECTED_DIB = initDib;
-        INIT_EXPECTED_TRB = initTrb;
-        INIT_EXPECTED_VRB = initVrb;
-        CLASSIFY_MIN_ABS = classifyMinAbs;
-        CLASSIFY_BPS = classifyBps;
-        CLASSIFY_SPREAD_MULT = classifySpreadMult;
-        DEFAULT_TICK_SIZE = defaultTick;
-        DERIV_TICK_SIZE = derivTick;
-        IMB_Q_ZSCORE = imbZScore;
+        CONFIG.set(new ImbalanceConfig(ewmaAlpha, initVib, initDib, initTrb, initVrb,
+                                       classifyMinAbs, classifyBps, classifySpreadMult,
+                                       defaultTick, derivTick, imbZScore));
+    }
+
+    // Helper methods to access configuration
+    private static ImbalanceConfig getConfig() {
+        return CONFIG.get();
     }
 
     // Initial expected values as static so constructor can use current config
@@ -292,44 +334,62 @@ public class EnrichedCandlestick {
     }
 
     private double getClassificationThreshold(double currentPrice, TickData tick) {
-        double base = Math.max(CLASSIFY_MIN_ABS, Math.abs(currentPrice) * CLASSIFY_BPS);
+        ImbalanceConfig cfg = getConfig();
+        double base = Math.max(cfg.classifyMinAbs, Math.abs(currentPrice) * cfg.classifyBps);
         double spreadTerm = 0.0;
         if (tick != null && tick.getOfferRate() > 0 && tick.getBidRate() > 0) {
             double spread = Math.max(0.0, tick.getOfferRate() - tick.getBidRate());
-            spreadTerm = CLASSIFY_SPREAD_MULT * spread;
+            spreadTerm = cfg.classifySpreadMult * spread;
         }
-        double tickTerm = getTickSize();
+        double tickTerm = getEffectiveTickSize();
         return Math.max(base, Math.max(spreadTerm, tickTerm));
     }
 
     /**
+     * BUG-006 FIX: Set instrument-specific tick size
+     */
+    public void setInstrumentTickSize(double tickSize) {
+        this.instrumentTickSize = tickSize;
+    }
+
+    // BUG-005 FIX: Track run length separately for proper accumulation
+    private int currentRunLength = 0;
+    private long currentVolumeRun = 0L;
+
+    /**
      * Update imbalance bars (VIB, DIB, TRB, VRB) with EWMA thresholds
+     * BUG-005 FIX: Properly accumulate tick runs and volume runs
      */
     private void updateImbalanceBars(TickData tick, double price, int deltaVolume, boolean isBuy, long eventTime) {
         String direction = isBuy ? "BUY" : "SELL";
         int directionSign = isBuy ? 1 : -1;
 
-        // Volume Imbalance (VIB)
+        // Volume Imbalance (VIB) - cumulative signed volume
         long signedVolume = deltaVolume * directionSign;
         volumeImbalance += signedVolume;
 
-        // Dollar Imbalance (DIB)
+        // Dollar Imbalance (DIB) - cumulative signed dollar volume
         double dollarVolume = (double) deltaVolume * price;
         dollarImbalance += dollarVolume * directionSign;
 
-        // Tick Runs (TRB)
+        // Tick Runs (TRB) - count CONSECUTIVE same-direction ticks
+        // BUG-005 FIX: Accumulate completed runs, don't reset
         if (direction.equals(currentDirection)) {
-            tickRuns++;
+            currentRunLength++;
         } else {
-            tickRuns = 1;
+            // Direction changed - add completed run to total
+            tickRuns += currentRunLength;
+            currentRunLength = 1;
             currentDirection = direction;
         }
 
-        // Volume Runs (VRB)
+        // Volume Runs (VRB) - volume in CONSECUTIVE same-direction trades
+        // BUG-005 FIX: Accumulate completed runs, don't reset
         if (direction.equals(currentDirection)) {
-            volumeRuns += deltaVolume;
+            currentVolumeRun += deltaVolume;
         } else {
-            volumeRuns = deltaVolume;
+            volumeRuns += currentVolumeRun;
+            currentVolumeRun = deltaVolume;
         }
 
         // Check thresholds and update EWMA
@@ -339,64 +399,85 @@ public class EnrichedCandlestick {
     /**
      * Check imbalance bar thresholds and update EWMA estimates
      * NOW WITH BAR EMISSION TRACKING!
+     * BUG-001 FIX: Properly update EWMA for each imbalance type
      */
     private void checkAndUpdateThresholds(long eventTime) {
         long currentTime = eventTime > 0 ? eventTime : System.currentTimeMillis();
+        ImbalanceConfig cfg = getConfig();
 
-        // Recompute thresholds using EWMA quantile (Q95 approx)
-        expectedVolumeImbalance = quantileThreshold(updateEwma(Math.abs((double) volumeImbalance), vibEwmaMean, vibEwmaSq), INIT_EXPECTED_VIB);
-        vibEwmaMean = expectedVolumeImbalance > 0 ? (vibEwmaMean * 1.0) : vibEwmaMean; // keep fields updated in updateEwma helper
-        expectedDollarImbalance = quantileThreshold(updateEwma(Math.abs(dollarImbalance), dibEwmaMean, dibEwmaSq), INIT_EXPECTED_DIB);
-        expectedTickRuns = quantileThreshold(updateEwma(Math.abs((double) tickRuns), trbEwmaMean, trbEwmaSq), INIT_EXPECTED_TRB);
-        expectedVolumeRuns = quantileThreshold(updateEwma(Math.abs((double) volumeRuns), vrbEwmaMean, vrbEwmaSq), INIT_EXPECTED_VRB);
+        // Update EWMA for each imbalance type
+        updateVibEwma(Math.abs((double) volumeImbalance));
+        updateDibEwma(Math.abs(dollarImbalance));
+        updateTrbEwma(Math.abs((double) tickRuns));
+        updateVrbEwma(Math.abs((double) volumeRuns));
+
+        // Calculate thresholds from updated EWMA
+        expectedVolumeImbalance = getQuantileThreshold(vibEwmaMean, vibEwmaSq, INIT_EXPECTED_VIB, cfg.imbZScore);
+        expectedDollarImbalance = getQuantileThreshold(dibEwmaMean, dibEwmaSq, INIT_EXPECTED_DIB, cfg.imbZScore);
+        expectedTickRuns = getQuantileThreshold(trbEwmaMean, trbEwmaSq, INIT_EXPECTED_TRB, cfg.imbZScore);
+        expectedVolumeRuns = getQuantileThreshold(vrbEwmaMean, vrbEwmaSq, INIT_EXPECTED_VRB, cfg.imbZScore);
 
         // VIB threshold check
         if (Math.abs(volumeImbalance) >= expectedVolumeImbalance) {
-            vibTriggered = true;  // NEW: Mark that VIB bar was triggered
-            lastVibTriggerTime = currentTime;  // NEW: Track when
+            vibTriggered = true;  // Mark that VIB bar was triggered
+            lastVibTriggerTime = currentTime;  // Track when
             volumeImbalance = 0L;  // Reset after bar emission
         }
 
         // DIB threshold check
         if (Math.abs(dollarImbalance) >= expectedDollarImbalance) {
-            dibTriggered = true;  // NEW: Mark that DIB bar was triggered
-            lastDibTriggerTime = currentTime;  // NEW: Track when
+            dibTriggered = true;  // Mark that DIB bar was triggered
+            lastDibTriggerTime = currentTime;  // Track when
             dollarImbalance = 0L;
         }
 
         // TRB threshold check
         if (Math.abs(tickRuns) >= expectedTickRuns) {
-            trbTriggered = true;  // NEW: Mark that TRB bar was triggered
-            lastTrbTriggerTime = currentTime;  // NEW: Track when
+            trbTriggered = true;  // Mark that TRB bar was triggered
+            lastTrbTriggerTime = currentTime;  // Track when
             tickRuns = 0;
         }
 
         // VRB threshold check
         if (Math.abs(volumeRuns) >= expectedVolumeRuns) {
-            vrbTriggered = true;  // NEW: Mark that VRB bar was triggered
-            lastVrbTriggerTime = currentTime;  // NEW: Track when
+            vrbTriggered = true;  // Mark that VRB bar was triggered
+            lastVrbTriggerTime = currentTime;  // Track when
             volumeRuns = 0L;
         }
     }
 
-    // Update EWMA(m, s2) for a stream; returns {mean, var} and writes back via fields
-    private double[] updateEwma(double x, double mean, double s2) {
-        double m = IMB_EWMA_ALPHA * x + (1 - IMB_EWMA_ALPHA) * mean;
-        double ss = IMB_EWMA_ALPHA * x * x + (1 - IMB_EWMA_ALPHA) * s2;
-        double var = Math.max(0.0, ss - m * m);
-        // assign back to correct fields based on references
-        if (mean == vibEwmaMean && s2 == vibEwmaSq) { vibEwmaMean = m; vibEwmaSq = ss; }
-        else if (mean == dibEwmaMean && s2 == dibEwmaSq) { dibEwmaMean = m; dibEwmaSq = ss; }
-        else if (mean == trbEwmaMean && s2 == trbEwmaSq) { trbEwmaMean = m; trbEwmaSq = ss; }
-        else if (mean == vrbEwmaMean && s2 == vrbEwmaSq) { vrbEwmaMean = m; vrbEwmaSq = ss; }
-        return new double[]{m, var};
+    /**
+     * BUG-001 FIX: Explicit per-type EWMA update methods
+     * These replace the broken updateEwma() method that compared primitive doubles by value
+     */
+    private void updateVibEwma(double x) {
+        ImbalanceConfig cfg = getConfig();
+        vibEwmaMean = cfg.ewmaAlpha * x + (1 - cfg.ewmaAlpha) * vibEwmaMean;
+        vibEwmaSq = cfg.ewmaAlpha * x * x + (1 - cfg.ewmaAlpha) * vibEwmaSq;
     }
 
-    private double quantileThreshold(double[] meanVar, double floor) {
-        double m = meanVar[0];
-        double v = Math.max(0.0, meanVar[1]);
-        double sigma = Math.sqrt(v);
-        double q = m + IMB_Q_ZSCORE * sigma;
+    private void updateDibEwma(double x) {
+        ImbalanceConfig cfg = getConfig();
+        dibEwmaMean = cfg.ewmaAlpha * x + (1 - cfg.ewmaAlpha) * dibEwmaMean;
+        dibEwmaSq = cfg.ewmaAlpha * x * x + (1 - cfg.ewmaAlpha) * dibEwmaSq;
+    }
+
+    private void updateTrbEwma(double x) {
+        ImbalanceConfig cfg = getConfig();
+        trbEwmaMean = cfg.ewmaAlpha * x + (1 - cfg.ewmaAlpha) * trbEwmaMean;
+        trbEwmaSq = cfg.ewmaAlpha * x * x + (1 - cfg.ewmaAlpha) * trbEwmaSq;
+    }
+
+    private void updateVrbEwma(double x) {
+        ImbalanceConfig cfg = getConfig();
+        vrbEwmaMean = cfg.ewmaAlpha * x + (1 - cfg.ewmaAlpha) * vrbEwmaMean;
+        vrbEwmaSq = cfg.ewmaAlpha * x * x + (1 - cfg.ewmaAlpha) * vrbEwmaSq;
+    }
+
+    private double getQuantileThreshold(double mean, double sqMean, double floor, double zScore) {
+        double var = Math.max(0.0, sqMean - mean * mean);
+        double sigma = Math.sqrt(var);
+        double q = mean + zScore * sigma;
         return Math.max(floor, q);
     }
 
@@ -407,7 +488,7 @@ public class EnrichedCandlestick {
         if (volume <= 0) return;
 
         // Round price to instrument tick size using BigDecimal to avoid float artifacts
-        double tickSize = getTickSize();
+        double tickSize = getEffectiveTickSize();
         java.math.BigDecimal p = java.math.BigDecimal.valueOf(price);
         java.math.BigDecimal step = java.math.BigDecimal.valueOf(tickSize);
         java.math.BigDecimal roundedBd = p.divide(step, 0, java.math.RoundingMode.HALF_UP)
@@ -424,12 +505,18 @@ public class EnrichedCandlestick {
 
     /**
      * Determine tick size for instrument.
+     * BUG-006 FIX: Use instrument-specific tick size if available
      */
-    private double getTickSize() {
-        if ("D".equalsIgnoreCase(exchangeType) || "F".equalsIgnoreCase(exchangeType) || "O".equalsIgnoreCase(exchangeType)) {
-            return DERIV_TICK_SIZE; // common for derivatives/options
+    private double getEffectiveTickSize() {
+        if (instrumentTickSize > 0) {
+            return instrumentTickSize;  // Use instrument-specific tick size if set
         }
-        return DEFAULT_TICK_SIZE;
+        // Fallback to defaults
+        ImbalanceConfig cfg = getConfig();
+        if ("D".equalsIgnoreCase(exchangeType) || "F".equalsIgnoreCase(exchangeType) || "O".equalsIgnoreCase(exchangeType)) {
+            return cfg.derivTickSize; // common for derivatives/options
+        }
+        return cfg.defaultTickSize;
     }
 
     /**
@@ -535,8 +622,11 @@ public class EnrichedCandlestick {
         this.volumeImbalance += other.volumeImbalance;
         this.dollarImbalance += other.dollarImbalance;
 
-        other.volumeAtPrice.forEach((price, vol) ->
-                this.volumeAtPrice.merge(price, vol, Long::sum));
+        // BUG-019 FIX: Handle null volumeAtPrice
+        if (other.volumeAtPrice != null) {
+            other.volumeAtPrice.forEach((price, vol) ->
+                    this.volumeAtPrice.merge(price, vol, Long::sum));
+        }
 
         if (other.lowestPrice != null) {
             this.lowestPrice = (this.lowestPrice == null)
@@ -580,6 +670,21 @@ public class EnrichedCandlestick {
         this.vpinCurrentBucketVolume += other.vpinCurrentBucketVolume;
         this.vpinCurrentBucketBuyVolume += other.vpinCurrentBucketBuyVolume;
         this.priceTickCount += other.priceTickCount;
+
+        // BUG-007 FIX: Merge EWMA stats (weighted average by observation count)
+        if (this.tickCount + other.tickCount > 0) {
+            double w1 = (double) this.tickCount / (this.tickCount + other.tickCount);
+            double w2 = (double) other.tickCount / (this.tickCount + other.tickCount);
+
+            this.vibEwmaMean = w1 * this.vibEwmaMean + w2 * other.vibEwmaMean;
+            this.vibEwmaSq = w1 * this.vibEwmaSq + w2 * other.vibEwmaSq;
+            this.dibEwmaMean = w1 * this.dibEwmaMean + w2 * other.dibEwmaMean;
+            this.dibEwmaSq = w1 * this.dibEwmaSq + w2 * other.dibEwmaSq;
+            this.trbEwmaMean = w1 * this.trbEwmaMean + w2 * other.trbEwmaMean;
+            this.trbEwmaSq = w1 * this.trbEwmaSq + w2 * other.trbEwmaSq;
+            this.vrbEwmaMean = w1 * this.vrbEwmaMean + w2 * other.vrbEwmaMean;
+            this.vrbEwmaSq = w1 * this.vrbEwmaSq + w2 * other.vrbEwmaSq;
+        }
 
         // Normalize: flush any full VPIN buckets from accumulated current volume
         flushFullVPINBucketsFromCurrent();
@@ -846,6 +951,7 @@ public class EnrichedCandlestick {
 
     /**
      * Updates the human-readable timestamps based on windowStartMillis and windowEndMillis
+     * BUG-017 FIX: Don't truncate seconds - use actual timestamp
      */
     public void updateHumanReadableTimestamps() {
         if (windowStartMillis > 0) {
@@ -853,7 +959,7 @@ public class EnrichedCandlestick {
                     Instant.ofEpochMilli(windowStartMillis),
                     ZoneId.of("Asia/Kolkata")
             );
-            startTime = startTime.withSecond(0).withNano(0);
+            // BUG-017 FIX: Don't truncate seconds
             this.humanReadableStartTime = startTime.format(
                     DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm:ss.SSS")
             );
@@ -864,7 +970,7 @@ public class EnrichedCandlestick {
                     Instant.ofEpochMilli(windowEndMillis),
                     ZoneId.of("Asia/Kolkata")
             );
-            endTime = endTime.withSecond(0).withNano(0);
+            // BUG-017 FIX: Don't truncate seconds
             this.humanReadableEndTime = endTime.format(
                     DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm:ss.SSS")
             );
@@ -897,14 +1003,17 @@ public class EnrichedCandlestick {
     // ---------------------------------------------------
     // Internal Serializer/Deserializer
     // ---------------------------------------------------
-    public static class EnrichedCandlestickSerializer implements Serializer<EnrichedCandlestick> {
-        private final ObjectMapper objectMapper = new ObjectMapper();
+    // BUG-015 FIX: Shared, thread-safe ObjectMapper
+    private static final ObjectMapper SHARED_OBJECT_MAPPER = new ObjectMapper()
+        .configure(com.fasterxml.jackson.databind.DeserializationFeature.FAIL_ON_UNKNOWN_PROPERTIES, false)
+        .setSerializationInclusion(com.fasterxml.jackson.annotation.JsonInclude.Include.NON_NULL);
 
+    public static class EnrichedCandlestickSerializer implements Serializer<EnrichedCandlestick> {
         @Override
         public byte[] serialize(String topic, EnrichedCandlestick data) {
             if (data == null) return null;
             try {
-                return objectMapper.writeValueAsBytes(data);
+                return SHARED_OBJECT_MAPPER.writeValueAsBytes(data);
             } catch (Exception e) {
                 throw new RuntimeException("Serialization failed for EnrichedCandlestick", e);
             }
@@ -912,13 +1021,11 @@ public class EnrichedCandlestick {
     }
 
     public static class EnrichedCandlestickDeserializer implements Deserializer<EnrichedCandlestick> {
-        private final ObjectMapper objectMapper = new ObjectMapper();
-
         @Override
         public EnrichedCandlestick deserialize(String topic, byte[] bytes) {
             if (bytes == null) return null;
             try {
-                return objectMapper.readValue(bytes, EnrichedCandlestick.class);
+                return SHARED_OBJECT_MAPPER.readValue(bytes, EnrichedCandlestick.class);
             } catch (Exception e) {
                 throw new RuntimeException("Deserialization failed for EnrichedCandlestick", e);
             }
