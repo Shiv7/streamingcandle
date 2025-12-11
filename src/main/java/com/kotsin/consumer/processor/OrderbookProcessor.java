@@ -29,18 +29,19 @@ import java.util.*;
 /**
  * Production-ready Kafka Streams processor for Orderbook microstructure signals.
  * Pattern: Copy of CandlestickProcessor.java
- * 
+ *
  * Data Flow:
- * 1. Raw orderbook snapshots → 1-minute microstructure signals (OFI, VPIN, Kyle's Lambda, etc.)
+ * 1. Raw orderbook snapshots → 1-minute microstructure signals (OFI, Kyle's Lambda, etc.)
  * 2. 1-minute signals → Multi-minute signals (2m, 3m, 5m, 15m, 30m)
- * 
+ *
  * Features:
  * - OFI (Order Flow Imbalance - full depth)
- * - VPIN (Volume-Synchronized PIN with adaptive buckets)
  * - Kyle's Lambda (price impact coefficient)
  * - Depth metrics (bid/ask VWAP, slopes, imbalances)
  * - Iceberg detection
  * - Spoofing detection
+ *
+ * Note: VPIN is calculated in EnrichedCandlestick (from trade data), not here
  */
 @Component
 public class OrderbookProcessor {
@@ -350,11 +351,12 @@ public class OrderbookProcessor {
                 Instant.ofEpochMilli(aggregate.getWindowEndMillis()),
                 ZoneId.of("Asia/Kolkata")
         );
-        LOGGER.debug("{}m orderbook for {}: window: {}-{}, OFI: {:.2f}, VPIN: {:.3f}, Depth Imb: {:.3f}, Iceberg: {}/{}, Spoofing: {}",
+        // BUG-022 FIX: Removed VPIN reference (VPIN is in EnrichedCandlestick, not OrderbookAggregate)
+        LOGGER.debug("{}m orderbook for {}: window: {}-{}, OFI: {:.2f}, Depth Imb: {:.3f}, Lambda: {:.6f}, Iceberg: {}/{}, Spoofing: {}",
                 windowSizeMinutes, aggregate.getCompanyName(),
                 windowStart.format(DateTimeFormatter.ofPattern("HH:mm:ss")),
                 windowEnd.format(DateTimeFormatter.ofPattern("HH:mm:ss")),
-                aggregate.getOfi(), aggregate.getVpin(), aggregate.getDepthImbalance(),
+                aggregate.getOfi(), aggregate.getDepthImbalance(), aggregate.getKyleLambda(),
                 aggregate.detectIcebergBid() ? "Y" : "N",
                 aggregate.detectIcebergAsk() ? "Y" : "N",
                 aggregate.getSpoofingCount());
