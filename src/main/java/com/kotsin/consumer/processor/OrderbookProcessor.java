@@ -352,13 +352,15 @@ public class OrderbookProcessor {
                 ZoneId.of("Asia/Kolkata")
         );
         // BUG-022 FIX: Removed VPIN reference (VPIN is in EnrichedCandlestick, not OrderbookAggregate)
-        LOGGER.debug("{}m orderbook for {}: window: {}-{}, OFI: {:.2f}, Depth Imb: {:.3f}, Lambda: {:.6f}, Iceberg: {}/{}, Spoofing: {}",
+        LOGGER.debug("{}m orderbook for {}: window: {}-{}, OFI: {}, Depth Imb: {}, Lambda: {}, Iceberg: {}/{}, Spoofing: {}",
                 windowSizeMinutes, aggregate.getCompanyName(),
                 windowStart.format(DateTimeFormatter.ofPattern("HH:mm:ss")),
                 windowEnd.format(DateTimeFormatter.ofPattern("HH:mm:ss")),
-                aggregate.getOfi(), aggregate.getDepthImbalance(), aggregate.getKyleLambda(),
-                aggregate.detectIcebergBid() ? "Y" : "N",
-                aggregate.detectIcebergAsk() ? "Y" : "N",
+                String.format("%.2f", aggregate.getOfi()), 
+                String.format("%.3f", aggregate.getDepthImbalance()), 
+                String.format("%.6f", aggregate.getKyleLambda()),
+                aggregate.detectIcebergBid(),
+                aggregate.detectIcebergAsk(),
                 aggregate.getSpoofingCount());
     }
 

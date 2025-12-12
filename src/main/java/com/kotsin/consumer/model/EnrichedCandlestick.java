@@ -584,7 +584,10 @@ public class EnrichedCandlestick {
             this.humanReadableEndTime = other.humanReadableEndTime;
         }
 
-        long candidateOpenTs = otherStart > 0 ? otherStart : otherEnd;
+        // BUG-FIX: Use actual openSourceTs from source candle, NOT window boundary
+        // This ensures we pick the OPEN from the candle with the earliest ACTUAL tick, not earliest window
+        long candidateOpenTs = other.openSourceTs > 0 ? other.openSourceTs : 
+                              (otherStart > 0 ? otherStart : otherEnd);
         if (otherHasPrice && (!this.openInitialized
                 || (candidateOpenTs > 0 && candidateOpenTs < this.openSourceTs))) {
             this.open = other.open;
@@ -594,7 +597,9 @@ public class EnrichedCandlestick {
             }
         }
 
-        long candidateCloseTs = otherEnd > 0 ? otherEnd : otherStart;
+        // BUG-FIX: Use actual closeSourceTs from source candle for CLOSE selection
+        long candidateCloseTs = other.closeSourceTs > 0 ? other.closeSourceTs :
+                               (otherEnd > 0 ? otherEnd : otherStart);
         if (otherHasPrice && (candidateCloseTs >= this.closeSourceTs)) {
             this.close = other.close;
             this.closeSourceTs = candidateCloseTs;

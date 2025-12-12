@@ -352,13 +352,13 @@ public class OIProcessor {
                 Instant.ofEpochMilli(aggregate.getWindowEndMillis()),
                 ZoneId.of("Asia/Kolkata")
         );
-        LOGGER.debug("{}m OI for {}: window: {}-{}, OI: {} → {}, Change: {}, Put/Call: {} / {} (Ratio: {:.2f})",
+        LOGGER.debug("{}m OI for {}: window: {}-{}, OI: {} → {}, Change: {}, Put/Call: {} / {} (Ratio: {})",
                 windowSizeMinutes, aggregate.getCompanyName(),
                 windowStart.format(DateTimeFormatter.ofPattern("HH:mm:ss")),
                 windowEnd.format(DateTimeFormatter.ofPattern("HH:mm:ss")),
                 aggregate.getOiOpen(), aggregate.getOiClose(), aggregate.getOiChange(),
                 aggregate.getPutOI(), aggregate.getCallOI(),
-                aggregate.getPutCallRatio() != null ? aggregate.getPutCallRatio() : 0.0);
+                String.format("%.2f", aggregate.getPutCallRatio() != null ? aggregate.getPutCallRatio() : 0.0));
     }
 
     /**
