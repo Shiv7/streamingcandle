@@ -104,19 +104,13 @@ public class TradingSignalProcessor {
      * Build topology that joins VCP + IPU
      */
     private void buildTradingSignalTopology(StreamsBuilder builder) {
-        // Read VCP stream
-        KStream<String, MTVCPOutput> vcpStream = builder.stream(
-                vcpTopic,
-                Consumed.with(Serdes.String(), MTVCPOutput.serde())
-        );
-
-        // Read IPU stream
+        // Read IPU stream - this drives signal emission
         KStream<String, IPUOutput> ipuStream = builder.stream(
                 ipuTopic,
                 Consumed.with(Serdes.String(), IPUOutput.serde())
         );
 
-        // Convert to GlobalKTables for point-in-time lookup
+        // VCP as GlobalKTable for point-in-time lookup (IPU stream drives emission)
         GlobalKTable<String, MTVCPOutput> vcpTable = builder.globalTable(
                 vcpTopic,
                 Consumed.with(Serdes.String(), MTVCPOutput.serde()),
@@ -124,15 +118,6 @@ public class TradingSignalProcessor {
                         as("vcp-global-store")
                         .withKeySerde(Serdes.String())
                         .withValueSerde(MTVCPOutput.serde())
-        );
-
-        GlobalKTable<String, IPUOutput> ipuTable = builder.globalTable(
-                ipuTopic,
-                Consumed.with(Serdes.String(), IPUOutput.serde()),
-                Materialized.<String, IPUOutput, KeyValueStore<Bytes, byte[]>>
-                        as("ipu-global-store")
-                        .withKeySerde(Serdes.String())
-                        .withValueSerde(IPUOutput.serde())
         );
 
         // Join IPU with VCP (IPU drives emission, VCP lookup)
