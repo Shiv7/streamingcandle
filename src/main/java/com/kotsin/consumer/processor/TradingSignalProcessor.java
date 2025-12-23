@@ -110,12 +110,13 @@ public class TradingSignalProcessor {
                 Consumed.with(Serdes.String(), IPUOutput.serde())
         );
 
-        // VCP as GlobalKTable for point-in-time lookup (IPU stream drives emission)
-        GlobalKTable<String, MTVCPOutput> vcpTable = builder.globalTable(
+        // VCP as KTable for lookup (will be empty until VCP starts producing)
+        // Note: Using KTable instead of GlobalKTable because GlobalKTable requires topic to exist at startup
+        KTable<String, MTVCPOutput> vcpTable = builder.table(
                 vcpTopic,
                 Consumed.with(Serdes.String(), MTVCPOutput.serde()),
                 Materialized.<String, MTVCPOutput, KeyValueStore<Bytes, byte[]>>
-                        as("vcp-global-store")
+                        as("vcp-store")
                         .withKeySerde(Serdes.String())
                         .withValueSerde(MTVCPOutput.serde())
         );
@@ -124,7 +125,6 @@ public class TradingSignalProcessor {
         KStream<String, TradingSignal> tradingSignals = ipuStream
                 .leftJoin(
                         vcpTable,
-                        (key, ipu) -> key,  // Key mapper for VCP lookup
                         (ipu, vcp) -> {
                             // Build multi-TF IPU if we have cached results FOR THIS SCRIPCODE
                             IPUOutput ipuCombined = ipu;
