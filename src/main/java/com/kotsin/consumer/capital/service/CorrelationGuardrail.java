@@ -44,28 +44,30 @@ public class CorrelationGuardrail {
     // Track open positions
     private final ConcurrentHashMap<String, PositionInfo> openPositions = new ConcurrentHashMap<>();
 
-    // Sector mapping (would normally come from database)
-    private static final Map<String, String> SECTOR_MAP = new HashMap<>();
+    // Sector mapping (would normally come from database) - IMMUTABLE for thread safety
+    private static final Map<String, String> SECTOR_MAP;
     static {
+        Map<String, String> map = new HashMap<>();
         // Common sectors - in production, fetch from ScripFinder
-        SECTOR_MAP.put("RELIANCE", "OIL_GAS");
-        SECTOR_MAP.put("INFY", "IT");
-        SECTOR_MAP.put("TCS", "IT");
-        SECTOR_MAP.put("HCLTECH", "IT");
-        SECTOR_MAP.put("WIPRO", "IT");
-        SECTOR_MAP.put("TECHM", "IT");
-        SECTOR_MAP.put("HDFCBANK", "BANKING");
-        SECTOR_MAP.put("ICICIBANK", "BANKING");
-        SECTOR_MAP.put("KOTAKBANK", "BANKING");
-        SECTOR_MAP.put("AXISBANK", "BANKING");
-        SECTOR_MAP.put("SBIN", "BANKING");
-        SECTOR_MAP.put("BHARTIARTL", "TELECOM");
-        SECTOR_MAP.put("TATAMOTORS", "AUTO");
-        SECTOR_MAP.put("MARUTI", "AUTO");
-        SECTOR_MAP.put("M&M", "AUTO");
-        SECTOR_MAP.put("SUNPHARMA", "PHARMA");
-        SECTOR_MAP.put("DRREDDY", "PHARMA");
-        SECTOR_MAP.put("CIPLA", "PHARMA");
+        map.put("RELIANCE", "OIL_GAS");
+        map.put("INFY", "IT");
+        map.put("TCS", "IT");
+        map.put("HCLTECH", "IT");
+        map.put("WIPRO", "IT");
+        map.put("TECHM", "IT");
+        map.put("HDFCBANK", "BANKING");
+        map.put("ICICIBANK", "BANKING");
+        map.put("KOTAKBANK", "BANKING");
+        map.put("AXISBANK", "BANKING");
+        map.put("SBIN", "BANKING");
+        map.put("BHARTIARTL", "TELECOM");
+        map.put("TATAMOTORS", "AUTO");
+        map.put("MARUTI", "AUTO");
+        map.put("M&M", "AUTO");
+        map.put("SUNPHARMA", "PHARMA");
+        map.put("DRREDDY", "PHARMA");
+        map.put("CIPLA", "PHARMA");
+        SECTOR_MAP = java.util.Collections.unmodifiableMap(map);
     }
 
     private static class PositionInfo {

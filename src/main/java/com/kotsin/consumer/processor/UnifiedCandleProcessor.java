@@ -152,31 +152,31 @@ public class UnifiedCandleProcessor {
 
         TimeWindows windows = TimeWindows.ofSizeAndGrace(windowDuration, graceDuration);
 
-        // Aggregate candles into KTable (should already be single value per window from upstream)
+        // Aggregate candles into KTable - take latest arriving (Kafka maintains ordering)
         KTable<Windowed<String>, EnrichedCandlestick> candleTable = candleStream
                 .groupByKey(Grouped.with(Serdes.String(), EnrichedCandlestick.serde()))
                 .windowedBy(windows)
-                .reduce((agg, newVal) -> newVal,  // Take latest
+                .reduce((agg, newVal) -> newVal,  // Take latest arriving
                         Materialized.<String, EnrichedCandlestick, WindowStore<Bytes, byte[]>>as("unified-candle-table-" + timeframe)
                                 .withKeySerde(Serdes.String())
                                 .withValueSerde(EnrichedCandlestick.serde())
                 );
 
-        // Aggregate orderbook into KTable
+        // Aggregate orderbook into KTable - take latest arriving
         KTable<Windowed<String>, OrderbookAggregate> orderbookTable = orderbookStream
                 .groupByKey(Grouped.with(Serdes.String(), OrderbookAggregate.serde()))
                 .windowedBy(windows)
-                .reduce((agg, newVal) -> newVal,  // Take latest
+                .reduce((agg, newVal) -> newVal,  // Take latest arriving
                         Materialized.<String, OrderbookAggregate, WindowStore<Bytes, byte[]>>as("unified-ob-table-" + timeframe)
                                 .withKeySerde(Serdes.String())
                                 .withValueSerde(OrderbookAggregate.serde())
                 );
 
-        // Aggregate OI into KTable
+        // Aggregate OI into KTable - take latest arriving
         KTable<Windowed<String>, OIAggregate> oiTable = oiStream
                 .groupByKey(Grouped.with(Serdes.String(), OIAggregate.serde()))
                 .windowedBy(windows)
-                .reduce((agg, newVal) -> newVal,  // Take latest
+                .reduce((agg, newVal) -> newVal,  // Take latest arriving
                         Materialized.<String, OIAggregate, WindowStore<Bytes, byte[]>>as("unified-oi-table-" + timeframe)
                                 .withKeySerde(Serdes.String())
                                 .withValueSerde(OIAggregate.serde())

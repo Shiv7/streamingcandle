@@ -131,6 +131,14 @@ public class TTLCache<K, V> {
     }
 
     /**
+     * Get value or default if not found
+     */
+    public V getOrDefault(K key, V defaultValue) {
+        V value = get(key);
+        return value != null ? value : defaultValue;
+    }
+
+    /**
      * Get value with cache miss logging
      */
     public V getWithLogging(K key, String context) {

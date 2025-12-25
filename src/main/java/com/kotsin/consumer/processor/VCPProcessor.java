@@ -28,6 +28,10 @@ import org.springframework.stereotype.Component;
 
 import java.time.Duration;
 import java.util.*;
+import java.util.concurrent.Executors;
+import java.util.concurrent.ScheduledExecutorService;
+import java.util.concurrent.TimeUnit;
+import com.kotsin.consumer.util.TTLCache;
 
 /**
  * VCPProcessor - Calculate VCP scores from UnifiedCandle history
@@ -69,9 +73,13 @@ public class VCPProcessor {
     @Value("${vcp.enabled:true}")
     private boolean enabled;
 
-    // Cache for multi-timeframe fusion - PER SCRIPCODE to avoid cross-contamination
-    private final java.util.concurrent.ConcurrentHashMap<String, VCPCalculator.VCPResult> cached15mResults = new java.util.concurrent.ConcurrentHashMap<>();
-    private final java.util.concurrent.ConcurrentHashMap<String, VCPCalculator.VCPResult> cached30mResults = new java.util.concurrent.ConcurrentHashMap<>();
+    @Value("${vcp.cache.ttl.ms:300000}")
+    private long cacheTtlMs;
+
+    // TTL Cache for multi-timeframe fusion - PER SCRIPCODE
+    private TTLCache<String, VCPCalculator.VCPResult> cached15mResults;
+    private TTLCache<String, VCPCalculator.VCPResult> cached30mResults;
+    private TTLCache<String, UnifiedCandle> lastCandleCache;  // For currentPrice fix
 
     /**
      * Process VCP for all timeframes
@@ -81,6 +89,13 @@ public class VCPProcessor {
             LOGGER.info("⏸️ VCPProcessor is disabled");
             return;
         }
+
+        // Initialize TTL caches
+        cached15mResults = new TTLCache<>("VCP-15m", cacheTtlMs, 1000, 30000);
+        cached30mResults = new TTLCache<>("VCP-30m", cacheTtlMs, 1000, 30000);
+        lastCandleCache = new TTLCache<>("VCP-LastCandle", 60000, 1000, 30000); // 1 min TTL
+
+        LOGGER.info("✅ VCP caches initialized with TTL={}ms", cacheTtlMs);
 
         // Process each timeframe
         processVCPForTimeframe("5m", vcpConfig.getLookback5m());
@@ -153,6 +168,13 @@ public class VCPProcessor {
                 Consumed.with(Serdes.String(), UnifiedCandle.serde())
         );
 
+        // Cache last candle for currentPrice fix (only needed for 5m)
+        if ("5m".equals(timeframe) && lastCandleCache != null) {
+            input.foreach((k, v) -> {
+                if (k != null && v != null) lastCandleCache.put(k, v);
+            });
+        }
+
         // Process: update history, calculate VCP, emit signals
         KStream<String, VCPCalculator.VCPResult> vcpResults = input.process(
                 () -> new VCPHistoryProcessor(historyStoreName, lookbackSize, timeframe, vcpCalculator),
@@ -178,14 +200,14 @@ public class VCPProcessor {
             vcpResults
                     .filter((k, v) -> v != null)
                     .mapValues((k, result5m) -> {
-                        // Get current candle for metadata (from result's clusters if available)
-                        UnifiedCandle current = null;  // We'll pass null and use scripCode from key
+                        // Get last candle for this scripCode (for currentPrice fix)
+                        UnifiedCandle current = lastCandleCache != null ? lastCandleCache.get(k) : null;
 
                         // Build combined output using per-scripCode cache
                         MTVCPOutput combined = vcpCalculator.buildCombinedOutput(
                                 result5m,
-                                cached15mResults.getOrDefault(k, VCPCalculator.VCPResult.empty()),
-                                cached30mResults.getOrDefault(k, VCPCalculator.VCPResult.empty()),
+                                cached15mResults != null ? cached15mResults.getOrDefault(k, VCPCalculator.VCPResult.empty()) : VCPCalculator.VCPResult.empty(),
+                                cached30mResults != null ? cached30mResults.getOrDefault(k, VCPCalculator.VCPResult.empty()) : VCPCalculator.VCPResult.empty(),
                                 current
                         );
                         combined.setScripCode(k);
@@ -198,12 +220,12 @@ public class VCPProcessor {
         // For 15m and 30m: cache results for fusion PER SCRIPCODE
         if ("15m".equals(timeframe)) {
             vcpResults.foreach((k, v) -> {
-                if (v != null && k != null) cached15mResults.put(k, v);
+                if (v != null && k != null && cached15mResults != null) cached15mResults.put(k, v);
             });
         }
         if ("30m".equals(timeframe)) {
             vcpResults.foreach((k, v) -> {
-                if (v != null && k != null) cached30mResults.put(k, v);
+                if (v != null && k != null && cached30mResults != null) cached30mResults.put(k, v);
             });
         }
 
