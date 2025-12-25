@@ -73,6 +73,14 @@ public class TradingSignal {
     private double positionSizeMultiplier;
     private double trailAtrMultiplier;
 
+    // ========== Trade Execution Parameters (CRITICAL FOR PRODUCTION) ==========
+    private double entryPrice;           // Suggested entry price
+    private double stopLoss;             // Stop loss level
+    private double target1;              // First target (2:1 R:R)
+    private double target2;              // Second target (3:1 R:R)
+    private double riskRewardRatio;      // Calculated R:R
+    private double riskPercentage;       // Risk as % of entry
+
     // ========== Enums ==========
 
     public enum SignalType {
@@ -142,6 +150,7 @@ public class TradingSignal {
 
         TradingSignal signal = builder.build();
         signal.classifySignal(vcp, ipu);
+        signal.calculateTradeParams(vcp, ipu);  // Calculate entry/stop/targets
         return signal;
     }
 
@@ -293,6 +302,49 @@ public class TradingSignal {
             this.confidence = ipu.getInstProxy() * ipu.getOfQuality();
             this.rationale = "Institutional selling without price movement - distribution";
             return;
+        }
+    }
+
+    /**
+     * Calculate trade parameters (entry, stop, targets)
+     * Call this AFTER classifySignal
+     */
+    public void calculateTradeParams(MTVCPOutput vcp, IPUOutput ipu) {
+        // Clamp confidence
+        this.confidence = Math.max(0, Math.min(1.0, this.confidence));
+
+        // Need price data
+        if (this.currentPrice <= 0) {
+            return;
+        }
+
+        // Calculate ATR-based stops and targets
+        double atrValue = this.atr > 0 ? this.atr : this.currentPrice * 0.015; // Default 1.5%
+
+        if (isLongSignal()) {
+            this.entryPrice = this.currentPrice;
+            this.stopLoss = this.currentPrice - (1.5 * atrValue);
+            this.target1 = this.currentPrice + (2.0 * atrValue);
+            this.target2 = this.currentPrice + (3.5 * atrValue);
+        } else if (isShortSignal()) {
+            this.entryPrice = this.currentPrice;
+            this.stopLoss = this.currentPrice + (1.5 * atrValue);
+            this.target1 = this.currentPrice - (2.0 * atrValue);
+            this.target2 = this.currentPrice - (3.5 * atrValue);
+        } else {
+            // No signal - no targets
+            this.entryPrice = this.currentPrice;
+            this.stopLoss = 0;
+            this.target1 = 0;
+            this.target2 = 0;
+        }
+
+        // Calculate risk/reward
+        if (this.stopLoss > 0 && this.entryPrice > 0) {
+            double risk = Math.abs(this.entryPrice - this.stopLoss);
+            double reward = Math.abs(this.target1 - this.entryPrice);
+            this.riskRewardRatio = risk > 0 ? reward / risk : 0;
+            this.riskPercentage = this.entryPrice > 0 ? (risk / this.entryPrice) * 100 : 0;
         }
     }
 
