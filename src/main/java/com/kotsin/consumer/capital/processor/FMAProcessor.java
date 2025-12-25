@@ -10,6 +10,7 @@ import com.kotsin.consumer.regime.model.*;
 import com.kotsin.consumer.regime.processor.RegimeProcessor;
 import com.kotsin.consumer.regime.service.*;
 import com.kotsin.consumer.signal.model.FUDKIIOutput;
+import com.kotsin.consumer.signal.model.VTDOutput;
 import com.kotsin.consumer.signal.service.FUDKIICalculator;
 import com.kotsin.consumer.util.TTLCache;
 
@@ -102,6 +103,7 @@ public class FMAProcessor {
     private TTLCache<String, SecurityRegime> cachedSecurityRegime;
     private TTLCache<String, ACLOutput> cachedACL;
     private TTLCache<String, FUDKIIOutput> cachedFUDKII;
+    private TTLCache<String, VTDOutput> cachedVTD;  // Nice-to-have: VTD integration
 
     // Stats logging executor
     private ScheduledExecutorService statsExecutor;
@@ -137,6 +139,7 @@ public class FMAProcessor {
         cachedSecurityRegime = new TTLCache<>("FMA-SecurityRegime", cacheTtlMs, 1000, 30000);
         cachedACL = new TTLCache<>("FMA-ACL", cacheTtlMs, 1000, 30000);
         cachedFUDKII = new TTLCache<>("FMA-FUDKII", cacheTtlMs, 1000, 30000);
+        cachedVTD = new TTLCache<>("FMA-VTD", cacheTtlMs, 1000, 30000);  // Nice-to-have
 
         // Schedule stats logging every 5 minutes
         statsExecutor = Executors.newSingleThreadScheduledExecutor(r -> {
@@ -217,6 +220,14 @@ public class FMAProcessor {
                 .foreach((k, v) -> {
                     if (isValidKey(k) && v != null) {
                         cachedACL.put(k, v);
+                    }
+                });
+
+        // Consume and cache VTD outputs (Nice-to-have: VTD integration)
+        builder.stream(KafkaTopics.VTD_OUTPUT, Consumed.with(Serdes.String(), VTDOutput.serde()))
+                .foreach((k, v) -> {
+                    if (isValidKey(k) && v != null) {
+                        cachedVTD.put(k, v);
                     }
                 });
 

@@ -2,6 +2,7 @@ package com.kotsin.consumer;
 
 import org.springframework.boot.SpringApplication;
 import org.springframework.boot.autoconfigure.SpringBootApplication;
+import org.springframework.scheduling.annotation.EnableScheduling;
 
 
 /**
@@ -19,6 +20,7 @@ import org.springframework.boot.autoconfigure.SpringBootApplication;
  * Pattern: Clean, simple, follows streamingcandle-working architecture
  */
 @SpringBootApplication
+@EnableScheduling
 public class ConsumerApplication {
 
     public static void main(String[] args) {

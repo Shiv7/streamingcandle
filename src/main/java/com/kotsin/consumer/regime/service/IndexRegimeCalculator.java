@@ -38,10 +38,10 @@ public class IndexRegimeCalculator {
     @Value("${regime.tf.weight.2h:0.30}")
     private double tfWeight2H;
 
-    @Value("${regime.tf.weight.30m:0.25}")
+    @Value("${regime.tf.weight.30m:0.30}")
     private double tfWeight30m;
 
-    @Value("${regime.tf.weight.5m:0.10}")
+    @Value("${regime.tf.weight.5m:0.05}")
     private double tfWeight5m;
 
     // Index scrip codes
@@ -152,10 +152,11 @@ public class IndexRegimeCalculator {
         double close = current.getClose();
 
         // Step 1: VWAP Control Score
+        // VWAP_control = min(|VWAP_bias|, 1.5) / 1.5
+        // High deviation = high control (directional control)
         double vwapDeviation = Math.abs(close - vwap);
         double vwapControl = Math.min(vwapDeviation / (atr14 + 0.0001), 1.5) / 1.5;
-        // Invert: low deviation = high control
-        vwapControl = 1 - vwapControl;
+        // NOTE: Per spec, high deviation = high control, so NO inversion
 
         // Step 2: Participation Score
         double volumeDelta = current.getBuyVolume() - current.getSellVolume();
@@ -259,24 +260,44 @@ public class IndexRegimeCalculator {
 
     /**
      * Calculate flow agreement over N bars (+1 = bullish, -1 = bearish, 0 = neutral)
+     * Uses epsilon thresholds per spec:
+     * - epsilon_price = 0.05 (ATR normalized)
+     * - epsilon_volume = 0.10 (expected imbalance normalized)
      */
     private int calculateFlowAgreement(List<EnrichedCandlestick> candles, int bars) {
         if (candles.size() < bars) return 0;
         
-        int bullishCount = 0, bearishCount = 0;
+        // Calculate ATR for normalization
+        double atr = calculateATR(candles, 14);
+        double expectedImbalance = calculateExpectedVolumeImbalance(candles);
+        
+        // Epsilon thresholds per spec
+        final double EPSILON_PRICE = 0.05;
+        final double EPSILON_VOLUME = 0.10;
+        
+        int sumFlowRaw = 0;
         for (int i = candles.size() - bars; i < candles.size(); i++) {
             EnrichedCandlestick c = candles.get(i);
-            double delta = c.getBuyVolume() - c.getSellVolume();
-            double priceChange = c.getClose() - c.getOpen();
             
-            // Both flow and price agree on direction
-            if (delta > 0 && priceChange > 0) bullishCount++;
-            if (delta < 0 && priceChange < 0) bearishCount++;
+            // Step 3.1: Price Sign (ATR normalized)
+            double priceChangeNorm = (c.getClose() - c.getOpen()) / (atr + 0.0001);
+            int priceSign = priceChangeNorm > EPSILON_PRICE ? 1 : 
+                           (priceChangeNorm < -EPSILON_PRICE ? -1 : 0);
+            
+            // Step 3.2: Volume Sign (normalized)
+            double volumeDelta = c.getBuyVolume() - c.getSellVolume();
+            double volNorm = volumeDelta / (expectedImbalance + 1);
+            int volumeSign = volNorm > EPSILON_VOLUME ? 1 : 
+                            (volNorm < -EPSILON_VOLUME ? -1 : 0);
+            
+            // Step 3.3: Raw Flow Agreement
+            int flowRaw = priceSign * volumeSign;
+            sumFlowRaw += flowRaw;
         }
         
-        if (bullishCount >= 2) return 1;
-        if (bearishCount >= 2) return -1;
-        return 0;
+        // Step 3.4: Smoothed (round of mean)
+        double mean = (double) sumFlowRaw / bars;
+        return (int) Math.round(mean);
     }
 
     /**
