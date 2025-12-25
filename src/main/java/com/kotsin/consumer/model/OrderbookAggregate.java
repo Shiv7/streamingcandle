@@ -45,6 +45,11 @@ public class OrderbookAggregate {
     private double ofi = 0.0;
     private Map<Double, Integer> prevBidDepth = new HashMap<>();
     private Map<Double, Integer> prevAskDepth = new HashMap<>();
+    
+    // BUG-FIX: Current depth snapshots for emission (not @JsonIgnore - these get serialized)
+    private Map<Double, Integer> currentBidDepth = new HashMap<>();
+    private Map<Double, Integer> currentAskDepth = new HashMap<>();
+    
     private double prevBestBid = 0.0;
     private double prevBestAsk = 0.0;
 
@@ -53,7 +58,7 @@ public class OrderbookAggregate {
     // ========== Kyle's Lambda State ==========
     private static final int LAMBDA_WINDOW_SIZE = 100;  // Rolling window size
     private static final int LAMBDA_CALC_FREQUENCY = 20;  // Recalculate every N updates
-    private static final int LAMBDA_MIN_OBSERVATIONS = 30;  // Statistical minimum
+    private static final int LAMBDA_MIN_OBSERVATIONS = 10;  // BUG-FIX: Lowered from 30 - most windows don't get 30 updates
     @JsonIgnore private Deque<PriceImpactObservation> priceImpactHistory = new ArrayDeque<>(); // ring buffer for rolling window
     private double kyleLambda = 0.0;
     @JsonIgnore private double lastMidPrice = 0.0;
@@ -233,22 +238,24 @@ public class OrderbookAggregate {
         }
 
         // ========== Calculate OFI (Full Depth) ==========
+        // BUG-FIX: Store current depth at class level for emission, not just local variables
+        Map<Double, Integer> newBidDepth = buildDepthMap(orderbook.getAllBids());
+        Map<Double, Integer> newAskDepth = buildDepthMap(orderbook.getAllAsks());
+        
+        // Always store current depth for VCP validation downstream
+        this.currentBidDepth = newBidDepth;
+        this.currentAskDepth = newAskDepth;
+        
         if (!prevBidDepth.isEmpty() && !prevAskDepth.isEmpty() && bestBid > 0 && bestAsk > 0) {
-            Map<Double, Integer> currentBidDepth = buildDepthMap(orderbook.getAllBids());
-            Map<Double, Integer> currentAskDepth = buildDepthMap(orderbook.getAllAsks());
-            
             ofi += calculateFullDepthOFI(
-                prevBidDepth, currentBidDepth, prevBestBid, bestBid,
-                prevAskDepth, currentAskDepth, prevBestAsk, bestAsk
+                prevBidDepth, newBidDepth, prevBestBid, bestBid,
+                prevAskDepth, newAskDepth, prevBestAsk, bestAsk
             );
-            
-            prevBidDepth = currentBidDepth;
-            prevAskDepth = currentAskDepth;
-        } else {
-            // First snapshot - initialize
-            prevBidDepth = buildDepthMap(orderbook.getAllBids());
-            prevAskDepth = buildDepthMap(orderbook.getAllAsks());
         }
+        
+        // Update prev for next OFI calculation
+        prevBidDepth = newBidDepth;
+        prevAskDepth = newAskDepth;
         
         prevBestBid = bestBid;
         prevBestAsk = bestAsk;

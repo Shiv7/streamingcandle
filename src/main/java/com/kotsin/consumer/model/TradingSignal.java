@@ -254,13 +254,24 @@ public class TradingSignal {
             return;
         }
 
-        // Scenario 8: Divergence Warning
+        // Scenario 8a: Divergence Warning (BULLISH losing momentum)
         if (ipu.getMomentumState() == IPUOutput.MomentumState.DECELERATING
                 && ipu.getDirection() == IPUOutput.Direction.BULLISH
                 && ipu.getFlowMomentumAgreement() < 0.5) {
             this.signal = SignalType.DIVERGENCE_WARNING;
             this.confidence = 1 - ipu.getFlowMomentumAgreement();
             this.rationale = "Bullish momentum losing flow support - potential reversal";
+            return;
+        }
+
+        // Scenario 8b: Divergence Warning (BEARISH losing momentum)
+        // BUG-FIX: Previously only checked BULLISH direction
+        if (ipu.getMomentumState() == IPUOutput.MomentumState.DECELERATING
+                && ipu.getDirection() == IPUOutput.Direction.BEARISH
+                && ipu.getFlowMomentumAgreement() < 0.5) {
+            this.signal = SignalType.DIVERGENCE_WARNING;
+            this.confidence = 1 - ipu.getFlowMomentumAgreement();
+            this.rationale = "Bearish momentum losing selling pressure - potential bounce";
             return;
         }
 

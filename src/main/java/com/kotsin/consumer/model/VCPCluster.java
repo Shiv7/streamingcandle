@@ -124,7 +124,8 @@ public class VCPCluster {
         score *= ofiModifier;
 
         // Apply order book validation (capped at 2x)
-        double obModifier = Math.min(obValidation, 2.0);
+        // BUG-FIX: Default to 1.0 when no orderbook validation available (avoids multiplying by 0)
+        double obModifier = obValidation > 0 ? Math.min(obValidation, 2.0) : 1.0;
         score *= obModifier;
 
         // Apply OI adjustment

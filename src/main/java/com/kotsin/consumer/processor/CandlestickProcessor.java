@@ -498,8 +498,12 @@ public class CandlestickProcessor {
                 processMultiMinuteCandlestick("prod-unified-5m", "candle-ohlcv-1m", "candle-ohlcv-5m", 5);
                 processMultiMinuteCandlestick("prod-unified-15m", "candle-ohlcv-1m", "candle-ohlcv-15m", 15);
                 processMultiMinuteCandlestick("prod-unified-30m", "candle-ohlcv-1m", "candle-ohlcv-30m", 30);
+                
+                // NEW: Higher timeframe candles for regime analysis
+                processMultiMinuteCandlestick("prod-unified-2h", "candle-ohlcv-30m", "candle-ohlcv-2h", 120);
+                processMultiMinuteCandlestick("prod-unified-1d", "candle-ohlcv-2h", "candle-ohlcv-1d", 375);  // 6h15m market day
 
-                LOGGER.info("✅ All Enriched Candlestick Processors started successfully (1m from ticks, rest cascaded)");
+                LOGGER.info("✅ All Enriched Candlestick Processors started successfully (1m from ticks, rest cascaded + 2H/1D)");
                 logStreamStates();
 
             } catch (Exception e) {

@@ -175,11 +175,12 @@ public class UnifiedCandle {
                    .weightedDepthImbalance(orderbook.getAverageWeightedDepthImbalance());
 
             // Copy depth snapshots for cluster validation
-            if (orderbook.getPrevBidDepth() != null) {
-                builder.bidDepthSnapshot(new HashMap<>(orderbook.getPrevBidDepth()));
+            // BUG-FIX: Use getCurrentXxxDepth() instead of getPrevXxxDepth()
+            if (orderbook.getCurrentBidDepth() != null && !orderbook.getCurrentBidDepth().isEmpty()) {
+                builder.bidDepthSnapshot(new HashMap<>(orderbook.getCurrentBidDepth()));
             }
-            if (orderbook.getPrevAskDepth() != null) {
-                builder.askDepthSnapshot(new HashMap<>(orderbook.getPrevAskDepth()));
+            if (orderbook.getCurrentAskDepth() != null && !orderbook.getCurrentAskDepth().isEmpty()) {
+                builder.askDepthSnapshot(new HashMap<>(orderbook.getCurrentAskDepth()));
             }
 
             // Use scripCode from orderbook if not already set

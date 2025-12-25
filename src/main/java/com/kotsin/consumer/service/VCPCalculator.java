@@ -429,9 +429,10 @@ public class VCPCalculator {
             // Exponential decay proximity
             double proximity = Math.exp(-effectiveDistance / config.getProximityDecayConstant());
 
-            // Zero out if too far
+            // Zero out if too far (but keep minimum floor)
+            // BUG-FIX: Use minimum floor instead of hard zero to avoid killing scores
             if (rawDistance > config.getMaxRelevantDistance()) {
-                proximity = 0;
+                proximity = 0.1;  // Keep minimal proximity instead of 0
             }
 
             cluster.setProximity(proximity);
@@ -494,7 +495,9 @@ public class VCPCalculator {
                 .mapToDouble(VCPCluster::getBreakoutDifficulty)
                 .sum();
         
-        return 1.0 / (1.0 + totalDifficulty);
+        // BUG-FIX: Ensure score is bounded [0, 1]
+        double score = 1.0 / (1.0 + totalDifficulty);
+        return Math.max(0.0, Math.min(1.0, score));
     }
 
     private double calculateATR(List<UnifiedCandle> history) {
