@@ -159,9 +159,30 @@ public class IndexRegimeCalculator {
         // NOTE: Per spec, high deviation = high control, so NO inversion
 
         // Step 2: Participation Score
+        // For INDICES: buyVolume/sellVolume are 0, use price-based fallback
         double volumeDelta = current.getBuyVolume() - current.getSellVolume();
-        double expectedImbalance = calculateExpectedVolumeImbalance(candles);
-        double participation = Math.min(Math.abs(volumeDelta) / (expectedImbalance + 1), 1.5) / 1.5;
+        double participation;
+        
+        if (Math.abs(volumeDelta) > 0) {
+            // Normal case: use volume delta
+            double expectedImbalance = calculateExpectedVolumeImbalance(candles);
+            participation = Math.min(Math.abs(volumeDelta) / (expectedImbalance + 1), 1.5) / 1.5;
+        } else {
+            // INDEX FALLBACK: Use price range participation
+            // Participation = how much of ATR the price moved
+            double priceMove = Math.abs(current.getClose() - current.getOpen());
+            double range = current.getHigh() - current.getLow();
+            double rangeRatio = range / (atr14 + 0.0001);
+            
+            // High range = high participation (volatility expansion = institutional activity)
+            participation = Math.min(rangeRatio, 1.5) / 1.5;
+            
+            // Boost if close near high/low (directional conviction)
+            double closePosition = (current.getClose() - current.getLow()) / (range + 0.0001);
+            if (closePosition > 0.7 || closePosition < 0.3) {
+                participation = Math.min(participation * 1.2, 1.0);
+            }
+        }
 
         // Step 3: Flow Agreement (3-bar smoothed)
         int flowAgreement = calculateFlowAgreement(candles, 3);
@@ -263,6 +284,8 @@ public class IndexRegimeCalculator {
      * Uses epsilon thresholds per spec:
      * - epsilon_price = 0.05 (ATR normalized)
      * - epsilon_volume = 0.10 (expected imbalance normalized)
+     * 
+     * For INDICES without buy/sell volume: uses price momentum consistency
      */
     private int calculateFlowAgreement(List<EnrichedCandlestick> candles, int bars) {
         if (candles.size() < bars) return 0;
@@ -275,6 +298,16 @@ public class IndexRegimeCalculator {
         final double EPSILON_PRICE = 0.05;
         final double EPSILON_VOLUME = 0.10;
         
+        // Check if this is an INDEX (no volume data)
+        boolean hasVolumeData = false;
+        for (int i = candles.size() - bars; i < candles.size(); i++) {
+            EnrichedCandlestick c = candles.get(i);
+            if (Math.abs(c.getBuyVolume() - c.getSellVolume()) > 0) {
+                hasVolumeData = true;
+                break;
+            }
+        }
+        
         int sumFlowRaw = 0;
         for (int i = candles.size() - bars; i < candles.size(); i++) {
             EnrichedCandlestick c = candles.get(i);
@@ -284,11 +317,24 @@ public class IndexRegimeCalculator {
             int priceSign = priceChangeNorm > EPSILON_PRICE ? 1 : 
                            (priceChangeNorm < -EPSILON_PRICE ? -1 : 0);
             
-            // Step 3.2: Volume Sign (normalized)
-            double volumeDelta = c.getBuyVolume() - c.getSellVolume();
-            double volNorm = volumeDelta / (expectedImbalance + 1);
-            int volumeSign = volNorm > EPSILON_VOLUME ? 1 : 
+            int volumeSign;
+            if (hasVolumeData) {
+                // Normal case: use volume delta
+                double volumeDelta = c.getBuyVolume() - c.getSellVolume();
+                double volNorm = volumeDelta / (expectedImbalance + 1);
+                volumeSign = volNorm > EPSILON_VOLUME ? 1 : 
                             (volNorm < -EPSILON_VOLUME ? -1 : 0);
+            } else {
+                // INDEX FALLBACK: Use close position within range as proxy
+                // If close near high = bullish flow, close near low = bearish flow
+                double range = c.getHigh() - c.getLow();
+                if (range > 0) {
+                    double closePosition = (c.getClose() - c.getLow()) / range;
+                    volumeSign = closePosition > 0.6 ? 1 : (closePosition < 0.4 ? -1 : 0);
+                } else {
+                    volumeSign = 0;
+                }
+            }
             
             // Step 3.3: Raw Flow Agreement
             int flowRaw = priceSign * volumeSign;
