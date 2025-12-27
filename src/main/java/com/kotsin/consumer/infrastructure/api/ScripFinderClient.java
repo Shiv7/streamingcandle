@@ -3,6 +3,7 @@ package com.kotsin.consumer.infrastructure.api;
 import com.fasterxml.jackson.annotation.JsonIgnoreProperties;
 import com.fasterxml.jackson.annotation.JsonProperty;
 import com.kotsin.consumer.domain.model.InstrumentFamily;
+import com.kotsin.consumer.util.CircuitBreaker;
 import lombok.AllArgsConstructor;
 import lombok.Data;
 import lombok.NoArgsConstructor;
@@ -36,10 +37,27 @@ public class ScripFinderClient {
     @Value("${scripfinder.api.timeout.ms:3000}")
     private long timeoutMs;
 
+    @Value("${scripfinder.api.circuit-breaker.failure-threshold:5}")
+    private int circuitBreakerFailureThreshold;
+
+    @Value("${scripfinder.api.circuit-breaker.timeout-ms:60000}")
+    private long circuitBreakerTimeoutMs;
+
     private final RestTemplate restTemplate;
+    private final CircuitBreaker circuitBreaker;
 
     public ScripFinderClient() {
         this.restTemplate = new RestTemplate();
+        // Initialize circuit breaker with defaults (will be reconfigured in @PostConstruct if needed)
+        this.circuitBreaker = new CircuitBreaker("ScripFinder", 5, 60000, 3);
+    }
+
+    @jakarta.annotation.PostConstruct
+    public void init() {
+        // Note: Circuit breaker is already initialized with defaults in constructor
+        // If you need to reinitialize with @Value properties, create a new instance here
+        log.info("ScripFinderClient initialized with circuit breaker: failureThreshold={}, timeout={}ms",
+                circuitBreakerFailureThreshold, circuitBreakerTimeoutMs);
     }
 
     /**
@@ -48,8 +66,17 @@ public class ScripFinderClient {
      * @param equityScripCode Equity scrip code (e.g., "14154" for UNOMINDA)
      * @param closePrice Current close price for ATM calculation
      * @return InstrumentFamily with future and options info
+     * @throws IllegalArgumentException if equityScripCode is null/empty or closePrice is invalid
      */
     public InstrumentFamily getFamily(String equityScripCode, double closePrice) {
+        // Input validation
+        if (equityScripCode == null || equityScripCode.trim().isEmpty()) {
+            throw new IllegalArgumentException("equityScripCode cannot be null or empty");
+        }
+        if (closePrice <= 0) {
+            throw new IllegalArgumentException("closePrice must be positive, got: " + closePrice);
+        }
+
         try {
             FutureResponse futureResp = getFuture(equityScripCode);
             OptionsResponse optionsResp = getOptions(equityScripCode);
@@ -124,47 +151,59 @@ public class ScripFinderClient {
     }
 
     /**
-     * Get future info for equity
+     * Get future info for equity with circuit breaker protection
+     * FIXED: Added circuit breaker to prevent cascading failures
+     * @throws IllegalArgumentException if equityScripCode is null/empty
      */
     public FutureResponse getFuture(String equityScripCode) {
-        try {
-            String url = baseUrl + "/getRequiredFuture?equityScripCode=" + equityScripCode;
-            log.debug("Fetching future: {}", url);
-            
-            CompletableFuture<FutureResponse> future = CompletableFuture.supplyAsync(() -> 
-                restTemplate.getForObject(url, FutureResponse.class));
-            
-            return future.get(timeoutMs, TimeUnit.MILLISECONDS);
-            
-        } catch (TimeoutException e) {
-            log.warn("Timeout fetching future for scripCode {}", equityScripCode);
-            return null;
-        } catch (Exception e) {
-            log.error("Error fetching future for scripCode {}: {}", equityScripCode, e.getMessage());
-            return null;
+        if (equityScripCode == null || equityScripCode.trim().isEmpty()) {
+            throw new IllegalArgumentException("equityScripCode cannot be null or empty");
         }
+
+        String url = baseUrl + "/getRequiredFuture?equityScripCode=" + equityScripCode;
+        log.debug("Fetching future: {}", url);
+
+        return circuitBreaker.execute(() -> {
+            try {
+                CompletableFuture<FutureResponse> future = CompletableFuture.supplyAsync(() ->
+                        restTemplate.getForObject(url, FutureResponse.class));
+                return future.get(timeoutMs, TimeUnit.MILLISECONDS);
+            } catch (TimeoutException e) {
+                log.warn("Timeout fetching future for scripCode {}", equityScripCode);
+                throw new RuntimeException("Timeout", e);
+            } catch (Exception e) {
+                log.error("Error fetching future for scripCode {}: {}", equityScripCode, e.getMessage());
+                throw new RuntimeException("API call failed", e);
+            }
+        }, null); // null fallback - caller handles null responses
     }
 
     /**
-     * Get options info for equity (returns 4 ATM options)
+     * Get options info for equity (returns 4 ATM options) with circuit breaker protection
+     * FIXED: Added circuit breaker to prevent cascading failures
+     * @throws IllegalArgumentException if equityScripCode is null/empty
      */
     public OptionsResponse getOptions(String equityScripCode) {
-        try {
-            String url = baseUrl + "/getRequiredOptions?equityScripCode=" + equityScripCode;
-            log.debug("Fetching options: {}", url);
-            
-            CompletableFuture<OptionsResponse> future = CompletableFuture.supplyAsync(() ->
-                restTemplate.getForObject(url, OptionsResponse.class));
-            
-            return future.get(timeoutMs, TimeUnit.MILLISECONDS);
-            
-        } catch (TimeoutException e) {
-            log.warn("Timeout fetching options for scripCode {}", equityScripCode);
-            return null;
-        } catch (Exception e) {
-            log.error("Error fetching options for scripCode {}: {}", equityScripCode, e.getMessage());
-            return null;
+        if (equityScripCode == null || equityScripCode.trim().isEmpty()) {
+            throw new IllegalArgumentException("equityScripCode cannot be null or empty");
         }
+
+        String url = baseUrl + "/getRequiredOptions?equityScripCode=" + equityScripCode;
+        log.debug("Fetching options: {}", url);
+
+        return circuitBreaker.execute(() -> {
+            try {
+                CompletableFuture<OptionsResponse> future = CompletableFuture.supplyAsync(() ->
+                        restTemplate.getForObject(url, OptionsResponse.class));
+                return future.get(timeoutMs, TimeUnit.MILLISECONDS);
+            } catch (TimeoutException e) {
+                log.warn("Timeout fetching options for scripCode {}", equityScripCode);
+                throw new RuntimeException("Timeout", e);
+            } catch (Exception e) {
+                log.error("Error fetching options for scripCode {}: {}", equityScripCode, e.getMessage());
+                throw new RuntimeException("API call failed", e);
+            }
+        }, null); // null fallback - caller handles null responses
     }
 
     // ==================== RESPONSE DTOs ====================

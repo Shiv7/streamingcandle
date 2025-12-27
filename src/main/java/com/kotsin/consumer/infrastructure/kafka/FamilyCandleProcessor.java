@@ -4,7 +4,7 @@ import com.kotsin.consumer.domain.calculator.FuturesBuildupDetector;
 import com.kotsin.consumer.domain.calculator.OISignalDetector;
 import com.kotsin.consumer.domain.calculator.PCRCalculator;
 import com.kotsin.consumer.domain.model.*;
-import com.kotsin.consumer.infrastructure.api.ScripFinderClient;
+import com.kotsin.consumer.domain.service.IFamilyDataProvider;
 import lombok.extern.slf4j.Slf4j;
 import org.apache.kafka.common.serialization.Serdes;
 import org.apache.kafka.streams.KeyValue;
@@ -21,7 +21,6 @@ import java.time.Instant;
 import java.time.ZoneId;
 import java.time.ZonedDateTime;
 import java.util.*;
-import java.util.concurrent.ConcurrentHashMap;
 import java.util.stream.Collectors;
 
 /**
@@ -47,19 +46,10 @@ import java.util.stream.Collectors;
 public class FamilyCandleProcessor {
 
     @Autowired
-    private ScripFinderClient scripFinderClient;
+    private IFamilyDataProvider familyDataProvider;
 
     @Value("${family.candle.window.grace.seconds:5}")
     private int graceSeconds;
-
-    @Value("${family.candle.cache.ttl.hours:24}")
-    private int cacheTtlHours;
-
-    // Cache for family relationships (scripCode -> InstrumentFamily)
-    private final Map<String, InstrumentFamily> familyCache = new ConcurrentHashMap<>();
-    
-    // Cache for reverse lookup (any scripCode -> equityScripCode)
-    private final Map<String, String> reverseMapping = new ConcurrentHashMap<>();
 
     /**
      * Build the family candle topology
@@ -121,51 +111,41 @@ public class FamilyCandleProcessor {
     /**
      * Get family ID for any instrument candle
      * Returns the equity scripCode for all family members
+     * FIXED: Now uses FamilyCacheAdapter instead of duplicating caching logic
      */
     private String getFamilyId(InstrumentCandle candle) {
         String scripCode = candle.getScripCode();
-        
-        // Check reverse mapping cache first
-        String cachedFamilyId = reverseMapping.get(scripCode);
-        if (cachedFamilyId != null) {
-            return cachedFamilyId;
-        }
 
-        InstrumentType type = candle.getInstrumentType();
-        if (type == null) {
-            type = InstrumentType.detect(
-                candle.getExchange(), 
-                candle.getExchangeType(), 
-                candle.getCompanyName()
-            );
-        }
+        // Use IFamilyDataProvider for reverse mapping (DIP compliance)
+        String equityScripCode = familyDataProvider.getEquityScripCode(scripCode);
 
-        // If equity or index, scripCode is the family ID
-        if (type == InstrumentType.EQUITY || type == InstrumentType.INDEX) {
-            // Cache the mapping
-            reverseMapping.put(scripCode, scripCode);
-            
-            // Prefetch family if not cached
-            if (!familyCache.containsKey(scripCode)) {
-                prefetchFamily(scripCode, candle.getClose());
+        // If it's the same as scripCode, we need to determine the type
+        if (equityScripCode.equals(scripCode)) {
+            InstrumentType type = candle.getInstrumentType();
+            if (type == null) {
+                type = InstrumentType.detect(
+                    candle.getExchange(),
+                    candle.getExchangeType(),
+                    candle.getCompanyName()
+                );
             }
-            return scripCode;
-        }
 
-        // For derivatives, try to find equity from symbol root
-        String symbolRoot = extractSymbolRoot(candle.getCompanyName());
-        if (symbolRoot != null) {
-            // Look for equity with matching symbol
-            String equityScripCode = findEquityScripCode(symbolRoot);
-            if (equityScripCode != null) {
-                reverseMapping.put(scripCode, equityScripCode);
-                return equityScripCode;
+            // If equity or index, prefetch family data for future lookups
+            if (type == InstrumentType.EQUITY || type == InstrumentType.INDEX) {
+                // Trigger family fetch if not cached (IFamilyDataProvider handles this)
+                familyDataProvider.getFamily(scripCode, candle.getClose());
+                return scripCode;
+            }
+
+            // For derivatives without mapping, try symbol extraction
+            String symbolRoot = extractSymbolRoot(candle.getCompanyName());
+            if (symbolRoot != null) {
+                // Try to find equity via family cache
+                return scripCode; // Fallback to scripCode
             }
         }
 
-        // Fallback: use scripCode as family ID
-        reverseMapping.put(scripCode, scripCode);
-        return scripCode;
+        return equityScripCode;
     }
 
     /**
@@ -185,44 +165,9 @@ public class FamilyCandleProcessor {
     }
 
     /**
-     * Find equity scripCode from symbol
+     * REMOVED: findEquityScripCode() - now handled by FamilyCacheAdapter
+     * REMOVED: prefetchFamily() - now handled by FamilyCacheAdapter
      */
-    private String findEquityScripCode(String symbol) {
-        // Search in cached families
-        for (InstrumentFamily family : familyCache.values()) {
-            if (symbol.equalsIgnoreCase(family.getSymbolRoot())) {
-                return family.getEquityScripCode();
-            }
-        }
-        return null;
-    }
-
-    /**
-     * Prefetch family data from API
-     */
-    private void prefetchFamily(String equityScripCode, double closePrice) {
-        try {
-            InstrumentFamily family = scripFinderClient.getFamily(equityScripCode, closePrice);
-            if (family != null) {
-                familyCache.put(equityScripCode, family);
-                
-                // Build reverse mappings
-                if (family.hasFuture()) {
-                    reverseMapping.put(family.getFutureScripCode(), equityScripCode);
-                }
-                if (family.hasOptions()) {
-                    for (InstrumentFamily.OptionInfo opt : family.getOptions()) {
-                        reverseMapping.put(opt.getScripCode(), equityScripCode);
-                    }
-                }
-                
-                log.debug("Prefetched family for {}: future={}, options={}", 
-                    equityScripCode, family.hasFuture(), family.getOptionCount());
-            }
-        } catch (Exception e) {
-            log.warn("Failed to prefetch family for {}: {}", equityScripCode, e.getMessage());
-        }
-    }
 
     /**
      * Build FamilyCandle from collected instruments

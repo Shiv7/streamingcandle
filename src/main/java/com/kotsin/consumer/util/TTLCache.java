@@ -34,10 +34,10 @@ public class TTLCache<K, V> {
     private final int maxSize;
     private final ScheduledExecutorService cleanupExecutor;
 
-    // Statistics
-    private volatile long hits = 0;
-    private volatile long misses = 0;
-    private volatile long evictions = 0;
+    // Statistics (AtomicLong for thread-safe increment operations)
+    private final java.util.concurrent.atomic.AtomicLong hits = new java.util.concurrent.atomic.AtomicLong(0);
+    private final java.util.concurrent.atomic.AtomicLong misses = new java.util.concurrent.atomic.AtomicLong(0);
+    private final java.util.concurrent.atomic.AtomicLong evictions = new java.util.concurrent.atomic.AtomicLong(0);
 
     private static class CacheEntry<V> {
         final V value;
@@ -108,25 +108,25 @@ public class TTLCache<K, V> {
      */
     public V get(K key) {
         if (key == null) {
-            misses++;
+            misses.incrementAndGet();
             return null;
         }
 
         CacheEntry<V> entry = cache.get(key);
         if (entry == null) {
-            misses++;
+            misses.incrementAndGet();
             return null;
         }
 
         if (entry.isExpired()) {
             cache.remove(key);
-            misses++;
-            evictions++;
+            misses.incrementAndGet();
+            evictions.incrementAndGet();
             return null;
         }
 
         entry.lastAccessTime = System.currentTimeMillis();
-        hits++;
+        hits.incrementAndGet();
         return entry.value;
     }
 
@@ -204,11 +204,11 @@ public class TTLCache<K, V> {
             if (it.next().getValue().isExpired()) {
                 it.remove();
                 removed++;
-                evictions++;
+                evictions.incrementAndGet();
             }
         }
         if (removed > 0) {
-            LOGGER.debug("🧹 Cache '{}' cleanup: removed {} expired, size now {}", 
+            LOGGER.debug("🧹 Cache '{}' cleanup: removed {} expired, size now {}",
                     cacheName, removed, cache.size());
         }
     }
@@ -229,7 +229,7 @@ public class TTLCache<K, V> {
 
         if (oldestKey != null) {
             cache.remove(oldestKey);
-            evictions++;
+            evictions.incrementAndGet();
             LOGGER.debug("🗑️ Cache '{}' evicted oldest key: {}", cacheName, oldestKey);
         }
     }
@@ -238,9 +238,12 @@ public class TTLCache<K, V> {
      * Get statistics string
      */
     public String getStats() {
-        double hitRate = (hits + misses) > 0 ? (double) hits / (hits + misses) * 100 : 0;
+        long hitsVal = hits.get();
+        long missesVal = misses.get();
+        long evictionsVal = evictions.get();
+        double hitRate = (hitsVal + missesVal) > 0 ? (double) hitsVal / (hitsVal + missesVal) * 100 : 0;
         return String.format("Cache '%s': size=%d, hits=%d, misses=%d, evictions=%d, hitRate=%.1f%%",
-                cacheName, cache.size(), hits, misses, evictions, hitRate);
+                cacheName, cache.size(), hitsVal, missesVal, evictionsVal, hitRate);
     }
 
     /**

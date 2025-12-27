@@ -72,7 +72,7 @@ public class UnifiedInstrumentCandleProcessor {
     private boolean processorEnabled;
 
     private KafkaStreams streams;
-    private final Map<String, AdaptiveVPINCalculator> vpinCalculators = new HashMap<>();
+    private final Map<String, AdaptiveVPINCalculator> vpinCalculators = new ConcurrentHashMap<>();
 
     /**
      * Build and start the unified processor

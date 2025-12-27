@@ -1,6 +1,7 @@
 package com.kotsin.consumer.config;
 
 
+import lombok.extern.slf4j.Slf4j;
 import org.apache.kafka.common.serialization.Serdes;
 import org.apache.kafka.streams.StreamsConfig;
 import org.apache.kafka.streams.errors.LogAndContinueExceptionHandler;
@@ -11,6 +12,7 @@ import java.io.File;
 import java.util.Properties;
 
 @Component
+@Slf4j
 public class KafkaConfig {
 
     // All configuration injected from application.properties
@@ -123,12 +125,11 @@ public class KafkaConfig {
             if (!created) {
                 // Fallback to temp directory if we can't create in /var/lib
                 String fallbackPath = System.getProperty("java.io.tmpdir") + "/kafka-streams/" + appId;
-                System.err.println("WARNING: Could not create state directory " + baseStateDir + 
-                                 ", falling back to " + fallbackPath);
+                log.warn("Could not create state directory {}, falling back to {}", baseStateDir, fallbackPath);
                 return fallbackPath;
             }
         }
-        
+
         // Return path for this application instance
         return baseStateDir + "/" + appId;
     }

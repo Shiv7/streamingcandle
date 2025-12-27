@@ -1,6 +1,7 @@
 package com.kotsin.consumer.infrastructure.redis;
 
 import com.kotsin.consumer.domain.model.InstrumentFamily;
+import com.kotsin.consumer.domain.service.IFamilyDataProvider;
 import com.kotsin.consumer.infrastructure.api.ScripFinderClient;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.beans.factory.annotation.Autowired;
@@ -15,18 +16,20 @@ import java.util.concurrent.TimeUnit;
 
 /**
  * FamilyCacheAdapter - Caches family relationships for fast lookup.
- * 
+ *
+ * FIXED: Now implements IFamilyDataProvider interface (DIP compliance)
+ *
  * Currently uses in-memory cache. Can be extended to use Redis for distributed caching.
- * 
+ *
  * Cache Structure:
  * - familyCache: equityScripCode -> InstrumentFamily
  * - reverseMapping: anyScripCode -> equityScripCode
- * 
+ *
  * TTL: 24 hours (refreshed on market open)
  */
 @Component
 @Slf4j
-public class FamilyCacheAdapter {
+public class FamilyCacheAdapter implements IFamilyDataProvider {
 
     @Autowired
     private ScripFinderClient scripFinderClient;
@@ -42,6 +45,9 @@ public class FamilyCacheAdapter {
     private final Map<String, String> reverseMapping = new ConcurrentHashMap<>();
     private final Map<String, Long> lastUpdated = new ConcurrentHashMap<>();
 
+    // Per-key locks for thread-safe refresh (replaces String.intern() anti-pattern)
+    private final Map<String, Object> refreshLocks = new ConcurrentHashMap<>();
+
     // Background refresh scheduler
     private final ScheduledExecutorService scheduler = Executors.newSingleThreadScheduledExecutor();
 
@@ -51,9 +57,18 @@ public class FamilyCacheAdapter {
      * @param equityScripCode Equity scrip code
      * @param closePrice Current close price (for ATM calculation)
      * @return InstrumentFamily or null
+     * @throws IllegalArgumentException if closePrice is invalid
      */
+    @Override
     public InstrumentFamily getFamily(String equityScripCode, double closePrice) {
-        if (equityScripCode == null) return null;
+        if (equityScripCode == null || equityScripCode.trim().isEmpty()) {
+            log.warn("getFamily called with null or empty equityScripCode");
+            return null;
+        }
+        if (closePrice <= 0) {
+            log.warn("getFamily called with invalid closePrice: {} for scripCode: {}", closePrice, equityScripCode);
+            return null;
+        }
 
         InstrumentFamily cached = familyCache.get(equityScripCode);
         
@@ -76,6 +91,7 @@ public class FamilyCacheAdapter {
      * @param scripCode Any scrip code (equity, future, or option)
      * @return Equity scrip code or the original scripCode if not found
      */
+    @Override
     public String getEquityScripCode(String scripCode) {
         if (scripCode == null) return null;
         return reverseMapping.getOrDefault(scripCode, scripCode);
@@ -90,18 +106,27 @@ public class FamilyCacheAdapter {
     }
 
     /**
-     * Check if family is cached and fresh
+     * Check if family is cached and fresh (implements IFamilyDataProvider)
      */
-    public boolean isFresh(String equityScripCode) {
+    @Override
+    public boolean isFamilyCached(String equityScripCode) {
+        return isFresh(equityScripCode);
+    }
+
+    /**
+     * Check if family is cached and fresh (internal helper)
+     */
+    private boolean isFresh(String equityScripCode) {
         Long updated = lastUpdated.get(equityScripCode);
         if (updated == null) return false;
-        
+
         long ageMs = System.currentTimeMillis() - updated;
         return ageMs < TimeUnit.HOURS.toMillis(ttlHours);
     }
 
     /**
-     * Thread-safe refresh using double-checked locking
+     * Thread-safe refresh using double-checked locking with per-key locks
+     * FIXED: Replaced String.intern() anti-pattern with ConcurrentHashMap-based locks
      */
     private InstrumentFamily refreshFamilyThreadSafe(String equityScripCode, double closePrice) {
         // Double-checked locking pattern
@@ -109,8 +134,11 @@ public class FamilyCacheAdapter {
         if (cached != null && isFresh(equityScripCode)) {
             return cached;
         }
-        
-        synchronized (equityScripCode.intern()) {
+
+        // Get or create lock object for this key (no memory leak like String.intern())
+        Object lock = refreshLocks.computeIfAbsent(equityScripCode, k -> new Object());
+
+        synchronized (lock) {
             // Check again inside synchronized block
             cached = familyCache.get(equityScripCode);
             if (cached != null && isFresh(equityScripCode)) {
@@ -141,8 +169,16 @@ public class FamilyCacheAdapter {
     /**
      * Cache a family and build reverse mappings
      */
+    @Override
     public void cacheFamily(InstrumentFamily family) {
-        if (family == null || family.getEquityScripCode() == null) return;
+        if (family == null) {
+            log.warn("cacheFamily called with null family");
+            return;
+        }
+        if (family.getEquityScripCode() == null || family.getEquityScripCode().trim().isEmpty()) {
+            log.warn("cacheFamily called with family having null/empty equityScripCode");
+            return;
+        }
 
         String equityCode = family.getEquityScripCode();
         
@@ -199,13 +235,22 @@ public class FamilyCacheAdapter {
     }
 
     /**
-     * Clear all caches
+     * Clear all caches (implements IFamilyDataProvider)
      */
-    public void clearAll() {
+    @Override
+    public void clearCache() {
         familyCache.clear();
         reverseMapping.clear();
         lastUpdated.clear();
+        refreshLocks.clear();
         log.info("Cleared all family caches");
+    }
+
+    /**
+     * Alias for clearCache() for backward compatibility
+     */
+    public void clearAll() {
+        clearCache();
     }
 
     /**
@@ -228,16 +273,23 @@ public class FamilyCacheAdapter {
 
     /**
      * Shutdown the scheduler
+     * FIXED: Added @PreDestroy to ensure cleanup on Spring shutdown
      */
+    @jakarta.annotation.PreDestroy
     public void shutdown() {
+        log.info("Shutting down FamilyCacheAdapter scheduler...");
         scheduler.shutdown();
         try {
             if (!scheduler.awaitTermination(10, TimeUnit.SECONDS)) {
                 scheduler.shutdownNow();
+                log.warn("Scheduler did not terminate in 10 seconds, forced shutdown");
+            } else {
+                log.info("Scheduler shut down successfully");
             }
         } catch (InterruptedException e) {
             scheduler.shutdownNow();
             Thread.currentThread().interrupt();
+            log.error("Interrupted while waiting for scheduler shutdown", e);
         }
     }
 }

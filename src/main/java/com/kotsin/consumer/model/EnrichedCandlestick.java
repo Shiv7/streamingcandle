@@ -19,7 +19,21 @@ import java.util.Map;
 /**
  * Enriched Candlestick with advanced features
  * Pattern: Simple aggregation model managed by Kafka Streams
- * 
+ *
+ * @deprecated This class is part of the LEGACY architecture.
+ *             Migrate to {@link com.kotsin.consumer.domain.model.InstrumentCandle} instead.
+ *
+ *             Why deprecated:
+ *             - God class anti-pattern (1040 lines, violates SRP)
+ *             - Logic has been extracted to dedicated calculators:
+ *               * {@link com.kotsin.consumer.calculator.TradeClassifier}
+ *               * {@link com.kotsin.consumer.calculator.VolumeProfileCalculator}
+ *               * {@link com.kotsin.consumer.calculator.ImbalanceBarCalculator}
+ *               * {@link com.kotsin.consumer.domain.calculator.AdaptiveVPINCalculator}
+ *             - New architecture uses InstrumentCandle + FamilyCandle
+ *
+ *             Migration timeline: Sunset Q2 2025
+ *
  * Features:
  * - OHLCV (basic candle data)
  * - Buy/Sell Volume separation
@@ -27,6 +41,7 @@ import java.util.Map;
  * - Imbalance Bars (VIB, DIB, TRB, VRB with EWMA thresholds)
  * - Volume Profile (POC, Value Area)
  */
+@Deprecated(since = "2.0.0", forRemoval = true)
 @Data
 @JsonIgnoreProperties(ignoreUnknown = true)
 public class EnrichedCandlestick {

@@ -1,21 +1,30 @@
 package com.kotsin.consumer.service;
 
+import com.kotsin.consumer.config.InstrumentConfig;
 import com.kotsin.consumer.repository.ScripRepository;
 import com.kotsin.consumer.entity.Scrip;
+import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.stereotype.Service;
 
 import java.util.Map;
 import java.util.Optional;
 import java.util.concurrent.ConcurrentHashMap;
 
+/**
+ * Instrument metadata service with externalized configuration
+ * FIXED: Removed hardcoded volume and tick size defaults
+ */
 @Service
 public class InstrumentMetadataService {
 
     private final ScripRepository scripRepository;
+    private final InstrumentConfig instrumentConfig;
     private final Map<String, Scrip> cache = new ConcurrentHashMap<>();
 
-    public InstrumentMetadataService(ScripRepository scripRepository) {
+    @Autowired
+    public InstrumentMetadataService(ScripRepository scripRepository, InstrumentConfig instrumentConfig) {
         this.scripRepository = scripRepository;
+        this.instrumentConfig = instrumentConfig;
     }
 
     private String key(String exch, String exchType, String scripCode) {
@@ -71,23 +80,29 @@ public class InstrumentMetadataService {
     /**
      * Get average daily volume for an instrument.
      * Used for adaptive VPIN bucket sizing.
-     * 
-     * @return Average daily volume, or default (1,000,000) if not found
+     * FIXED: Now uses externalized configuration instead of hardcoded values
+     *
+     * @return Average daily volume from configuration
      */
     public double getAverageDailyVolume(String exch, String exchType, String scripCode) {
         // Try to get from scrip metadata
         Optional<Scrip> scrip = getScrip(exch, exchType, scripCode, null);
         if (scrip.isPresent()) {
             // If scrip has avgVolume field, use it (extend Scrip entity if needed)
-            // For now, use a heuristic based on instrument type
+            // For now, use configured defaults based on instrument type
             String exchTypeUpper = exchType != null ? exchType.toUpperCase() : "C";
-            if ("D".equals(exchTypeUpper)) {
-                // Derivatives typically have higher volume
-                return 5_000_000.0;
+            if ("D".equals(exchTypeUpper) || "F".equals(exchTypeUpper) || "O".equals(exchTypeUpper)) {
+                // Derivatives (futures/options)
+                return instrumentConfig.getVolume().getDerivatives();
             }
         }
-        
+
+        // Check if it's an index based on exchange type or name
+        if (scripCode != null && (scripCode.equalsIgnoreCase("NIFTY") || scripCode.equalsIgnoreCase("BANKNIFTY"))) {
+            return instrumentConfig.getVolume().getIndex();
+        }
+
         // Default for equity
-        return 1_000_000.0;
+        return instrumentConfig.getVolume().getEquity();
     }
 }
