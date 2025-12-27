@@ -1,6 +1,7 @@
 package com.kotsin.consumer.curated.service;
 
 import com.kotsin.consumer.curated.model.BreakoutBar;
+import com.kotsin.consumer.curated.model.MultiTimeframeLevels;
 import com.kotsin.consumer.curated.model.RetestEntry;
 import com.kotsin.consumer.model.UnifiedCandle;
 import org.slf4j.Logger;
@@ -121,5 +122,151 @@ public class RetestDetector {
                 String.format("%.2f", riskReward));
 
         return entry;
+    }
+
+    /**
+     * 🆕 ENHANCED: Optimize entry/stop/target using multi-timeframe Fibonacci & Pivot levels
+     *
+     * This method refines the basic retest entry by:
+     * 1. Entry: Align with Fibonacci retracement levels (0.618, 0.5, 0.382) if near
+     * 2. Stop: Place below nearest multi-TF support (Pivot S1, Fib levels)
+     * 3. Target: Aim for nearest multi-TF resistance (Pivot R1/R2, Fib extensions)
+     * 4. R:R: Validate minimum 2:1, extend target if needed
+     */
+    public RetestEntry optimizeEntryWithLevels(RetestEntry basicEntry, MultiTimeframeLevels levels, double atr) {
+        if (levels == null) {
+            log.debug("No levels available for {}, using basic entry", basicEntry.getScripCode());
+            return basicEntry;  // Return basic entry if no levels
+        }
+
+        String scripCode = basicEntry.getScripCode();
+        double currentPrice = basicEntry.getEntryPrice();
+        double tolerance = currentPrice * 0.01;  // 1% tolerance for level matching
+
+        // 🆕 Step 1: Optimize Entry - Check if near significant Fibonacci level
+        double optimizedEntry = currentPrice;
+        String entryReason = "current price";
+
+        // Check daily Fibonacci levels first (most relevant for intraday)
+        if (levels.getDailyFib() != null) {
+            MultiTimeframeLevels.FibonacciLevels dailyFib = levels.getDailyFib();
+
+            if (Math.abs(currentPrice - dailyFib.getFib618()) <= tolerance) {
+                optimizedEntry = dailyFib.getFib618();
+                entryReason = "Daily Fib 0.618 (Golden ratio)";
+            } else if (Math.abs(currentPrice - dailyFib.getFib50()) <= tolerance) {
+                optimizedEntry = dailyFib.getFib50();
+                entryReason = "Daily Fib 0.50";
+            } else if (Math.abs(currentPrice - dailyFib.getFib382()) <= tolerance) {
+                optimizedEntry = dailyFib.getFib382();
+                entryReason = "Daily Fib 0.382";
+            }
+        }
+
+        // Check daily pivot levels if no Fib match
+        if (optimizedEntry == currentPrice && levels.getDailyPivot() != null) {
+            MultiTimeframeLevels.PivotLevels dailyPivot = levels.getDailyPivot();
+
+            if (Math.abs(currentPrice - dailyPivot.getS1()) <= tolerance) {
+                optimizedEntry = dailyPivot.getS1();
+                entryReason = "Daily Pivot S1";
+            } else if (Math.abs(currentPrice - dailyPivot.getPivot()) <= tolerance) {
+                optimizedEntry = dailyPivot.getPivot();
+                entryReason = "Daily Pivot";
+            }
+        }
+
+        // 🆕 Step 2: Optimize Stop - Find nearest support across all timeframes
+        double nearestSupport = levels.getNearestSupport(currentPrice);
+        double optimizedStop = nearestSupport > 0 ? nearestSupport - (0.5 * atr) : basicEntry.getStopLoss();
+
+        // Ensure stop is below entry
+        if (optimizedStop >= optimizedEntry) {
+            optimizedStop = optimizedEntry - (1.5 * atr);  // Fallback to ATR-based stop
+        }
+
+        // 🆕 Step 3: Optimize Target - Find nearest resistance across all timeframes
+        double nearestResistance = levels.getNearestResistance(currentPrice);
+        double optimizedTarget = nearestResistance > 0 ? nearestResistance : basicEntry.getTarget();
+
+        // 🆕 Step 4: Validate R:R - Minimum 2:1
+        double riskAmount = optimizedEntry - optimizedStop;
+        double rewardAmount = optimizedTarget - optimizedEntry;
+        double riskReward = riskAmount > 0 ? rewardAmount / riskAmount : 0;
+
+        // If R:R < 2.0, extend target to next resistance level
+        if (riskReward < 2.0) {
+            // Try to find a higher resistance level
+            double extendedTarget = findNextResistance(levels, optimizedTarget);
+            if (extendedTarget > optimizedTarget) {
+                optimizedTarget = extendedTarget;
+                rewardAmount = optimizedTarget - optimizedEntry;
+                riskReward = riskAmount > 0 ? rewardAmount / riskAmount : 0;
+                log.debug("Extended target to {} for better R:R", String.format("%.2f", extendedTarget));
+            }
+        }
+
+        // Build optimized entry
+        RetestEntry optimizedRetestEntry = RetestEntry.builder()
+                .scripCode(scripCode)
+                .timestamp(basicEntry.getTimestamp())
+                .entryPrice(optimizedEntry)
+                .stopLoss(optimizedStop)
+                .target(optimizedTarget)
+                .riskReward(riskReward)
+                .pivotLevel(basicEntry.getPivotLevel())
+                .microprice(basicEntry.getMicroprice())
+                .retestBarVolume(basicEntry.getRetestBarVolume())
+                .retestBarVolumeDelta(basicEntry.getRetestBarVolumeDelta())
+                .retestBarOFI(basicEntry.getRetestBarOFI())
+                .buyingPressure(basicEntry.isBuyingPressure())
+                .positionSizeMultiplier(basicEntry.getPositionSizeMultiplier())
+                .build();
+
+        log.info("🎯 ENTRY OPTIMIZED WITH LEVELS: {} | Entry {} -> {} ({}) | Stop {} -> {} | Target {} -> {} | R:R {} -> {}",
+                scripCode,
+                String.format("%.2f", basicEntry.getEntryPrice()),
+                String.format("%.2f", optimizedEntry),
+                entryReason,
+                String.format("%.2f", basicEntry.getStopLoss()),
+                String.format("%.2f", optimizedStop),
+                String.format("%.2f", basicEntry.getTarget()),
+                String.format("%.2f", optimizedTarget),
+                String.format("%.2f", basicEntry.getRiskReward()),
+                String.format("%.2f", riskReward));
+
+        return optimizedRetestEntry;
+    }
+
+    /**
+     * Find next higher resistance level beyond current target
+     */
+    private double findNextResistance(MultiTimeframeLevels levels, double currentTarget) {
+        double nextResistance = Double.MAX_VALUE;
+
+        // Check daily pivots
+        if (levels.getDailyPivot() != null) {
+            MultiTimeframeLevels.PivotLevels pivot = levels.getDailyPivot();
+            if (pivot.getR1() > currentTarget && pivot.getR1() < nextResistance) nextResistance = pivot.getR1();
+            if (pivot.getR2() > currentTarget && pivot.getR2() < nextResistance) nextResistance = pivot.getR2();
+            if (pivot.getR3() > currentTarget && pivot.getR3() < nextResistance) nextResistance = pivot.getR3();
+        }
+
+        // Check weekly pivots
+        if (levels.getWeeklyPivot() != null) {
+            MultiTimeframeLevels.PivotLevels pivot = levels.getWeeklyPivot();
+            if (pivot.getR1() > currentTarget && pivot.getR1() < nextResistance) nextResistance = pivot.getR1();
+            if (pivot.getR2() > currentTarget && pivot.getR2() < nextResistance) nextResistance = pivot.getR2();
+        }
+
+        // Check Fibonacci extensions
+        if (levels.getDailyFib() != null) {
+            MultiTimeframeLevels.FibonacciLevels fib = levels.getDailyFib();
+            if (fib.getFib1272() > currentTarget && fib.getFib1272() < nextResistance) nextResistance = fib.getFib1272();
+            if (fib.getFib1618() > currentTarget && fib.getFib1618() < nextResistance) nextResistance = fib.getFib1618();
+            if (fib.getFib200() > currentTarget && fib.getFib200() < nextResistance) nextResistance = fib.getFib200();
+        }
+
+        return nextResistance == Double.MAX_VALUE ? currentTarget : nextResistance;
     }
 }

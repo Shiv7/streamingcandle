@@ -276,10 +276,17 @@ public class CuratedSignalProcessor {
             // Continue without levels - graceful degradation
         }
 
+        // 🆕 ENHANCED: Optimize entry/stop/target using multi-TF levels
+        RetestEntry optimizedEntry = entry;
+        if (levels != null) {
+            double atr = getATR(scripCode);
+            optimizedEntry = retestDetector.optimizeEntryWithLevels(entry, levels, atr);
+        }
+
         // 🆕 ENHANCED: Calculate curated score with F&O + Levels
         double curatedScore = scorer.calculateCuratedScore(
                 breakout, indexRegime, securityRegime, acl, vcp, css, ipu,
-                foAlignment, levels, entry.getEntryPrice()
+                foAlignment, levels, optimizedEntry.getEntryPrice()
         );
 
         // 🆕 Check minimum score threshold (increased from 50.0 to 60.0)
@@ -291,7 +298,7 @@ public class CuratedSignalProcessor {
 
         // 🆕 ENHANCED: Calculate position size multiplier with F&O adjustment
         double positionMultiplier = scorer.calculatePositionSizeMultiplier(curatedScore, foAlignment);
-        entry.setPositionSizeMultiplier(positionMultiplier);
+        optimizedEntry.setPositionSizeMultiplier(positionMultiplier);
 
         // 🆕 Build curated reason (enhanced with F&O)
         String reason = buildCuratedReason(breakout, indexRegime, ipu, acl, foAlignment);
@@ -312,11 +319,11 @@ public class CuratedSignalProcessor {
                 .finalMagnitude(fma)
                 .foAlignment(foAlignment)          // 🆕 F&O alignment
                 .levels(levels)                    // 🆕 Multi-TF levels
-                .entry(entry)
+                .entry(optimizedEntry)             // 🆕 Optimized entry
                 .curatedScore(curatedScore)
                 .curatedReason(reason)
                 .positionSizeMultiplier(positionMultiplier)
-                .riskRewardRatio(entry.getRiskReward())
+                .riskRewardRatio(optimizedEntry.getRiskReward())
                 .build();
 
         // Send to Kafka
@@ -325,10 +332,10 @@ public class CuratedSignalProcessor {
         log.info("📤 ENHANCED CURATED SIGNAL EMITTED: {} | Score={} | Entry={} | Stop={} | Target={} | R:R={}",
                 scripCode,
                 String.format("%.1f", curatedScore),
-                String.format("%.2f", entry.getEntryPrice()),
-                String.format("%.2f", entry.getStopLoss()),
-                String.format("%.2f", entry.getTarget()),
-                String.format("%.2f", entry.getRiskReward()));
+                String.format("%.2f", optimizedEntry.getEntryPrice()),
+                String.format("%.2f", optimizedEntry.getStopLoss()),
+                String.format("%.2f", optimizedEntry.getTarget()),
+                String.format("%.2f", optimizedEntry.getRiskReward()));
         if (foAlignment != null && foAlignment.isUsable()) {
             log.info("   F&O: {} (score={}, aligned={})",
                 foAlignment.getBias(),
