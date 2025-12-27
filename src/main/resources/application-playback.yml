@@ -1,0 +1,137 @@
+# Playback Testing Configuration
+# Use this profile for historical data replay: --spring.profiles.active=playback
+
+spring:
+  application:
+    name: streaming-candle-playback
+  kafka:
+    bootstrap-servers: localhost:9092
+    consumer:
+      auto-offset-reset: earliest  # READ FROM BEGINNING for playback
+      enable-auto-commit: true
+      group-id: playback-test-group-${random.uuid}  # Unique group per run
+
+# ========== ENABLE BOTH SYSTEMS FOR COMPARISON ==========
+
+# OLD System (TradingSignalProcessor)
+trading:
+  enabled: true  # Keep OLD system running
+  input:
+    vcp: vcp-combined
+    ipu: ipu-signals-5m
+  output: trading-signals  # OLD output topic
+
+# NEW Curated System (CuratedSignalProcessor)
+curated:
+  enabled: true  # Enable NEW system
+
+  # Consumer configuration (PLAYBACK MODE)
+  consumer:
+    group-id: curated-playback-${random.uuid}  # Unique group per playback run
+    auto-offset-reset: earliest  # READ FROM BEGINNING
+
+  # F&O integration (DISABLE for playback - no historical F&O data)
+  fo:
+    enabled: false  # Historical F&O data not available
+    api:
+      base-url: http://localhost:8080/api/fo
+      timeout-ms: 3000
+
+  # Multi-timeframe levels (DISABLE for playback - no historical level data)
+  levels:
+    enabled: false  # Historical level data not available
+    api:
+      base-url: http://localhost:8080/api/historical
+      timeout-ms: 3000
+
+  # Scoring (ADJUSTED for playback without F&O/Levels)
+  scoring:
+    min-curated-score: 55.0  # Slightly lower since F&O/Levels disabled (normally 60)
+    high-conviction-score: 75.0  # Adjusted threshold
+    fo-weight: 0.0   # Disabled
+    levels-weight: 0.0  # Disabled
+
+  # Retest validation
+  retest:
+    pivot-tolerance-percent: 0.005  # 0.5%
+    min-risk-reward: 2.0  # Still require 2:1 R:R
+
+  # Output topic
+  output:
+    topic: trading-signals-curated  # NEW output topic
+
+# ========== MODULE PROCESSORS (All read from earliest) ==========
+
+# All processors should use earliest offset for playback
+regime:
+  enabled: true
+  consumer:
+    auto-offset-reset: earliest
+
+vcp:
+  enabled: true
+  consumer:
+    auto-offset-reset: earliest
+
+ipu:
+  enabled: true
+  consumer:
+    auto-offset-reset: earliest
+
+css:
+  enabled: true
+  consumer:
+    auto-offset-reset: earliest
+
+magnitude:
+  enabled: true
+  consumer:
+    auto-offset-reset: earliest
+
+# ========== ENHANCED LOGGING FOR COMPARISON ==========
+
+logging:
+  level:
+    root: INFO
+    # OLD system logs
+    com.kotsin.consumer.processor.TradingSignalProcessor: INFO
+    # NEW curated system logs
+    com.kotsin.consumer.curated: INFO
+    com.kotsin.consumer.curated.processor.CuratedSignalProcessor: INFO
+    com.kotsin.consumer.curated.service: INFO
+    # Module logs (keep at INFO for visibility)
+    com.kotsin.consumer.regime: INFO
+    com.kotsin.consumer.service.VCPCalculator: INFO
+    com.kotsin.consumer.service.IPUCalculator: INFO
+
+  pattern:
+    console: "%d{HH:mm:ss.SSS} [%thread] %-5level %logger{36} - %msg%n"
+    file: "%d{yyyy-MM-dd HH:mm:ss.SSS} [%thread] %-5level %logger{36} - %msg%n"
+
+  file:
+    name: logs/playback-comparison.log
+    max-size: 100MB
+    max-history: 7
+
+# ========== KAFKA STREAMS CONFIGURATION ==========
+
+kafka:
+  streams:
+    replication-factor: 1
+    application-id-prefix: playback-test
+    auto-offset-reset: earliest  # ALL streams read from beginning
+
+# ========== NOTES ==========
+#
+# This configuration:
+# 1. Enables BOTH old and new signal systems
+# 2. Sets ALL consumers to read from EARLIEST
+# 3. Uses unique consumer groups (with UUID) for each playback run
+# 4. Disables F&O and Levels (no historical data available)
+# 5. Adjusts scoring thresholds accordingly
+# 6. Outputs to separate topics for comparison
+# 7. Enhanced logging for detailed analysis
+#
+# Usage:
+#   java -jar target/streamingcandle-*.jar --spring.profiles.active=playback
+#

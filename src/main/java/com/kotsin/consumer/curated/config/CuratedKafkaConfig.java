@@ -38,21 +38,28 @@ public class CuratedKafkaConfig {
     @Value("${spring.kafka.bootstrap-servers:localhost:9092}")
     private String bootstrapServers;
 
+    @Value("${curated.consumer.group-id:curated-signal-processor-v1}")
+    private String consumerGroupId;
+
+    @Value("${curated.consumer.auto-offset-reset:earliest}")
+    private String autoOffsetReset;
+
     /**
      * Consumer Factory for Curated Signal Processor
-     * Uses a NEW consumer group: "curated-signal-processor"
+     * Uses a UNIQUE consumer group (configurable via properties)
+     * Default: reads from EARLIEST for playback testing
      */
     @Bean
     public ConsumerFactory<String, Object> curatedConsumerFactory() {
         Map<String, Object> props = new HashMap<>();
         props.put(ConsumerConfig.BOOTSTRAP_SERVERS_CONFIG, bootstrapServers);
-        props.put(ConsumerConfig.GROUP_ID_CONFIG, "curated-signal-processor");
+        props.put(ConsumerConfig.GROUP_ID_CONFIG, consumerGroupId);
         props.put(ConsumerConfig.KEY_DESERIALIZER_CLASS_CONFIG, StringDeserializer.class);
         props.put(ConsumerConfig.VALUE_DESERIALIZER_CLASS_CONFIG, JsonDeserializer.class);
         props.put(JsonDeserializer.TRUSTED_PACKAGES, "com.kotsin.consumer.*");
         props.put(JsonDeserializer.USE_TYPE_INFO_HEADERS, false);
         props.put(JsonDeserializer.VALUE_DEFAULT_TYPE, UnifiedCandle.class.getName());
-        props.put(ConsumerConfig.AUTO_OFFSET_RESET_CONFIG, "latest");  // Start from latest
+        props.put(ConsumerConfig.AUTO_OFFSET_RESET_CONFIG, autoOffsetReset);  // Configurable: earliest/latest
         props.put(ConsumerConfig.ENABLE_AUTO_COMMIT_CONFIG, true);
 
         return new DefaultKafkaConsumerFactory<>(props);

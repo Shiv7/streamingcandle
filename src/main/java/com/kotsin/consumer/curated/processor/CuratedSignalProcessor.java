@@ -198,13 +198,23 @@ public class CuratedSignalProcessor {
         MultiTFBreakout breakout = breakoutDetector.detectMultiTFBreakout(scripCode);
 
         if (breakout != null && breakout.isValid()) {
+            log.info("🔍 BREAKOUT DETECTED | scrip={} | TF_confirmations={}/3 | confluence={} | volZ={} | kyle={}",
+                scripCode,
+                breakout.getConfirmations(),
+                String.format("%.2f", breakout.getConfluenceScore()),
+                String.format("%.1f", breakout.getAvgVolumeZScore()),
+                String.format("%.2f", breakout.getAvgKyleLambda()));
+
             // Check gates before adding to active breakouts
             if (!passesGates(scripCode)) {
-                log.info("⛔ Breakout rejected for {}: Failed gates", scripCode);
+                log.info("⛔ BREAKOUT REJECTED | scrip={} | reason=Failed_gates | See gate logs above", scripCode);
                 return;
             }
 
-            log.info("🎯 Adding {} to active breakouts (waiting for retest)", scripCode);
+            log.info("✅ BREAKOUT ACCEPTED | scrip={} | status=WAITING_FOR_RETEST | pivot={} | high={}",
+                scripCode,
+                String.format("%.2f", breakout.getPrimaryBreakout().getPivotLevel()),
+                String.format("%.2f", breakout.getPrimaryBreakout().getBreakoutHigh()));
             activeBreakouts.put(scripCode, breakout);
         }
     }
@@ -346,37 +356,64 @@ public class CuratedSignalProcessor {
     }
 
     /**
-     * Check if scrip passes all gates
+     * Check if scrip passes all gates (ENHANCED with detailed logging)
      */
     private boolean passesGates(String scripCode) {
         // Gate 1: Index regime must be tradeable
         IndexRegime indexRegime = indexRegimeCache.get("NIFTY50");
-        if (indexRegime == null || !indexRegime.isTradeable()) {
-            log.debug("Gate failed: Index regime not tradeable");
+        if (indexRegime == null) {
+            log.info("🚫 GATE_1_FAILED | scrip={} | gate=INDEX_REGIME | reason=Index_regime_null", scripCode);
+            return false;
+        }
+        if (!indexRegime.isTradeable()) {
+            log.info("🚫 GATE_1_FAILED | scrip={} | gate=INDEX_REGIME | reason=Not_tradeable | regime={} | strength={}",
+                scripCode,
+                indexRegime.getLabel(),
+                String.format("%.2f", indexRegime.getRegimeStrength()));
             return false;
         }
 
         // Gate 2: Avoid OPENING/CLOSING sessions
         if (indexRegime.getSessionPhase() == IndexRegime.SessionPhase.OPENING ||
                 indexRegime.getSessionPhase() == IndexRegime.SessionPhase.CLOSING) {
-            log.debug("Gate failed: Session phase = {}", indexRegime.getSessionPhase());
+            log.info("🚫 GATE_2_FAILED | scrip={} | gate=SESSION_PHASE | reason=Avoid_{}",
+                scripCode, indexRegime.getSessionPhase());
             return false;
         }
 
         // Gate 3: Security regime must be aligned with index
         SecurityRegime securityRegime = securityRegimeCache.get(scripCode);
-        if (securityRegime == null || !securityRegime.isAlignedWithIndex()) {
-            log.debug("Gate failed: Security not aligned with index");
+        if (securityRegime == null) {
+            log.info("🚫 GATE_3_FAILED | scrip={} | gate=SECURITY_REGIME | reason=Security_regime_null", scripCode);
+            return false;
+        }
+        if (!securityRegime.isAlignedWithIndex()) {
+            log.info("🚫 GATE_3_FAILED | scrip={} | gate=SECURITY_REGIME | reason=Not_aligned_with_index | secRegime={} | idxRegime={}",
+                scripCode,
+                securityRegime.getRegimeLabel(),
+                indexRegime.getLabel());
             return false;
         }
 
         // Gate 4: ACL must allow entry
         ACLOutput acl = aclCache.get(scripCode);
-        if (acl == null || !acl.isEntryAllowed()) {
-            log.debug("Gate failed: ACL does not allow entry");
+        if (acl == null) {
+            log.info("🚫 GATE_4_FAILED | scrip={} | gate=ACL | reason=ACL_null", scripCode);
+            return false;
+        }
+        if (!acl.isEntryAllowed()) {
+            log.info("🚫 GATE_4_FAILED | scrip={} | gate=ACL | reason=Entry_not_allowed | aclState={} | multiplier={}",
+                scripCode,
+                acl.getAclState(),
+                String.format("%.2f", acl.getAclMultiplier()));
             return false;
         }
 
+        log.info("✅ ALL_GATES_PASSED | scrip={} | indexRegime={} | secRegime={} | aclState={}",
+            scripCode,
+            indexRegime.getLabel(),
+            securityRegime.getRegimeLabel(),
+            acl.getAclState());
         return true;  // All gates passed
     }
 
