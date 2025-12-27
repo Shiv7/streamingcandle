@@ -317,7 +317,7 @@ class MultiTimeframeLevelCalculatorTest {
     // ========== Cache Management Tests ==========
 
     @Test
-    void testCache_SamePerio d_UsesCache() {
+    void testCache_SamePeriod_UsesCache() {
         // Given: Same scrip, same period
         String scripCode = "RELIANCE";
         SwingData swingData = new SwingData(2500.0, 2400.0);
