@@ -62,9 +62,9 @@ public class FamilyCacheAdapter {
             return cached;
         }
 
-        // Refresh from API if enabled
+        // Refresh from API if enabled - use computeIfAbsent pattern for thread safety
         if (refreshOnMiss) {
-            return refreshFamily(equityScripCode, closePrice);
+            return refreshFamilyThreadSafe(equityScripCode, closePrice);
         }
 
         return cached;  // Return stale data if refresh disabled
@@ -98,6 +98,26 @@ public class FamilyCacheAdapter {
         
         long ageMs = System.currentTimeMillis() - updated;
         return ageMs < TimeUnit.HOURS.toMillis(ttlHours);
+    }
+
+    /**
+     * Thread-safe refresh using double-checked locking
+     */
+    private InstrumentFamily refreshFamilyThreadSafe(String equityScripCode, double closePrice) {
+        // Double-checked locking pattern
+        InstrumentFamily cached = familyCache.get(equityScripCode);
+        if (cached != null && isFresh(equityScripCode)) {
+            return cached;
+        }
+        
+        synchronized (equityScripCode.intern()) {
+            // Check again inside synchronized block
+            cached = familyCache.get(equityScripCode);
+            if (cached != null && isFresh(equityScripCode)) {
+                return cached;
+            }
+            return refreshFamily(equityScripCode, closePrice);
+        }
     }
 
     /**

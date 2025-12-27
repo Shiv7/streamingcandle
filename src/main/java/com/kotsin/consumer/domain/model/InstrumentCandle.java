@@ -125,6 +125,54 @@ public class InstrumentCandle {
     private long maxTickAgeMs;
     private long minTickAgeMs;
 
+    // ==================== VALIDATION ====================
+
+    /**
+     * Validate OHLCV data integrity
+     * @return true if data is valid
+     */
+    public boolean isValid() {
+        // Basic null checks
+        if (scripCode == null || scripCode.isEmpty()) return false;
+        
+        // OHLCV validation
+        if (high < low) return false;          // High must be >= Low
+        if (high < open || high < close) return false;  // High must be highest
+        if (low > open || low > close) return false;    // Low must be lowest
+        if (volume < 0) return false;          // Volume cannot be negative
+        if (close <= 0) return false;          // Price must be positive
+        
+        return true;
+    }
+
+    /**
+     * Get validation errors if any
+     */
+    public String getValidationErrors() {
+        StringBuilder errors = new StringBuilder();
+        
+        if (scripCode == null || scripCode.isEmpty()) {
+            errors.append("scripCode is null/empty;");
+        }
+        if (high < low) {
+            errors.append("high < low;");
+        }
+        if (high < open || high < close) {
+            errors.append("high is not highest;");
+        }
+        if (low > open || low > close) {
+            errors.append("low is not lowest;");
+        }
+        if (volume < 0) {
+            errors.append("negative volume;");
+        }
+        if (close <= 0) {
+            errors.append("non-positive close;");
+        }
+        
+        return errors.length() > 0 ? errors.toString() : null;
+    }
+
     // ==================== HELPER METHODS ====================
 
     /**
