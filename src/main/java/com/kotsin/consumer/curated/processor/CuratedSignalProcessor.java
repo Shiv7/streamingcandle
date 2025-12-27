@@ -390,7 +390,7 @@ public class CuratedSignalProcessor {
         if (!securityRegime.isAlignedWithIndex()) {
             log.info("🚫 GATE_3_FAILED | scrip={} | gate=SECURITY_REGIME | reason=Not_aligned_with_index | secRegime={} | idxRegime={}",
                 scripCode,
-                securityRegime.getRegimeLabel(),
+                securityRegime.getLabel(),
                 indexRegime.getLabel());
             return false;
         }
@@ -412,7 +412,7 @@ public class CuratedSignalProcessor {
         log.info("✅ ALL_GATES_PASSED | scrip={} | indexRegime={} | secRegime={} | aclState={}",
             scripCode,
             indexRegime.getLabel(),
-            securityRegime.getRegimeLabel(),
+            securityRegime.getLabel(),
             acl.getAclState());
         return true;  // All gates passed
     }

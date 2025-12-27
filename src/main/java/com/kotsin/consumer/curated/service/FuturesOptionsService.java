@@ -168,30 +168,32 @@ public class FuturesOptionsService {
         boolean dataFresh = (futuresData != null && futuresData.isFresh())
                 || (optionsData != null && optionsData.isFresh());
 
-        FuturesOptionsAlignment.FuturesOptionsAlignmentBuilder builder = FuturesOptionsAlignment.builder()
-                .scripCode(scripCode)
-                .timestamp(System.currentTimeMillis())
-                .futuresData(futuresData)
-                .optionsData(optionsData)
-                .dataAvailable(dataAvailable)
-                .dataFresh(dataFresh);
+        // Collect reasons in a list
+        java.util.List<String> reasons = new java.util.ArrayList<>();
 
         if (!dataAvailable) {
             log.warn("No F&O data available for {}", scripCode);
-            return builder
+            return FuturesOptionsAlignment.builder()
+                    .scripCode(scripCode)
+                    .timestamp(System.currentTimeMillis())
+                    .futuresData(futuresData)
+                    .optionsData(optionsData)
+                    .dataAvailable(dataAvailable)
+                    .dataFresh(dataFresh)
                     .futuresScore(0.0)
                     .optionsScore(0.0)
                     .alignmentScore(0.0)
                     .isAligned(false)
                     .bias(FuturesOptionsAlignment.DirectionalBias.NEUTRAL)
+                    .reasons(reasons)
                     .build();
         }
 
         // Calculate futures score
-        double futuresScore = calculateFuturesScore(futuresData, builder);
+        double futuresScore = calculateFuturesScore(futuresData, reasons);
 
         // Calculate options score
-        double optionsScore = calculateOptionsScore(optionsData, builder);
+        double optionsScore = calculateOptionsScore(optionsData, reasons);
 
         // Combined score (weighted average)
         double alignmentScore;
@@ -206,12 +208,19 @@ public class FuturesOptionsService {
         // Determine bias
         FuturesOptionsAlignment.DirectionalBias bias = determineBias(futuresData, optionsData);
 
-        FuturesOptionsAlignment alignment = builder
+        FuturesOptionsAlignment alignment = FuturesOptionsAlignment.builder()
+                .scripCode(scripCode)
+                .timestamp(System.currentTimeMillis())
+                .futuresData(futuresData)
+                .optionsData(optionsData)
+                .dataAvailable(dataAvailable)
+                .dataFresh(dataFresh)
                 .futuresScore(futuresScore)
                 .optionsScore(optionsScore)
                 .alignmentScore(alignmentScore)
                 .isAligned(alignmentScore >= 0.6)
                 .bias(bias)
+                .reasons(reasons)
                 .build();
 
         log.info("F&O Alignment for {}: score={}, bias={}, aligned={}",
@@ -223,8 +232,7 @@ public class FuturesOptionsService {
     /**
      * Calculate futures score (0 to 1)
      */
-    private double calculateFuturesScore(FuturesData futures,
-                                         FuturesOptionsAlignment.FuturesOptionsAlignmentBuilder builder) {
+    private double calculateFuturesScore(FuturesData futures, java.util.List<String> reasons) {
         if (futures == null || !futures.isFresh()) {
             return 0.0;
         }
@@ -234,13 +242,13 @@ public class FuturesOptionsService {
         // Premium analysis (0-0.3 points)
         if (futures.isPremiumPositive()) {
             score += 0.3;
-            builder.reasons.add("Futures at premium (" + String.format("%.2f", futures.getPremium()) + "%)");
+            reasons.add("Futures at premium (" + String.format("%.2f", futures.getPremium()) + "%)");
         }
 
         // OI change analysis (0-0.3 points)
         if (futures.getOiChangePercent() > 5) {
             score += 0.3;
-            builder.reasons.add("Futures OI increasing (" + String.format("%.1f", futures.getOiChangePercent()) + "%)");
+            reasons.add("Futures OI increasing (" + String.format("%.1f", futures.getOiChangePercent()) + "%)");
         } else if (futures.getOiChangePercent() > 2) {
             score += 0.15;
         }
@@ -250,19 +258,19 @@ public class FuturesOptionsService {
         switch (buildup) {
             case LONG_BUILDUP:
                 score += 0.4;
-                builder.reasons.add("LONG BUILDUP (Price ↑ + OI ↑)");
+                reasons.add("LONG BUILDUP (Price ↑ + OI ↑)");
                 break;
             case SHORT_COVERING:
                 score += 0.2;
-                builder.reasons.add("SHORT COVERING (Price ↑ + OI ↓)");
+                reasons.add("SHORT COVERING (Price ↑ + OI ↓)");
                 break;
             case SHORT_BUILDUP:
                 score += 0.0;  // Bearish, bad for long
-                builder.reasons.add("SHORT BUILDUP (Price ↓ + OI ↑) - BEARISH");
+                reasons.add("SHORT BUILDUP (Price ↓ + OI ↑) - BEARISH");
                 break;
             case LONG_UNWINDING:
                 score += 0.0;  // Bearish, bad for long
-                builder.reasons.add("LONG UNWINDING (Price ↓ + OI ↓) - BEARISH");
+                reasons.add("LONG UNWINDING (Price ↓ + OI ↓) - BEARISH");
                 break;
             default:
                 score += 0.1;
@@ -274,8 +282,7 @@ public class FuturesOptionsService {
     /**
      * Calculate options score (0 to 1)
      */
-    private double calculateOptionsScore(OptionsData options,
-                                          FuturesOptionsAlignment.FuturesOptionsAlignmentBuilder builder) {
+    private double calculateOptionsScore(OptionsData options, java.util.List<String> reasons) {
         if (options == null || !options.isFresh()) {
             return 0.0;
         }
@@ -286,18 +293,18 @@ public class FuturesOptionsService {
         OptionsData.Sentiment sentiment = options.getSentiment();
         if (sentiment == OptionsData.Sentiment.BULLISH) {
             score += 0.4;
-            builder.reasons.add("Options BULLISH (PCR=" + String.format("%.2f", options.getPcr()) + ")");
+            reasons.add("Options BULLISH (PCR=" + String.format("%.2f", options.getPcr()) + ")");
         } else if (sentiment == OptionsData.Sentiment.NEUTRAL) {
             score += 0.2;
         } else {
             score += 0.0;
-            builder.reasons.add("Options BEARISH (PCR=" + String.format("%.2f", options.getPcr()) + ")");
+            reasons.add("Options BEARISH (PCR=" + String.format("%.2f", options.getPcr()) + ")");
         }
 
         // OI change analysis (0-0.3 points)
         if (options.getTotalCallOIChange() > options.getTotalPutOIChange()) {
             score += 0.3;
-            builder.reasons.add("Call OI increasing faster than Put OI");
+            reasons.add("Call OI increasing faster than Put OI");
         } else if (options.getTotalCallOIChange() > 0) {
             score += 0.15;
         }
@@ -305,13 +312,13 @@ public class FuturesOptionsService {
         // Strong directional move (0-0.3 points)
         if (options.indicatesStrongMove()) {
             score += 0.3;
-            builder.reasons.add("Strong directional OI positioning detected");
+            reasons.add("Strong directional OI positioning detected");
         }
 
         // Max pain check (penalty)
         if (options.isNearMaxPain()) {
             score *= 0.7;  // Reduce score by 30% if near max pain (pinning risk)
-            builder.reasons.add("Near max pain - pinning risk");
+            reasons.add("Near max pain - pinning risk");
         }
 
         return Math.min(score, 1.0);
