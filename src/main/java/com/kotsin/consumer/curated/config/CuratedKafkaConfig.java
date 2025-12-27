@@ -48,6 +48,8 @@ public class CuratedKafkaConfig {
      * Consumer Factory for Curated Signal Processor
      * Uses a UNIQUE consumer group (configurable via properties)
      * Default: reads from EARLIEST for playback testing
+     *
+     * IMPORTANT: Supports multiple message types (UnifiedCandle, CSSOutput, IPUOutput, etc.)
      */
     @Bean
     public ConsumerFactory<String, Object> curatedConsumerFactory() {
@@ -57,8 +59,17 @@ public class CuratedKafkaConfig {
         props.put(ConsumerConfig.KEY_DESERIALIZER_CLASS_CONFIG, StringDeserializer.class);
         props.put(ConsumerConfig.VALUE_DESERIALIZER_CLASS_CONFIG, JsonDeserializer.class);
         props.put(JsonDeserializer.TRUSTED_PACKAGES, "com.kotsin.consumer.*");
-        props.put(JsonDeserializer.USE_TYPE_INFO_HEADERS, false);
-        props.put(JsonDeserializer.VALUE_DEFAULT_TYPE, UnifiedCandle.class.getName());
+        props.put(JsonDeserializer.USE_TYPE_INFO_HEADERS, true);  // Use type headers for polymorphic deserialization
+        props.put(JsonDeserializer.TYPE_MAPPINGS,
+            "UnifiedCandle:com.kotsin.consumer.model.UnifiedCandle," +
+            "CSSOutput:com.kotsin.consumer.signal.model.CSSOutput," +
+            "IPUOutput:com.kotsin.consumer.model.IPUOutput," +
+            "MTVCPOutput:com.kotsin.consumer.model.MTVCPOutput," +
+            "IndexRegime:com.kotsin.consumer.regime.model.IndexRegime," +
+            "SecurityRegime:com.kotsin.consumer.regime.model.SecurityRegime," +
+            "ACLOutput:com.kotsin.consumer.regime.model.ACLOutput," +
+            "FinalMagnitude:com.kotsin.consumer.capital.model.FinalMagnitude");
+        props.put(JsonDeserializer.VALUE_DEFAULT_TYPE, Object.class.getName());  // Fallback to Object
         props.put(ConsumerConfig.AUTO_OFFSET_RESET_CONFIG, autoOffsetReset);  // Configurable: earliest/latest
         props.put(ConsumerConfig.ENABLE_AUTO_COMMIT_CONFIG, true);
 
