@@ -67,4 +67,27 @@ public class InstrumentMetadataService {
                     try { return Optional.of(Double.parseDouble(val)); } catch (Exception e) { return Optional.empty(); }
                 });
     }
+
+    /**
+     * Get average daily volume for an instrument.
+     * Used for adaptive VPIN bucket sizing.
+     * 
+     * @return Average daily volume, or default (1,000,000) if not found
+     */
+    public double getAverageDailyVolume(String exch, String exchType, String scripCode) {
+        // Try to get from scrip metadata
+        Optional<Scrip> scrip = getScrip(exch, exchType, scripCode, null);
+        if (scrip.isPresent()) {
+            // If scrip has avgVolume field, use it (extend Scrip entity if needed)
+            // For now, use a heuristic based on instrument type
+            String exchTypeUpper = exchType != null ? exchType.toUpperCase() : "C";
+            if ("D".equals(exchTypeUpper)) {
+                // Derivatives typically have higher volume
+                return 5_000_000.0;
+            }
+        }
+        
+        // Default for equity
+        return 1_000_000.0;
+    }
 }

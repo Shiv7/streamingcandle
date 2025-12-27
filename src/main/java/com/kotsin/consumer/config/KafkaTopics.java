@@ -59,6 +59,23 @@ public final class KafkaTopics {
     // ========== Trading Signal Topics ==========
     public static final String TRADING_SIGNALS = "trading-signals";
 
+    // ========== NEW: Instrument Candle Topics ==========
+    public static final String INSTRUMENT_CANDLE_1M = "instrument-candle-1m";
+
+    // ========== NEW: Family Candle Topics (Unified Architecture) ==========
+    public static final String FAMILY_CANDLE_1M = "family-candle-1m";
+    public static final String FAMILY_CANDLE_2M = "family-candle-2m";
+    public static final String FAMILY_CANDLE_3M = "family-candle-3m";
+    public static final String FAMILY_CANDLE_5M = "family-candle-5m";
+    public static final String FAMILY_CANDLE_15M = "family-candle-15m";
+    public static final String FAMILY_CANDLE_30M = "family-candle-30m";
+    public static final String FAMILY_CANDLE_1H = "family-candle-1h";
+    public static final String FAMILY_CANDLE_2H = "family-candle-2h";
+    public static final String FAMILY_CANDLE_4H = "family-candle-4h";
+    public static final String FAMILY_CANDLE_1D = "family-candle-1d";
+    public static final String FAMILY_CANDLE_1WK = "family-candle-1wk";
+    public static final String FAMILY_CANDLE_1MO = "family-candle-1mo";
+
     // ========== State Store Names ==========
     public static final String STORE_FMA_HISTORY = "fma-candle-history";
     public static final String STORE_FUDKII_HISTORY = "fudkii-candle-history";
