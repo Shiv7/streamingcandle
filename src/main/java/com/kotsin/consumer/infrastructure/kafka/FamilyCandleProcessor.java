@@ -141,13 +141,8 @@ public class FamilyCandleProcessor {
         log.info("Building FamilyCandleProcessor topology: {} -> {}, window={}m", 
             inputTopic, outputTopic, windowSizeMinutes);
 
-        // State store for collecting family members
+        // State store name - Materialized.as() will handle creation
         String stateStoreName = "family-members-store-" + windowSizeMinutes + "m";
-        builder.addStateStore(Stores.keyValueStoreBuilder(
-            Stores.persistentKeyValueStore(stateStoreName),
-            Serdes.String(),
-            FamilyCandleCollector.serde()
-        ));
 
         // Consume instrument candles
         KStream<String, InstrumentCandle> instruments = builder.stream(
@@ -172,7 +167,9 @@ public class FamilyCandleProcessor {
             .aggregate(
                 FamilyCandleCollector::new,
                 (familyId, candle, collector) -> collector.add(candle),
-                Materialized.as(stateStoreName)
+                Materialized.<String, FamilyCandleCollector, org.apache.kafka.streams.state.WindowStore<org.apache.kafka.common.utils.Bytes, byte[]>>as(stateStoreName)
+                    .withKeySerde(Serdes.String())
+                    .withValueSerde(FamilyCandleCollector.serde())
             )
             .suppress(Suppressed.untilWindowCloses(Suppressed.BufferConfig.unbounded()));
 
