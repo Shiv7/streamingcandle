@@ -27,6 +27,7 @@ import org.springframework.stereotype.Component;
 import java.time.*;
 import java.util.*;
 import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.ConcurrentHashMap;
 
 /**
  * UnifiedInstrumentCandleProcessor - Joins tick, orderbook, and OI data.
