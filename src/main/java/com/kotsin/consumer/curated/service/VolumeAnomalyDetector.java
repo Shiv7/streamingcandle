@@ -176,6 +176,31 @@ public class VolumeAnomalyDetector {
         // (missing data should not block breakout detection)
         return true;
     }
+    
+    /**
+     * Check OFI (Order Flow Imbalance) for selling pressure (for bearish breakdowns)
+     * 
+     * Mirror of hasOFIBuyingPressure but checks for selling instead.
+     */
+    public boolean hasOFISellingPressure(UnifiedCandle candle) {
+        // If we have OFI data, use it (negative = selling pressure)
+        if (candle.getOfi() != 0) {
+            return candle.getOfi() < 0;
+        }
+        
+        // Fallback to volume delta (negative = more selling)
+        if (candle.getVolumeDelta() != 0) {
+            return candle.getVolumeDelta() < 0;
+        }
+        
+        // If no OFI and no volume delta, use buy/sell volume comparison
+        if (candle.getBuyVolume() > 0 || candle.getSellVolume() > 0) {
+            return candle.getSellVolume() > candle.getBuyVolume();
+        }
+        
+        // No data available - allow breakout check to proceed
+        return true;
+    }
 
     /**
      * Check VPIN for directional volume

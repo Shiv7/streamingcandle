@@ -47,21 +47,27 @@ public class BreakoutDetector {
             return null;  // No consolidation, no breakout possible
         }
 
-        log.info("BREAKOUT_CHECK {} {} | ✓ Consolidation found | recentHigh={} close={}",
+        log.info("BREAKOUT_CHECK {} {} | ✓ Consolidation found | high={} low={} close={}",
             scripCode, timeframe, 
             String.format("%.2f", consolidation.getRecentHigh()),
+            String.format("%.2f", consolidation.getRecentLow()),
             String.format("%.2f", currentCandle.getClose()));
 
-        // 2. Check if price breaks above recent high
-        if (currentCandle.getClose() <= consolidation.getRecentHigh()) {
-            log.info("BREAKOUT_CHECK {} {} | FAIL: close={} <= recentHigh={}", 
+        // 2. Check if price breaks above recent high (BULLISH) OR below recent low (BEARISH)
+        boolean bullishBreakout = currentCandle.getClose() > consolidation.getRecentHigh();
+        boolean bearishBreakdown = currentCandle.getClose() < consolidation.getRecentLow();
+        
+        if (!bullishBreakout && !bearishBreakdown) {
+            log.info("BREAKOUT_CHECK {} {} | FAIL: close={} within range [{}, {}]", 
                 scripCode, timeframe, 
                 String.format("%.2f", currentCandle.getClose()), 
+                String.format("%.2f", consolidation.getRecentLow()),
                 String.format("%.2f", consolidation.getRecentHigh()));
-            return null;  // No price breakout
+            return null;  // No breakout in either direction
         }
 
-        log.info("BREAKOUT_CHECK {} {} | ✓ Price breakout confirmed", scripCode, timeframe);
+        String direction = bullishBreakout ? "BULLISH" : "BEARISH";
+        log.info("BREAKOUT_CHECK {} {} | ✓ {} breakout confirmed", scripCode, timeframe, direction);
 
         // 3. Get history for volume analysis
         List<UnifiedCandle> history = structureTracker.getHistory(scripCode, timeframe, 20);
@@ -87,12 +93,20 @@ public class BreakoutDetector {
             scripCode, timeframe, kylePass ? "✓" : "bypassed",
             String.format("%.4f", currentCandle.getKyleLambda()));
 
-        // 6. Check OFI (buying pressure) - fallback to volume delta if no orderbook
-        boolean ofiPass = volumeDetector.hasOFIBuyingPressure(currentCandle);
-        log.info("BREAKOUT_CHECK {} {} | OFI/Delta check: {} (ofi={}, delta={})",
+        // 6. Check OFI - For BULLISH need buying pressure, for BEARISH need selling pressure
+        // FIX: Check correct direction based on breakout type
+        boolean ofiPass;
+        if (bullishBreakout) {
+            ofiPass = volumeDetector.hasOFIBuyingPressure(currentCandle);
+        } else {
+            // For bearish breakdown, we want selling pressure (opposite of buying)
+            ofiPass = volumeDetector.hasOFISellingPressure(currentCandle);
+        }
+        log.info("BREAKOUT_CHECK {} {} | OFI/Delta check: {} (ofi={}, delta={}, direction={})",
             scripCode, timeframe, ofiPass ? "✓" : "FAIL",
             String.format("%.2f", currentCandle.getOfi()),
-            currentCandle.getVolumeDelta());  // FIX: volumeDelta is long, not double
+            currentCandle.getVolumeDelta(),
+            direction);
         
         if (!ofiPass) {
             return null;
@@ -103,6 +117,9 @@ public class BreakoutDetector {
         double avgVolume = volumeDetector.getAverageVolume(history);
 
         // ALL CONDITIONS MET - This is a breakout!
+        // FIX: Set pivot level based on direction
+        double pivotLevel = bullishBreakout ? consolidation.getRecentHigh() : consolidation.getRecentLow();
+        
         BreakoutBar breakout = BreakoutBar.builder()
                 .scripCode(scripCode)
                 .timeframe(timeframe)
@@ -118,12 +135,13 @@ public class BreakoutDetector {
                 .ofi(currentCandle.getOfi())
                 .vpin(currentCandle.getVpin())
                 .volumeDelta(currentCandle.getVolumeDelta())
-                .pivotLevel(consolidation.getRecentHigh())  // Old high = new support
+                .pivotLevel(pivotLevel)
                 .compressionRatio(consolidation.getCompressionRatio())
+                .direction(direction)  // Add direction to breakout bar
                 .build();
 
-        log.info("🚀 BREAKOUT DETECTED: {} {} @ {} | Vol Z={} | Kyle={} | OFI={}",
-                scripCode, timeframe, breakout.getBreakoutPrice(),
+        log.info("🚀 {} BREAKOUT DETECTED: {} {} @ {} | Vol Z={} | Kyle={} | OFI={}",
+                direction, scripCode, timeframe, breakout.getBreakoutPrice(),
                 String.format("%.2f", volumeZScore),
                 String.format("%.2f", currentCandle.getKyleLambda()),
                 String.format("%.2f", currentCandle.getOfi()));
