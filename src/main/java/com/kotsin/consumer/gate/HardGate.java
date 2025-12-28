@@ -102,13 +102,10 @@ public class HardGate {
         }
 
         // Gate 1.5: OI data not too stale (if available)
-        // BUG-FIX: Check futures/options timestamp, not candle timestamp
+        // FamilyCandle timestamp represents the candle window end time
+        // OI data is aggregated into FamilyCandle, so use candle timestamp for staleness check
         if (family.getOiSignal() != null && !family.getOiSignal().equals("NEUTRAL")) {
-            // Use futures timestamp if available, otherwise fall back to candle timestamp
-            long oiTimestamp = family.getTimestamp();  // Default
-            if (family.getFutures() != null && family.getFutures().getWindowEndMillis() > 0) {
-                oiTimestamp = family.getFutures().getWindowEndMillis();
-            }
+            long oiTimestamp = family.getTimestamp();
             long oiAge = System.currentTimeMillis() - oiTimestamp;
             long maxAgeMs = maxOiAgeMinutes * 60 * 1000L;
             if (oiAge > maxAgeMs) {
