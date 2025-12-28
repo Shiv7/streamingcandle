@@ -39,8 +39,8 @@ public class ConfigurationValidator {
     @Value("${unified.input.topic.orderbook:}")
     private String orderbookTopic;
     
-    @Value("${stream.outputs.candles.1m:}")
-    private String candle1mTopic;
+    @Value("${unified.output.topic.instrument:}")
+    private String instrumentOutputTopic;
     
     @Value("${spring.data.mongodb.uri:}")
     private String mongoUri;
@@ -85,9 +85,9 @@ public class ConfigurationValidator {
             errors.add("unified.input.topic.orderbook is not configured");
         }
         
-        // Validate output topics
-        if (isNullOrEmpty(candle1mTopic)) {
-            errors.add("stream.outputs.candles.1m is not configured");
+        // Validate output topics (NEW: instrument candle topic instead of legacy)
+        if (isNullOrEmpty(instrumentOutputTopic)) {
+            log.warn("⚠️ unified.output.topic.instrument is not configured - using default 'instrument-candle-1m'");
         }
         
         // Validate MongoDB configuration
@@ -119,7 +119,7 @@ public class ConfigurationValidator {
         log.info("  Kafka Bootstrap Servers: {}", bootstrapServers);
         log.info("  Application ID: {}", applicationId);
         log.info("  Input Topics: ticks={}, oi={}, orderbook={}", ticksTopic, oiTopic, orderbookTopic);
-        log.info("  Output Topics: 1m={}", candle1mTopic);
+        log.info("  Output Topics: instrument={}", instrumentOutputTopic);
         log.info("  MongoDB URI: {}", maskUri(mongoUri));
         log.info("  Trading Hours: {} - {}", nseStartTime, nseEndTime);
     }
