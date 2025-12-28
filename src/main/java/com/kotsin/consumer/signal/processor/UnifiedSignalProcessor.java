@@ -5,6 +5,8 @@ import com.kotsin.consumer.capital.orchestrator.WatchlistOrchestrator;
 import com.kotsin.consumer.capital.service.*;
 import com.kotsin.consumer.config.KafkaConfig;
 import com.kotsin.consumer.config.KafkaTopics;
+import com.kotsin.consumer.domain.model.FamilyCandle;
+import com.kotsin.consumer.domain.model.InstrumentCandle;
 import com.kotsin.consumer.model.*;
 import com.kotsin.consumer.processor.VCPProcessor;
 import com.kotsin.consumer.regime.model.*;
@@ -37,14 +39,14 @@ import java.util.concurrent.*;
 
 /**
  * UnifiedSignalProcessor - Integrates CSS, SOM, VTD modules
- * 
+ *
  * FIXED:
  * - Uses unique state store names for each processor
  * - Uses TTL cache for module outputs
  * - Uses OHM cached results (no API calls in hot path)
  * - Has comprehensive logging
  * - Has null checks
- * 
+ *
  * Emits to:
  * - css-output
  * - som-output
@@ -167,10 +169,10 @@ public class UnifiedSignalProcessor {
                 new VCPProcessor.CandleHistorySerde()
         ));
 
-        // Read unified candle stream
-        KStream<String, UnifiedCandle> candleStream = builder.stream(
-                KafkaTopics.UNIFIED_5M,
-                Consumed.with(Serdes.String(), UnifiedCandle.serde())
+        // Read family candle stream
+        KStream<String, FamilyCandle> candleStream = builder.stream(
+                KafkaTopics.FAMILY_CANDLE_5M,
+                Consumed.with(Serdes.String(), FamilyCandle.serde())
         );
 
         // Consume VCP for CSS calculation
@@ -243,15 +245,15 @@ public class UnifiedSignalProcessor {
 
         // Emit OHM from cache (not computed per candle anymore!)
         candleStream
-                .filter((k, v) -> isValidKey(k))
-                .mapValues((k, candle) -> ohmService.getCached(candle.getScripCode()))
+                .filter((k, v) -> isValidKey(k) && v.getEquity() != null)
+                .mapValues((k, familyCandle) -> ohmService.getCached(familyCandle.getEquity().getScripCode()))
                 .filter((k, v) -> v != null && v.getQualityScore() > 0.3)
                 .to(KafkaTopics.OHM_OUTPUT, Produced.with(Serdes.String(), OptionHealthOutput.serde()));
 
         // Periodically emit watchlist
         candleStream
-                .filter((k, v) -> v != null && v.getScripCode() != null)
-                .groupByKey(Grouped.with(Serdes.String(), UnifiedCandle.serde()))
+                .filter((k, v) -> v != null && v.getEquity() != null && v.getEquity().getScripCode() != null)
+                .groupByKey(Grouped.with(Serdes.String(), FamilyCandle.serde()))
                 .windowedBy(TimeWindows.ofSizeWithNoGrace(Duration.ofMinutes(1)))
                 .count()
                 .toStream()
@@ -283,7 +285,7 @@ public class UnifiedSignalProcessor {
     /**
      * CSS Processor with unique state store
      */
-    private static class CSSProcessor implements Processor<String, UnifiedCandle, String, CSSOutput> {
+    private static class CSSProcessor implements Processor<String, FamilyCandle, String, CSSOutput> {
         private final String storeName;
         private final int lookback;
         private final CompositeStructureScore calculator;
@@ -306,10 +308,20 @@ public class UnifiedSignalProcessor {
         }
 
         @Override
-        public void process(Record<String, UnifiedCandle> record) {
+        public void process(Record<String, FamilyCandle> record) {
             String key = record.key();
-            UnifiedCandle candle = record.value();
-            if (key == null || candle == null || key.contains("999920")) return;
+            FamilyCandle familyCandle = record.value();
+            if (key == null || familyCandle == null || key.contains("999920")) return;
+
+            // Extract equity InstrumentCandle
+            InstrumentCandle equity = familyCandle.getEquity();
+            if (equity == null) {
+                LOGGER.warn("No equity data in FamilyCandle for {}", key);
+                return;
+            }
+
+            // Convert to UnifiedCandle for backwards compatibility
+            UnifiedCandle candle = convertToUnifiedCandle(equity);
 
             VCPProcessor.CandleHistory history = historyStore.get(key);
             if (history == null) {
@@ -340,7 +352,7 @@ public class UnifiedSignalProcessor {
     /**
      * SOM Processor with unique state store
      */
-    private static class SOMProcessor implements Processor<String, UnifiedCandle, String, SOMOutput> {
+    private static class SOMProcessor implements Processor<String, FamilyCandle, String, SOMOutput> {
         private final String storeName;
         private final int lookback;
         private final SentimentOscillationModule calculator;
@@ -360,10 +372,20 @@ public class UnifiedSignalProcessor {
         }
 
         @Override
-        public void process(Record<String, UnifiedCandle> record) {
+        public void process(Record<String, FamilyCandle> record) {
             String key = record.key();
-            UnifiedCandle candle = record.value();
-            if (key == null || candle == null || key.contains("999920")) return;
+            FamilyCandle familyCandle = record.value();
+            if (key == null || familyCandle == null || key.contains("999920")) return;
+
+            // Extract equity InstrumentCandle
+            InstrumentCandle equity = familyCandle.getEquity();
+            if (equity == null) {
+                LOGGER.warn("No equity data in FamilyCandle for {}", key);
+                return;
+            }
+
+            // Convert to UnifiedCandle for backwards compatibility
+            UnifiedCandle candle = convertToUnifiedCandle(equity);
 
             VCPProcessor.CandleHistory history = historyStore.get(key);
             if (history == null) {
@@ -393,7 +415,7 @@ public class UnifiedSignalProcessor {
     /**
      * VTD Processor with unique state store and OHM integration
      */
-    private static class VTDProcessor implements Processor<String, UnifiedCandle, String, VTDOutput> {
+    private static class VTDProcessor implements Processor<String, FamilyCandle, String, VTDOutput> {
         private final String storeName;
         private final int lookback;
         private final VolatilityTrapDetector calculator;
@@ -416,10 +438,20 @@ public class UnifiedSignalProcessor {
         }
 
         @Override
-        public void process(Record<String, UnifiedCandle> record) {
+        public void process(Record<String, FamilyCandle> record) {
             String key = record.key();
-            UnifiedCandle candle = record.value();
-            if (key == null || candle == null || key.contains("999920")) return;
+            FamilyCandle familyCandle = record.value();
+            if (key == null || familyCandle == null || key.contains("999920")) return;
+
+            // Extract equity InstrumentCandle
+            InstrumentCandle equity = familyCandle.getEquity();
+            if (equity == null) {
+                LOGGER.warn("No equity data in FamilyCandle for {}", key);
+                return;
+            }
+
+            // Convert to UnifiedCandle for backwards compatibility
+            UnifiedCandle candle = convertToUnifiedCandle(equity);
 
             VCPProcessor.CandleHistory history = historyStore.get(key);
             if (history == null) {
@@ -452,6 +484,62 @@ public class UnifiedSignalProcessor {
 
         @Override
         public void close() {}
+    }
+
+    /**
+     * Convert InstrumentCandle to UnifiedCandle for backwards compatibility
+     */
+    private static UnifiedCandle convertToUnifiedCandle(InstrumentCandle instrument) {
+        return UnifiedCandle.builder()
+                .scripCode(instrument.getScripCode())
+                .companyName(instrument.getCompanyName())
+                .exchange(instrument.getExchange())
+                .exchangeType(instrument.getExchangeType())
+                .timeframe(instrument.getTimeframe())
+                .windowStartMillis(instrument.getWindowStartMillis())
+                .windowEndMillis(instrument.getWindowEndMillis())
+                .humanReadableStartTime(instrument.getHumanReadableTime())
+                .humanReadableEndTime(instrument.getHumanReadableTime())
+                // OHLCV
+                .open(instrument.getOpen())
+                .high(instrument.getHigh())
+                .low(instrument.getLow())
+                .close(instrument.getClose())
+                .volume(instrument.getVolume())
+                .buyVolume(instrument.getBuyVolume())
+                .sellVolume(instrument.getSellVolume())
+                .vwap(instrument.getVwap())
+                .tickCount(instrument.getTickCount())
+                // Volume Profile
+                .volumeAtPrice(instrument.getVolumeAtPrice())
+                .poc(instrument.getPoc())
+                .valueAreaHigh(instrument.getVah())
+                .valueAreaLow(instrument.getVal())
+                // Imbalance
+                .volumeImbalance(instrument.getVolumeImbalance())
+                .dollarImbalance(instrument.getDollarImbalance())
+                .vpin(instrument.getVpin())
+                // Orderbook (may be null)
+                .ofi(instrument.getOfi() != null ? instrument.getOfi() : 0.0)
+                .depthImbalance(instrument.getDepthImbalance() != null ? instrument.getDepthImbalance() : 0.0)
+                .kyleLambda(instrument.getKyleLambda() != null ? instrument.getKyleLambda() : 0.0)
+                .microprice(instrument.getMicroprice() != null ? instrument.getMicroprice() : 0.0)
+                .bidAskSpread(instrument.getBidAskSpread() != null ? instrument.getBidAskSpread() : 0.0)
+                .weightedDepthImbalance(instrument.getWeightedDepthImbalance() != null ? instrument.getWeightedDepthImbalance() : 0.0)
+                .totalBidDepth(instrument.getAverageBidDepth() != null ? instrument.getAverageBidDepth() : 0.0)
+                .totalAskDepth(instrument.getAverageAskDepth() != null ? instrument.getAverageAskDepth() : 0.0)
+                // OI (may be null)
+                .oiOpen(instrument.getOiOpen())
+                .oiHigh(instrument.getOiHigh())
+                .oiLow(instrument.getOiLow())
+                .oiClose(instrument.getOiClose())
+                .oiChange(instrument.getOiChange())
+                .oiChangePercent(instrument.getOiChangePercent())
+                // Derived fields
+                .volumeDeltaPercent(instrument.getVolumeDeltaPercent())
+                .range(instrument.getRange())
+                .isBullish(instrument.isBullish())
+                .build();
     }
 
     private void startStream(StreamsBuilder builder, Properties props, String instanceKey) {

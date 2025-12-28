@@ -4,6 +4,8 @@ import com.kotsin.consumer.capital.model.FinalMagnitude;
 import com.kotsin.consumer.capital.service.FinalMagnitudeAssembly;
 import com.kotsin.consumer.config.KafkaConfig;
 import com.kotsin.consumer.config.KafkaTopics;
+import com.kotsin.consumer.domain.model.FamilyCandle;
+import com.kotsin.consumer.domain.model.InstrumentCandle;
 import com.kotsin.consumer.model.*;
 import com.kotsin.consumer.processor.VCPProcessor;
 import com.kotsin.consumer.regime.model.*;
@@ -40,21 +42,21 @@ import java.util.concurrent.TimeUnit;
 
 /**
  * FMAProcessor - Kafka processor for Final Magnitude Assembly (Module 14)
- * 
+ *
  * FIXED:
  * - Uses TTL cache with automatic expiry (5 min default)
  * - Uses unique state store names
  * - Has comprehensive cache miss logging
  * - Has input validation
  * - Has cache statistics logging
- * 
+ *
  * Consumes:
- * - unified-candle-5m
+ * - family-candle-5m
  * - ipu-signals-5m
  * - vcp-combined
  * - regime-security-output
  * - regime-acl-output
- * 
+ *
  * Produces:
  * - magnitude-final
  * - fudkii-output
@@ -186,10 +188,10 @@ public class FMAProcessor {
                 new VCPProcessor.CandleHistorySerde()
         ));
 
-        // Read unified candle stream
-        KStream<String, UnifiedCandle> candleStream = builder.stream(
-                KafkaTopics.UNIFIED_5M,
-                Consumed.with(Serdes.String(), UnifiedCandle.serde())
+        // Read family candle stream
+        KStream<String, FamilyCandle> candleStream = builder.stream(
+                KafkaTopics.FAMILY_CANDLE_5M,
+                Consumed.with(Serdes.String(), FamilyCandle.serde())
         );
 
         // Consume and cache IPU outputs
@@ -285,7 +287,7 @@ public class FMAProcessor {
     /**
      * FMA History Processor with null checks and logging
      */
-    private static class FMAHistoryProcessor implements Processor<String, UnifiedCandle, String, FinalMagnitude> {
+    private static class FMAHistoryProcessor implements Processor<String, FamilyCandle, String, FinalMagnitude> {
         private final String storeName;
         private final int lookback;
         private final FinalMagnitudeAssembly fma;
@@ -334,22 +336,32 @@ public class FMAProcessor {
         }
 
         @Override
-        public void process(Record<String, UnifiedCandle> record) {
+        public void process(Record<String, FamilyCandle> record) {
             String key = record.key();
-            UnifiedCandle candle = record.value();
+            FamilyCandle familyCandle = record.value();
 
             // Input validation
             if (key == null || key.isEmpty()) {
                 LOGGER.warn("⚠️ FMA: Received null/empty key");
                 return;
             }
-            if (candle == null) {
+            if (familyCandle == null) {
                 LOGGER.warn("⚠️ FMA: Received null candle for key={}", key);
                 return;
             }
             if (key.contains("999920")) {
                 return; // Skip indices silently
             }
+
+            // Extract equity InstrumentCandle
+            InstrumentCandle equity = familyCandle.getEquity();
+            if (equity == null) {
+                LOGGER.warn("No equity data in FamilyCandle for {}", key);
+                return;
+            }
+
+            // Convert to UnifiedCandle for backwards compatibility
+            UnifiedCandle candle = convertToUnifiedCandle(equity);
 
             // Get or create history with null check
             VCPProcessor.CandleHistory history = historyStore.get(key);
@@ -439,9 +451,65 @@ public class FMAProcessor {
     }
 
     /**
+     * Convert InstrumentCandle to UnifiedCandle for backwards compatibility
+     */
+    private static UnifiedCandle convertToUnifiedCandle(InstrumentCandle instrument) {
+        return UnifiedCandle.builder()
+                .scripCode(instrument.getScripCode())
+                .companyName(instrument.getCompanyName())
+                .exchange(instrument.getExchange())
+                .exchangeType(instrument.getExchangeType())
+                .timeframe(instrument.getTimeframe())
+                .windowStartMillis(instrument.getWindowStartMillis())
+                .windowEndMillis(instrument.getWindowEndMillis())
+                .humanReadableStartTime(instrument.getHumanReadableTime())
+                .humanReadableEndTime(instrument.getHumanReadableTime())
+                // OHLCV
+                .open(instrument.getOpen())
+                .high(instrument.getHigh())
+                .low(instrument.getLow())
+                .close(instrument.getClose())
+                .volume(instrument.getVolume())
+                .buyVolume(instrument.getBuyVolume())
+                .sellVolume(instrument.getSellVolume())
+                .vwap(instrument.getVwap())
+                .tickCount(instrument.getTickCount())
+                // Volume Profile
+                .volumeAtPrice(instrument.getVolumeAtPrice())
+                .poc(instrument.getPoc())
+                .valueAreaHigh(instrument.getVah())
+                .valueAreaLow(instrument.getVal())
+                // Imbalance
+                .volumeImbalance(instrument.getVolumeImbalance())
+                .dollarImbalance(instrument.getDollarImbalance())
+                .vpin(instrument.getVpin())
+                // Orderbook (may be null)
+                .ofi(instrument.getOfi() != null ? instrument.getOfi() : 0.0)
+                .depthImbalance(instrument.getDepthImbalance() != null ? instrument.getDepthImbalance() : 0.0)
+                .kyleLambda(instrument.getKyleLambda() != null ? instrument.getKyleLambda() : 0.0)
+                .microprice(instrument.getMicroprice() != null ? instrument.getMicroprice() : 0.0)
+                .bidAskSpread(instrument.getBidAskSpread() != null ? instrument.getBidAskSpread() : 0.0)
+                .weightedDepthImbalance(instrument.getWeightedDepthImbalance() != null ? instrument.getWeightedDepthImbalance() : 0.0)
+                .totalBidDepth(instrument.getAverageBidDepth() != null ? instrument.getAverageBidDepth() : 0.0)
+                .totalAskDepth(instrument.getAverageAskDepth() != null ? instrument.getAverageAskDepth() : 0.0)
+                // OI (may be null)
+                .oiOpen(instrument.getOiOpen())
+                .oiHigh(instrument.getOiHigh())
+                .oiLow(instrument.getOiLow())
+                .oiClose(instrument.getOiClose())
+                .oiChange(instrument.getOiChange())
+                .oiChangePercent(instrument.getOiChangePercent())
+                // Derived fields
+                .volumeDeltaPercent(instrument.getVolumeDeltaPercent())
+                .range(instrument.getRange())
+                .isBullish(instrument.isBullish())
+                .build();
+    }
+
+    /**
      * FUDKII Processor with its own state store
      */
-    private static class FUDKIIProcessor implements Processor<String, UnifiedCandle, String, FUDKIIOutput> {
+    private static class FUDKIIProcessor implements Processor<String, FamilyCandle, String, FUDKIIOutput> {
         private final String storeName;
         private final int lookback;
         private final FUDKIICalculator calculator;
@@ -466,11 +534,21 @@ public class FMAProcessor {
         }
 
         @Override
-        public void process(Record<String, UnifiedCandle> record) {
+        public void process(Record<String, FamilyCandle> record) {
             String key = record.key();
-            UnifiedCandle candle = record.value();
+            FamilyCandle familyCandle = record.value();
 
-            if (key == null || candle == null || key.contains("999920")) return;
+            if (key == null || familyCandle == null || key.contains("999920")) return;
+
+            // Extract equity InstrumentCandle
+            InstrumentCandle equity = familyCandle.getEquity();
+            if (equity == null) {
+                LOGGER.warn("No equity data in FamilyCandle for {}", key);
+                return;
+            }
+
+            // Convert to UnifiedCandle for backwards compatibility
+            UnifiedCandle candle = convertToUnifiedCandle(equity);
 
             VCPProcessor.CandleHistory history = historyStore.get(key);
             if (history == null) {

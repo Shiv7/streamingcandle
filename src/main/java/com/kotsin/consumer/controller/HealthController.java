@@ -1,12 +1,13 @@
 package com.kotsin.consumer.controller;
 
 import com.kotsin.consumer.monitoring.SystemMonitor;
-import com.kotsin.consumer.processor.CandlestickProcessor;
-import com.kotsin.consumer.processor.OrderbookProcessor;
-import com.kotsin.consumer.processor.OIProcessor;
-import lombok.RequiredArgsConstructor;
+import com.kotsin.consumer.infrastructure.kafka.UnifiedInstrumentCandleProcessor;
+import com.kotsin.consumer.infrastructure.kafka.FamilyCandleProcessor;
+import com.kotsin.consumer.processor.IPUProcessor;
+import com.kotsin.consumer.processor.VCPProcessor;
 import lombok.extern.slf4j.Slf4j;
 import org.apache.kafka.streams.KafkaStreams;
+import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.RequestMapping;
@@ -17,22 +18,34 @@ import java.util.Map;
 
 /**
  * Health check and metrics endpoint
- * 
+ *
  * OBSERVABILITY: Expose health and metrics for monitoring
  * KUBERNETES READY: Provides liveness and readiness probes
- * 
- * Updated: Now monitors 3 independent processors
+ *
+ * Updated: Now monitors NEW family-candle architecture processors
  */
 @RestController
 @RequestMapping("/api/v1/health")
-@RequiredArgsConstructor
 @Slf4j
 public class HealthController {
 
     private final SystemMonitor systemMonitor;
-    private final CandlestickProcessor candlestickProcessor;
-    private final OrderbookProcessor orderbookProcessor;
-    private final OIProcessor oiProcessor;
+
+    @Autowired(required = false)
+    private UnifiedInstrumentCandleProcessor instrumentProcessor;
+
+    @Autowired(required = false)
+    private FamilyCandleProcessor familyProcessor;
+
+    @Autowired(required = false)
+    private IPUProcessor ipuProcessor;
+
+    @Autowired(required = false)
+    private VCPProcessor vcpProcessor;
+
+    public HealthController(SystemMonitor systemMonitor) {
+        this.systemMonitor = systemMonitor;
+    }
 
     /**
      * Liveness probe - Is the application running?
@@ -70,18 +83,33 @@ public class HealthController {
      * Check if all processors are healthy
      */
     private boolean areAllProcessorsHealthy() {
-        Map<String, KafkaStreams.State> candleStates = candlestickProcessor.getStreamStates();
-        Map<String, KafkaStreams.State> obStates = orderbookProcessor.getStreamStates();
-        Map<String, KafkaStreams.State> oiStates = oiProcessor.getStreamStates();
-        
-        boolean candlesHealthy = candleStates.values().stream()
-            .allMatch(state -> state == KafkaStreams.State.RUNNING);
-        boolean orderbookHealthy = obStates.values().stream()
-            .allMatch(state -> state == KafkaStreams.State.RUNNING);
-        boolean oiHealthy = oiStates.values().stream()
-            .allMatch(state -> state == KafkaStreams.State.RUNNING);
-            
-        return candlesHealthy && orderbookHealthy && oiHealthy;
+        boolean allHealthy = true;
+
+        // Check IPU processor
+        if (ipuProcessor != null) {
+            try {
+                Map<String, KafkaStreams.State> states = ipuProcessor.getStreamStates();
+                allHealthy = allHealthy && states.values().stream()
+                    .allMatch(state -> state == KafkaStreams.State.RUNNING);
+            } catch (Exception e) {
+                log.warn("Error checking IPU processor health", e);
+                allHealthy = false;
+            }
+        }
+
+        // Check VCP processor
+        if (vcpProcessor != null) {
+            try {
+                Map<String, KafkaStreams.State> states = vcpProcessor.getStreamStates();
+                allHealthy = allHealthy && states.values().stream()
+                    .allMatch(state -> state == KafkaStreams.State.RUNNING);
+            } catch (Exception e) {
+                log.warn("Error checking VCP processor health", e);
+                allHealthy = false;
+            }
+        }
+
+        return allHealthy;
     }
 
     /**
@@ -90,24 +118,35 @@ public class HealthController {
     @GetMapping
     public ResponseEntity<Map<String, Object>> health() {
         Map<String, Object> response = new HashMap<>();
-        
+
         boolean isHealthy = systemMonitor.isSystemHealthy() && areAllProcessorsHealthy();
-        
+
         response.put("status", isHealthy ? "HEALTHY" : "UNHEALTHY");
         response.put("timestamp", System.currentTimeMillis());
         response.put("systemMetrics", systemMonitor.getSystemMetrics());
-        
-        // Stream states from all 3 processors
+
+        // Stream states from NEW architecture processors
         Map<String, Object> allStreamStates = new HashMap<>();
-        allStreamStates.put("candlesticks", candlestickProcessor.getStreamStates());
-        allStreamStates.put("orderbook", orderbookProcessor.getStreamStates());
-        allStreamStates.put("oi", oiProcessor.getStreamStates());
+        if (ipuProcessor != null) {
+            try {
+                allStreamStates.put("ipu", ipuProcessor.getStreamStates());
+            } catch (Exception e) {
+                allStreamStates.put("ipu", "ERROR: " + e.getMessage());
+            }
+        }
+        if (vcpProcessor != null) {
+            try {
+                allStreamStates.put("vcp", vcpProcessor.getStreamStates());
+            } catch (Exception e) {
+                allStreamStates.put("vcp", "ERROR: " + e.getMessage());
+            }
+        }
         response.put("streamStates", allStreamStates);
-        
+
         if (!isHealthy) {
             return ResponseEntity.status(503).body(response);
         }
-        
+
         return ResponseEntity.ok(response);
     }
 

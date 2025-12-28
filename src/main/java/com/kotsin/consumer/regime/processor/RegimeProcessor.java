@@ -1,6 +1,8 @@
 package com.kotsin.consumer.regime.processor;
 
 import com.kotsin.consumer.config.KafkaConfig;
+import com.kotsin.consumer.domain.model.FamilyCandle;
+import com.kotsin.consumer.domain.model.InstrumentCandle;
 import com.kotsin.consumer.model.EnrichedCandlestick;
 import com.kotsin.consumer.model.UnifiedCandle;
 import com.kotsin.consumer.processor.VCPProcessor;
@@ -32,13 +34,13 @@ import java.util.concurrent.ConcurrentHashMap;
 
 /**
  * RegimeProcessor - Kafka processor for all regime modules
- * 
+ *
  * Processes:
  * - Module 1: Index Regime → regime-index-output
- * - Module 2: Security Regime → regime-security-output  
+ * - Module 2: Security Regime → regime-security-output
  * - Module 3: ACL → regime-acl-output
- * 
- * Consumes from unified-candle-* topics and emits regime outputs
+ *
+ * Consumes from family-candle-* topics and emits regime outputs
  */
 @Component
 public class RegimeProcessor {
@@ -69,8 +71,8 @@ public class RegimeProcessor {
     @Value("${regime.output.acl:regime-acl-output}")
     private String aclOutputTopic;
 
-    // Input topics  
-    @Value("${regime.input.prefix:unified-candle-}")
+    // Input topics
+    @Value("${regime.input.prefix:family-candle-}")
     private String inputTopicPrefix;
 
     // Index scrip codes
@@ -138,22 +140,25 @@ public class RegimeProcessor {
         Properties props = kafkaConfig.getStreamProperties(instanceKey);
         StreamsBuilder builder = new StreamsBuilder();
 
-        // Read 30m unified candles (for indices)
-        KStream<String, UnifiedCandle> candle30mStream = builder.stream(
+        // Read 30m family candles (for indices)
+        KStream<String, FamilyCandle> candle30mStream = builder.stream(
                 inputTopicPrefix + "30m",
-                Consumed.with(Serdes.String(), UnifiedCandle.serde())
+                Consumed.with(Serdes.String(), FamilyCandle.serde())
         );
 
         // Also consume 5m candles for faster regime
-        KStream<String, UnifiedCandle> candle5mStream = builder.stream(
+        KStream<String, FamilyCandle> candle5mStream = builder.stream(
                 inputTopicPrefix + "5m",
-                Consumed.with(Serdes.String(), UnifiedCandle.serde())
+                Consumed.with(Serdes.String(), FamilyCandle.serde())
         );
 
         // Cache 5m candles for index codes
         candle5mStream
-                .filter((k, v) -> v != null && INDEX_SCRIP_CODES.contains(v.getScripCode()))
-                .foreach((k, candle) -> {
+                .filter((k, v) -> v != null && v.getEquity() != null && INDEX_SCRIP_CODES.contains(v.getEquity().getScripCode()))
+                .foreach((k, familyCandle) -> {
+                    InstrumentCandle equity = familyCandle.getEquity();
+                    if (equity == null) return;
+                    UnifiedCandle candle = convertToUnifiedCandle(equity);
                     CandleCache cache = candleCache.computeIfAbsent(candle.getScripCode(), c -> new CandleCache());
                     cache.addCandle("5m", candle, historyLookback);
                 });
@@ -185,12 +190,22 @@ public class RegimeProcessor {
         }
 
         // Filter for index scrip codes only
-        KStream<String, UnifiedCandle> indexStream = candle30mStream
-                .filter((k, v) -> v != null && INDEX_SCRIP_CODES.contains(v.getScripCode()));
+        KStream<String, FamilyCandle> indexStream = candle30mStream
+                .filter((k, v) -> v != null && v.getEquity() != null && INDEX_SCRIP_CODES.contains(v.getEquity().getScripCode()));
 
         // Process and emit index regime
         indexStream
-                .mapValues((key, candle) -> {
+                .mapValues((key, familyCandle) -> {
+                    // Extract equity InstrumentCandle
+                    InstrumentCandle equity = familyCandle.getEquity();
+                    if (equity == null) {
+                        LOGGER.warn("No equity data in FamilyCandle for index");
+                        return null;
+                    }
+
+                    // Convert to UnifiedCandle for backwards compatibility
+                    UnifiedCandle candle = convertToUnifiedCandle(equity);
+
                     // Update cache
                     CandleCache cache = candleCache.computeIfAbsent(candle.getScripCode(), k -> new CandleCache());
                     cache.addCandle("30m", candle, historyLookback);
@@ -256,15 +271,15 @@ public class RegimeProcessor {
                 new VCPProcessor.CandleHistorySerde()
         ));
 
-        // Read 30m unified candles
-        KStream<String, UnifiedCandle> candleStream = builder.stream(
+        // Read 30m family candles
+        KStream<String, FamilyCandle> candleStream = builder.stream(
                 inputTopicPrefix + "30m",
-                Consumed.with(Serdes.String(), UnifiedCandle.serde())
+                Consumed.with(Serdes.String(), FamilyCandle.serde())
         );
 
         // Filter out indices (process equities only)
-        KStream<String, UnifiedCandle> equityStream = candleStream
-                .filter((k, v) -> v != null && !INDEX_SCRIP_CODES.contains(v.getScripCode()));
+        KStream<String, FamilyCandle> equityStream = candleStream
+                .filter((k, v) -> v != null && v.getEquity() != null && !INDEX_SCRIP_CODES.contains(v.getEquity().getScripCode()));
 
         // Process with state store
         KStream<String, SecurityRegime> regimeStream = equityStream.process(
@@ -314,17 +329,17 @@ public class RegimeProcessor {
                 new VCPProcessor.CandleHistorySerde()
         ));
 
-        // Read 30m unified candles
-        KStream<String, UnifiedCandle> candleStream = builder.stream(
+        // Read 30m family candles
+        KStream<String, FamilyCandle> candleStream = builder.stream(
                 inputTopicPrefix + "30m",
-                Consumed.with(Serdes.String(), UnifiedCandle.serde())
+                Consumed.with(Serdes.String(), FamilyCandle.serde())
         );
 
         // Process ACL
         KStream<String, ACLOutput> aclStream = candleStream
-                .filter((k, v) -> v != null && !INDEX_SCRIP_CODES.contains(v.getScripCode()))
+                .filter((k, v) -> v != null && v.getEquity() != null && !INDEX_SCRIP_CODES.contains(v.getEquity().getScripCode()))
                 .process(
-                        () -> new ACLHistoryProcessor(historyStore, historyLookback, 
+                        () -> new ACLHistoryProcessor(historyStore, historyLookback,
                                 antiCycleLimiter, cachedIndexRegimes),
                         historyStore
                 );
@@ -350,7 +365,7 @@ public class RegimeProcessor {
     /**
      * Processor for security regime with history
      */
-    private static class SecurityRegimeHistoryProcessor implements Processor<String, UnifiedCandle, String, SecurityRegime> {
+    private static class SecurityRegimeHistoryProcessor implements Processor<String, FamilyCandle, String, SecurityRegime> {
         private final String storeName;
         private final int lookback;
         private final SecurityRegimeCalculator calculator;
@@ -374,10 +389,20 @@ public class RegimeProcessor {
         }
 
         @Override
-        public void process(Record<String, UnifiedCandle> record) {
+        public void process(Record<String, FamilyCandle> record) {
             String key = record.key();
-            UnifiedCandle candle = record.value();
-            if (key == null || candle == null) return;
+            FamilyCandle familyCandle = record.value();
+            if (key == null || familyCandle == null) return;
+
+            // Extract equity InstrumentCandle
+            InstrumentCandle equity = familyCandle.getEquity();
+            if (equity == null) {
+                LOGGER.warn("No equity data in FamilyCandle for {}", key);
+                return;
+            }
+
+            // Convert to UnifiedCandle for backwards compatibility
+            UnifiedCandle candle = convertToUnifiedCandle(equity);
 
             // Get or create history
             VCPProcessor.CandleHistory history = historyStore.get(key);
@@ -411,7 +436,7 @@ public class RegimeProcessor {
     /**
      * Processor for ACL with history
      */
-    private static class ACLHistoryProcessor implements Processor<String, UnifiedCandle, String, ACLOutput> {
+    private static class ACLHistoryProcessor implements Processor<String, FamilyCandle, String, ACLOutput> {
         private final String storeName;
         private final int lookback;
         private final AntiCycleLimiter acl;
@@ -435,10 +460,20 @@ public class RegimeProcessor {
         }
 
         @Override
-        public void process(Record<String, UnifiedCandle> record) {
+        public void process(Record<String, FamilyCandle> record) {
             String key = record.key();
-            UnifiedCandle candle = record.value();
-            if (key == null || candle == null) return;
+            FamilyCandle familyCandle = record.value();
+            if (key == null || familyCandle == null) return;
+
+            // Extract equity InstrumentCandle
+            InstrumentCandle equity = familyCandle.getEquity();
+            if (equity == null) {
+                LOGGER.warn("No equity data in FamilyCandle for {}", key);
+                return;
+            }
+
+            // Convert to UnifiedCandle for backwards compatibility
+            UnifiedCandle candle = convertToUnifiedCandle(equity);
 
             // Get or create history
             VCPProcessor.CandleHistory history = historyStore.get(key);
@@ -507,6 +542,62 @@ public class RegimeProcessor {
             case "999920043": return "MIDCPNIFTY";
             default: return "UNKNOWN";
         }
+    }
+
+    /**
+     * Convert InstrumentCandle to UnifiedCandle for backwards compatibility
+     */
+    private static UnifiedCandle convertToUnifiedCandle(InstrumentCandle instrument) {
+        return UnifiedCandle.builder()
+                .scripCode(instrument.getScripCode())
+                .companyName(instrument.getCompanyName())
+                .exchange(instrument.getExchange())
+                .exchangeType(instrument.getExchangeType())
+                .timeframe(instrument.getTimeframe())
+                .windowStartMillis(instrument.getWindowStartMillis())
+                .windowEndMillis(instrument.getWindowEndMillis())
+                .humanReadableStartTime(instrument.getHumanReadableTime())
+                .humanReadableEndTime(instrument.getHumanReadableTime())
+                // OHLCV
+                .open(instrument.getOpen())
+                .high(instrument.getHigh())
+                .low(instrument.getLow())
+                .close(instrument.getClose())
+                .volume(instrument.getVolume())
+                .buyVolume(instrument.getBuyVolume())
+                .sellVolume(instrument.getSellVolume())
+                .vwap(instrument.getVwap())
+                .tickCount(instrument.getTickCount())
+                // Volume Profile
+                .volumeAtPrice(instrument.getVolumeAtPrice())
+                .poc(instrument.getPoc())
+                .valueAreaHigh(instrument.getVah())
+                .valueAreaLow(instrument.getVal())
+                // Imbalance
+                .volumeImbalance(instrument.getVolumeImbalance())
+                .dollarImbalance(instrument.getDollarImbalance())
+                .vpin(instrument.getVpin())
+                // Orderbook (may be null)
+                .ofi(instrument.getOfi() != null ? instrument.getOfi() : 0.0)
+                .depthImbalance(instrument.getDepthImbalance() != null ? instrument.getDepthImbalance() : 0.0)
+                .kyleLambda(instrument.getKyleLambda() != null ? instrument.getKyleLambda() : 0.0)
+                .microprice(instrument.getMicroprice() != null ? instrument.getMicroprice() : 0.0)
+                .bidAskSpread(instrument.getBidAskSpread() != null ? instrument.getBidAskSpread() : 0.0)
+                .weightedDepthImbalance(instrument.getWeightedDepthImbalance() != null ? instrument.getWeightedDepthImbalance() : 0.0)
+                .totalBidDepth(instrument.getAverageBidDepth() != null ? instrument.getAverageBidDepth() : 0.0)
+                .totalAskDepth(instrument.getAverageAskDepth() != null ? instrument.getAverageAskDepth() : 0.0)
+                // OI (may be null)
+                .oiOpen(instrument.getOiOpen())
+                .oiHigh(instrument.getOiHigh())
+                .oiLow(instrument.getOiLow())
+                .oiClose(instrument.getOiClose())
+                .oiChange(instrument.getOiChange())
+                .oiChangePercent(instrument.getOiChangePercent())
+                // Derived fields
+                .volumeDeltaPercent(instrument.getVolumeDeltaPercent())
+                .range(instrument.getRange())
+                .isBullish(instrument.isBullish())
+                .build();
     }
 
     /**

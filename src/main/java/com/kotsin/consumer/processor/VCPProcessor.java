@@ -2,6 +2,8 @@ package com.kotsin.consumer.processor;
 
 import com.kotsin.consumer.config.KafkaConfig;
 import com.kotsin.consumer.config.VCPConfig;
+import com.kotsin.consumer.domain.model.FamilyCandle;
+import com.kotsin.consumer.domain.model.InstrumentCandle;
 import com.kotsin.consumer.model.*;
 import com.kotsin.consumer.service.VCPCalculator;
 
@@ -34,14 +36,15 @@ import java.util.concurrent.TimeUnit;
 import com.kotsin.consumer.util.TTLCache;
 
 /**
- * VCPProcessor - Calculate VCP scores from UnifiedCandle history
- * 
+ * VCPProcessor - Calculate VCP scores from FamilyCandle history
+ *
  * Data Flow:
- * 1. Input: unified-candle-{5m,15m,30m}
- * 2. Maintain rolling history in state store (48/32/24 candles for 5m/15m/30m)
- * 3. Calculate VCP per timeframe on each new candle
- * 4. Output: vcp-signals-{5m,15m,30m} for per-TF results
- * 5. Output: vcp-combined for fused multi-TF output (emitted on 5m close)
+ * 1. Input: family-candle-{5m,15m,30m}
+ * 2. Extract equity InstrumentCandle from FamilyCandle
+ * 3. Maintain rolling history in state store (48/32/24 candles for 5m/15m/30m)
+ * 4. Calculate VCP per timeframe on each new candle
+ * 5. Output: vcp-signals-{5m,15m,30m} for per-TF results
+ * 6. Output: vcp-combined for fused multi-TF output (emitted on 5m close)
  */
 @Component
 public class VCPProcessor {
@@ -60,7 +63,7 @@ public class VCPProcessor {
     private final Map<String, KafkaStreams> streamsInstances = new HashMap<>();
 
     // Topic configuration
-    @Value("${vcp.input.prefix:unified-candle-}")
+    @Value("${vcp.input.prefix:family-candle-}")
     private String inputTopicPrefix;
 
     @Value("${vcp.output.signals.prefix:vcp-signals-}")
@@ -162,16 +165,18 @@ public class VCPProcessor {
                 new CandleHistorySerde()
         ));
 
-        // Read UnifiedCandle stream
-        KStream<String, UnifiedCandle> input = builder.stream(
+        // Read FamilyCandle stream
+        KStream<String, FamilyCandle> input = builder.stream(
                 inputTopic,
-                Consumed.with(Serdes.String(), UnifiedCandle.serde())
+                Consumed.with(Serdes.String(), FamilyCandle.serde())
         );
 
         // Cache last candle for currentPrice fix (only needed for 5m)
         if ("5m".equals(timeframe) && lastCandleCache != null) {
             input.foreach((k, v) -> {
-                if (k != null && v != null) lastCandleCache.put(k, v);
+                if (k != null && v != null && v.getEquity() != null) {
+                    lastCandleCache.put(k, convertToUnifiedCandle(v.getEquity()));
+                }
             });
         }
 
@@ -235,7 +240,7 @@ public class VCPProcessor {
     /**
      * Processor that maintains candle history and calculates VCP
      */
-    private static class VCPHistoryProcessor implements Processor<String, UnifiedCandle, String, VCPCalculator.VCPResult> {
+    private static class VCPHistoryProcessor implements Processor<String, FamilyCandle, String, VCPCalculator.VCPResult> {
 
         private final String storeName;
         private final int lookbackSize;
@@ -258,11 +263,21 @@ public class VCPProcessor {
         }
 
         @Override
-        public void process(Record<String, UnifiedCandle> record) {
+        public void process(Record<String, FamilyCandle> record) {
             String key = record.key();
-            UnifiedCandle candle = record.value();
+            FamilyCandle familyCandle = record.value();
 
-            if (key == null || candle == null) return;
+            if (key == null || familyCandle == null) return;
+
+            // Extract equity InstrumentCandle from FamilyCandle
+            InstrumentCandle equity = familyCandle.getEquity();
+            if (equity == null) {
+                LOGGER.warn("No equity data in FamilyCandle for {}", key);
+                return;
+            }
+
+            // Convert InstrumentCandle to UnifiedCandle for backwards compatibility
+            UnifiedCandle candle = convertToUnifiedCandle(equity);
 
             // Get or create history
             CandleHistory history = historyStore.get(key);
@@ -381,7 +396,63 @@ public class VCPProcessor {
     }
 
     /**
-     * Start VCP processors after UnifiedCandle processors
+     * Convert InstrumentCandle to UnifiedCandle for backwards compatibility
+     */
+    private static UnifiedCandle convertToUnifiedCandle(InstrumentCandle instrument) {
+        return UnifiedCandle.builder()
+                .scripCode(instrument.getScripCode())
+                .companyName(instrument.getCompanyName())
+                .exchange(instrument.getExchange())
+                .exchangeType(instrument.getExchangeType())
+                .timeframe(instrument.getTimeframe())
+                .windowStartMillis(instrument.getWindowStartMillis())
+                .windowEndMillis(instrument.getWindowEndMillis())
+                .humanReadableStartTime(instrument.getHumanReadableTime())
+                .humanReadableEndTime(instrument.getHumanReadableTime())
+                // OHLCV
+                .open(instrument.getOpen())
+                .high(instrument.getHigh())
+                .low(instrument.getLow())
+                .close(instrument.getClose())
+                .volume(instrument.getVolume())
+                .buyVolume(instrument.getBuyVolume())
+                .sellVolume(instrument.getSellVolume())
+                .vwap(instrument.getVwap())
+                .tickCount(instrument.getTickCount())
+                // Volume Profile
+                .volumeAtPrice(instrument.getVolumeAtPrice())
+                .poc(instrument.getPoc())
+                .valueAreaHigh(instrument.getVah())
+                .valueAreaLow(instrument.getVal())
+                // Imbalance
+                .volumeImbalance(instrument.getVolumeImbalance())
+                .dollarImbalance(instrument.getDollarImbalance())
+                .vpin(instrument.getVpin())
+                // Orderbook (may be null)
+                .ofi(instrument.getOfi() != null ? instrument.getOfi() : 0.0)
+                .depthImbalance(instrument.getDepthImbalance() != null ? instrument.getDepthImbalance() : 0.0)
+                .kyleLambda(instrument.getKyleLambda() != null ? instrument.getKyleLambda() : 0.0)
+                .microprice(instrument.getMicroprice() != null ? instrument.getMicroprice() : 0.0)
+                .bidAskSpread(instrument.getBidAskSpread() != null ? instrument.getBidAskSpread() : 0.0)
+                .weightedDepthImbalance(instrument.getWeightedDepthImbalance() != null ? instrument.getWeightedDepthImbalance() : 0.0)
+                .totalBidDepth(instrument.getAverageBidDepth() != null ? instrument.getAverageBidDepth() : 0.0)
+                .totalAskDepth(instrument.getAverageAskDepth() != null ? instrument.getAverageAskDepth() : 0.0)
+                // OI (may be null)
+                .oiOpen(instrument.getOiOpen())
+                .oiHigh(instrument.getOiHigh())
+                .oiLow(instrument.getOiLow())
+                .oiClose(instrument.getOiClose())
+                .oiChange(instrument.getOiChange())
+                .oiChangePercent(instrument.getOiChangePercent())
+                // Derived fields
+                .volumeDeltaPercent(instrument.getVolumeDeltaPercent())
+                .range(instrument.getRange())
+                .isBullish(instrument.isBullish())
+                .build();
+    }
+
+    /**
+     * Start VCP processors after FamilyCandle processors
      */
     @PostConstruct
     public void start() {
@@ -394,7 +465,7 @@ public class VCPProcessor {
 
         java.util.concurrent.CompletableFuture.runAsync(() -> {
             try {
-                // Wait for UnifiedCandle processors to start
+                // Wait for FamilyCandle processors to start
                 Thread.sleep(10000);
 
                 startVCPProcessors();
