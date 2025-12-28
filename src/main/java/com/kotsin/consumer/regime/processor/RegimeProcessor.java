@@ -98,13 +98,13 @@ public class RegimeProcessor {
     private final ConcurrentHashMap<String, CandleCache> candleCache = new ConcurrentHashMap<>();
 
     private static class CandleCache {
-        final List<EnrichedCandlestick> candles1D = Collections.synchronizedList(new ArrayList<>());
-        final List<EnrichedCandlestick> candles2H = Collections.synchronizedList(new ArrayList<>());
-        final List<UnifiedCandle> candles30m = Collections.synchronizedList(new ArrayList<>());
-        final List<UnifiedCandle> candles5m = Collections.synchronizedList(new ArrayList<>());
-        
-        void addCandle(String timeframe, Object candle, int maxSize) {
-            List<?> list;
+        final List<InstrumentCandle> candles1D = Collections.synchronizedList(new ArrayList<>());
+        final List<InstrumentCandle> candles2H = Collections.synchronizedList(new ArrayList<>());
+        final List<InstrumentCandle> candles30m = Collections.synchronizedList(new ArrayList<>());
+        final List<InstrumentCandle> candles5m = Collections.synchronizedList(new ArrayList<>());
+
+        void addCandle(String timeframe, InstrumentCandle candle, int maxSize) {
+            List<InstrumentCandle> list;
             switch (timeframe) {
                 case "1d": list = candles1D; break;
                 case "2h": list = candles2H; break;
@@ -112,13 +112,9 @@ public class RegimeProcessor {
                 case "5m": list = candles5m; break;
                 default: return;
             }
-            
+
             synchronized (list) {
-                if (candle instanceof EnrichedCandlestick) {
-                    ((List<EnrichedCandlestick>) list).add((EnrichedCandlestick) candle);
-                } else if (candle instanceof UnifiedCandle) {
-                    ((List<UnifiedCandle>) list).add((UnifiedCandle) candle);
-                }
+                list.add(candle);
                 while (list.size() > maxSize) {
                     list.remove(0);
                 }
@@ -159,9 +155,8 @@ public class RegimeProcessor {
                 .foreach((k, familyCandle) -> {
                     InstrumentCandle equity = familyCandle.getEquity();
                     if (equity == null) return;
-                    UnifiedCandle candle = FamilyCandleConverter.toUnifiedCandle(equity);
-                    CandleCache cache = candleCache.computeIfAbsent(candle.getScripCode(), c -> new CandleCache());
-                    cache.addCandle("5m", candle, historyLookback);
+                    CandleCache cache = candleCache.computeIfAbsent(equity.getScripCode(), c -> new CandleCache());
+                    cache.addCandle("5m", equity, historyLookback);
                 });
 
         // Try to consume 2H family candles (may not exist in all deployments)
@@ -171,9 +166,8 @@ public class RegimeProcessor {
                 .foreach((k, familyCandle) -> {
                     InstrumentCandle equity = familyCandle.getEquity();
                     if (equity == null) return;
-                    EnrichedCandlestick enriched = FamilyCandleConverter.toEnrichedCandlestick(equity);
                     CandleCache cache = candleCache.computeIfAbsent(equity.getScripCode(), c -> new CandleCache());
-                    cache.addCandle("2h", enriched, 20);
+                    cache.addCandle("2h", equity, 20);
                 });
         } catch (Exception e) {
             LOGGER.warn("2H family-candle topic not available: {}", e.getMessage());
@@ -186,9 +180,8 @@ public class RegimeProcessor {
                 .foreach((k, familyCandle) -> {
                     InstrumentCandle equity = familyCandle.getEquity();
                     if (equity == null) return;
-                    EnrichedCandlestick enriched = FamilyCandleConverter.toEnrichedCandlestick(equity);
                     CandleCache cache = candleCache.computeIfAbsent(equity.getScripCode(), c -> new CandleCache());
-                    cache.addCandle("1d", enriched, 10);
+                    cache.addCandle("1d", equity, 10);
                 });
         } catch (Exception e) {
             LOGGER.warn("1D family-candle topic not available: {}", e.getMessage());
@@ -208,33 +201,26 @@ public class RegimeProcessor {
                         return null;
                     }
 
-                    // Convert to UnifiedCandle for backwards compatibility
-                    UnifiedCandle candle = FamilyCandleConverter.toUnifiedCandle(equity);
-
-                    // Update cache
-                    CandleCache cache = candleCache.computeIfAbsent(candle.getScripCode(), k -> new CandleCache());
-                    cache.addCandle("30m", candle, historyLookback);
+                    // Update cache with InstrumentCandle directly
+                    CandleCache cache = candleCache.computeIfAbsent(equity.getScripCode(), k -> new CandleCache());
+                    cache.addCandle("30m", equity, historyLookback);
 
                     // Calculate regime using all available timeframes
-                    String indexName = getIndexName(candle.getScripCode());
-                    
-                    // Convert UnifiedCandle to EnrichedCandlestick for calculator
-                    List<EnrichedCandlestick> enriched30m = convertToEnriched(cache.candles30m);
-                    List<EnrichedCandlestick> enriched5m = convertToEnriched(cache.candles5m);
-                    
+                    String indexName = getIndexName(equity.getScripCode());
+
                     IndexRegime regime = indexRegimeCalculator.calculate(
                             indexName,
-                            candle.getScripCode(),
-                            cache.candles1D,      // Use actual 1D if available
-                            cache.candles2H,      // Use actual 2H if available
-                            enriched30m,
-                            enriched5m.isEmpty() ? enriched30m : enriched5m  // Fallback to 30m if no 5m
+                            equity.getScripCode(),
+                            cache.candles1D,
+                            cache.candles2H,
+                            cache.candles30m,
+                            cache.candles5m.isEmpty() ? cache.candles30m : cache.candles5m  // Fallback to 30m if no 5m
                     );
 
                     // Cache for security regime use - use BOTH scripCode and index name as keys
-                    cachedIndexRegimes.put(candle.getScripCode(), regime);
+                    cachedIndexRegimes.put(equity.getScripCode(), regime);
                     cachedIndexRegimes.put(IndexRegimeCalculator.NIFTY50_CODE, regime);  // Ensure lookup works
-                    
+
                     return regime;
                 })
                 .filter((k, v) -> v != null && v.getRegimeStrength() > 0)
