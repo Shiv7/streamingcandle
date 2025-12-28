@@ -88,11 +88,11 @@ public class MTISCalculator {
                 .tfScores(new HashMap<>())
                 .build();
 
-        // Build FamilyScore
+        // Build FamilyScore - use candle timestamp, not processing time
         FamilyScore score = FamilyScore.builder()
                 .familyId(familyId)
                 .symbol(symbol)
-                .timestamp(System.currentTimeMillis())
+                .timestamp(family.getWindowEndMillis())  // Use candle's end time, not processing time
                 .windowStartMillis(family.getWindowStartMillis())
                 .windowEndMillis(family.getWindowEndMillis())
                 .triggerTimeframe(family.getTimeframe())
@@ -188,8 +188,8 @@ public class MTISCalculator {
         // Set actionable flag
         score.setActionable(score.isActionable());
 
-        // Update human readable time
-        score.setHumanReadableTime(formatTime(System.currentTimeMillis()));
+        // Update human readable time (use candle timestamp, not processing time)
+        score.setHumanReadableTime(formatTime(family.getWindowEndMillis()));
 
         return score;
     }

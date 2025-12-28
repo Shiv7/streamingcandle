@@ -77,7 +77,8 @@ public class MTISProcessor {
 
     @PostConstruct
     public void init() {
-        log.info("MTISProcessor initialized. Enabled: {}, Output topic: {}", enabled, outputTopic);
+        log.info("🎯 MTISProcessor initialized. Enabled: {}, Output topic: {}", enabled, outputTopic);
+        log.info("🎯 Listening to: family-candle-*, regime-*, ipu-combined, fudkii-output, vcp-combined");
     }
 
     // ==================== MAIN LISTENER ====================
@@ -160,17 +161,30 @@ public class MTISProcessor {
             // 7. Emit to output topic
             try {
                 familyScoreProducer.send(outputTopic, familyId, score);
-                log.debug("[{}] MTIS={} ({}) triggered by {} candle",
-                        familyCandle.getSymbol(),
-                        String.format("%.1f", score.getMtis()),
-                        score.getMtisLabel(),
-                        timeframe);
+                
+                // Log at INFO for actionable signals, DEBUG for others
+                if (score.isActionable()) {
+                    log.info("🎯 MTIS | {} | score={} ({}) | {} | F&O={} IPU={} FUDKII={}",
+                            familyCandle.getSymbol(),
+                            String.format("%+.1f", score.getMtis()),
+                            score.getMtisLabel(),
+                            timeframe,
+                            String.format("%.0f", score.getBreakdown().getFoAlignmentScore()),
+                            String.format("%.0f", score.getBreakdown().getIpuScore()),
+                            score.isFudkiiIgnition() ? "🔥" : "-");
+                } else {
+                    log.debug("[{}] MTIS={} ({}) triggered by {} candle",
+                            familyCandle.getSymbol(),
+                            String.format("%.1f", score.getMtis()),
+                            score.getMtisLabel(),
+                            timeframe);
+                }
             } catch (Exception e) {
-                log.error("Failed to send FamilyScore for {}: {}", familyId, e.getMessage());
+                log.error("❌ Failed to send FamilyScore for {}: {}", familyId, e.getMessage());
             }
 
         } catch (Exception e) {
-            log.error("Error processing candle for MTIS: {}", e.getMessage(), e);
+            log.error("❌ Error processing candle for MTIS: {}", e.getMessage(), e);
         }
     }
 
@@ -190,9 +204,12 @@ public class MTISProcessor {
             if ("NIFTY50".equals(indexRegime.getIndexName()) || 
                 "999920000".equals(indexRegime.getScripCode())) {
                 latestNiftyRegime = indexRegime;
+                log.info("📊 MTIS | NIFTY regime updated: {} (bias={})", 
+                        indexRegime.getLabel(), 
+                        String.format("%.2f", indexRegime.getDirectionalBias()));
             }
         } catch (Exception e) {
-            log.error("Error processing IndexRegime: {}", e.getMessage());
+            log.error("❌ Error processing IndexRegime: {}", e.getMessage());
         }
     }
 
@@ -233,8 +250,12 @@ public class MTISProcessor {
         if (fudkii == null) return;
         try {
             fudkiiCache.put(fudkii.getScripCode(), fudkii);
+            if (fudkii.isIgnitionFlag()) {
+                log.info("🔥 MTIS | FUDKII ignition cached for {} (sim={})", 
+                        fudkii.getScripCode(), fudkii.getSimultaneityScore());
+            }
         } catch (Exception e) {
-            log.error("Error processing FUDKII: {}", e.getMessage());
+            log.error("❌ Error processing FUDKII: {}", e.getMessage());
         }
     }
 
