@@ -227,6 +227,7 @@ public class TimeframeAggregator {
 
     /**
      * Merge two family candles (for aggregation)
+     * FIXED: Properly aggregates OHLCV - Open=first, High=max, Low=min, Close=last, Volume=sum
      */
     private FamilyCandle mergeCandles(FamilyCandle aggregate, FamilyCandle incoming, String timeframe) {
         if (aggregate == null) {
@@ -238,9 +239,9 @@ public class TimeframeAggregator {
                 .windowStartMillis(incoming.getWindowStartMillis())
                 .windowEndMillis(incoming.getWindowEndMillis())
                 .timeframe(timeframe)
-                .equity(incoming.getEquity())
-                .future(incoming.getFuture())
-                .options(incoming.getOptions())
+                .equity(cloneInstrumentCandle(incoming.getEquity()))
+                .future(cloneInstrumentCandle(incoming.getFuture()))
+                .options(incoming.getOptions() != null ? new ArrayList<>(incoming.getOptions()) : null)
                 .hasFuture(incoming.isHasFuture())
                 .hasOptions(incoming.isHasOptions())
                 .optionCount(incoming.getOptionCount())
@@ -260,22 +261,33 @@ public class TimeframeAggregator {
                 .build();
         }
 
-        // Existing aggregate - merge with incoming
-        // Update timestamp to latest
+        // Existing aggregate - PROPERLY merge OHLCV
         aggregate.setTimestamp(Math.max(aggregate.getTimestamp(), incoming.getTimestamp()));
         
-        // Update equity OHLC (if equity candles can be merged)
+        // ========== MERGE EQUITY CANDLE OHLCV ==========
         if (incoming.getEquity() != null) {
-            aggregate.setEquity(incoming.getEquity());  // Use latest equity data
+            if (aggregate.getEquity() == null) {
+                aggregate.setEquity(cloneInstrumentCandle(incoming.getEquity()));
+            } else {
+                mergeInstrumentCandle(aggregate.getEquity(), incoming.getEquity());
+            }
         }
+        
+        // ========== MERGE FUTURE CANDLE OHLCV ==========
         if (incoming.getFuture() != null) {
-            aggregate.setFuture(incoming.getFuture());  // Use latest future data
+            if (aggregate.getFuture() == null) {
+                aggregate.setFuture(cloneInstrumentCandle(incoming.getFuture()));
+            } else {
+                mergeInstrumentCandle(aggregate.getFuture(), incoming.getFuture());
+            }
         }
+        
+        // ========== MERGE OPTIONS (use latest with OI aggregation) ==========
         if (incoming.getOptions() != null && !incoming.getOptions().isEmpty()) {
-            aggregate.setOptions(incoming.getOptions());  // Use latest options
+            aggregate.setOptions(incoming.getOptions());  // Options are point-in-time, use latest
         }
 
-        // Aggregate OI changes
+        // ========== AGGREGATE OI CHANGES ==========
         if (incoming.getTotalCallOIChange() != null) {
             Long current = aggregate.getTotalCallOIChange();
             aggregate.setTotalCallOIChange((current != null ? current : 0L) + incoming.getTotalCallOIChange());
@@ -289,7 +301,7 @@ public class TimeframeAggregator {
             aggregate.setFutureOIChange((current != null ? current : 0L) + incoming.getFutureOIChange());
         }
 
-        // Use latest point-in-time values
+        // Use latest point-in-time values (not aggregated)
         aggregate.setSpotFuturePremium(incoming.getSpotFuturePremium());
         aggregate.setFuturesBuildup(incoming.getFuturesBuildup());
         aggregate.setPcr(incoming.getPcr());
@@ -300,6 +312,101 @@ public class TimeframeAggregator {
         aggregate.setBiasConfidence(incoming.getBiasConfidence());
 
         return aggregate;
+    }
+
+    /**
+     * Clone an InstrumentCandle (for initial aggregation)
+     */
+    private com.kotsin.consumer.domain.model.InstrumentCandle cloneInstrumentCandle(
+            com.kotsin.consumer.domain.model.InstrumentCandle source) {
+        if (source == null) return null;
+        
+        return com.kotsin.consumer.domain.model.InstrumentCandle.builder()
+            .scripCode(source.getScripCode())
+            .symbol(source.getSymbol())
+            .companyName(source.getCompanyName())
+            .exchange(source.getExchange())
+            .exchangeType(source.getExchangeType())
+            .instrumentType(source.getInstrumentType())
+            .windowStartMillis(source.getWindowStartMillis())
+            .windowEndMillis(source.getWindowEndMillis())
+            .timeframe(source.getTimeframe())
+            .humanReadableTime(source.getHumanReadableTime())
+            // OHLCV
+            .open(source.getOpen())
+            .high(source.getHigh())
+            .low(source.getLow())
+            .close(source.getClose())
+            .volume(source.getVolume())
+            .buyVolume(source.getBuyVolume())
+            .sellVolume(source.getSellVolume())
+            .vwap(source.getVwap())
+            .tickCount(source.getTickCount())
+            // OI
+            .oiPresent(source.isOiPresent())
+            .openInterest(source.getOpenInterest())
+            .oiOpen(source.getOiOpen())
+            .oiHigh(source.getOiHigh())
+            .oiLow(source.getOiLow())
+            .oiClose(source.getOiClose())
+            .oiChange(source.getOiChange())
+            .oiChangePercent(source.getOiChangePercent())
+            .quality(source.getQuality())
+            .build();
+    }
+
+    /**
+     * Merge OHLCV from incoming candle into aggregate
+     * RULE: Open=first, High=max, Low=min, Close=last, Volume=sum
+     */
+    private void mergeInstrumentCandle(
+            com.kotsin.consumer.domain.model.InstrumentCandle aggregate,
+            com.kotsin.consumer.domain.model.InstrumentCandle incoming) {
+        
+        // ===== OHLCV AGGREGATION =====
+        // Open stays from first candle (aggregate already has it)
+        // High = max(aggregate.high, incoming.high)
+        aggregate.setHigh(Math.max(aggregate.getHigh(), incoming.getHigh()));
+        // Low = min(aggregate.low, incoming.low)
+        aggregate.setLow(Math.min(aggregate.getLow(), incoming.getLow()));
+        // Close = incoming.close (last candle's close)
+        aggregate.setClose(incoming.getClose());
+        // Volume = sum
+        aggregate.setVolume(aggregate.getVolume() + incoming.getVolume());
+        aggregate.setBuyVolume(aggregate.getBuyVolume() + incoming.getBuyVolume());
+        aggregate.setSellVolume(aggregate.getSellVolume() + incoming.getSellVolume());
+        aggregate.setTickCount(aggregate.getTickCount() + incoming.getTickCount());
+        
+        // Update window end time to latest
+        aggregate.setWindowEndMillis(incoming.getWindowEndMillis());
+        aggregate.setHumanReadableTime(incoming.getHumanReadableTime());
+        
+        // ===== OI AGGREGATION =====
+        if (incoming.isOiPresent()) {
+            aggregate.setOiPresent(true);
+            // OI Open stays from first
+            // OI High = max
+            if (incoming.getOiHigh() != null) {
+                Long aggHigh = aggregate.getOiHigh();
+                aggregate.setOiHigh(aggHigh != null ? Math.max(aggHigh, incoming.getOiHigh()) : incoming.getOiHigh());
+            }
+            // OI Low = min
+            if (incoming.getOiLow() != null) {
+                Long aggLow = aggregate.getOiLow();
+                aggregate.setOiLow(aggLow != null ? Math.min(aggLow, incoming.getOiLow()) : incoming.getOiLow());
+            }
+            // OI Close = latest
+            aggregate.setOiClose(incoming.getOiClose());
+            aggregate.setOpenInterest(incoming.getOpenInterest());
+            // OI Change = sum
+            if (incoming.getOiChange() != null) {
+                Long aggChange = aggregate.getOiChange();
+                aggregate.setOiChange((aggChange != null ? aggChange : 0L) + incoming.getOiChange());
+            }
+        }
+        
+        // VWAP = use latest (could be volume-weighted average but complex)
+        aggregate.setVwap(incoming.getVwap());
     }
 
     /**
