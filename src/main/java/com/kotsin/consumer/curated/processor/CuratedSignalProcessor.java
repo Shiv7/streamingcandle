@@ -167,12 +167,15 @@ public class CuratedSignalProcessor {
             UnifiedCandle candle = convertToUnifiedCandle(equity);
 
             String scripCode = candle.getScripCode();
-            String timeframe = candle.getTimeframe();
+            // BUG-FIX: Use FamilyCandle's timeframe, NOT equity's timeframe!
+            // The equity InstrumentCandle always has timeframe="1m" even in 3m FamilyCandles
+            String timeframe = familyCandle.getTimeframe();
 
             // Cache the FamilyCandle for gate evaluation
             familyCandleCache.put(scripCode, familyCandle);
 
-            // 1. Update structure tracker
+            // 1. Update structure tracker - pass the correct timeframe
+            candle.setTimeframe(timeframe);  // Override with correct timeframe
             structureTracker.updateCandle(candle);
 
             // FIX: Periodically cleanup expired breakouts (every ~100 candles)
@@ -190,6 +193,7 @@ public class CuratedSignalProcessor {
                 // No active breakout - check if this candle creates a new breakout
                 // Only check on 3m candles to avoid spam
                 if ("3m".equals(timeframe)) {
+                    log.debug("Checking for breakout on 3m candle: {}", scripCode);
                     checkForNewBreakout(scripCode);
                 }
             }
