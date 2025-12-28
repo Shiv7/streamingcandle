@@ -1,6 +1,6 @@
 package com.kotsin.consumer.regime.service;
 
-import com.kotsin.consumer.model.EnrichedCandlestick;
+import com.kotsin.consumer.domain.model.InstrumentCandle;
 import com.kotsin.consumer.regime.model.IndexRegime;
 import com.kotsin.consumer.regime.model.IndexRegime.*;
 import com.kotsin.consumer.regime.model.RegimeLabel;
@@ -52,7 +52,7 @@ public class IndexRegimeCalculator {
 
     /**
      * Calculate full Index Regime from multi-timeframe candle data
-     * 
+     *
      * @param indexName Name of the index (NIFTY50, BANKNIFTY, etc.)
      * @param scripCode Scrip code for the index
      * @param candles1D 1D candle history (most recent last)
@@ -64,10 +64,10 @@ public class IndexRegimeCalculator {
     public IndexRegime calculate(
             String indexName,
             String scripCode,
-            List<EnrichedCandlestick> candles1D,
-            List<EnrichedCandlestick> candles2H,
-            List<EnrichedCandlestick> candles30m,
-            List<EnrichedCandlestick> candles5m) {
+            List<InstrumentCandle> candles1D,
+            List<InstrumentCandle> candles2H,
+            List<InstrumentCandle> candles30m,
+            List<InstrumentCandle> candles5m) {
 
         // Calculate per-timeframe data
         TimeframeRegimeData tf1D = calculateForTimeframe("1D", candles1D);
@@ -129,7 +129,7 @@ public class IndexRegimeCalculator {
     /**
      * Calculate regime data for a single timeframe
      */
-    private TimeframeRegimeData calculateForTimeframe(String timeframe, List<EnrichedCandlestick> candles) {
+    private TimeframeRegimeData calculateForTimeframe(String timeframe, List<InstrumentCandle> candles) {
         if (candles == null || candles.isEmpty()) {
             return TimeframeRegimeData.builder()
                     .timeframe(timeframe)
@@ -141,7 +141,7 @@ public class IndexRegimeCalculator {
                     .build();
         }
 
-        EnrichedCandlestick current = candles.get(candles.size() - 1);
+        InstrumentCandle current = candles.get(candles.size() - 1);
         
         // Calculate ATR14
         double atr14 = calculateATR(candles, 14);
@@ -225,14 +225,14 @@ public class IndexRegimeCalculator {
     /**
      * Calculate ATR for given period
      */
-    private double calculateATR(List<EnrichedCandlestick> candles, int period) {
+    private double calculateATR(List<InstrumentCandle> candles, int period) {
         int actualPeriod = Math.min(period, candles.size());
         if (actualPeriod <= 1) return 0;
 
         double sum = 0;
         for (int i = candles.size() - actualPeriod; i < candles.size(); i++) {
             if (i < 0) continue;
-            EnrichedCandlestick c = candles.get(i);
+            InstrumentCandle c = candles.get(i);
             double tr = c.getHigh() - c.getLow();
             
             if (i > 0) {
@@ -248,7 +248,7 @@ public class IndexRegimeCalculator {
     /**
      * Calculate average ATR over longer period for comparison
      */
-    private double calculateAverageATR(List<EnrichedCandlestick> candles, int period) {
+    private double calculateAverageATR(List<InstrumentCandle> candles, int period) {
         if (candles.size() < period) {
             return calculateATR(candles, candles.size());
         }
@@ -257,7 +257,7 @@ public class IndexRegimeCalculator {
         double sum = 0;
         int count = 0;
         for (int i = 14; i < candles.size(); i++) {
-            List<EnrichedCandlestick> sublist = candles.subList(Math.max(0, i - 14), i + 1);
+            List<InstrumentCandle> sublist = candles.subList(Math.max(0, i - 14), i + 1);
             sum += calculateATR(sublist, 14);
             count++;
         }
@@ -267,13 +267,13 @@ public class IndexRegimeCalculator {
     /**
      * Calculate expected volume imbalance (average absolute delta)
      */
-    private double calculateExpectedVolumeImbalance(List<EnrichedCandlestick> candles) {
+    private double calculateExpectedVolumeImbalance(List<InstrumentCandle> candles) {
         if (candles.size() < 5) return 1;
         
         double sum = 0;
         int period = Math.min(20, candles.size());
         for (int i = candles.size() - period; i < candles.size(); i++) {
-            EnrichedCandlestick c = candles.get(i);
+            InstrumentCandle c = candles.get(i);
             sum += Math.abs(c.getBuyVolume() - c.getSellVolume());
         }
         return sum / period;
@@ -284,10 +284,10 @@ public class IndexRegimeCalculator {
      * Uses epsilon thresholds per spec:
      * - epsilon_price = 0.05 (ATR normalized)
      * - epsilon_volume = 0.10 (expected imbalance normalized)
-     * 
+     *
      * For INDICES without buy/sell volume: uses price momentum consistency
      */
-    private int calculateFlowAgreement(List<EnrichedCandlestick> candles, int bars) {
+    private int calculateFlowAgreement(List<InstrumentCandle> candles, int bars) {
         if (candles.size() < bars) return 0;
         
         // Calculate ATR for normalization
@@ -301,16 +301,16 @@ public class IndexRegimeCalculator {
         // Check if this is an INDEX (no volume data)
         boolean hasVolumeData = false;
         for (int i = candles.size() - bars; i < candles.size(); i++) {
-            EnrichedCandlestick c = candles.get(i);
+            InstrumentCandle c = candles.get(i);
             if (Math.abs(c.getBuyVolume() - c.getSellVolume()) > 0) {
                 hasVolumeData = true;
                 break;
             }
         }
-        
+
         int sumFlowRaw = 0;
         for (int i = candles.size() - bars; i < candles.size(); i++) {
-            EnrichedCandlestick c = candles.get(i);
+            InstrumentCandle c = candles.get(i);
             
             // Step 3.1: Price Sign (ATR normalized)
             double priceChangeNorm = (c.getClose() - c.getOpen()) / (atr + 0.0001);
