@@ -176,10 +176,17 @@ public class FamilyCandleProcessor {
             )
             .suppress(Suppressed.untilWindowCloses(Suppressed.BufferConfig.unbounded()));
 
-        // Convert to FamilyCandle and emit
+        // Convert to FamilyCandle and emit with metrics tracking
         collected.toStream()
             .filter((windowedKey, collector) -> collector != null && collector.hasEquity())
-            .mapValues((windowedKey, collector) -> buildFamilyCandle(windowedKey, collector))
+            .mapValues((windowedKey, collector) -> {
+                FamilyCandle familyCandle = buildFamilyCandle(windowedKey, collector);
+                // Record metrics
+                if (dataQualityMetrics != null && familyCandle != null) {
+                    dataQualityMetrics.recordCandleProcessed("FamilyCandleProcessor", "1m", true);
+                }
+                return familyCandle;
+            })
             .map((windowedKey, familyCandle) -> KeyValue.pair(windowedKey.key(), familyCandle))
             .to(outputTopic, Produced.with(Serdes.String(), FamilyCandle.serde()));
 

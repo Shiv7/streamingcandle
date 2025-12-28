@@ -167,6 +167,11 @@ public class TimeframeAggregator {
                 // Validate and log aggregation result
                 validateAggregatedCandle(candle, timeframe);
                 
+                // Record metrics for this timeframe
+                if (dataQualityMetrics != null) {
+                    dataQualityMetrics.recordCandleProcessed("TimeframeAggregator", timeframe, true);
+                }
+                
                 return KeyValue.pair(windowedKey.key(), candle);
             })
             .to(outputTopic, Produced.with(Serdes.String(), FamilyCandle.serde()));
