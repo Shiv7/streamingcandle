@@ -492,21 +492,37 @@ public class UnifiedInstrumentCandleProcessor {
             high = Math.max(high, tick.getLastRate());
             low = Math.min(low, tick.getLastRate());
 
-            long deltaVol = tick.getDeltaVolume() != null ? tick.getDeltaVolume() : 0;
+            // FIX: Use lastQuantity as primary volume source (last trade quantity)
+            // deltaVolume is only set by external delta computation (which may not exist)
+            long deltaVol = 0;
+            
+            // Priority 1: Use computed deltaVolume if available
+            if (tick.getDeltaVolume() != null && tick.getDeltaVolume() > 0) {
+                deltaVol = tick.getDeltaVolume();
+            } 
+            // Priority 2: Use lastQuantity (last trade quantity from exchange)
+            else if (tick.getLastQuantity() > 0) {
+                deltaVol = tick.getLastQuantity();
+            }
+            // Priority 3: If no volume data available, at least count the tick
+            // (volume stays 0 but tickCount increments)
+            
             volume += deltaVol;
             totalValue += deltaVol * tick.getLastRate();
 
             // Classify buy/sell using bid/offer rates from TickData
             double askRate = tick.getOfferRate();
             double bidRate = tick.getBidRate();
-            if (askRate > 0 && tick.getLastRate() >= askRate) {
-                buyVolume += deltaVol;
-            } else if (bidRate > 0 && tick.getLastRate() <= bidRate) {
-                sellVolume += deltaVol;
-            } else {
-                // Mid - split 50/50
-                buyVolume += deltaVol / 2;
-                sellVolume += deltaVol / 2;
+            if (deltaVol > 0) {
+                if (askRate > 0 && tick.getLastRate() >= askRate) {
+                    buyVolume += deltaVol;
+                } else if (bidRate > 0 && tick.getLastRate() <= bidRate) {
+                    sellVolume += deltaVol;
+                } else {
+                    // Mid - split 50/50
+                    buyVolume += deltaVol / 2;
+                    sellVolume += deltaVol / 2;
+                }
             }
 
             tickCount++;
