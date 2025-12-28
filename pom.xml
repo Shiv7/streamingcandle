@@ -61,6 +61,13 @@
 			<artifactId>jackson-databind</artifactId>
 		</dependency>
 
+		<!-- OkHttp for 5paisa Historical API calls -->
+		<dependency>
+			<groupId>com.squareup.okhttp3</groupId>
+			<artifactId>okhttp</artifactId>
+			<version>4.12.0</version>
+		</dependency>
+
 		<!-- Lombok (optional) -->
 		<dependency>
 			<groupId>org.projectlombok</groupId>

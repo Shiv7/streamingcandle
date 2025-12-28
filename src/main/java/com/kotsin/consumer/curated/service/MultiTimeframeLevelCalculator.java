@@ -1,37 +1,53 @@
 package com.kotsin.consumer.curated.service;
 
-import com.fasterxml.jackson.databind.JsonNode;
+import com.fasterxml.jackson.annotation.JsonAlias;
+import com.fasterxml.jackson.annotation.JsonIgnoreProperties;
+import com.fasterxml.jackson.annotation.JsonProperty;
+import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.kotsin.consumer.curated.model.MultiTimeframeLevels;
 import com.kotsin.consumer.curated.model.MultiTimeframeLevels.FibonacciLevels;
 import com.kotsin.consumer.curated.model.MultiTimeframeLevels.PivotLevels;
+import okhttp3.HttpUrl;
+import okhttp3.OkHttpClient;
+import okhttp3.Request;
+import okhttp3.Response;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Service;
-import org.springframework.web.client.RestTemplate;
 
 import java.time.*;
 import java.time.format.DateTimeFormatter;
 import java.util.*;
-import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ConcurrentHashMap;
-import java.util.concurrent.ExecutorService;
-import java.util.concurrent.Executors;
 import java.util.concurrent.TimeUnit;
 
 /**
  * MultiTimeframeLevelCalculator - Calculates Fibonacci and Pivot levels
  * across multiple timeframes (Daily, Weekly, Monthly)
  *
- * Uses 5paisa historical data API to get OHLC data and calculates swing levels.
+ * Uses 5paisa historical data API (same as TradeExecutionModule) to get OHLC data.
+ * 
+ * API Response format:
+ * [
+ *   {
+ *     "Datetime": "2025-12-26T09:15:00",
+ *     "Open": 4115,
+ *     "High": 4125,
+ *     "Low": 4107,
+ *     "Close": 4125,
+ *     "Volume": 4300
+ *   },
+ *   ...
+ * ]
  */
 @Service
 public class MultiTimeframeLevelCalculator {
 
     private static final Logger log = LoggerFactory.getLogger(MultiTimeframeLevelCalculator.class);
-    private static final DateTimeFormatter DATE_FORMAT = DateTimeFormatter.ofPattern("yyyy-MM-dd");
     private static final ZoneId IST = ZoneId.of("Asia/Kolkata");
+    private static final DateTimeFormatter DATETIME_FORMATTER = DateTimeFormatter.ISO_LOCAL_DATE_TIME;
 
     @Value("${curated.levels.api.base-url:http://13.203.60.173:8002}")
     private String historicalApiBaseUrl;
@@ -42,14 +58,13 @@ public class MultiTimeframeLevelCalculator {
     @Value("${curated.levels.enabled:false}")
     private boolean levelsEnabled;
 
-    @Value("${curated.levels.api.exch:N}")
+    @Value("${curated.levels.api.exch:n}")
     private String defaultExch;
 
-    @Value("${curated.levels.api.exch-type:C}")
+    @Value("${curated.levels.api.exch-type:c}")
     private String defaultExchType;
 
-    private final RestTemplate restTemplate;
-    private final ExecutorService executor;
+    private final OkHttpClient httpClient;
     private final ObjectMapper objectMapper;
 
     // Cache levels (valid until next period)
@@ -61,8 +76,10 @@ public class MultiTimeframeLevelCalculator {
     private static final long OHLC_CACHE_TTL_MS = 5 * 60 * 1000; // 5 minutes
 
     public MultiTimeframeLevelCalculator() {
-        this.restTemplate = new RestTemplate();
-        this.executor = Executors.newFixedThreadPool(5);
+        this.httpClient = new OkHttpClient.Builder()
+                .connectTimeout(5, TimeUnit.SECONDS)
+                .readTimeout(10, TimeUnit.SECONDS)
+                .build();
         this.objectMapper = new ObjectMapper();
     }
 
@@ -126,6 +143,7 @@ public class MultiTimeframeLevelCalculator {
 
     /**
      * Fetch 1-minute OHLC data from 5paisa API and cache it
+     * Uses same approach as TradeExecutionModule's HistoricalDataClient
      */
     private List<OHLCData> fetchHistoricalData(String scripCode) {
         // Check cache
@@ -133,132 +151,59 @@ public class MultiTimeframeLevelCalculator {
         if (cacheTime != null && (System.currentTimeMillis() - cacheTime) < OHLC_CACHE_TTL_MS) {
             List<OHLCData> cached = ohlcCache.get(scripCode);
             if (cached != null && !cached.isEmpty()) {
+                log.debug("Cache HIT for {}: {} candles", scripCode, cached.size());
                 return cached;
             }
         }
 
         try {
-            LocalDate endDate = LocalDate.now(IST);
-            LocalDate startDate = endDate.minusDays(50);
+            LocalDate endDate = LocalDate.now(IST).plusDays(1); // API needs +1 day to include last day
+            LocalDate startDate = endDate.minusDays(51); // 50 days back from today
 
-            // Build API URL: /getHisDataFromFivePaisa
-            String url = String.format("%s/getHisDataFromFivePaisa?exch=%s&exch_type=%s&scrip_code=%s&start_date=%s&end_date=%s&interval=1m",
-                    historicalApiBaseUrl, defaultExch, defaultExchType, scripCode,
-                    startDate.format(DATE_FORMAT), endDate.format(DATE_FORMAT));
+            // Build URL exactly like TradeExecutionModule
+            HttpUrl url = HttpUrl.parse(historicalApiBaseUrl)
+                    .newBuilder()
+                    .addPathSegments("getHisDataFromFivePaisa")
+                    .addQueryParameter("scrip_code", scripCode)
+                    .addQueryParameter("start_date", startDate.toString())
+                    .addQueryParameter("end_date", endDate.toString())
+                    .addQueryParameter("exch", defaultExch.toLowerCase())
+                    .addQueryParameter("exch_type", defaultExchType.toLowerCase())
+                    .addQueryParameter("interval", "1m")
+                    .build();
 
-            log.debug("Fetching historical data from: {}", url);
-
-            CompletableFuture<String> future = CompletableFuture.supplyAsync(() -> {
-                try {
-                    return restTemplate.getForObject(url, String.class);
-                } catch (Exception e) {
-                    log.error("Error fetching historical data for {}: {}", scripCode, e.getMessage());
-                    return null;
-                }
-            }, executor);
-
-            String response = future.get(apiTimeoutMs, TimeUnit.MILLISECONDS);
-            if (response == null || response.isEmpty()) {
-                log.warn("Empty response for historical data: {}", scripCode);
-                return Collections.emptyList();
-            }
-
-            // Parse JSON response
-            List<OHLCData> candles = parseHistoricalResponse(response);
+            log.debug("Fetching historical candles: {}", url);
             
-            if (!candles.isEmpty()) {
-                ohlcCache.put(scripCode, candles);
-                ohlcCacheTimestamp.put(scripCode, System.currentTimeMillis());
-                log.info("Fetched {} 1m candles for {}", candles.size(), scripCode);
+            Request request = new Request.Builder().url(url).get().build();
+            
+            try (Response response = httpClient.newCall(request).execute()) {
+                if (!response.isSuccessful() || response.body() == null) {
+                    log.warn("Historical API non-200/empty for {}: status={}", scripCode, response.code());
+                    return Collections.emptyList();
+                }
+                
+                // Parse JSON array response - same format as TradeExecutionModule
+                List<OHLCData> candles = objectMapper.readValue(
+                        response.body().byteStream(), 
+                        new TypeReference<List<OHLCData>>() {}
+                );
+                
+                log.info("Fetched {} 1m candles for {} from {} to {}", 
+                        candles.size(), scripCode, startDate, endDate);
+                
+                // Cache the result
+                if (!candles.isEmpty()) {
+                    ohlcCache.put(scripCode, candles);
+                    ohlcCacheTimestamp.put(scripCode, System.currentTimeMillis());
+                }
+                
+                return candles;
             }
-
-            return candles;
 
         } catch (Exception e) {
             log.error("Error fetching historical data for {}: {}", scripCode, e.getMessage());
             return Collections.emptyList();
         }
-    }
-
-    /**
-     * Parse 5paisa API response to list of OHLC data
-     */
-    private List<OHLCData> parseHistoricalResponse(String response) {
-        List<OHLCData> candles = new ArrayList<>();
-        try {
-            JsonNode root = objectMapper.readTree(response);
-            
-            // Handle both array and object responses
-            JsonNode dataNode = root.isArray() ? root : root.path("data");
-            if (dataNode.isMissingNode()) {
-                dataNode = root.path("candles");
-            }
-            if (dataNode.isMissingNode()) {
-                dataNode = root;
-            }
-
-            for (JsonNode candle : dataNode) {
-                try {
-                    OHLCData ohlc = new OHLCData();
-                    
-                    // Try different field names
-                    ohlc.setOpen(getDoubleField(candle, "open", "Open", "o"));
-                    ohlc.setHigh(getDoubleField(candle, "high", "High", "h"));
-                    ohlc.setLow(getDoubleField(candle, "low", "Low", "l"));
-                    ohlc.setClose(getDoubleField(candle, "close", "Close", "c"));
-                    
-                    // Parse timestamp
-                    String timeStr = getStringField(candle, "datetime", "Datetime", "time", "Time", "timestamp");
-                    if (timeStr != null) {
-                        ohlc.setTimestamp(parseTimestamp(timeStr));
-                    }
-
-                    if (ohlc.getHigh() > 0 && ohlc.getLow() > 0) {
-                        candles.add(ohlc);
-                    }
-                } catch (Exception e) {
-                    // Skip invalid candle
-                }
-            }
-        } catch (Exception e) {
-            log.error("Error parsing historical response: {}", e.getMessage());
-        }
-        return candles;
-    }
-
-    private double getDoubleField(JsonNode node, String... fieldNames) {
-        for (String field : fieldNames) {
-            JsonNode value = node.path(field);
-            if (!value.isMissingNode() && value.isNumber()) {
-                return value.asDouble();
-            }
-        }
-        return 0;
-    }
-
-    private String getStringField(JsonNode node, String... fieldNames) {
-        for (String field : fieldNames) {
-            JsonNode value = node.path(field);
-            if (!value.isMissingNode() && value.isTextual()) {
-                return value.asText();
-            }
-        }
-        return null;
-    }
-
-    private long parseTimestamp(String timeStr) {
-        try {
-            // Try various formats
-            if (timeStr.contains("T")) {
-                return LocalDateTime.parse(timeStr.replace("Z", "")).atZone(IST).toInstant().toEpochMilli();
-            } else if (timeStr.contains(" ")) {
-                return LocalDateTime.parse(timeStr, DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm:ss"))
-                        .atZone(IST).toInstant().toEpochMilli();
-            }
-        } catch (Exception e) {
-            // Ignore
-        }
-        return System.currentTimeMillis();
     }
 
     /**
@@ -532,13 +477,36 @@ public class MultiTimeframeLevelCalculator {
         private double low;
     }
 
+    /**
+     * OHLC Data matching 5paisa API response format (same as TradeExecutionModule)
+     * 
+     * API Response: {"Datetime": "2025-12-26T09:15:00", "Open": 4115, "High": 4125, "Low": 4107, "Close": 4125}
+     */
     @lombok.Data
     @lombok.NoArgsConstructor
+    @JsonIgnoreProperties(ignoreUnknown = true)
     private static class OHLCData {
+        
+        @JsonProperty("Open")
+        @JsonAlias({"open"})
         private double open;
+        
+        @JsonProperty("High")
+        @JsonAlias({"high"})
         private double high;
+        
+        @JsonProperty("Low")
+        @JsonAlias({"low"})
         private double low;
+        
+        @JsonProperty("Close")
+        @JsonAlias({"close"})
         private double close;
+        
+        @JsonProperty("Volume")
+        @JsonAlias({"volume"})
+        private long volume;
+        
         private long timestamp;
 
         public OHLCData(double open, double high, double low, double close) {
@@ -547,6 +515,23 @@ public class MultiTimeframeLevelCalculator {
             this.low = low;
             this.close = close;
             this.timestamp = System.currentTimeMillis();
+        }
+        
+        /**
+         * Handle API's Datetime field and convert to timestamp
+         */
+        @JsonProperty("Datetime")
+        @JsonAlias({"datetime"})
+        public void setDatetime(String datetime) {
+            if (datetime != null && !datetime.isEmpty()) {
+                try {
+                    LocalDateTime ldt = LocalDateTime.parse(datetime, DATETIME_FORMATTER);
+                    this.timestamp = ldt.atZone(IST).toInstant().toEpochMilli();
+                } catch (Exception e) {
+                    // Fallback
+                    this.timestamp = System.currentTimeMillis();
+                }
+            }
         }
     }
 }
