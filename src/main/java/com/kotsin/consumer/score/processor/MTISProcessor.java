@@ -94,7 +94,7 @@ public class MTISProcessor {
                     KafkaTopics.FAMILY_CANDLE_1H, KafkaTopics.FAMILY_CANDLE_2H, KafkaTopics.FAMILY_CANDLE_4H,
                     KafkaTopics.FAMILY_CANDLE_1D
             },
-            groupId = "mtis-processor",
+            groupId = "${kafka.consumer.mtis-group:mtis-processor-v2}",
             containerFactory = "curatedKafkaListenerContainerFactory"
     )
     public void processCandle(FamilyCandle familyCandle) {
@@ -192,7 +192,7 @@ public class MTISProcessor {
 
     @KafkaListener(
             topics = KafkaTopics.REGIME_INDEX,
-            groupId = "mtis-processor",
+            groupId = "${kafka.consumer.mtis-group:mtis-processor-v2}",
             containerFactory = "curatedKafkaListenerContainerFactory"
     )
     public void processIndexRegime(IndexRegime indexRegime) {
@@ -215,7 +215,7 @@ public class MTISProcessor {
 
     @KafkaListener(
             topics = KafkaTopics.REGIME_SECURITY,
-            groupId = "mtis-processor",
+            groupId = "${kafka.consumer.mtis-group:mtis-processor-v2}",
             containerFactory = "curatedKafkaListenerContainerFactory"
     )
     public void processSecurityRegime(SecurityRegime securityRegime) {
@@ -229,7 +229,7 @@ public class MTISProcessor {
 
     @KafkaListener(
             topics = KafkaTopics.IPU_COMBINED,
-            groupId = "mtis-processor",
+            groupId = "${kafka.consumer.mtis-group:mtis-processor-v2}",
             containerFactory = "curatedKafkaListenerContainerFactory"
     )
     public void processIPU(IPUOutput ipu) {
@@ -243,7 +243,7 @@ public class MTISProcessor {
 
     @KafkaListener(
             topics = KafkaTopics.FUDKII_OUTPUT,  // "fudkii-output" - CRITICAL: was wrong
-            groupId = "mtis-processor",
+            groupId = "${kafka.consumer.mtis-group:mtis-processor-v2}",
             containerFactory = "curatedKafkaListenerContainerFactory"
     )
     public void processFUDKII(FUDKIIOutput fudkii) {
@@ -261,7 +261,7 @@ public class MTISProcessor {
 
     @KafkaListener(
             topics = KafkaTopics.VCP_COMBINED,
-            groupId = "mtis-processor",
+            groupId = "${kafka.consumer.mtis-group:mtis-processor-v2}",
             containerFactory = "curatedKafkaListenerContainerFactory"
     )
     public void processVCP(MTVCPOutput vcp) {

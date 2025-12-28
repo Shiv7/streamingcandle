@@ -149,7 +149,7 @@ public class CuratedSignalProcessor {
      */
     @KafkaListener(
             topics = {"family-candle-1m", "family-candle-2m", "family-candle-3m"},
-            groupId = "curated-signal-processor",
+            groupId = "${kafka.consumer.curated-group:curated-signal-processor-v2}",
             containerFactory = "curatedKafkaListenerContainerFactory"
     )
     public void processCandle(FamilyCandle familyCandle) {
@@ -204,7 +204,7 @@ public class CuratedSignalProcessor {
      */
     @KafkaListener(
             topics = "regime-index-output",
-            groupId = "curated-signal-processor",
+            groupId = "${kafka.consumer.curated-group:curated-signal-processor-v2}",
             containerFactory = "curatedKafkaListenerContainerFactory"
     )
     public void processIndexRegime(IndexRegime indexRegime) {
@@ -216,7 +216,7 @@ public class CuratedSignalProcessor {
      */
     @KafkaListener(
             topics = "regime-security-output",
-            groupId = "curated-signal-processor",
+            groupId = "${kafka.consumer.curated-group:curated-signal-processor-v2}",
             containerFactory = "curatedKafkaListenerContainerFactory"
     )
     public void processSecurityRegime(SecurityRegime securityRegime) {
@@ -228,7 +228,7 @@ public class CuratedSignalProcessor {
      */
     @KafkaListener(
             topics = "regime-acl-output",
-            groupId = "curated-signal-processor",
+            groupId = "${kafka.consumer.curated-group:curated-signal-processor-v2}",
             containerFactory = "curatedKafkaListenerContainerFactory"
     )
     public void processACL(ACLOutput acl) {
@@ -240,7 +240,7 @@ public class CuratedSignalProcessor {
      */
     @KafkaListener(
             topics = "vcp-combined",
-            groupId = "curated-signal-processor",
+            groupId = "${kafka.consumer.curated-group:curated-signal-processor-v2}",
             containerFactory = "curatedKafkaListenerContainerFactory"
     )
     public void processVCP(MTVCPOutput vcp) {
@@ -252,7 +252,7 @@ public class CuratedSignalProcessor {
      */
     @KafkaListener(
             topics = "css-output",
-            groupId = "curated-signal-processor",
+            groupId = "${kafka.consumer.curated-group:curated-signal-processor-v2}",
             containerFactory = "curatedKafkaListenerContainerFactory"
     )
     public void processCSS(CSSOutput css) {
@@ -264,7 +264,7 @@ public class CuratedSignalProcessor {
      */
     @KafkaListener(
             topics = "ipu-signals-5m",
-            groupId = "curated-signal-processor",
+            groupId = "${kafka.consumer.curated-group:curated-signal-processor-v2}",
             containerFactory = "curatedKafkaListenerContainerFactory"
     )
     public void processIPU(IPUOutput ipu) {
@@ -276,7 +276,7 @@ public class CuratedSignalProcessor {
      */
     @KafkaListener(
             topics = "magnitude-final",
-            groupId = "curated-signal-processor",
+            groupId = "${kafka.consumer.curated-group:curated-signal-processor-v2}",
             containerFactory = "curatedKafkaListenerContainerFactory"
     )
     public void processFinalMagnitude(FinalMagnitude fma) {

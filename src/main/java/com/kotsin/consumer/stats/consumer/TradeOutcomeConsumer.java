@@ -35,7 +35,7 @@ public class TradeOutcomeConsumer {
 
     @KafkaListener(
             topics = "trade-outcomes",
-            groupId = "signal-stats-updater",
+            groupId = "${kafka.consumer.stats-group:signal-stats-updater-v2}",
             containerFactory = "curatedKafkaListenerContainerFactory"
     )
     public void onTradeOutcome(String payload) {
