@@ -196,7 +196,10 @@ public class FamilyCandleProcessor {
     /**
      * Get family ID for any instrument candle
      * Returns the equity scripCode for all family members
-     * FIXED: Now uses FamilyCacheAdapter instead of duplicating caching logic
+     * 
+     * FIXED: Now properly handles options by extracting symbol root and looking up equity.
+     * When no reverse mapping exists, extracts symbol (e.g., "ADANIENT" from "ADANIENT 30 DEC 2025 CE 2260.00")
+     * and searches cached families for matching symbol.
      */
     private String getFamilyId(InstrumentCandle candle) {
         String scripCode = candle.getScripCode();
@@ -204,34 +207,67 @@ public class FamilyCandleProcessor {
         // Use IFamilyDataProvider for reverse mapping (DIP compliance)
         String equityScripCode = familyDataProvider.getEquityScripCode(scripCode);
 
-        // If it's the same as scripCode, we need to determine the type
-        if (equityScripCode.equals(scripCode)) {
-            InstrumentType type = candle.getInstrumentType();
-            if (type == null) {
-                type = InstrumentType.detect(
-                    candle.getExchange(),
-                    candle.getExchangeType(),
-                    candle.getCompanyName()
-                );
-            }
-
-            // If equity or index, prefetch family data for future lookups
-            if (type == InstrumentType.EQUITY || type == InstrumentType.INDEX) {
-                // Trigger family fetch if not cached (IFamilyDataProvider handles this)
-                familyDataProvider.getFamily(scripCode, candle.getClose());
-                return scripCode;
-            }
-
-            // For derivatives without mapping, try symbol extraction
-            String symbolRoot = extractSymbolRoot(candle.getCompanyName());
-            if (symbolRoot != null) {
-                // Try to find equity via family cache
-                return scripCode; // Fallback to scripCode
-            }
+        // If mapping found and different from input, we have the equity
+        if (!equityScripCode.equals(scripCode)) {
+            return equityScripCode;
+        }
+        
+        // No mapping found - need to determine type and handle accordingly
+        InstrumentType type = candle.getInstrumentType();
+        if (type == null) {
+            type = InstrumentType.detect(
+                candle.getExchange(),
+                candle.getExchangeType(),
+                candle.getCompanyName()
+            );
         }
 
-        return equityScripCode;
+        // If equity or index, prefetch family data for future lookups
+        if (type == InstrumentType.EQUITY || type == InstrumentType.INDEX) {
+            // Cache the symbol -> scripCode mapping for derivative lookups
+            String symbol = candle.getCompanyName();
+            if (symbol != null && !symbol.isEmpty()) {
+                symbolToScripCodeCache.put(symbol.toUpperCase(), scripCode);
+            }
+            // Trigger family fetch if not cached (IFamilyDataProvider handles this)
+            familyDataProvider.getFamily(scripCode, candle.getClose());
+            return scripCode;
+        }
+
+        // For derivatives (futures/options) without mapping, try symbol extraction
+        String symbolRoot = extractSymbolRoot(candle.getCompanyName());
+        if (symbolRoot != null && !symbolRoot.isEmpty()) {
+            // Try to find equity scripCode by looking up symbol in cached families
+            String mappedEquity = findEquityBySymbol(symbolRoot);
+            if (mappedEquity != null) {
+                return mappedEquity;
+            }
+            // Log this so we can track unmapped options
+            log.debug("No equity mapping found for {} (symbol: {}), using scripCode as familyId", 
+                candle.getCompanyName(), symbolRoot);
+        }
+        
+        // Fallback to scripCode - option will be grouped alone
+        return scripCode;
     }
+    
+    /**
+     * Find equity scripCode by symbol name
+     * Searches cached families for matching symbol
+     */
+    private String findEquityBySymbol(String symbol) {
+        if (symbol == null || symbol.isEmpty()) {
+            return null;
+        }
+        // Search through cached families to find one with matching symbol
+        // This works because equities usually have their symbol as company name
+        // Note: This is a workaround until a proper symbol->scripCode index is built
+        return symbolToScripCodeCache.get(symbol.toUpperCase());
+    }
+    
+    // Cache for symbol -> equity scripCode mapping (built when equities are processed)
+    private final java.util.concurrent.ConcurrentHashMap<String, String> symbolToScripCodeCache = 
+        new java.util.concurrent.ConcurrentHashMap<>();
 
     /**
      * Extract symbol root from company name
