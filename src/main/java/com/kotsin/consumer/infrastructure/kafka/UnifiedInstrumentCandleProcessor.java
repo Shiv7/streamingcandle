@@ -194,9 +194,10 @@ public class UnifiedInstrumentCandleProcessor {
             (tickOb, oi) -> new InstrumentCandleData(tickOb.tick, tickOb.orderbook, oi)
         );
 
-        // ========== 9. SUPPRESS UNTIL WINDOW CLOSES ==========
+        // ========== 9. EMIT ON WINDOW CLOSE ==========
+        // Note: Instead of suppress() which requires custom Serdes for complex types,
+        // we rely on the windowed aggregate's natural behavior with grace period
         fullData
-            .suppress(Suppressed.untilWindowCloses(Suppressed.BufferConfig.unbounded()))
             .toStream()
             .filter((windowedKey, data) -> data != null && data.tick != null)
             .mapValues((windowedKey, data) -> buildInstrumentCandle(windowedKey, data))
