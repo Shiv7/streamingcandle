@@ -149,7 +149,7 @@ public class TimeframeAggregator {
                     .withValueSerde(FamilyCandle.serde())
             );
 
-        // Emit on window close
+        // Emit on window close with validation
         aggregated
             .suppress(Suppressed.untilWindowCloses(Suppressed.BufferConfig.unbounded()))
             .toStream()
@@ -160,9 +160,41 @@ public class TimeframeAggregator {
                 candle.setWindowEndMillis(windowedKey.window().end());
                 candle.setTimeframe(timeframe);
                 updateHumanReadableTime(candle);
+                
+                // Validate and log aggregation result
+                validateAggregatedCandle(candle, timeframe);
+                
                 return KeyValue.pair(windowedKey.key(), candle);
             })
             .to(outputTopic, Produced.with(Serdes.String(), FamilyCandle.serde()));
+    }
+    
+    /**
+     * Validate aggregated candle and log issues
+     */
+    private void validateAggregatedCandle(FamilyCandle candle, String timeframe) {
+        if (candle.getEquity() != null) {
+            com.kotsin.consumer.domain.model.InstrumentCandle eq = candle.getEquity();
+            double range = eq.getHigh() - eq.getLow();
+            
+            // Log if range seems too small for larger timeframes
+            if (timeframe.contains("h") || timeframe.equals("1d")) {
+                // For hourly+ candles, range < 0.1% is suspicious
+                double rangePercent = (range / eq.getClose()) * 100;
+                if (rangePercent < 0.1 && eq.getClose() > 0) {
+                    log.warn("⚠️ {} candle {} has tiny range: {}% | OHLC={}/{}/{}/{}", 
+                        timeframe, candle.getFamilyId(), 
+                        String.format("%.3f", rangePercent),
+                        eq.getOpen(), eq.getHigh(), eq.getLow(), eq.getClose());
+                }
+            }
+            
+            // OHLC sanity check
+            if (eq.getHigh() < eq.getLow()) {
+                log.error("🚨 {} OHLC INVALID | {} | high={} < low={}", 
+                    timeframe, candle.getFamilyId(), eq.getHigh(), eq.getLow());
+            }
+        }
     }
 
     /**

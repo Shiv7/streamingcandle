@@ -250,6 +250,15 @@ public class FamilyCandleProcessor {
     private FamilyCandle buildFamilyCandle(Windowed<String> windowedKey, FamilyCandleCollector collector) {
         String familyId = windowedKey.key();
         
+        // Log merge stats if any merging occurred (indicates multiple candles in window)
+        if (collector.getEquityMergeCount() > 0 || collector.getFutureMergeCount() > 0) {
+            log.debug("FamilyCandle {} merged: equity={} future={} options={}", 
+                familyId, 
+                collector.getEquityMergeCount() + 1, 
+                collector.getFutureMergeCount() + 1,
+                collector.getOptions().size());
+        }
+        
         FamilyCandle.FamilyCandleBuilder builder = FamilyCandle.builder()
             .familyId(familyId)
             .timestamp(System.currentTimeMillis())
@@ -267,16 +276,21 @@ public class FamilyCandleProcessor {
         // Set equity candle
         InstrumentCandle equity = collector.getEquity();
         if (equity != null) {
+            // VALIDATE OHLC
+            validateOHLC(equity, "EQUITY", familyId);
             builder.equity(equity);
             builder.symbol(extractSymbolRoot(equity.getCompanyName()));
         }
 
         // Set future candle
         InstrumentCandle future = collector.getFuture();
+        if (future != null) {
+            validateOHLC(future, "FUTURE", familyId);
+        }
         builder.future(future);
         builder.hasFuture(future != null);
 
-        // Set options
+        // Set options (now deduplicated!)
         List<OptionCandle> options = collector.getOptions().stream()
             .map(OptionCandle::fromInstrumentCandle)
             .filter(Objects::nonNull)
@@ -291,6 +305,33 @@ public class FamilyCandleProcessor {
         return builder
             .quality(DataQuality.VALID)
             .build();
+    }
+    
+    /**
+     * Validate OHLC data and log errors
+     */
+    private void validateOHLC(InstrumentCandle candle, String type, String familyId) {
+        double o = candle.getOpen();
+        double h = candle.getHigh();
+        double l = candle.getLow();
+        double c = candle.getClose();
+        
+        // Check High >= Low
+        if (h < l) {
+            log.error("🚨 OHLC INVALID | {} {} | high={} < low={}", type, familyId, h, l);
+        }
+        // Check High is highest
+        if (h < o || h < c) {
+            log.error("🚨 HIGH NOT HIGHEST | {} {} | O={} H={} L={} C={}", type, familyId, o, h, l, c);
+        }
+        // Check Low is lowest
+        if (l > o || l > c) {
+            log.error("🚨 LOW NOT LOWEST | {} {} | O={} H={} L={} C={}", type, familyId, o, h, l, c);
+        }
+        // Check for zero/negative close
+        if (c <= 0) {
+            log.error("🚨 INVALID CLOSE | {} {} | close={}", type, familyId, c);
+        }
     }
 
     /**
@@ -360,6 +401,7 @@ public class FamilyCandleProcessor {
 
     /**
      * Collector for family members within a window
+     * FIXED: Now properly merges OHLCV instead of replacing
      */
     @lombok.Data
     @lombok.NoArgsConstructor
@@ -367,6 +409,11 @@ public class FamilyCandleProcessor {
         private InstrumentCandle equity;
         private InstrumentCandle future;
         private List<InstrumentCandle> options = new ArrayList<>();
+        private Map<String, InstrumentCandle> optionsByScripCode = new HashMap<>();
+        
+        // Track merge counts for debugging
+        private int equityMergeCount = 0;
+        private int futureMergeCount = 0;
 
         public FamilyCandleCollector add(InstrumentCandle candle) {
             if (candle == null) return this;
@@ -384,21 +431,92 @@ public class FamilyCandleProcessor {
             switch (type) {
                 case EQUITY:
                 case INDEX:
-                    this.equity = candle;
+                    if (this.equity == null) {
+                        this.equity = candle;
+                    } else {
+                        // MERGE instead of replace!
+                        mergeInstrumentCandle(this.equity, candle);
+                        equityMergeCount++;
+                    }
                     break;
                 case FUTURE:
-                    this.future = candle;
+                    if (this.future == null) {
+                        this.future = candle;
+                    } else {
+                        // MERGE instead of replace!
+                        mergeInstrumentCandle(this.future, candle);
+                        futureMergeCount++;
+                    }
                     break;
                 case OPTION_CE:
                 case OPTION_PE:
-                    this.options.add(candle);
+                    // Deduplicate by scripCode and merge OHLCV
+                    String scripCode = candle.getScripCode();
+                    if (scripCode != null) {
+                        InstrumentCandle existing = optionsByScripCode.get(scripCode);
+                        if (existing == null) {
+                            optionsByScripCode.put(scripCode, candle);
+                        } else {
+                            // Merge OHLCV for same option
+                            mergeInstrumentCandle(existing, candle);
+                        }
+                    }
                     break;
             }
             return this;
         }
+        
+        /**
+         * Merge OHLCV: Open=first, High=max, Low=min, Close=last, Volume=sum
+         */
+        private void mergeInstrumentCandle(InstrumentCandle aggregate, InstrumentCandle incoming) {
+            // Open stays from first (aggregate)
+            aggregate.setHigh(Math.max(aggregate.getHigh(), incoming.getHigh()));
+            aggregate.setLow(Math.min(aggregate.getLow(), incoming.getLow()));
+            aggregate.setClose(incoming.getClose());
+            aggregate.setVolume(aggregate.getVolume() + incoming.getVolume());
+            aggregate.setBuyVolume(aggregate.getBuyVolume() + incoming.getBuyVolume());
+            aggregate.setSellVolume(aggregate.getSellVolume() + incoming.getSellVolume());
+            aggregate.setTickCount(aggregate.getTickCount() + incoming.getTickCount());
+            aggregate.setWindowEndMillis(incoming.getWindowEndMillis());
+            
+            // Merge OI if present
+            if (incoming.isOiPresent()) {
+                aggregate.setOiPresent(true);
+                if (incoming.getOiHigh() != null) {
+                    Long aggHigh = aggregate.getOiHigh();
+                    aggregate.setOiHigh(aggHigh != null ? Math.max(aggHigh, incoming.getOiHigh()) : incoming.getOiHigh());
+                }
+                if (incoming.getOiLow() != null) {
+                    Long aggLow = aggregate.getOiLow();
+                    aggregate.setOiLow(aggLow != null ? Math.min(aggLow, incoming.getOiLow()) : incoming.getOiLow());
+                }
+                aggregate.setOiClose(incoming.getOiClose());
+                aggregate.setOpenInterest(incoming.getOpenInterest());
+            }
+        }
+        
+        /**
+         * Get deduplicated options list
+         */
+        public List<InstrumentCandle> getOptions() {
+            // Return deduplicated options from map
+            if (!optionsByScripCode.isEmpty()) {
+                return new ArrayList<>(optionsByScripCode.values());
+            }
+            return options;
+        }
 
         public boolean hasEquity() {
             return equity != null;
+        }
+        
+        public int getEquityMergeCount() {
+            return equityMergeCount;
+        }
+        
+        public int getFutureMergeCount() {
+            return futureMergeCount;
         }
 
         public static org.apache.kafka.common.serialization.Serde<FamilyCandleCollector> serde() {
