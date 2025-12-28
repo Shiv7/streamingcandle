@@ -49,7 +49,7 @@ public class CuratedKafkaConfig {
      * Uses a UNIQUE consumer group (configurable via properties)
      * Default: reads from EARLIEST for playback testing
      *
-     * IMPORTANT: Supports multiple message types (UnifiedCandle, CSSOutput, IPUOutput, etc.)
+     * IMPORTANT: Supports multiple message types via message converter
      */
     @Bean
     public ConsumerFactory<String, Object> curatedConsumerFactory() {
@@ -57,34 +57,40 @@ public class CuratedKafkaConfig {
         props.put(ConsumerConfig.BOOTSTRAP_SERVERS_CONFIG, bootstrapServers);
         props.put(ConsumerConfig.GROUP_ID_CONFIG, consumerGroupId);
         props.put(ConsumerConfig.KEY_DESERIALIZER_CLASS_CONFIG, StringDeserializer.class);
-        props.put(ConsumerConfig.VALUE_DESERIALIZER_CLASS_CONFIG, JsonDeserializer.class);
-        props.put(JsonDeserializer.TRUSTED_PACKAGES, "com.kotsin.consumer.*");
-        props.put(JsonDeserializer.USE_TYPE_INFO_HEADERS, true);  // Use type headers for polymorphic deserialization
-        props.put(JsonDeserializer.TYPE_MAPPINGS,
-            "UnifiedCandle:com.kotsin.consumer.model.UnifiedCandle," +
-            "CSSOutput:com.kotsin.consumer.signal.model.CSSOutput," +
-            "IPUOutput:com.kotsin.consumer.model.IPUOutput," +
-            "MTVCPOutput:com.kotsin.consumer.model.MTVCPOutput," +
-            "IndexRegime:com.kotsin.consumer.regime.model.IndexRegime," +
-            "SecurityRegime:com.kotsin.consumer.regime.model.SecurityRegime," +
-            "ACLOutput:com.kotsin.consumer.regime.model.ACLOutput," +
-            "FinalMagnitude:com.kotsin.consumer.capital.model.FinalMagnitude");
-        props.put(JsonDeserializer.VALUE_DEFAULT_TYPE, Object.class.getName());  // Fallback to Object
-        props.put(ConsumerConfig.AUTO_OFFSET_RESET_CONFIG, autoOffsetReset);  // Configurable: earliest/latest
+        props.put(ConsumerConfig.VALUE_DESERIALIZER_CLASS_CONFIG, StringDeserializer.class); // Read as String first
+        props.put(ConsumerConfig.AUTO_OFFSET_RESET_CONFIG, autoOffsetReset);
         props.put(ConsumerConfig.ENABLE_AUTO_COMMIT_CONFIG, true);
 
         return new DefaultKafkaConsumerFactory<>(props);
     }
 
     /**
+     * ObjectMapper for JSON conversion
+     */
+    @Bean
+    public com.fasterxml.jackson.databind.ObjectMapper curatedObjectMapper() {
+        com.fasterxml.jackson.databind.ObjectMapper mapper = new com.fasterxml.jackson.databind.ObjectMapper();
+        mapper.configure(com.fasterxml.jackson.databind.DeserializationFeature.FAIL_ON_UNKNOWN_PROPERTIES, false);
+        mapper.registerModule(new com.fasterxml.jackson.datatype.jsr310.JavaTimeModule());
+        return mapper;
+    }
+
+    /**
      * Kafka Listener Container Factory for Curated Signal Processor
+     * Uses StringJsonMessageConverter to handle JSON -> POJO conversion
      */
     @Bean
     public ConcurrentKafkaListenerContainerFactory<String, Object> curatedKafkaListenerContainerFactory() {
         ConcurrentKafkaListenerContainerFactory<String, Object> factory =
                 new ConcurrentKafkaListenerContainerFactory<>();
         factory.setConsumerFactory(curatedConsumerFactory());
-        factory.setConcurrency(3);  // 3 consumer threads
+        factory.setConcurrency(3);
+        
+        // Use StringJsonMessageConverter for proper JSON -> POJO conversion
+        org.springframework.kafka.support.converter.StringJsonMessageConverter converter = 
+            new org.springframework.kafka.support.converter.StringJsonMessageConverter(curatedObjectMapper());
+        factory.setRecordMessageConverter(converter);
+        
         return factory;
     }
 
