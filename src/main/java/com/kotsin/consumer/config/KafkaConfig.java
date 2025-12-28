@@ -56,6 +56,15 @@ public class KafkaConfig {
     private String producerTimestampType;
 
     /**
+     * CONFIGURABLE APP-ID PREFIX
+     * This prefix is prepended to ALL processor application-ids.
+     * To replay data from earliest, simply change this prefix to a new unique value.
+     * Example: "replay-20251228-" will make consumer group "replay-20251228-unified-instrument-candle-processor"
+     */
+    @Value("${kafka.streams.app-id-prefix:}")
+    private String appIdPrefix;
+
+    /**
      * Gets the bootstrap servers configuration.
      *
      * @return The bootstrap servers string.
@@ -65,17 +74,42 @@ public class KafkaConfig {
     }
 
     /**
+     * Gets the configured auto.offset.reset setting.
+     *
+     * @return The auto offset reset setting (earliest/latest).
+     */
+    public String getAutoOffsetReset() {
+        return autoOffsetReset;
+    }
+
+    /**
+     * Gets the application-id prefix.
+     *
+     * @return The prefix to prepend to all application-ids.
+     */
+    public String getAppIdPrefix() {
+        return appIdPrefix;
+    }
+
+    /**
      * Retrieves Kafka Streams properties with a given application ID.
+     * The application ID is prefixed with the configurable kafka.streams.app-id-prefix.
      * All settings are now configurable via application.properties.
      *
-     * @param appId The application ID for the Kafka Streams instance.
+     * @param appId The base application ID for the Kafka Streams instance.
      * @return Properties configured for Kafka Streams.
      */
     public Properties getStreamProperties(String appId) {
         Properties props = new Properties();
 
+        // Apply configurable prefix to application-id for easy replay
+        String fullAppId = (appIdPrefix != null && !appIdPrefix.isEmpty()) 
+            ? appIdPrefix + appId 
+            : appId;
+
         // Core configuration
-        props.put(StreamsConfig.APPLICATION_ID_CONFIG, appId);
+        props.put(StreamsConfig.APPLICATION_ID_CONFIG, fullAppId);
+        log.info("Creating Kafka Streams with app-id: {} (prefix: '{}')", fullAppId, appIdPrefix);
         props.put(StreamsConfig.BOOTSTRAP_SERVERS_CONFIG, bootstrapServers);
         props.put(StreamsConfig.DEFAULT_KEY_SERDE_CLASS_CONFIG, Serdes.String().getClass().getName());
         props.put(StreamsConfig.DEFAULT_VALUE_SERDE_CLASS_CONFIG, Serdes.String().getClass().getName());
