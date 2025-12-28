@@ -65,6 +65,9 @@ public class IPUProcessor {
     @Value("${ipu.output.signals.prefix:ipu-signals-}")
     private String signalsTopicPrefix;
 
+    @Value("${ipu.output.combined:ipu-combined}")
+    private String combinedTopic;
+
     // Feature toggle
     @Value("${ipu.enabled:true}")
     private boolean enabled;
@@ -179,6 +182,16 @@ public class IPUProcessor {
                 })
                 .to(outputTopic, Produced.with(Serdes.String(), IPUOutput.serde()));
 
+        // For 5m: Also emit to ipu-combined for MTIS processor consumption
+        if ("5m".equals(timeframe)) {
+            ipuResults
+                    .filter((k, v) -> v != null && v.getFinalIpuScore() > 0)
+                    .peek((k, v) -> LOGGER.debug("🎯 IPU Combined | scrip={} score={}", k, 
+                            String.format("%.3f", v.getFinalIpuScore())))
+                    .to(combinedTopic, Produced.with(Serdes.String(), IPUOutput.serde()));
+            LOGGER.info("📐 IPU 5m also publishing to {}", combinedTopic);
+        }
+
         // Cache 15m/30m results for fusion PER SCRIPCODE
         if ("15m".equals(timeframe)) {
             ipuResults.foreach((k, v) -> {
@@ -191,7 +204,11 @@ public class IPUProcessor {
             });
         }
 
-        LOGGER.info("📐 Built IPU topology for {} -> {}", timeframe, outputTopic);
+        if ("5m".equals(timeframe)) {
+            LOGGER.info("📐 Built IPU topology for {} -> {} + {}", timeframe, outputTopic, combinedTopic);
+        } else {
+            LOGGER.info("📐 Built IPU topology for {} -> {}", timeframe, outputTopic);
+        }
     }
 
     /**
