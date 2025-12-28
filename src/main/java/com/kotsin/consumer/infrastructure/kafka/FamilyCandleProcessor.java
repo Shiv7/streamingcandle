@@ -56,6 +56,9 @@ public class FamilyCandleProcessor {
 
     @Autowired
     private IFamilyDataProvider familyDataProvider;
+    
+    @Autowired
+    private com.kotsin.consumer.monitoring.DataQualityMetrics dataQualityMetrics;
 
     @Value("${family.candle.window.grace.seconds:5}")
     private int graceSeconds;
@@ -308,30 +311,49 @@ public class FamilyCandleProcessor {
     }
     
     /**
-     * Validate OHLC data and log errors
+     * Validate OHLC data, log errors, and record metrics
+     * @return true if valid, false if any violations found
      */
-    private void validateOHLC(InstrumentCandle candle, String type, String familyId) {
+    private boolean validateOHLC(InstrumentCandle candle, String type, String familyId) {
         double o = candle.getOpen();
         double h = candle.getHigh();
         double l = candle.getLow();
         double c = candle.getClose();
+        boolean valid = true;
         
         // Check High >= Low
         if (h < l) {
             log.error("🚨 OHLC INVALID | {} {} | high={} < low={}", type, familyId, h, l);
+            if (dataQualityMetrics != null) {
+                dataQualityMetrics.recordViolation("OHLC_HIGH_LESS_THAN_LOW");
+            }
+            valid = false;
         }
         // Check High is highest
         if (h < o || h < c) {
             log.error("🚨 HIGH NOT HIGHEST | {} {} | O={} H={} L={} C={}", type, familyId, o, h, l, c);
+            if (dataQualityMetrics != null) {
+                dataQualityMetrics.recordViolation("HIGH_NOT_HIGHEST");
+            }
+            valid = false;
         }
         // Check Low is lowest
         if (l > o || l > c) {
             log.error("🚨 LOW NOT LOWEST | {} {} | O={} H={} L={} C={}", type, familyId, o, h, l, c);
+            if (dataQualityMetrics != null) {
+                dataQualityMetrics.recordViolation("LOW_NOT_LOWEST");
+            }
+            valid = false;
         }
         // Check for zero/negative close
         if (c <= 0) {
             log.error("🚨 INVALID CLOSE | {} {} | close={}", type, familyId, c);
+            if (dataQualityMetrics != null) {
+                dataQualityMetrics.recordViolation("INVALID_CLOSE");
+            }
+            valid = false;
         }
+        return valid;
     }
 
     /**

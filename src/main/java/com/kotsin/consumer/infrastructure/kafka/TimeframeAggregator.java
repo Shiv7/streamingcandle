@@ -43,6 +43,9 @@ public class TimeframeAggregator {
 
     @Autowired
     private KafkaConfig kafkaConfig;
+    
+    @Autowired
+    private com.kotsin.consumer.monitoring.DataQualityMetrics dataQualityMetrics;
 
     @Value("${timeframe.aggregator.enabled:true}")
     private boolean enabled;
