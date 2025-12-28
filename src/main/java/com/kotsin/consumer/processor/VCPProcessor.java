@@ -293,7 +293,11 @@ public class VCPProcessor {
             historyStore.put(key, history);
 
             // Calculate VCP if we have enough history
-            if (history.size() >= 5) {  // Minimum for meaningful VCP
+            // FIX: Increased from 5 to 20 candles for reliable volume profile
+            // 5 candles = 25 min (5m TF), too little for meaningful clusters
+            // 20 candles = 100 min (5m TF), minimum for volume profile stability
+            int minHistory = Math.max(20, lookbackSize / 3);  // At least 20, or 1/3 of lookback
+            if (history.size() >= minHistory) {
                 VCPCalculator.VCPResult result = calculator.calculateForTimeframe(
                         history.getCandles(), timeframe);
 

@@ -14,13 +14,20 @@ import lombok.extern.slf4j.Slf4j;
  * - NEUTRAL:          No clear signal
  * 
  * This is a crucial cross-instrument signal when combined with equity movement.
+ * 
+ * FIX: Thresholds are now ATR-relative for price (not fixed %), making them
+ * meaningful across different instruments and volatility regimes.
  */
 @Slf4j
 public class FuturesBuildupDetector {
 
-    // Threshold for significant changes
-    private static final double PRICE_CHANGE_THRESHOLD = 0.1;  // 0.1% price change
-    private static final double OI_CHANGE_THRESHOLD = 1.0;     // 1% OI change
+    // FIX: Default thresholds - price threshold should be ATR-based, not fixed %
+    // These defaults are fallbacks when ATR is not available
+    private static final double DEFAULT_PRICE_CHANGE_THRESHOLD = 0.1;  // 0.1% fallback
+    private static final double OI_CHANGE_THRESHOLD = 1.0;             // 1% OI change
+    
+    // ATR-relative thresholds (more meaningful)
+    private static final double ATR_PRICE_THRESHOLD_MULTIPLIER = 0.3;  // 30% of ATR is significant
 
     /**
      * Buildup Type enumeration
@@ -55,17 +62,69 @@ public class FuturesBuildupDetector {
     }
 
     /**
-     * Detect buildup type from price and OI change percentages
+     * Detect buildup type from price and OI change percentages (legacy method)
      *
      * @param priceChangePercent Price change in percentage
      * @param oiChangePercent OI change in percentage
      * @return BuildupType classification
      */
     public static BuildupType detect(double priceChangePercent, double oiChangePercent) {
-        boolean priceUp = priceChangePercent > PRICE_CHANGE_THRESHOLD;
-        boolean priceDown = priceChangePercent < -PRICE_CHANGE_THRESHOLD;
+        return detectWithThresholds(priceChangePercent, oiChangePercent, 
+                                     DEFAULT_PRICE_CHANGE_THRESHOLD, OI_CHANGE_THRESHOLD);
+    }
+
+    /**
+     * FIX: Detect buildup type using ATR-relative price threshold
+     * This is more meaningful across different instruments
+     *
+     * @param priceChange Absolute price change (close - open)
+     * @param atr14 14-period ATR for the instrument
+     * @param oiChangePercent OI change in percentage
+     * @return BuildupType classification
+     */
+    public static BuildupType detectWithATR(double priceChange, double atr14, double oiChangePercent) {
+        if (atr14 <= 0) {
+            // Fallback to percentage if ATR not available
+            return detect(priceChange, oiChangePercent);
+        }
+        
+        // FIX: Use ATR-relative threshold for price significance
+        // 30% of daily ATR is a meaningful move
+        double priceThresholdAbs = atr14 * ATR_PRICE_THRESHOLD_MULTIPLIER;
+        
+        boolean priceUp = priceChange > priceThresholdAbs;
+        boolean priceDown = priceChange < -priceThresholdAbs;
         boolean oiUp = oiChangePercent > OI_CHANGE_THRESHOLD;
         boolean oiDown = oiChangePercent < -OI_CHANGE_THRESHOLD;
+
+        if (priceUp && oiUp) {
+            return BuildupType.LONG_BUILDUP;
+        } else if (priceDown && oiUp) {
+            return BuildupType.SHORT_BUILDUP;
+        } else if (priceDown && oiDown) {
+            return BuildupType.LONG_UNWINDING;
+        } else if (priceUp && oiDown) {
+            return BuildupType.SHORT_COVERING;
+        } else {
+            return BuildupType.NEUTRAL;
+        }
+    }
+
+    /**
+     * Detect buildup type from price and OI change percentages with custom thresholds
+     *
+     * @param priceChangePercent Price change in percentage
+     * @param oiChangePercent OI change in percentage
+     * @param priceThreshold Custom price threshold
+     * @param oiThreshold Custom OI threshold  
+     * @return BuildupType classification
+     */
+    private static BuildupType detectWithThresholdsInternal(double priceChangePercent, double oiChangePercent,
+                                                             double priceThreshold, double oiThreshold) {
+        boolean priceUp = priceChangePercent > priceThreshold;
+        boolean priceDown = priceChangePercent < -priceThreshold;
+        boolean oiUp = oiChangePercent > oiThreshold;
+        boolean oiDown = oiChangePercent < -oiThreshold;
 
         if (priceUp && oiUp) {
             return BuildupType.LONG_BUILDUP;

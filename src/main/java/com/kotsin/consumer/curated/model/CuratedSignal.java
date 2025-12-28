@@ -44,6 +44,7 @@ public class CuratedSignal {
     private String scripCode;
     private String companyName;
     private long timestamp;
+    private String signalId;  // For linking to SignalHistory and TradeOutcome
 
     // ========== Structure & Breakout ==========
     private MultiTFBreakout breakout;           // Multi-TF breakout data

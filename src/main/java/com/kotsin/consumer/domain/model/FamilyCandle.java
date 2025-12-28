@@ -143,23 +143,28 @@ public class FamilyCandle {
 
     /**
      * Get signal strength (0-1) based on confluence
+     * 
+     * FIX: OI signal no longer auto-confirms - must align with equity direction
      */
     public double getSignalStrength() {
         int signals = 0;
         int confirmedSignals = 0;
+        
+        // First determine equity direction (baseline)
+        boolean equityBullish = equity != null && equity.getClose() > equity.getOpen();
+        boolean equityBearish = equity != null && equity.getClose() < equity.getOpen();
 
-        // Check equity trend
+        // Check equity trend (always counts as one signal/confirmation)
         if (equity != null && equity.getClose() != equity.getOpen()) {
             signals++;
-            if (isBullishOI() == (equity.getClose() > equity.getOpen())) {
-                confirmedSignals++;
-            }
+            confirmedSignals++;  // Equity defines the direction, so it's always "confirmed"
         }
 
         // Check future trend confirmation
         if (future != null && equity != null) {
             signals++;
-            if ((future.getClose() > future.getOpen()) == (equity.getClose() > equity.getOpen())) {
+            boolean futureBullish = future.getClose() > future.getOpen();
+            if (futureBullish == equityBullish) {
                 confirmedSignals++;
             }
         }
@@ -167,17 +172,25 @@ public class FamilyCandle {
         // Check PCR confirmation
         if (pcr != null) {
             signals++;
-            // PCR > 1 with dropping price, or PCR < 1 with rising price = confirmed
+            // PCR > 1 = bearish sentiment, PCR < 1 = bullish sentiment
+            // Confirmation: sentiment matches equity direction (not contrarian here)
             boolean pcrBullish = pcr < 1.0;
-            if (equity != null && pcrBullish == (equity.getClose() > equity.getOpen())) {
+            if (pcrBullish == equityBullish) {
                 confirmedSignals++;
             }
         }
 
-        // Check OI signal
+        // FIX: Check OI signal alignment with equity direction (was double-counting before)
         if (oiSignal != null && !oiSignal.equals("NEUTRAL")) {
             signals++;
-            confirmedSignals++;  // OI signal is already directional
+            // OI signal must ALIGN with equity direction to confirm
+            boolean oiIsBullish = isBullishOI();
+            boolean oiIsBearish = isBearishOI();
+            
+            if ((oiIsBullish && equityBullish) || (oiIsBearish && equityBearish)) {
+                confirmedSignals++;
+            }
+            // If OI disagrees with equity, it doesn't confirm (0 added to confirmedSignals)
         }
 
         return signals > 0 ? (double) confirmedSignals / signals : 0.0;

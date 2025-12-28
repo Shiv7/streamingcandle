@@ -73,15 +73,31 @@ public class IPUProcessor {
     @Value("${ipu.lookback:20}")
     private int defaultLookback;
 
-    // Cache for multi-TF fusion PER SCRIPCODE to avoid cross-contamination
-    private static final java.util.concurrent.ConcurrentHashMap<String, IPUOutput> cached15mResults = new java.util.concurrent.ConcurrentHashMap<>();
-    private static final java.util.concurrent.ConcurrentHashMap<String, IPUOutput> cached30mResults = new java.util.concurrent.ConcurrentHashMap<>();
+    @Value("${ipu.cache.ttl.ms:600000}")  // 10 minutes default TTL
+    private long cacheTtlMs;
+
+    @Value("${ipu.cache.max.size:5000}")  // Max 5000 entries per cache
+    private int cacheMaxSize;
+
+    // Cache for multi-TF fusion PER SCRIPCODE with TTL eviction (FIX: was static without TTL)
+    // Using project's TTLCache instead of external Caffeine dependency
+    private static com.kotsin.consumer.util.TTLCache<String, IPUOutput> cached15mResults;
+    private static com.kotsin.consumer.util.TTLCache<String, IPUOutput> cached30mResults;
 
     public static IPUOutput getCached15mResult(String scripCode) { 
-        return cached15mResults.get(scripCode); 
+        return cached15mResults != null ? cached15mResults.get(scripCode) : null; 
     }
     public static IPUOutput getCached30mResult(String scripCode) { 
-        return cached30mResults.get(scripCode); 
+        return cached30mResults != null ? cached30mResults.get(scripCode) : null; 
+    }
+
+    private void initializeCaches() {
+        // Use project's TTLCache with automatic cleanup
+        cached15mResults = new com.kotsin.consumer.util.TTLCache<>(
+            "IPU-15m", cacheTtlMs, cacheMaxSize, 60000);  // 1-minute cleanup interval
+        cached30mResults = new com.kotsin.consumer.util.TTLCache<>(
+            "IPU-30m", cacheTtlMs, cacheMaxSize, 60000);
+        LOGGER.info("✅ IPU caches initialized with TTL={}ms, maxSize={}", cacheTtlMs, cacheMaxSize);
     }
 
     /**
@@ -287,6 +303,9 @@ public class IPUProcessor {
         }
 
         LOGGER.info("🚀 Scheduling IPUProcessor startup...");
+
+        // Initialize TTL caches first
+        initializeCaches();
 
         java.util.concurrent.CompletableFuture.runAsync(() -> {
             try {

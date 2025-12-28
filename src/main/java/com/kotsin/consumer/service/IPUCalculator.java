@@ -73,6 +73,12 @@ public class IPUCalculator {
         double priceEfficiency = rawEfficiency * wickPenalty;
 
         // ========== STEP 3: Order Flow Quality Score ==========
+        // FIX Bug #11: Return empty output if zero volume (no data, not "neutral")
+        if (current.getBuyVolume() == 0 && current.getSellVolume() == 0 && current.getVolume() == 0) {
+            log.debug("Zero volume for {} - returning empty IPU (no data)", current.getScripCode());
+            return emptyOutput(timeframe);
+        }
+        
         double totalVolume = current.getBuyVolume() + current.getSellVolume() + cfg.getEpsilon();
         double volumeDeltaPct = (current.getBuyVolume() - current.getSellVolume()) / totalVolume;
         double volumeDeltaAbs = Math.abs(volumeDeltaPct);
@@ -210,27 +216,57 @@ public class IPUCalculator {
         }
 
         // ========== STEP 8: Directional Conviction ==========
+        // FIX: Use count-based agreement instead of weighted sum that cancels out
         double priceDir = Math.signum(current.getClose() - current.getOpen());
         double flowDir = Math.signum(current.getBuyVolume() - current.getSellVolume());
-        double ofiDir = Math.signum(current.getOfi());
+        double ofiDir = Double.isNaN(current.getOfi()) ? 0 : Math.signum(current.getOfi());
         double depthDir = Math.signum(current.getTotalBidDepth() - current.getTotalAskDepth());
 
+        // FIX: Count bullish/bearish factors separately instead of using weighted sum
+        int bullishCount = 0;
+        int bearishCount = 0;
+        int totalFactors = 0;
+        
+        if (priceDir > 0) { bullishCount++; totalFactors++; }
+        else if (priceDir < 0) { bearishCount++; totalFactors++; }
+        
+        if (flowDir > 0) { bullishCount++; totalFactors++; }
+        else if (flowDir < 0) { bearishCount++; totalFactors++; }
+        
+        if (ofiDir > 0) { bullishCount++; totalFactors++; }
+        else if (ofiDir < 0) { bearishCount++; totalFactors++; }
+        
+        if (depthDir > 0) { bullishCount++; totalFactors++; }
+        else if (depthDir < 0) { bearishCount++; totalFactors++; }
+        
+        if (momentumDirection > 0) { bullishCount++; totalFactors++; }
+        else if (momentumDirection < 0) { bearishCount++; totalFactors++; }
+
+        // FIX: Calculate agreement as percentage of factors agreeing with dominant direction
+        int dominantCount = Math.max(bullishCount, bearishCount);
+        double directionAgreement = totalFactors > 0 ? (double) dominantCount / totalFactors : 0;
+
+        // Also keep weighted vote for direction determination
         double directionVotes = priceDir * cfg.getPriceDirectionWeight()
                               + flowDir * cfg.getFlowDirectionWeight()
                               + ofiDir * cfg.getOfiDirectionWeight()
                               + depthDir * cfg.getDepthDirectionWeight()
                               + momentumDirection * cfg.getMomentumDirectionWeight();
 
-        double directionAgreement = Math.abs(directionVotes) / cfg.getMaxDirectionVotes();
-
         IPUOutput.Direction direction;
         double directionalConviction;
-        if (directionVotes > 0.5) {
+        
+        // FIX: Use count-based majority for direction, agreement for conviction
+        if (bullishCount > bearishCount && bullishCount >= 3) {
             direction = IPUOutput.Direction.BULLISH;
             directionalConviction = instProxy * directionAgreement;
-        } else if (directionVotes < -0.5) {
+        } else if (bearishCount > bullishCount && bearishCount >= 3) {
             direction = IPUOutput.Direction.BEARISH;
             directionalConviction = instProxy * directionAgreement;
+        } else if (Math.abs(directionVotes) > 0.3) {
+            // Fallback to weighted vote if count is ambiguous
+            direction = directionVotes > 0 ? IPUOutput.Direction.BULLISH : IPUOutput.Direction.BEARISH;
+            directionalConviction = instProxy * Math.abs(directionVotes) / cfg.getMaxDirectionVotes();
         } else {
             direction = IPUOutput.Direction.NEUTRAL;
             directionalConviction = 0;

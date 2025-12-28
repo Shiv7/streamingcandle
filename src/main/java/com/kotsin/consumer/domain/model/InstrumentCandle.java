@@ -129,11 +129,18 @@ public class InstrumentCandle {
 
     /**
      * Validate OHLCV data integrity
+     * FIX: Now checks for NaN and Infinity values
      * @return true if data is valid
      */
     public boolean isValid() {
         // Basic null checks
         if (scripCode == null || scripCode.isEmpty()) return false;
+        
+        // FIX: Check for NaN/Infinity in price values
+        if (Double.isNaN(open) || Double.isInfinite(open)) return false;
+        if (Double.isNaN(high) || Double.isInfinite(high)) return false;
+        if (Double.isNaN(low) || Double.isInfinite(low)) return false;
+        if (Double.isNaN(close) || Double.isInfinite(close)) return false;
         
         // OHLCV validation
         if (high < low) return false;          // High must be >= Low
@@ -144,15 +151,36 @@ public class InstrumentCandle {
         
         return true;
     }
+    
+    /**
+     * Check if a specific field has valid numeric value (not NaN or Infinite)
+     */
+    public static boolean isValidNumber(Double value) {
+        return value != null && !Double.isNaN(value) && !Double.isInfinite(value);
+    }
 
     /**
      * Get validation errors if any
+     * FIX: Now includes NaN/Infinity checks
      */
     public String getValidationErrors() {
         StringBuilder errors = new StringBuilder();
         
         if (scripCode == null || scripCode.isEmpty()) {
             errors.append("scripCode is null/empty;");
+        }
+        // FIX: Check for NaN/Infinity
+        if (Double.isNaN(open) || Double.isInfinite(open)) {
+            errors.append("open is NaN/Infinite;");
+        }
+        if (Double.isNaN(high) || Double.isInfinite(high)) {
+            errors.append("high is NaN/Infinite;");
+        }
+        if (Double.isNaN(low) || Double.isInfinite(low)) {
+            errors.append("low is NaN/Infinite;");
+        }
+        if (Double.isNaN(close) || Double.isInfinite(close)) {
+            errors.append("close is NaN/Infinite;");
         }
         if (high < low) {
             errors.append("high < low;");

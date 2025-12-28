@@ -270,6 +270,21 @@ public class StructureTracker {
         return history != null ? history.peekLast() : null;
     }
 
+    /**
+     * Get previous (second-to-last) completed candle
+     * Useful for MTF gate to avoid using partially formed current candle
+     */
+    public UnifiedCandle getPreviousCandle(String scripCode, String timeframe) {
+        Deque<UnifiedCandle> history = candleHistory.get(key(scripCode, timeframe));
+        if (history == null || history.size() < 2) {
+            return null;
+        }
+        
+        // Convert to list and get second-to-last
+        List<UnifiedCandle> list = new ArrayList<>(history);
+        return list.get(list.size() - 2);
+    }
+
     private String key(String scripCode, String timeframe) {
         return scripCode + ":" + timeframe;
     }

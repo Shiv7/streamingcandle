@@ -3,7 +3,6 @@ package com.kotsin.consumer.regime.processor;
 import com.kotsin.consumer.config.KafkaConfig;
 import com.kotsin.consumer.domain.model.FamilyCandle;
 import com.kotsin.consumer.domain.model.InstrumentCandle;
-import com.kotsin.consumer.model.EnrichedCandlestick;
 import com.kotsin.consumer.model.UnifiedCandle;
 import com.kotsin.consumer.processor.VCPProcessor;
 import com.kotsin.consumer.regime.model.*;
@@ -533,28 +532,6 @@ public class RegimeProcessor {
             case "999920043": return "MIDCPNIFTY";
             default: return "UNKNOWN";
         }
-    }
-
-    /**
-     * Convert UnifiedCandle list to EnrichedCandlestick list
-     */
-    private List<EnrichedCandlestick> convertToEnriched(List<UnifiedCandle> candles) {
-        List<EnrichedCandlestick> result = new ArrayList<>();
-        for (UnifiedCandle uc : candles) {
-            EnrichedCandlestick ec = new EnrichedCandlestick();
-            ec.setOpen(uc.getOpen());
-            ec.setHigh(uc.getHigh());
-            ec.setLow(uc.getLow());
-            ec.setClose(uc.getClose());
-            ec.setVolume(uc.getVolume());
-            ec.setBuyVolume(uc.getBuyVolume());
-            ec.setSellVolume(uc.getSellVolume());
-            ec.setVwap(uc.getVwap());
-            ec.setScripCode(uc.getScripCode());
-            ec.setCompanyName(uc.getCompanyName());
-            result.add(ec);
-        }
-        return result;
     }
 
     /**

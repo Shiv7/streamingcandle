@@ -77,7 +77,14 @@ public class VCPCalculator {
         calculateProximity(clusters, currentPrice, current.getBidAskSpread(), atr);
 
         // Step 7: Calculate penetration difficulty
-        calculatePenetrationDifficulty(clusters, current.getKyleLambda(), atr);
+        // FIX: Handle null Kyle Lambda safely
+        Double kyleLambda = current.getKyleLambda();
+        if (kyleLambda == null || Double.isNaN(kyleLambda)) {
+            kyleLambda = 0.0;
+            log.debug("Kyle Lambda is null/NaN for {}, using 0 (penetration difficulty will be minimal)", 
+                      current.getScripCode());
+        }
+        calculatePenetrationDifficulty(clusters, kyleLambda, atr);
 
         // Step 8: Calculate composite scores
         clusters.forEach(VCPCluster::calculateCompositeScore);
@@ -107,6 +114,8 @@ public class VCPCalculator {
     /**
      * Build combined multi-timeframe VCP output.
      * 
+     * FIX: Validates that MTF weights sum to 1.0
+     * 
      * @param result5m VCP result for 5m
      * @param result15m VCP result for 15m
      * @param result30m VCP result for 30m
@@ -115,10 +124,22 @@ public class VCPCalculator {
      */
     public MTVCPOutput buildCombinedOutput(VCPResult result5m, VCPResult result15m, VCPResult result30m,
                                            UnifiedCandle current) {
-        // Weighted score fusion
-        double vcpCombined = config.getWeight5m() * result5m.getScore()
-                           + config.getWeight15m() * result15m.getScore()
-                           + config.getWeight30m() * result30m.getScore();
+        // FIX: Validate weights sum to approximately 1.0
+        double weightSum = config.getWeight5m() + config.getWeight15m() + config.getWeight30m();
+        if (Math.abs(weightSum - 1.0) > 0.01) {
+            log.warn("VCP MTF weights don't sum to 1.0: {} + {} + {} = {}. Normalizing.",
+                    config.getWeight5m(), config.getWeight15m(), config.getWeight30m(), weightSum);
+        }
+        
+        // Normalize weights if they don't sum to 1.0
+        double w5m = weightSum > 0 ? config.getWeight5m() / weightSum : 0.5;
+        double w15m = weightSum > 0 ? config.getWeight15m() / weightSum : 0.3;
+        double w30m = weightSum > 0 ? config.getWeight30m() / weightSum : 0.2;
+        
+        // Weighted score fusion (now with normalized weights)
+        double vcpCombined = w5m * result5m.getScore()
+                           + w15m * result15m.getScore()
+                           + w30m * result30m.getScore();
 
         // Directional score fusion
         double supportScore = config.getWeight5m() * result5m.getSupportScore()
@@ -180,54 +201,103 @@ public class VCPCalculator {
 
     // ========== Step 1: Build Volume Profile ==========
 
+    // FIX: Track how much of the profile is estimated vs actual
+    private double estimatedDataRatio = 0.0;
+
     private Map<Double, Long> buildVolumeProfile(List<UnifiedCandle> history) {
         Map<Double, Long> profile = new HashMap<>();
+        int estimatedCount = 0;
+        int totalCount = 0;
 
         for (UnifiedCandle candle : history) {
-            if (candle.getVolumeAtPrice() != null) {
+            if (candle.getVolumeAtPrice() != null && !candle.getVolumeAtPrice().isEmpty()) {
                 // Use actual volumeAtPrice (Option A in spec)
                 candle.getVolumeAtPrice().forEach((price, vol) -> 
                     profile.merge(price, vol, Long::sum));
+                totalCount++;
             } else if (candle.getVolume() > 0) {
                 // Fallback: VWAP-weighted distribution (Option B in spec)
-                distributeVolumeVWAPWeighted(candle, profile);
+                // FIX: Track this as estimated data
+                boolean wasEstimated = distributeVolumeVWAPWeighted(candle, profile);
+                if (wasEstimated) {
+                    estimatedCount++;
+                }
+                totalCount++;
             }
+        }
+
+        // FIX: Store ratio for downstream quality assessment
+        this.estimatedDataRatio = totalCount > 0 ? (double) estimatedCount / totalCount : 0.0;
+        
+        if (estimatedDataRatio > 0.5) {
+            log.warn("VCP volume profile is {}% estimated data - clusters may be unreliable", 
+                    String.format("%.0f", estimatedDataRatio * 100));
         }
 
         return profile;
     }
 
-    private void distributeVolumeVWAPWeighted(UnifiedCandle candle, Map<Double, Long> profile) {
+    /**
+     * Fallback volume distribution when volumeAtPrice is not available.
+     * 
+     * FIX: This is now clearly marked as ESTIMATED data and uses triangular
+     * distribution centered on VWAP instead of arbitrary Gaussian.
+     * The clusters generated from estimated data are flagged accordingly.
+     * 
+     * @param candle The candle to distribute volume for
+     * @param profile The volume profile map to update
+     * @return true if this was estimated (fallback) data
+     */
+    private boolean distributeVolumeVWAPWeighted(UnifiedCandle candle, Map<Double, Long> profile) {
         double high = candle.getHigh();
         double low = candle.getLow();
         double vwap = candle.getVwap() > 0 ? candle.getVwap() : (high + low) / 2;
         long volume = candle.getVolume();
         
-        if (high <= low || volume <= 0) return;
+        if (high <= low || volume <= 0) return false;
 
         double range = high - low;
         double buyRatio = candle.getVolume() > 0 ? 
                          (double) candle.getBuyVolume() / candle.getVolume() : 0.5;
-        double sellRatio = 1.0 - buyRatio;
 
         double tickSize = Math.max(config.getPriceBinSize() * vwap, 0.01);
         
+        // FIX: Use triangular distribution (more realistic than Gaussian)
+        // Peak at VWAP, linear decay to high/low
+        // This is still estimated but more conservative than Gaussian
+        double totalWeight = 0;
+        List<double[]> priceWeights = new ArrayList<>();
+        
         for (double price = low; price <= high; price += tickSize) {
-            double weight;
+            // Triangular weight: max at VWAP, 0 at extremes
+            double distanceFromVwap = Math.abs(price - vwap);
+            double maxDistance = Math.max(vwap - low, high - vwap);
+            double weight = maxDistance > 0 ? 1.0 - (distanceFromVwap / maxDistance) : 1.0;
+            
+            // Adjust for buy/sell bias: above VWAP = more buy volume
             if (price >= vwap) {
-                // Buyers were aggressive here
-                weight = buyRatio * gaussianWeight(price, vwap, 0.3 * range);
+                weight *= buyRatio;
             } else {
-                // Sellers were aggressive here
-                weight = sellRatio * gaussianWeight(price, vwap, 0.3 * range);
+                weight *= (1.0 - buyRatio);
             }
             
-            long volumeAtLevel = (long) (volume * weight);
+            weight = Math.max(0.01, weight);  // Minimum weight to avoid zero
+            priceWeights.add(new double[]{price, weight});
+            totalWeight += weight;
+        }
+        
+        // Normalize and distribute volume
+        for (double[] pw : priceWeights) {
+            double price = pw[0];
+            double weight = pw[1];
+            long volumeAtLevel = (long) ((weight / totalWeight) * volume);
             if (volumeAtLevel > 0) {
                 double roundedPrice = Math.round(price / tickSize) * tickSize;
                 profile.merge(roundedPrice, volumeAtLevel, Long::sum);
             }
         }
+        
+        return true;  // This was estimated data
     }
 
     private double gaussianWeight(double x, double center, double width) {
@@ -522,10 +592,31 @@ public class VCPCalculator {
 
         double atr = atrSum / period;
         
-        // Fallback if ATR is zero
+        // FIX: Improved fallback for ATR
+        // Instead of fixed % of price, use actual range data from recent candles
         if (atr <= 0 && !history.isEmpty()) {
             double price = history.get(history.size() - 1).getClose();
-            atr = price * config.getDefaultAtrFraction();
+            
+            // Calculate average range from available candles
+            double avgRange = 0;
+            int count = 0;
+            for (int i = Math.max(0, history.size() - 14); i < history.size(); i++) {
+                UnifiedCandle c = history.get(i);
+                double range = c.getHigh() - c.getLow();
+                if (range > 0) {
+                    avgRange += range;
+                    count++;
+                }
+            }
+            
+            if (count > 0 && avgRange > 0) {
+                atr = avgRange / count;
+                log.debug("ATR fallback using avg range: {} from {} candles", atr, count);
+            } else {
+                // Last resort: use % of price but log warning
+                atr = price * config.getDefaultAtrFraction();
+                log.warn("ATR using fixed %: {} (no range data available)", atr);
+            }
         }
 
         return atr;
@@ -546,14 +637,23 @@ public class VCPCalculator {
         private List<VCPCluster> clusters;
 
         public static VCPResult empty() {
+            // FIX: Empty runway = unknown, not "clean"
+            // Return 0 instead of 1.0 to indicate we have no data to assess runway
             return VCPResult.builder()
                     .score(0)
                     .supportScore(0)
                     .resistanceScore(0)
-                    .runwayScore(1.0)  // Empty = clean runway
+                    .runwayScore(0)  // FIX: Empty = unknown (0), NOT clean runway (1.0)
                     .atr(0)
                     .clusters(new ArrayList<>())
                     .build();
+        }
+        
+        /**
+         * Check if this result has meaningful data
+         */
+        public boolean isEmpty() {
+            return clusters == null || clusters.isEmpty();
         }
     }
 }

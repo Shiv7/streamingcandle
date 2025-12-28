@@ -12,7 +12,9 @@ import org.springframework.stereotype.Service;
  * RetestDetector - Detects when price retests the breakout pivot level
  *
  * After a breakout, we wait for price to pullback and retest the breakout level
- * (which becomes new support). This provides a better entry with lower risk.
+ * (which becomes new support/resistance). This provides a better entry with lower risk.
+ * 
+ * FIX: Now supports both BULLISH and BEARISH retest detection
  */
 @Service
 public class RetestDetector {
@@ -23,7 +25,26 @@ public class RetestDetector {
     private static final double MIN_RISK_REWARD = 1.5;
 
     /**
-     * Detect retest at breakout pivot level
+     * Detect retest at breakout pivot level (auto-detects direction from breakout)
+     *
+     * @param breakout The breakout bar containing pivot and direction info
+     * @param currentCandle Current candle to check for retest
+     * @param atr Average True Range for stop calculation
+     * @return RetestEntry if valid retest detected, null otherwise
+     */
+    public RetestEntry detectRetest(BreakoutBar breakout, UnifiedCandle currentCandle, double atr) {
+        // FIX: Determine direction from breakout
+        boolean isBullishBreakout = breakout.getBreakoutHigh() > breakout.getPivotLevel();
+        
+        if (isBullishBreakout) {
+            return detectBullishRetest(breakout, currentCandle, atr);
+        } else {
+            return detectBearishRetest(breakout, currentCandle, atr);
+        }
+    }
+
+    /**
+     * Detect BULLISH retest - price pulls back to support after breakout up
      *
      * Conditions:
      * 1. Current bar's low touches pivot (within tolerance)
@@ -31,12 +52,10 @@ public class RetestDetector {
      * 3. Volume delta > 0 (buyers > sellers)
      * 4. OFI > 0 (order flow imbalance favors buyers)
      */
-    public RetestEntry detectRetest(BreakoutBar breakout, UnifiedCandle currentCandle, double atr) {
-
+    private RetestEntry detectBullishRetest(BreakoutBar breakout, UnifiedCandle currentCandle, double atr) {
         double pivotLevel = breakout.getPivotLevel();
         double currentLow = currentCandle.getLow();
         double currentClose = currentCandle.getClose();
-        double currentHigh = currentCandle.getHigh();
 
         // 1. Check if low touches pivot (within tolerance)
         double tolerance = pivotLevel * PIVOT_TOLERANCE_PCT;
@@ -50,7 +69,7 @@ public class RetestDetector {
         boolean closesAbovePivot = currentClose > pivotLevel;
 
         if (!closesAbovePivot) {
-            log.debug("Retest rejected for {}: Closes below pivot", breakout.getScripCode());
+            log.debug("Bullish retest rejected for {}: Closes below pivot", breakout.getScripCode());
             return null;
         }
 
@@ -58,28 +77,28 @@ public class RetestDetector {
         boolean buyingPressure = currentCandle.getVolumeDelta() > 0;
 
         if (!buyingPressure) {
-            log.debug("Retest rejected for {}: No buying pressure (volume delta)", breakout.getScripCode());
+            log.debug("Bullish retest rejected for {}: No buying pressure (volume delta)", breakout.getScripCode());
             return null;
         }
 
-        // 4. Check OFI (order flow buying pressure)
-        boolean ofiBuyingPressure = currentCandle.getOfi() > 0;
+        // 4. Check OFI (order flow buying pressure) - allow NaN (no OFI data)
+        double ofi = currentCandle.getOfi();
+        boolean ofiBuyingPressure = Double.isNaN(ofi) || ofi > 0;
 
         if (!ofiBuyingPressure) {
-            log.debug("Retest rejected for {}: No OFI buying pressure", breakout.getScripCode());
+            log.debug("Bullish retest rejected for {}: OFI selling pressure", breakout.getScripCode());
             return null;
         }
 
         // Calculate entry levels
-        double entryPrice = currentClose;  // Enter at close
+        double entryPrice = currentClose;
         double microprice = currentCandle.getMicroprice();
 
-        // Use microprice if available and close to current close
         if (microprice > 0 && Math.abs(microprice - currentClose) < (atr * 0.1)) {
             entryPrice = microprice;
         }
 
-        // Stop loss: Below pivot with safety margin (using ATR)
+        // Stop loss: Below pivot with safety margin
         double stopLoss = pivotLevel - atr;
 
         // Target: Measured move (add breakout range to breakout high)
@@ -91,13 +110,11 @@ public class RetestDetector {
         double rewardAmount = target - entryPrice;
         double riskReward = riskAmount > 0 ? rewardAmount / riskAmount : 0;
 
-        // Check minimum R:R
         if (riskReward < MIN_RISK_REWARD) {
-            log.debug("Retest rejected for {}: Poor R:R={}", breakout.getScripCode(), riskReward);
+            log.debug("Bullish retest rejected for {}: Poor R:R={}", breakout.getScripCode(), riskReward);
             return null;
         }
 
-        // ALL CONDITIONS MET - Valid retest entry!
         RetestEntry entry = RetestEntry.builder()
                 .scripCode(breakout.getScripCode())
                 .timestamp(currentCandle.getWindowEndMillis())
@@ -109,12 +126,111 @@ public class RetestDetector {
                 .microprice(microprice)
                 .retestBarVolume(currentCandle.getVolume())
                 .retestBarVolumeDelta(currentCandle.getVolumeDelta())
-                .retestBarOFI(currentCandle.getOfi())
+                .retestBarOFI(ofi)
                 .buyingPressure(true)
-                .positionSizeMultiplier(1.0)  // Will be adjusted by scorer
+                .positionSizeMultiplier(1.0)
                 .build();
 
-        log.info("✅ RETEST ENTRY CONFIRMED: {} @ {} | Stop={} | Target={} | R:R={}",
+        log.info("✅ BULLISH RETEST ENTRY: {} @ {} | Stop={} | Target={} | R:R={}",
+                breakout.getScripCode(),
+                String.format("%.2f", entryPrice),
+                String.format("%.2f", stopLoss),
+                String.format("%.2f", target),
+                String.format("%.2f", riskReward));
+
+        return entry;
+    }
+
+    /**
+     * FIX: Detect BEARISH retest - price rallies back to resistance after breakdown
+     *
+     * Conditions:
+     * 1. Current bar's high touches pivot (within tolerance)
+     * 2. Current bar closes below pivot (selling pressure)
+     * 3. Volume delta < 0 (sellers > buyers)
+     * 4. OFI < 0 (order flow imbalance favors sellers)
+     */
+    private RetestEntry detectBearishRetest(BreakoutBar breakout, UnifiedCandle currentCandle, double atr) {
+        double pivotLevel = breakout.getPivotLevel();
+        double currentHigh = currentCandle.getHigh();
+        double currentClose = currentCandle.getClose();
+
+        // 1. Check if high touches pivot (within tolerance)
+        double tolerance = pivotLevel * PIVOT_TOLERANCE_PCT;
+        boolean touchesPivot = Math.abs(currentHigh - pivotLevel) <= tolerance;
+
+        if (!touchesPivot) {
+            return null;  // Not touching pivot
+        }
+
+        // 2. Check if closes below pivot (selling pressure)
+        boolean closesBelowPivot = currentClose < pivotLevel;
+
+        if (!closesBelowPivot) {
+            log.debug("Bearish retest rejected for {}: Closes above pivot", breakout.getScripCode());
+            return null;
+        }
+
+        // 3. Check volume delta (selling pressure)
+        boolean sellingPressure = currentCandle.getVolumeDelta() < 0;
+
+        if (!sellingPressure) {
+            log.debug("Bearish retest rejected for {}: No selling pressure (volume delta)", breakout.getScripCode());
+            return null;
+        }
+
+        // 4. Check OFI (order flow selling pressure) - allow NaN (no OFI data)
+        double ofi = currentCandle.getOfi();
+        boolean ofiSellingPressure = Double.isNaN(ofi) || ofi < 0;
+
+        if (!ofiSellingPressure) {
+            log.debug("Bearish retest rejected for {}: OFI buying pressure", breakout.getScripCode());
+            return null;
+        }
+
+        // Calculate entry levels for SHORT
+        double entryPrice = currentClose;
+        double microprice = currentCandle.getMicroprice();
+
+        if (microprice > 0 && Math.abs(microprice - currentClose) < (atr * 0.1)) {
+            entryPrice = microprice;
+        }
+
+        // Stop loss: Above pivot with safety margin (for short)
+        double stopLoss = pivotLevel + atr;
+
+        // Target: Measured move DOWN (subtract breakdown range from breakdown low)
+        double breakdownLow = breakout.getBreakoutLow() != 0 ? breakout.getBreakoutLow() : pivotLevel - atr;
+        double breakdownRange = breakout.getPivotLevel() - breakdownLow;
+        double target = breakdownLow - breakdownRange;
+
+        // Calculate risk/reward (for short: risk = stop - entry, reward = entry - target)
+        double riskAmount = stopLoss - entryPrice;
+        double rewardAmount = entryPrice - target;
+        double riskReward = riskAmount > 0 ? rewardAmount / riskAmount : 0;
+
+        if (riskReward < MIN_RISK_REWARD) {
+            log.debug("Bearish retest rejected for {}: Poor R:R={}", breakout.getScripCode(), riskReward);
+            return null;
+        }
+
+        RetestEntry entry = RetestEntry.builder()
+                .scripCode(breakout.getScripCode())
+                .timestamp(currentCandle.getWindowEndMillis())
+                .entryPrice(entryPrice)
+                .stopLoss(stopLoss)
+                .target(target)
+                .riskReward(riskReward)
+                .pivotLevel(pivotLevel)
+                .microprice(microprice)
+                .retestBarVolume(currentCandle.getVolume())
+                .retestBarVolumeDelta(currentCandle.getVolumeDelta())
+                .retestBarOFI(ofi)
+                .buyingPressure(false)  // FIX: Selling pressure for shorts
+                .positionSizeMultiplier(1.0)
+                .build();
+
+        log.info("✅ BEARISH RETEST ENTRY (SHORT): {} @ {} | Stop={} | Target={} | R:R={}",
                 breakout.getScripCode(),
                 String.format("%.2f", entryPrice),
                 String.format("%.2f", stopLoss),

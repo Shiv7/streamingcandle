@@ -21,7 +21,30 @@ import java.util.Map;
 public class OFICalculator {
 
     /**
-     * Calculate full-depth OFI from orderbook changes
+     * OFI calculation result with data quality information
+     */
+    @lombok.Data
+    @lombok.AllArgsConstructor
+    public static class OFIResult {
+        private double ofi;
+        private boolean hasValidPreviousData;
+        private String reason;  // Null if valid, otherwise reason for invalid
+        
+        public static OFIResult invalid(String reason) {
+            return new OFIResult(Double.NaN, false, reason);
+        }
+        
+        public static OFIResult valid(double ofi) {
+            return new OFIResult(ofi, true, null);
+        }
+        
+        public boolean isValid() {
+            return hasValidPreviousData && !Double.isNaN(ofi);
+        }
+    }
+
+    /**
+     * Calculate full-depth OFI from orderbook changes (with data quality tracking)
      *
      * @param prevBid Previous bid depth map (price -> quantity)
      * @param currBid Current bid depth map
@@ -31,7 +54,36 @@ public class OFICalculator {
      * @param currAsk Current ask depth map
      * @param prevBestAsk Previous best ask price
      * @param currBestAsk Current best ask price
-     * @return OFI value (positive = buying pressure, negative = selling pressure)
+     * @return OFIResult with value and data quality info
+     */
+    public static OFIResult calculateWithQuality(
+        Map<Double, Integer> prevBid, Map<Double, Integer> currBid,
+        double prevBestBid, double currBestBid,
+        Map<Double, Integer> prevAsk, Map<Double, Integer> currAsk,
+        double prevBestAsk, double currBestAsk
+    ) {
+        // FIX: Return NaN with reason instead of 0 for missing previous data
+        if (prevBid == null || prevAsk == null) {
+            return OFIResult.invalid("No previous orderbook data (first observation)");
+        }
+        if (currBid == null || currAsk == null) {
+            return OFIResult.invalid("No current orderbook data");
+        }
+        if (prevBid.isEmpty() && prevAsk.isEmpty()) {
+            return OFIResult.invalid("Previous orderbook was empty");
+        }
+        
+        double ofi = calculateInternal(prevBid, currBid, prevBestBid, currBestBid, 
+                                        prevAsk, currAsk, prevBestAsk, currBestAsk);
+        return OFIResult.valid(ofi);
+    }
+
+    /**
+     * Calculate full-depth OFI from orderbook changes
+     * 
+     * FIX: Now returns NaN instead of 0 for missing data
+     *
+     * @return OFI value (positive = buying pressure, negative = selling pressure, NaN = no data)
      */
     public static double calculate(
         Map<Double, Integer> prevBid, Map<Double, Integer> currBid,
@@ -39,9 +91,22 @@ public class OFICalculator {
         Map<Double, Integer> prevAsk, Map<Double, Integer> currAsk,
         double prevBestAsk, double currBestAsk
     ) {
+        // FIX: Return NaN instead of 0 for null previous data
+        // This prevents false "neutral pressure" signal when we have no data
         if (prevBid == null || currBid == null || prevAsk == null || currAsk == null) {
-            return 0.0;
+            return Double.NaN;
         }
+        
+        return calculateInternal(prevBid, currBid, prevBestBid, currBestBid, 
+                                  prevAsk, currAsk, prevBestAsk, currBestAsk);
+    }
+
+    private static double calculateInternal(
+        Map<Double, Integer> prevBid, Map<Double, Integer> currBid,
+        double prevBestBid, double currBestBid,
+        Map<Double, Integer> prevAsk, Map<Double, Integer> currAsk,
+        double prevBestAsk, double currBestAsk
+    ) {
 
         double deltaBid = 0.0;
         double deltaAsk = 0.0;
@@ -79,6 +144,13 @@ public class OFICalculator {
         }
 
         return deltaBid - deltaAsk;
+    }
+
+    /**
+     * Check if OFI value is valid (not NaN)
+     */
+    public static boolean isValidOFI(double ofi) {
+        return !Double.isNaN(ofi) && !Double.isInfinite(ofi);
     }
 
     /**

@@ -1,6 +1,5 @@
 package com.kotsin.consumer.regime.service;
 
-import com.kotsin.consumer.model.EnrichedCandlestick;
 import com.kotsin.consumer.model.UnifiedCandle;
 import com.kotsin.consumer.regime.model.IndexRegime;
 import com.kotsin.consumer.regime.model.RegimeLabel;

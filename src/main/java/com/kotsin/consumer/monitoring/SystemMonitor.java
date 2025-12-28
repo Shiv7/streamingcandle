@@ -27,7 +27,7 @@ public class SystemMonitor {
     
     private final MemoryMXBean memoryBean = ManagementFactory.getMemoryMXBean();
     
-    private long lastReportTime = System.currentTimeMillis();
+    private final long startTime = System.currentTimeMillis();
     private long lastAlertTime = 0;
     private static final long ALERT_COOLDOWN_MS = 60000; // 1 minute cooldown
 
@@ -57,8 +57,6 @@ public class SystemMonitor {
         checkAlertConditions(heapUsedPercent);
         
         log.info("============================");
-        
-        lastReportTime = System.currentTimeMillis();
     }
 
     /**
@@ -144,7 +142,7 @@ public class SystemMonitor {
         metrics.put("system.healthy", isSystemHealthy());
         
         // Uptime
-        long uptime = System.currentTimeMillis() - lastReportTime;
+        long uptime = System.currentTimeMillis() - startTime;
         metrics.put("system.uptime.seconds", uptime / 1000);
         
         return metrics;

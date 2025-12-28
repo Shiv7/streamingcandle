@@ -11,7 +11,9 @@ import java.util.stream.Collectors;
  * 
  * Calculates Put/Call Ratio from options data for sentiment analysis.
  * 
- * PCR = Total Put OI / Total Call OI
+ * TWO MODES:
+ * 1. OI-based PCR: For overnight/swing analysis (position buildup)
+ * 2. Volume-based PCR: For intraday analysis (current activity)
  * 
  * Interpretation:
  * - PCR > 1.0: More puts than calls = bearish sentiment (contrarian bullish)
@@ -26,7 +28,94 @@ import java.util.stream.Collectors;
 public class PCRCalculator {
 
     /**
-     * Calculate PCR from list of option candles
+     * PCR Result containing both OI and Volume based PCR
+     */
+    @lombok.Data
+    @lombok.Builder
+    @lombok.AllArgsConstructor
+    public static class PCRResult {
+        private Double oiPcr;           // OI-based PCR (for swing/overnight)
+        private Double volumePcr;       // Volume-based PCR (for intraday)
+        private Double combinedPcr;     // Weighted combination
+        private long totalCallOI;
+        private long totalPutOI;
+        private long totalCallVolume;
+        private long totalPutVolume;
+        private String sentiment;       // EXTREME_BEARISH, BEARISH, NEUTRAL, BULLISH, EXTREME_BULLISH
+        
+        public boolean isValid() {
+            return oiPcr != null || volumePcr != null;
+        }
+    }
+
+    /**
+     * Calculate comprehensive PCR from list of option candles
+     * Returns both OI-based and Volume-based PCR for different timeframe analysis
+     *
+     * @param options List of option candles (should contain both CE and PE)
+     * @param intradayMode If true, weight volume PCR higher; otherwise weight OI PCR higher
+     * @return PCRResult with both PCR types (null if insufficient data)
+     */
+    public static PCRResult calculateComprehensive(List<OptionCandle> options, boolean intradayMode) {
+        if (options == null || options.isEmpty()) {
+            return null;
+        }
+
+        long totalCallOI = options.stream()
+            .filter(OptionCandle::isCall)
+            .mapToLong(OptionCandle::getOpenInterest)
+            .sum();
+
+        long totalPutOI = options.stream()
+            .filter(OptionCandle::isPut)
+            .mapToLong(OptionCandle::getOpenInterest)
+            .sum();
+
+        long totalCallVolume = options.stream()
+            .filter(OptionCandle::isCall)
+            .mapToLong(OptionCandle::getVolume)
+            .sum();
+
+        long totalPutVolume = options.stream()
+            .filter(OptionCandle::isPut)
+            .mapToLong(OptionCandle::getVolume)
+            .sum();
+
+        Double oiPcr = totalCallOI > 0 ? (double) totalPutOI / totalCallOI : null;
+        Double volumePcr = totalCallVolume > 0 ? (double) totalPutVolume / totalCallVolume : null;
+
+        // Combined PCR: weight based on trading mode
+        Double combinedPcr = null;
+        if (oiPcr != null && volumePcr != null) {
+            if (intradayMode) {
+                // Intraday: 70% volume, 30% OI
+                combinedPcr = volumePcr * 0.7 + oiPcr * 0.3;
+            } else {
+                // Swing/Overnight: 70% OI, 30% volume
+                combinedPcr = oiPcr * 0.7 + volumePcr * 0.3;
+            }
+        } else if (oiPcr != null) {
+            combinedPcr = oiPcr;
+        } else if (volumePcr != null) {
+            combinedPcr = volumePcr;
+        }
+
+        String sentiment = classifySentiment(combinedPcr);
+
+        return PCRResult.builder()
+            .oiPcr(oiPcr)
+            .volumePcr(volumePcr)
+            .combinedPcr(combinedPcr)
+            .totalCallOI(totalCallOI)
+            .totalPutOI(totalPutOI)
+            .totalCallVolume(totalCallVolume)
+            .totalPutVolume(totalPutVolume)
+            .sentiment(sentiment)
+            .build();
+    }
+
+    /**
+     * Calculate OI-based PCR from list of option candles (legacy method)
      *
      * @param options List of option candles (should contain both CE and PE)
      * @return PCR value (null if insufficient data)
