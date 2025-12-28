@@ -92,7 +92,7 @@ public class BreakoutDetector {
         log.info("BREAKOUT_CHECK {} {} | OFI/Delta check: {} (ofi={}, delta={})",
             scripCode, timeframe, ofiPass ? "✓" : "FAIL",
             String.format("%.2f", currentCandle.getOfi()),
-            String.format("%.2f", currentCandle.getVolumeDelta()));
+            currentCandle.getVolumeDelta());  // FIX: volumeDelta is long, not double
         
         if (!ofiPass) {
             return null;
