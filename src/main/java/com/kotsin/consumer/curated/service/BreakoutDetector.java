@@ -40,11 +40,14 @@ public class BreakoutDetector {
         // 1. Check if consolidation pattern exists
         ConsolidationPattern consolidation = structureTracker.detectConsolidation(scripCode, timeframe);
         if (consolidation == null) {
+            log.debug("detectBreakout: {} {} - No consolidation pattern", scripCode, timeframe);
             return null;  // No consolidation, no breakout possible
         }
 
         // 2. Check if price breaks above recent high
         if (currentCandle.getClose() <= consolidation.getRecentHigh()) {
+            log.debug("detectBreakout: {} {} - No price breakout (close={} <= high={})", 
+                scripCode, timeframe, currentCandle.getClose(), consolidation.getRecentHigh());
             return null;  // No price breakout
         }
 
@@ -118,8 +121,15 @@ public class BreakoutDetector {
 
         // Need at least one candle
         if (candle1m == null && candle2m == null && candle3m == null) {
+            log.debug("detectMultiTFBreakout: {} - No candles found in any timeframe", scripCode);
             return null;
         }
+        
+        log.debug("detectMultiTFBreakout: {} - Candles: 1m={}, 2m={}, 3m={}", 
+            scripCode, 
+            candle1m != null ? candle1m.getClose() : "null",
+            candle2m != null ? candle2m.getClose() : "null",
+            candle3m != null ? candle3m.getClose() : "null");
 
         // Detect breakout on each timeframe
         BreakoutBar breakout1m = candle1m != null ? detectBreakout(scripCode, "1m", candle1m) : null;

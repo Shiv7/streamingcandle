@@ -160,34 +160,46 @@ public class StructureTracker {
 
     /**
      * Detect consolidation pattern (Lower Highs + Higher Lows)
+     * BUG-FIX: Use latest candle timestamp instead of System.currentTimeMillis()
+     * This allows proper detection during replay/historical data processing.
      */
     public ConsolidationPattern detectConsolidation(String scripCode, String timeframe) {
         String key = key(scripCode, timeframe);
         List<SwingPoint> points = swingPoints.get(key);
 
         if (points == null || points.size() < 4) {
+            log.debug("detectConsolidation: {} {} - Not enough swing points ({})", 
+                scripCode, timeframe, points == null ? 0 : points.size());
             return null;
         }
 
-        long currentTime = System.currentTimeMillis();
+        // BUG-FIX: Use the latest swing point timestamp as reference, not real clock
+        // This enables proper consolidation detection during replay/historical data
+        long latestSwingTimestamp = points.stream()
+                .mapToLong(SwingPoint::getTimestamp)
+                .max()
+                .orElse(System.currentTimeMillis());
+        
         long maxAge = 30 * 60 * 1000; // 30 minutes
 
-        // Get recent highs and lows
+        // Get recent highs and lows (relative to latest swing point, not real time)
         List<SwingPoint> recentHighs = points.stream()
                 .filter(p -> p.getType() == SwingPoint.SwingType.HIGH)
-                .filter(p -> p.isRecent(currentTime, maxAge))
+                .filter(p -> p.isRecent(latestSwingTimestamp, maxAge))
                 .sorted(Comparator.comparing(SwingPoint::getTimestamp).reversed())
                 .limit(2)
                 .collect(Collectors.toList());
 
         List<SwingPoint> recentLows = points.stream()
                 .filter(p -> p.getType() == SwingPoint.SwingType.LOW)
-                .filter(p -> p.isRecent(currentTime, maxAge))
+                .filter(p -> p.isRecent(latestSwingTimestamp, maxAge))
                 .sorted(Comparator.comparing(SwingPoint::getTimestamp).reversed())
                 .limit(2)
                 .collect(Collectors.toList());
 
         if (recentHighs.size() < 2 || recentLows.size() < 2) {
+            log.debug("detectConsolidation: {} {} - Not enough recent swings (highs={}, lows={})", 
+                scripCode, timeframe, recentHighs.size(), recentLows.size());
             return null;
         }
 
@@ -198,6 +210,8 @@ public class StructureTracker {
         boolean higherLow = recentLows.get(0).getPrice() > recentLows.get(1).getPrice();
 
         if (!lowerHigh || !higherLow) {
+            log.debug("detectConsolidation: {} {} - No LH/HL pattern (LH={}, HL={})", 
+                scripCode, timeframe, lowerHigh, higherLow);
             return null;  // Not a consolidation pattern
         }
 
@@ -212,6 +226,11 @@ public class StructureTracker {
 
         boolean isCoiling = compressionRatio < COMPRESSION_THRESHOLD;
 
+        log.info("✨ CONSOLIDATION DETECTED: {} {} | High={} Low={} | Compression={} | Coiling={}",
+                scripCode, timeframe, 
+                String.format("%.2f", recentHighPrice), String.format("%.2f", recentLowPrice),
+                String.format("%.2f", compressionRatio), isCoiling);
+        
         return ConsolidationPattern.builder()
                 .scripCode(scripCode)
                 .timeframe(timeframe)
@@ -220,7 +239,7 @@ public class StructureTracker {
                 .compressionRatio(compressionRatio)
                 .isCoiling(isCoiling)
                 .atr(atr)
-                .detectedAt(currentTime)
+                .detectedAt(latestSwingTimestamp)  // Use swing timestamp, not real time
                 .build();
     }
 
