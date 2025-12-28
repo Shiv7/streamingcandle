@@ -533,11 +533,32 @@ public class VCPCalculator {
     private double calculateVCPScore(List<VCPCluster> clusters) {
         if (clusters.isEmpty()) return 0;
         
-        double sum = clusters.stream()
+        // BUG-FIX: Use weighted AVERAGE instead of SUM
+        // Summing composite scores meant 3+ clusters ALWAYS hit 1.0 (100%)
+        // Now we calculate: average(compositeScores) * qualityBonus
+        double avgComposite = clusters.stream()
                 .mapToDouble(VCPCluster::getCompositeScore)
-                .sum();
+                .average()
+                .orElse(0);
         
-        return Math.min(sum, 1.0);
+        // Quality bonus: more clusters = higher confidence (up to 20% boost)
+        double clusterCountBonus = Math.min(0.2, (clusters.size() - 1) * 0.05);
+        
+        // Alignment bonus: well-aligned clusters get boost
+        long alignedCount = clusters.stream().filter(VCPCluster::isAligned).count();
+        double alignmentBonus = clusters.size() > 0 ? 
+                (double) alignedCount / clusters.size() * 0.15 : 0;
+        
+        double result = Math.min(avgComposite * (1 + clusterCountBonus + alignmentBonus), 1.0);
+        
+        log.debug("VCP score: avg={} clusters={} aligned={} bonus={} final={}",
+                String.format("%.3f", avgComposite),
+                clusters.size(),
+                alignedCount,
+                String.format("%.2f", clusterCountBonus + alignmentBonus),
+                String.format("%.3f", result));
+        
+        return result;
     }
 
     private double calculateSupportScore(List<VCPCluster> clusters) {
