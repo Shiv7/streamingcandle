@@ -8,6 +8,7 @@ import com.kotsin.consumer.model.UnifiedCandle;
 import com.kotsin.consumer.processor.VCPProcessor;
 import com.kotsin.consumer.regime.model.*;
 import com.kotsin.consumer.regime.service.*;
+import com.kotsin.consumer.util.FamilyCandleConverter;
 
 import jakarta.annotation.PostConstruct;
 import jakarta.annotation.PreDestroy;
@@ -158,35 +159,39 @@ public class RegimeProcessor {
                 .foreach((k, familyCandle) -> {
                     InstrumentCandle equity = familyCandle.getEquity();
                     if (equity == null) return;
-                    UnifiedCandle candle = convertToUnifiedCandle(equity);
+                    UnifiedCandle candle = FamilyCandleConverter.toUnifiedCandle(equity);
                     CandleCache cache = candleCache.computeIfAbsent(candle.getScripCode(), c -> new CandleCache());
                     cache.addCandle("5m", candle, historyLookback);
                 });
 
-        // Try to consume 2H candles (may not exist in all deployments)
+        // Try to consume 2H family candles (may not exist in all deployments)
         try {
-            builder.stream("candle-ohlcv-2h", Consumed.with(Serdes.String(), 
-                    com.kotsin.consumer.model.EnrichedCandlestick.serde()))
-                .filter((k, v) -> v != null && INDEX_SCRIP_CODES.contains(v.getScripCode()))
-                .foreach((k, candle) -> {
-                    CandleCache cache = candleCache.computeIfAbsent(candle.getScripCode(), c -> new CandleCache());
-                    cache.addCandle("2h", candle, 20);
+            builder.stream(inputTopicPrefix + "2h", Consumed.with(Serdes.String(), FamilyCandle.serde()))
+                .filter((k, v) -> v != null && v.getEquity() != null && INDEX_SCRIP_CODES.contains(v.getEquity().getScripCode()))
+                .foreach((k, familyCandle) -> {
+                    InstrumentCandle equity = familyCandle.getEquity();
+                    if (equity == null) return;
+                    EnrichedCandlestick enriched = FamilyCandleConverter.toEnrichedCandlestick(equity);
+                    CandleCache cache = candleCache.computeIfAbsent(equity.getScripCode(), c -> new CandleCache());
+                    cache.addCandle("2h", enriched, 20);
                 });
         } catch (Exception e) {
-            LOGGER.warn("2H candle topic not available: {}", e.getMessage());
+            LOGGER.warn("2H family-candle topic not available: {}", e.getMessage());
         }
 
-        // Try to consume 1D candles (may not exist in all deployments)
+        // Try to consume 1D family candles (may not exist in all deployments)
         try {
-            builder.stream("candle-ohlcv-1d", Consumed.with(Serdes.String(), 
-                    com.kotsin.consumer.model.EnrichedCandlestick.serde()))
-                .filter((k, v) -> v != null && INDEX_SCRIP_CODES.contains(v.getScripCode()))
-                .foreach((k, candle) -> {
-                    CandleCache cache = candleCache.computeIfAbsent(candle.getScripCode(), c -> new CandleCache());
-                    cache.addCandle("1d", candle, 10);
+            builder.stream(inputTopicPrefix + "1d", Consumed.with(Serdes.String(), FamilyCandle.serde()))
+                .filter((k, v) -> v != null && v.getEquity() != null && INDEX_SCRIP_CODES.contains(v.getEquity().getScripCode()))
+                .foreach((k, familyCandle) -> {
+                    InstrumentCandle equity = familyCandle.getEquity();
+                    if (equity == null) return;
+                    EnrichedCandlestick enriched = FamilyCandleConverter.toEnrichedCandlestick(equity);
+                    CandleCache cache = candleCache.computeIfAbsent(equity.getScripCode(), c -> new CandleCache());
+                    cache.addCandle("1d", enriched, 10);
                 });
         } catch (Exception e) {
-            LOGGER.warn("1D candle topic not available: {}", e.getMessage());
+            LOGGER.warn("1D family-candle topic not available: {}", e.getMessage());
         }
 
         // Filter for index scrip codes only
@@ -204,7 +209,7 @@ public class RegimeProcessor {
                     }
 
                     // Convert to UnifiedCandle for backwards compatibility
-                    UnifiedCandle candle = convertToUnifiedCandle(equity);
+                    UnifiedCandle candle = FamilyCandleConverter.toUnifiedCandle(equity);
 
                     // Update cache
                     CandleCache cache = candleCache.computeIfAbsent(candle.getScripCode(), k -> new CandleCache());
@@ -402,7 +407,7 @@ public class RegimeProcessor {
             }
 
             // Convert to UnifiedCandle for backwards compatibility
-            UnifiedCandle candle = convertToUnifiedCandle(equity);
+            UnifiedCandle candle = FamilyCandleConverter.toUnifiedCandle(equity);
 
             // Get or create history
             VCPProcessor.CandleHistory history = historyStore.get(key);
@@ -473,7 +478,7 @@ public class RegimeProcessor {
             }
 
             // Convert to UnifiedCandle for backwards compatibility
-            UnifiedCandle candle = convertToUnifiedCandle(equity);
+            UnifiedCandle candle = FamilyCandleConverter.toUnifiedCandle(equity);
 
             // Get or create history
             VCPProcessor.CandleHistory history = historyStore.get(key);
@@ -542,62 +547,6 @@ public class RegimeProcessor {
             case "999920043": return "MIDCPNIFTY";
             default: return "UNKNOWN";
         }
-    }
-
-    /**
-     * Convert InstrumentCandle to UnifiedCandle for backwards compatibility
-     */
-    private static UnifiedCandle convertToUnifiedCandle(InstrumentCandle instrument) {
-        return UnifiedCandle.builder()
-                .scripCode(instrument.getScripCode())
-                .companyName(instrument.getCompanyName())
-                .exchange(instrument.getExchange())
-                .exchangeType(instrument.getExchangeType())
-                .timeframe(instrument.getTimeframe())
-                .windowStartMillis(instrument.getWindowStartMillis())
-                .windowEndMillis(instrument.getWindowEndMillis())
-                .humanReadableStartTime(instrument.getHumanReadableTime())
-                .humanReadableEndTime(instrument.getHumanReadableTime())
-                // OHLCV
-                .open(instrument.getOpen())
-                .high(instrument.getHigh())
-                .low(instrument.getLow())
-                .close(instrument.getClose())
-                .volume(instrument.getVolume())
-                .buyVolume(instrument.getBuyVolume())
-                .sellVolume(instrument.getSellVolume())
-                .vwap(instrument.getVwap())
-                .tickCount(instrument.getTickCount())
-                // Volume Profile
-                .volumeAtPrice(instrument.getVolumeAtPrice())
-                .poc(instrument.getPoc())
-                .valueAreaHigh(instrument.getVah())
-                .valueAreaLow(instrument.getVal())
-                // Imbalance
-                .volumeImbalance(instrument.getVolumeImbalance())
-                .dollarImbalance(instrument.getDollarImbalance())
-                .vpin(instrument.getVpin())
-                // Orderbook (may be null)
-                .ofi(instrument.getOfi() != null ? instrument.getOfi() : 0.0)
-                .depthImbalance(instrument.getDepthImbalance() != null ? instrument.getDepthImbalance() : 0.0)
-                .kyleLambda(instrument.getKyleLambda() != null ? instrument.getKyleLambda() : 0.0)
-                .microprice(instrument.getMicroprice() != null ? instrument.getMicroprice() : 0.0)
-                .bidAskSpread(instrument.getBidAskSpread() != null ? instrument.getBidAskSpread() : 0.0)
-                .weightedDepthImbalance(instrument.getWeightedDepthImbalance() != null ? instrument.getWeightedDepthImbalance() : 0.0)
-                .totalBidDepth(instrument.getAverageBidDepth() != null ? instrument.getAverageBidDepth() : 0.0)
-                .totalAskDepth(instrument.getAverageAskDepth() != null ? instrument.getAverageAskDepth() : 0.0)
-                // OI (may be null)
-                .oiOpen(instrument.getOiOpen())
-                .oiHigh(instrument.getOiHigh())
-                .oiLow(instrument.getOiLow())
-                .oiClose(instrument.getOiClose())
-                .oiChange(instrument.getOiChange())
-                .oiChangePercent(instrument.getOiChangePercent())
-                // Derived fields
-                .volumeDeltaPercent(instrument.getVolumeDeltaPercent())
-                .range(instrument.getRange())
-                .isBullish(instrument.isBullish())
-                .build();
     }
 
     /**

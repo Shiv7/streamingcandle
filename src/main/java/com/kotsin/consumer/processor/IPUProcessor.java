@@ -6,6 +6,7 @@ import com.kotsin.consumer.domain.model.FamilyCandle;
 import com.kotsin.consumer.domain.model.InstrumentCandle;
 import com.kotsin.consumer.model.*;
 import com.kotsin.consumer.service.IPUCalculator;
+import com.kotsin.consumer.util.FamilyCandleConverter;
 
 import jakarta.annotation.PostConstruct;
 import jakarta.annotation.PreDestroy;
@@ -217,7 +218,7 @@ public class IPUProcessor {
             }
 
             // Convert InstrumentCandle to UnifiedCandle for backwards compatibility
-            UnifiedCandle candle = convertToUnifiedCandle(equity);
+            UnifiedCandle candle = FamilyCandleConverter.toUnifiedCandle(equity);
 
             // Get or create history
             VCPProcessor.CandleHistory history = historyStore.get(key);
@@ -273,62 +274,6 @@ public class IPUProcessor {
                 }
             };
         }
-    }
-
-    /**
-     * Convert InstrumentCandle to UnifiedCandle for backwards compatibility
-     */
-    private static UnifiedCandle convertToUnifiedCandle(InstrumentCandle instrument) {
-        return UnifiedCandle.builder()
-                .scripCode(instrument.getScripCode())
-                .companyName(instrument.getCompanyName())
-                .exchange(instrument.getExchange())
-                .exchangeType(instrument.getExchangeType())
-                .timeframe(instrument.getTimeframe())
-                .windowStartMillis(instrument.getWindowStartMillis())
-                .windowEndMillis(instrument.getWindowEndMillis())
-                .humanReadableStartTime(instrument.getHumanReadableTime())
-                .humanReadableEndTime(instrument.getHumanReadableTime())
-                // OHLCV
-                .open(instrument.getOpen())
-                .high(instrument.getHigh())
-                .low(instrument.getLow())
-                .close(instrument.getClose())
-                .volume(instrument.getVolume())
-                .buyVolume(instrument.getBuyVolume())
-                .sellVolume(instrument.getSellVolume())
-                .vwap(instrument.getVwap())
-                .tickCount(instrument.getTickCount())
-                // Volume Profile
-                .volumeAtPrice(instrument.getVolumeAtPrice())
-                .poc(instrument.getPoc())
-                .valueAreaHigh(instrument.getVah())
-                .valueAreaLow(instrument.getVal())
-                // Imbalance
-                .volumeImbalance(instrument.getVolumeImbalance())
-                .dollarImbalance(instrument.getDollarImbalance())
-                .vpin(instrument.getVpin())
-                // Orderbook (may be null)
-                .ofi(instrument.getOfi() != null ? instrument.getOfi() : 0.0)
-                .depthImbalance(instrument.getDepthImbalance() != null ? instrument.getDepthImbalance() : 0.0)
-                .kyleLambda(instrument.getKyleLambda() != null ? instrument.getKyleLambda() : 0.0)
-                .microprice(instrument.getMicroprice() != null ? instrument.getMicroprice() : 0.0)
-                .bidAskSpread(instrument.getBidAskSpread() != null ? instrument.getBidAskSpread() : 0.0)
-                .weightedDepthImbalance(instrument.getWeightedDepthImbalance() != null ? instrument.getWeightedDepthImbalance() : 0.0)
-                .totalBidDepth(instrument.getAverageBidDepth() != null ? instrument.getAverageBidDepth() : 0.0)
-                .totalAskDepth(instrument.getAverageAskDepth() != null ? instrument.getAverageAskDepth() : 0.0)
-                // OI (may be null)
-                .oiOpen(instrument.getOiOpen())
-                .oiHigh(instrument.getOiHigh())
-                .oiLow(instrument.getOiLow())
-                .oiClose(instrument.getOiClose())
-                .oiChange(instrument.getOiChange())
-                .oiChangePercent(instrument.getOiChangePercent())
-                // Derived fields
-                .volumeDeltaPercent(instrument.getVolumeDeltaPercent())
-                .range(instrument.getRange())
-                .isBullish(instrument.isBullish())
-                .build();
     }
 
     /**

@@ -9,24 +9,6 @@ public final class KafkaTopics {
 
     private KafkaTopics() {} // Prevent instantiation
 
-    // ========== Candle Topics ==========
-    public static final String CANDLE_1M = "candle-ohlcv-1m";
-    public static final String CANDLE_2M = "candle-ohlcv-2m";
-    public static final String CANDLE_3M = "candle-ohlcv-3m";
-    public static final String CANDLE_5M = "candle-ohlcv-5m";
-    public static final String CANDLE_15M = "candle-ohlcv-15m";
-    public static final String CANDLE_30M = "candle-ohlcv-30m";
-    public static final String CANDLE_2H = "candle-ohlcv-2h";
-    public static final String CANDLE_1D = "candle-ohlcv-1d";
-
-    // ========== Unified Candle Topics ==========
-    public static final String UNIFIED_1M = "unified-candle-1m";
-    public static final String UNIFIED_2M = "unified-candle-2m";
-    public static final String UNIFIED_3M = "unified-candle-3m";
-    public static final String UNIFIED_5M = "unified-candle-5m";
-    public static final String UNIFIED_15M = "unified-candle-15m";
-    public static final String UNIFIED_30M = "unified-candle-30m";
-
     // ========== IPU Topics ==========
     public static final String IPU_5M = "ipu-signals-5m";
     public static final String IPU_15M = "ipu-signals-15m";
