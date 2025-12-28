@@ -51,10 +51,14 @@ public class VolumeAnomalyDetector {
 
     /**
      * Check if volume is abnormal (> 2x average)
+     * 
+     * BUG-FIX: If volume data is missing (volume=0), use tick count as fallback.
+     * Also, if average is 0, check if current volume is just non-zero.
      */
     public boolean isAbnormalVolume(UnifiedCandle candle, List<UnifiedCandle> history) {
         if (history == null || history.isEmpty()) {
-            return false;
+            // No history - allow if current candle has any volume
+            return candle.getVolume() > 0 || candle.getTickCount() > 10;
         }
 
         double avgVolume = history.stream()
@@ -62,7 +66,28 @@ public class VolumeAnomalyDetector {
                 .average()
                 .orElse(0);
 
-        return candle.getVolume() > (ABNORMAL_MULTIPLIER * avgVolume);
+        // If average is 0 but current has volume, that's abnormal
+        if (avgVolume == 0) {
+            return candle.getVolume() > 0;
+        }
+
+        // Standard check: volume > 2x average
+        if (candle.getVolume() > (ABNORMAL_MULTIPLIER * avgVolume)) {
+            return true;
+        }
+        
+        // BUG-FIX: If volume data is sparse, also check tick count
+        // High tick count with normal volume could still indicate activity
+        double avgTicks = history.stream()
+                .mapToInt(UnifiedCandle::getTickCount)
+                .average()
+                .orElse(0);
+        
+        if (avgTicks > 0 && candle.getTickCount() > (ABNORMAL_MULTIPLIER * avgTicks)) {
+            return true;
+        }
+
+        return false;
     }
 
     /**
@@ -81,10 +106,13 @@ public class VolumeAnomalyDetector {
 
     /**
      * Check Kyle's Lambda spike (high price impact = low liquidity = institutional)
+     * 
+     * BUG-FIX: If no orderbook data available (kyleLambda=0), return TRUE to allow
+     * breakout detection to proceed. Orderbook data is a bonus, not a requirement.
      */
     public boolean isKyleLambdaSpike(UnifiedCandle candle, List<UnifiedCandle> history) {
         if (history == null || history.size() < 20) {
-            return false;
+            return true;  // Not enough history - allow breakout check to proceed
         }
 
         // Calculate 75th percentile of Kyle's Lambda
@@ -94,12 +122,19 @@ public class VolumeAnomalyDetector {
                 .sorted()
                 .toArray();
 
+        // BUG-FIX: If no orderbook data (all zeros), return TRUE
+        // Orderbook data is optional - don't block breakouts just because we lack it
         if (kyleLambdas.length == 0) {
-            return false;
+            return true;  // No orderbook data available - allow breakout
         }
 
         int p75Index = (int) (kyleLambdas.length * 0.75);
         double p75 = kyleLambdas[Math.min(p75Index, kyleLambdas.length - 1)];
+
+        // If current candle has no Kyle's Lambda, still allow (missing data != failure)
+        if (candle.getKyleLambda() == 0) {
+            return true;
+        }
 
         // Current Kyle's Lambda should be > 75th percentile
         return candle.getKyleLambda() > p75;
@@ -115,9 +150,31 @@ public class VolumeAnomalyDetector {
 
     /**
      * Check OFI (Order Flow Imbalance) for buying pressure
+     * 
+     * BUG-FIX: If no orderbook data available (ofi=0), fall back to volume delta.
+     * Don't require OFI if we simply don't have orderbook data.
      */
     public boolean hasOFIBuyingPressure(UnifiedCandle candle) {
-        return candle.getOfi() > 0;
+        // If we have OFI data, use it
+        if (candle.getOfi() != 0) {
+            return candle.getOfi() > 0;
+        }
+        
+        // BUG-FIX: Fallback to volume delta when OFI not available
+        // Volume delta = buyVolume - sellVolume
+        // Positive delta indicates buying pressure
+        if (candle.getVolumeDelta() != 0) {
+            return candle.getVolumeDelta() > 0;
+        }
+        
+        // If no OFI and no volume delta, use buy/sell volume comparison
+        if (candle.getBuyVolume() > 0 || candle.getSellVolume() > 0) {
+            return candle.getBuyVolume() > candle.getSellVolume();
+        }
+        
+        // No data available - allow breakout check to proceed
+        // (missing data should not block breakout detection)
+        return true;
     }
 
     /**

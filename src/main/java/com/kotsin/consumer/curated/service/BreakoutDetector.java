@@ -40,38 +40,61 @@ public class BreakoutDetector {
         // 1. Check if consolidation pattern exists
         ConsolidationPattern consolidation = structureTracker.detectConsolidation(scripCode, timeframe);
         if (consolidation == null) {
-            log.debug("detectBreakout: {} {} - No consolidation pattern", scripCode, timeframe);
+            // Only log every 100th check to avoid spam
+            if (System.currentTimeMillis() % 1000 < 10) {
+                log.info("BREAKOUT_CHECK {} {} | FAIL: No consolidation pattern", scripCode, timeframe);
+            }
             return null;  // No consolidation, no breakout possible
         }
 
+        log.info("BREAKOUT_CHECK {} {} | ✓ Consolidation found | recentHigh={} close={}",
+            scripCode, timeframe, 
+            String.format("%.2f", consolidation.getRecentHigh()),
+            String.format("%.2f", currentCandle.getClose()));
+
         // 2. Check if price breaks above recent high
         if (currentCandle.getClose() <= consolidation.getRecentHigh()) {
-            log.debug("detectBreakout: {} {} - No price breakout (close={} <= high={})", 
-                scripCode, timeframe, currentCandle.getClose(), consolidation.getRecentHigh());
+            log.info("BREAKOUT_CHECK {} {} | FAIL: close={} <= recentHigh={}", 
+                scripCode, timeframe, 
+                String.format("%.2f", currentCandle.getClose()), 
+                String.format("%.2f", consolidation.getRecentHigh()));
             return null;  // No price breakout
         }
+
+        log.info("BREAKOUT_CHECK {} {} | ✓ Price breakout confirmed", scripCode, timeframe);
 
         // 3. Get history for volume analysis
         List<UnifiedCandle> history = structureTracker.getHistory(scripCode, timeframe, 20);
         if (history.isEmpty()) {
+            log.info("BREAKOUT_CHECK {} {} | FAIL: No history for volume analysis", scripCode, timeframe);
             return null;
         }
 
         // 4. Check volume anomaly
         if (!volumeDetector.isAbnormalVolume(currentCandle, history)) {
-            log.debug("Breakout rejected for {} {}: No volume anomaly", scripCode, timeframe);
+            log.info("BREAKOUT_CHECK {} {} | FAIL: Volume not abnormal (vol={}, avgVol={})",
+                scripCode, timeframe, 
+                currentCandle.getVolume(),
+                String.format("%.0f", history.stream().mapToLong(c -> c.getVolume()).average().orElse(0)));
             return null;
         }
 
-        // 5. Check Kyle's Lambda spike
-        if (!volumeDetector.isKyleLambdaSpike(currentCandle, history)) {
-            log.debug("Breakout rejected for {} {}: No Kyle's Lambda spike", scripCode, timeframe);
-            return null;
-        }
+        log.info("BREAKOUT_CHECK {} {} | ✓ Abnormal volume confirmed", scripCode, timeframe);
 
-        // 6. Check OFI (buying pressure)
-        if (!volumeDetector.hasOFIBuyingPressure(currentCandle)) {
-            log.debug("Breakout rejected for {} {}: No OFI buying pressure", scripCode, timeframe);
+        // 5. Check Kyle's Lambda spike (optional - allows missing orderbook data)
+        boolean kylePass = volumeDetector.isKyleLambdaSpike(currentCandle, history);
+        log.info("BREAKOUT_CHECK {} {} | Kyle Lambda check: {} (kyle={})",
+            scripCode, timeframe, kylePass ? "✓" : "bypassed",
+            String.format("%.4f", currentCandle.getKyleLambda()));
+
+        // 6. Check OFI (buying pressure) - fallback to volume delta if no orderbook
+        boolean ofiPass = volumeDetector.hasOFIBuyingPressure(currentCandle);
+        log.info("BREAKOUT_CHECK {} {} | OFI/Delta check: {} (ofi={}, delta={})",
+            scripCode, timeframe, ofiPass ? "✓" : "FAIL",
+            String.format("%.2f", currentCandle.getOfi()),
+            String.format("%.2f", currentCandle.getVolumeDelta()));
+        
+        if (!ofiPass) {
             return null;
         }
 
