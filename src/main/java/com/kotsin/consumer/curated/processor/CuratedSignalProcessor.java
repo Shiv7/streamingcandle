@@ -308,38 +308,48 @@ public class CuratedSignalProcessor {
                 return;
             }
 
-                log.info("✅ BREAKOUT ACCEPTED | scrip={} | status=WAITING_FOR_RETEST | pivot={} | high={}",
+                log.info("✅ BREAKOUT ACCEPTED | scrip={} | status=WAITING_FOR_RETEST | pivot={} | high={} | direction={}",
                 scripCode,
                 String.format("%.2f", breakout.getPrimaryBreakout().getPivotLevel()),
-                String.format("%.2f", breakout.getPrimaryBreakout().getBreakoutHigh()));
+                String.format("%.2f", breakout.getPrimaryBreakout().getBreakoutHigh()),
+                breakout.getPrimaryBreakout().getDirection());
             activeBreakouts.put(scripCode, breakout);
-            breakoutTimestamps.put(scripCode, System.currentTimeMillis());  // FIX: Track timestamp
+            // BUG-FIX: Use breakout timestamp (candle time) instead of System.currentTimeMillis()
+            // This ensures correct expiry during replay of historical data
+            breakoutTimestamps.put(scripCode, breakout.getTimestamp());
         }
     }
 
     /**
-     * FIX: Clean up expired breakouts that never got retested
+     * Clean up expired breakouts that never got retested
      * Called periodically to prevent memory leaks
-     * BUG-FIX: Fixed race condition in cleanup + corrected age calculation
+     * 
+     * BUG-FIX: Uses latest candle timestamp for comparison instead of System.currentTimeMillis()
+     * This ensures correct expiry during replay of historical data.
      */
     private synchronized void cleanupExpiredBreakouts() {
-        long now = System.currentTimeMillis();
+        // BUG-FIX: Use the latest FamilyCandle timestamp as reference, not system time
+        // This ensures correct expiry calculation during replay
+        long latestCandleTime = familyCandleCache.values().stream()
+                .mapToLong(fc -> fc.getTimestamp())
+                .max()
+                .orElse(System.currentTimeMillis());
+        
         List<String> expired = new java.util.ArrayList<>();
         java.util.Map<String, Long> expiredAges = new java.util.HashMap<>();
         
         breakoutTimestamps.forEach((scripCode, timestamp) -> {
-            long age = now - timestamp;
+            long age = latestCandleTime - timestamp;
             if (age > BREAKOUT_EXPIRY_MS) {
                 expired.add(scripCode);
-                expiredAges.put(scripCode, age);  // BUG-FIX: Store age before removal
+                expiredAges.put(scripCode, age);
             }
         });
         
         for (String scripCode : expired) {
             MultiTFBreakout removed = activeBreakouts.remove(scripCode);
-            Long removedTimestamp = breakoutTimestamps.remove(scripCode);
+            breakoutTimestamps.remove(scripCode);
             if (removed != null) {
-                // BUG-FIX: Use stored age, not post-removal lookup
                 long ageMinutes = expiredAges.getOrDefault(scripCode, 0L) / 60000;
                 log.info("🗑️ BREAKOUT EXPIRED | scrip={} | age={}min | reason=No_retest_within_window",
                     scripCode, ageMinutes);
@@ -377,10 +387,8 @@ public class CuratedSignalProcessor {
      */
     private void generateCuratedSignal(MultiTFBreakout breakout, RetestEntry entry) {
         String scripCode = breakout.getScripCode();
-        // Infer direction from breakout price vs pivot level
-        // If breakout price > pivot, it's bullish; otherwise bearish
-        String direction = (breakout.getPrimaryBreakout().getBreakoutPrice() > breakout.getPrimaryBreakout().getPivotLevel()) 
-                ? "BULLISH" : "BEARISH";
+        // BUG-FIX: Use BreakoutBar's direction field instead of inferring
+        String direction = breakout.getPrimaryBreakout().getDirection();
         String signalType = "BREAKOUT_RETEST";
 
         // Fetch all module outputs

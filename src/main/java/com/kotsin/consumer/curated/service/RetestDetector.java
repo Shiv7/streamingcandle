@@ -33,10 +33,8 @@ public class RetestDetector {
      * @return RetestEntry if valid retest detected, null otherwise
      */
     public RetestEntry detectRetest(BreakoutBar breakout, UnifiedCandle currentCandle, double atr) {
-        // FIX: Determine direction from breakout
-        boolean isBullishBreakout = breakout.getBreakoutHigh() > breakout.getPivotLevel();
-        
-        if (isBullishBreakout) {
+        // BUG-FIX: Use BreakoutBar's direction field instead of inferring
+        if (breakout.isBullish()) {
             return detectBullishRetest(breakout, currentCandle, atr);
         } else {
             return detectBearishRetest(breakout, currentCandle, atr);
@@ -74,19 +72,28 @@ public class RetestDetector {
         }
 
         // 3. Check volume delta (buying pressure)
-        boolean buyingPressure = currentCandle.getVolumeDelta() > 0;
+        // BUG-FIX: Allow when volumeDelta == 0 (no data available)
+        // Only reject if there's actual selling pressure (volumeDelta < 0)
+        long volumeDelta = currentCandle.getVolumeDelta();
+        boolean hasVolumeData = currentCandle.getBuyVolume() > 0 || currentCandle.getSellVolume() > 0;
+        boolean buyingPressure = !hasVolumeData || volumeDelta >= 0;  // Allow if no data or buying
 
         if (!buyingPressure) {
-            log.debug("Bullish retest rejected for {}: No buying pressure (volume delta)", breakout.getScripCode());
+            log.debug("Bullish retest rejected for {}: Selling pressure (volumeDelta={})", 
+                    breakout.getScripCode(), volumeDelta);
             return null;
         }
 
-        // 4. Check OFI (order flow buying pressure) - allow NaN (no OFI data)
+        // 4. Check OFI (order flow buying pressure)
+        // BUG-FIX: Allow when OFI == 0 (no data), not just NaN
+        // Only reject if there's actual selling pressure (OFI < 0)
         double ofi = currentCandle.getOfi();
-        boolean ofiBuyingPressure = Double.isNaN(ofi) || ofi > 0;
+        boolean hasOFIData = !Double.isNaN(ofi) && ofi != 0;
+        boolean ofiBuyingPressure = !hasOFIData || ofi > 0;  // Allow if no data or buying
 
         if (!ofiBuyingPressure) {
-            log.debug("Bullish retest rejected for {}: OFI selling pressure", breakout.getScripCode());
+            log.debug("Bullish retest rejected for {}: OFI selling pressure (ofi={})", 
+                    breakout.getScripCode(), ofi);
             return null;
         }
 
@@ -172,19 +179,28 @@ public class RetestDetector {
         }
 
         // 3. Check volume delta (selling pressure)
-        boolean sellingPressure = currentCandle.getVolumeDelta() < 0;
+        // BUG-FIX: Allow when volumeDelta == 0 (no data available)
+        // Only reject if there's actual buying pressure (volumeDelta > 0)
+        long volumeDelta = currentCandle.getVolumeDelta();
+        boolean hasVolumeData = currentCandle.getBuyVolume() > 0 || currentCandle.getSellVolume() > 0;
+        boolean sellingPressure = !hasVolumeData || volumeDelta <= 0;  // Allow if no data or selling
 
         if (!sellingPressure) {
-            log.debug("Bearish retest rejected for {}: No selling pressure (volume delta)", breakout.getScripCode());
+            log.debug("Bearish retest rejected for {}: Buying pressure (volumeDelta={})", 
+                    breakout.getScripCode(), volumeDelta);
             return null;
         }
 
-        // 4. Check OFI (order flow selling pressure) - allow NaN (no OFI data)
+        // 4. Check OFI (order flow selling pressure)
+        // BUG-FIX: Allow when OFI == 0 (no data), not just NaN
+        // Only reject if there's actual buying pressure (OFI > 0)
         double ofi = currentCandle.getOfi();
-        boolean ofiSellingPressure = Double.isNaN(ofi) || ofi < 0;
+        boolean hasOFIData = !Double.isNaN(ofi) && ofi != 0;
+        boolean ofiSellingPressure = !hasOFIData || ofi < 0;  // Allow if no data or selling
 
         if (!ofiSellingPressure) {
-            log.debug("Bearish retest rejected for {}: OFI buying pressure", breakout.getScripCode());
+            log.debug("Bearish retest rejected for {}: OFI buying pressure (ofi={})", 
+                    breakout.getScripCode(), ofi);
             return null;
         }
 
