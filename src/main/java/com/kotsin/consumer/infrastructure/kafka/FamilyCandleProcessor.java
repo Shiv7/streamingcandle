@@ -1,14 +1,19 @@
 package com.kotsin.consumer.infrastructure.kafka;
 
+import com.kotsin.consumer.config.KafkaConfig;
 import com.kotsin.consumer.domain.calculator.FuturesBuildupDetector;
 import com.kotsin.consumer.domain.calculator.OISignalDetector;
 import com.kotsin.consumer.domain.calculator.PCRCalculator;
 import com.kotsin.consumer.domain.model.*;
 import com.kotsin.consumer.domain.service.IFamilyDataProvider;
+import jakarta.annotation.PostConstruct;
+import jakarta.annotation.PreDestroy;
 import lombok.extern.slf4j.Slf4j;
 import org.apache.kafka.common.serialization.Serdes;
+import org.apache.kafka.streams.KafkaStreams;
 import org.apache.kafka.streams.KeyValue;
 import org.apache.kafka.streams.StreamsBuilder;
+import org.apache.kafka.streams.errors.StreamsUncaughtExceptionHandler;
 import org.apache.kafka.streams.kstream.*;
 import org.apache.kafka.streams.state.KeyValueStore;
 import org.apache.kafka.streams.state.Stores;
@@ -21,6 +26,7 @@ import java.time.Instant;
 import java.time.ZoneId;
 import java.time.ZonedDateTime;
 import java.util.*;
+import java.util.concurrent.CompletableFuture;
 import java.util.stream.Collectors;
 
 /**
@@ -46,10 +52,82 @@ import java.util.stream.Collectors;
 public class FamilyCandleProcessor {
 
     @Autowired
+    private KafkaConfig kafkaConfig;
+
+    @Autowired
     private IFamilyDataProvider familyDataProvider;
 
     @Value("${family.candle.window.grace.seconds:5}")
     private int graceSeconds;
+
+    @Value("${family.candle.processor.enabled:true}")
+    private boolean processorEnabled;
+
+    @Value("${unified.output.topic.instrument:instrument-candle-1m}")
+    private String inputTopic;
+
+    @Value("${family.output.topics.1m:family-candle-1m}")
+    private String outputTopic;
+
+    private KafkaStreams streams;
+
+    /**
+     * Start the FamilyCandleProcessor
+     * FIX: This was missing! Without @PostConstruct, the processor never started.
+     */
+    @PostConstruct
+    public void start() {
+        if (!processorEnabled) {
+            log.info("FamilyCandleProcessor is DISABLED");
+            return;
+        }
+
+        CompletableFuture.runAsync(() -> {
+            try {
+                log.info("🚀 Starting FamilyCandleProcessor...");
+                
+                Properties props = kafkaConfig.getStreamProperties("family-candle-processor");
+                StreamsBuilder builder = new StreamsBuilder();
+                
+                buildTopology(builder, inputTopic, outputTopic, 1);
+                
+                streams = new KafkaStreams(builder.build(), props);
+                setupExceptionHandling();
+                
+                streams.start();
+                log.info("✅ FamilyCandleProcessor started: {} -> {}", inputTopic, outputTopic);
+                
+            } catch (Exception e) {
+                log.error("❌ Failed to start FamilyCandleProcessor", e);
+            }
+        });
+    }
+
+    /**
+     * Setup exception handling for the stream
+     */
+    private void setupExceptionHandling() {
+        streams.setStateListener((newState, oldState) -> {
+            log.info("FamilyCandleProcessor state: {} -> {}", oldState, newState);
+            if (newState == KafkaStreams.State.ERROR) {
+                log.error("❌ FamilyCandleProcessor entered ERROR state!");
+            }
+        });
+
+        streams.setUncaughtExceptionHandler(exception -> {
+            log.error("Uncaught exception in FamilyCandleProcessor", exception);
+            return StreamsUncaughtExceptionHandler.StreamThreadExceptionResponse.REPLACE_THREAD;
+        });
+    }
+
+    @PreDestroy
+    public void stop() {
+        if (streams != null) {
+            log.info("🛑 Stopping FamilyCandleProcessor...");
+            streams.close(Duration.ofSeconds(30));
+            log.info("✅ FamilyCandleProcessor stopped");
+        }
+    }
 
     /**
      * Build the family candle topology
