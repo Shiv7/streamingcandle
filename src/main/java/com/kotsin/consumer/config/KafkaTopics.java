@@ -58,6 +58,9 @@ public final class KafkaTopics {
     public static final String FAMILY_CANDLE_1WK = "family-candle-1wk";
     public static final String FAMILY_CANDLE_1MO = "family-candle-1mo";
 
+    // ========== NEW: MTIS Family Score Topic ==========
+    public static final String FAMILY_SCORE = "family-score";
+
     // ========== State Store Names ==========
     public static final String STORE_FMA_HISTORY = "fma-candle-history";
     public static final String STORE_FUDKII_HISTORY = "fudkii-candle-history";

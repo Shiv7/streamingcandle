@@ -135,6 +135,10 @@ create_topic "regime-acl-output"
 create_topic "trading-signals"
 create_topic "curated-trading-signals"
 
+# MTIS Score topic
+log_info "Creating MTIS score topic..."
+create_topic "family-score"
+
 log_info "All topics created"
 
 # =============================================================================
@@ -142,7 +146,7 @@ log_info "All topics created"
 # =============================================================================
 log_step "Step 5: Resetting Consumer Groups"
 
-GROUPS="unified-instrument-candle-processor family-candle-processor timeframe-aggregator ipu-processor vcp-processor regime-processor curated-signal-processor"
+GROUPS="unified-instrument-candle-processor family-candle-processor timeframe-aggregator ipu-processor vcp-processor regime-processor curated-signal-processor mtis-processor"
 
 for group in $GROUPS; do
     kafka-consumer-groups.sh --bootstrap-server "$KAFKA_BOOTSTRAP" --list 2>/dev/null | grep "$group" | while read -r cg; do
