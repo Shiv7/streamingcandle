@@ -1,7 +1,11 @@
 package com.kotsin.consumer.curated.config;
 
+import com.fasterxml.jackson.databind.DeserializationFeature;
+import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.datatype.jsr310.JavaTimeModule;
 import com.kotsin.consumer.capital.model.FinalMagnitude;
 import com.kotsin.consumer.curated.model.CuratedSignal;
+import com.kotsin.consumer.domain.model.FamilyCandle;
 import com.kotsin.consumer.model.IPUOutput;
 import com.kotsin.consumer.model.MTVCPOutput;
 import com.kotsin.consumer.model.UnifiedCandle;
@@ -9,6 +13,7 @@ import com.kotsin.consumer.regime.model.ACLOutput;
 import com.kotsin.consumer.regime.model.IndexRegime;
 import com.kotsin.consumer.regime.model.SecurityRegime;
 import com.kotsin.consumer.signal.model.CSSOutput;
+import com.kotsin.consumer.score.model.FUDKIIOutput;
 import org.apache.kafka.clients.consumer.ConsumerConfig;
 import org.apache.kafka.clients.producer.ProducerConfig;
 import org.apache.kafka.common.serialization.StringDeserializer;
@@ -45,19 +50,27 @@ public class CuratedKafkaConfig {
     private String autoOffsetReset;
 
     /**
-     * Consumer Factory for Curated Signal Processor
-     * Uses a UNIQUE consumer group (configurable via properties)
-     * Default: reads from EARLIEST for playback testing
-     *
-     * IMPORTANT: Supports multiple message types via message converter
+     * ObjectMapper for JSON conversion - shared across all consumers
      */
     @Bean
-    public ConsumerFactory<String, Object> curatedConsumerFactory() {
+    public ObjectMapper curatedObjectMapper() {
+        ObjectMapper mapper = new ObjectMapper();
+        mapper.configure(DeserializationFeature.FAIL_ON_UNKNOWN_PROPERTIES, false);
+        mapper.registerModule(new JavaTimeModule());
+        return mapper;
+    }
+
+    /**
+     * Consumer Factory for Curated Signal Processor
+     * Uses StringDeserializer for values - conversion happens in MessageConverter
+     */
+    @Bean
+    public ConsumerFactory<String, String> curatedConsumerFactory() {
         Map<String, Object> props = new HashMap<>();
         props.put(ConsumerConfig.BOOTSTRAP_SERVERS_CONFIG, bootstrapServers);
         props.put(ConsumerConfig.GROUP_ID_CONFIG, consumerGroupId);
         props.put(ConsumerConfig.KEY_DESERIALIZER_CLASS_CONFIG, StringDeserializer.class);
-        props.put(ConsumerConfig.VALUE_DESERIALIZER_CLASS_CONFIG, StringDeserializer.class); // Read as String first
+        props.put(ConsumerConfig.VALUE_DESERIALIZER_CLASS_CONFIG, StringDeserializer.class);
         props.put(ConsumerConfig.AUTO_OFFSET_RESET_CONFIG, autoOffsetReset);
         props.put(ConsumerConfig.ENABLE_AUTO_COMMIT_CONFIG, true);
 
@@ -65,28 +78,17 @@ public class CuratedKafkaConfig {
     }
 
     /**
-     * ObjectMapper for JSON conversion
-     */
-    @Bean
-    public com.fasterxml.jackson.databind.ObjectMapper curatedObjectMapper() {
-        com.fasterxml.jackson.databind.ObjectMapper mapper = new com.fasterxml.jackson.databind.ObjectMapper();
-        mapper.configure(com.fasterxml.jackson.databind.DeserializationFeature.FAIL_ON_UNKNOWN_PROPERTIES, false);
-        mapper.registerModule(new com.fasterxml.jackson.datatype.jsr310.JavaTimeModule());
-        return mapper;
-    }
-
-    /**
      * Kafka Listener Container Factory for Curated Signal Processor
-     * Uses StringJsonMessageConverter to handle JSON -> POJO conversion
+     * StringJsonMessageConverter converts JSON String -> target POJO based on method parameter type
      */
     @Bean
-    public ConcurrentKafkaListenerContainerFactory<String, Object> curatedKafkaListenerContainerFactory() {
-        ConcurrentKafkaListenerContainerFactory<String, Object> factory =
+    public ConcurrentKafkaListenerContainerFactory<String, String> curatedKafkaListenerContainerFactory() {
+        ConcurrentKafkaListenerContainerFactory<String, String> factory =
                 new ConcurrentKafkaListenerContainerFactory<>();
         factory.setConsumerFactory(curatedConsumerFactory());
         factory.setConcurrency(3);
         
-        // Use StringJsonMessageConverter for proper JSON -> POJO conversion
+        // StringJsonMessageConverter uses method parameter type for conversion
         org.springframework.kafka.support.converter.StringJsonMessageConverter converter = 
             new org.springframework.kafka.support.converter.StringJsonMessageConverter(curatedObjectMapper());
         factory.setRecordMessageConverter(converter);
