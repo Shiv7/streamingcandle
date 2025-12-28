@@ -215,8 +215,9 @@ public class TTLCache<K, V> {
 
     /**
      * Evict oldest entry (LRU)
+     * BUG-FIX: Use synchronized block to prevent race condition between find and remove
      */
-    private void evictOldest() {
+    private synchronized void evictOldest() {
         K oldestKey = null;
         long oldestTime = Long.MAX_VALUE;
 
@@ -228,9 +229,11 @@ public class TTLCache<K, V> {
         }
 
         if (oldestKey != null) {
-            cache.remove(oldestKey);
-            evictions.incrementAndGet();
-            LOGGER.debug("🗑️ Cache '{}' evicted oldest key: {}", cacheName, oldestKey);
+            CacheEntry<V> removed = cache.remove(oldestKey);
+            if (removed != null) {
+                evictions.incrementAndGet();
+                LOGGER.debug("🗑️ Cache '{}' evicted oldest key: {}", cacheName, oldestKey);
+            }
         }
     }
 

@@ -226,11 +226,14 @@ public class StructureTracker {
 
     /**
      * Get current ATR for a scrip-timeframe
+     * BUG-FIX: Use price-based default instead of arbitrary 1.0
      */
     private double getCurrentATR(String scripCode, String timeframe) {
         Deque<UnifiedCandle> history = candleHistory.get(key(scripCode, timeframe));
         if (history == null || history.isEmpty()) {
-            return 1.0;  // Default to avoid division by zero
+            // BUG-FIX: Return 0 to signal "no data" - caller should handle
+            log.warn("No history for ATR calculation: {}/{}", scripCode, timeframe);
+            return 0;
         }
 
         // Simple ATR: average of last 5 candle ranges
@@ -242,7 +245,15 @@ public class StructureTracker {
         double avgRange = recent.stream()
                 .mapToDouble(c -> c.getHigh() - c.getLow())
                 .average()
-                .orElse(1.0);
+                .orElse(0);
+
+        // BUG-FIX: If ATR is suspiciously small (<0.01% of price), use 1% of price as fallback
+        if (avgRange <= 0 && !recent.isEmpty()) {
+            double price = recent.get(0).getClose();
+            avgRange = price * 0.01;  // 1% of price as fallback ATR
+            log.debug("Using fallback ATR for {}/{}: {} (1% of price {})", 
+                    scripCode, timeframe, avgRange, price);
+        }
 
         return avgRange;
     }

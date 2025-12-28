@@ -45,7 +45,13 @@ public class HardGate {
             return GateResult.pass("HARD_GATE_DISABLED");
         }
 
-        String scripCode = family != null ? family.getSymbol() : "unknown";
+        // BUG-FIX: Use equity scripCode, not family symbol
+        String scripCode = "unknown";
+        if (family != null && family.getEquity() != null) {
+            scripCode = family.getEquity().getScripCode();
+        } else if (family != null && family.getSymbol() != null) {
+            scripCode = family.getSymbol();
+        }
 
         // Gate 1.1: Must have equity data
         if (family == null || family.getEquity() == null) {
@@ -96,8 +102,14 @@ public class HardGate {
         }
 
         // Gate 1.5: OI data not too stale (if available)
+        // BUG-FIX: Check futures/options timestamp, not candle timestamp
         if (family.getOiSignal() != null && !family.getOiSignal().equals("NEUTRAL")) {
-            long oiAge = System.currentTimeMillis() - family.getTimestamp();
+            // Use futures timestamp if available, otherwise fall back to candle timestamp
+            long oiTimestamp = family.getTimestamp();  // Default
+            if (family.getFutures() != null && family.getFutures().getWindowEndMillis() > 0) {
+                oiTimestamp = family.getFutures().getWindowEndMillis();
+            }
+            long oiAge = System.currentTimeMillis() - oiTimestamp;
             long maxAgeMs = maxOiAgeMinutes * 60 * 1000L;
             if (oiAge > maxAgeMs) {
                 String detail = String.format("age=%d min, max=%d min", oiAge / 60000, maxOiAgeMinutes);

@@ -73,13 +73,20 @@ public class SignalStatsGate {
             return result;
         }
 
-        // Ensure daily stats are current
+        // BUG-FIX: Ensure daily stats are current with null-safe handling
         LocalDate today = LocalDate.now();
-        if (stats.getStatsDate() == null || !stats.getStatsDate().equals(today)) {
+        LocalDate statsDate = stats.getStatsDate();
+        if (statsDate == null || !today.equals(statsDate)) {
             // Stats from previous day - reset daily counters in memory
+            log.debug("STATS_GATE | {} | Resetting daily stats (statsDate={}, today={})", key, statsDate, today);
             stats.resetDailyStats();
             stats.setStatsDate(today);
-            // Save will happen on next outcome
+            // Save will happen on next outcome - also save now to persist the reset
+            try {
+                statsRepo.save(stats);
+            } catch (Exception e) {
+                log.warn("Failed to save stats reset for {}: {}", key, e.getMessage());
+            }
         }
 
         // Rule 2: Too many losses today

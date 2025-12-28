@@ -246,10 +246,12 @@ public class FuturesOptionsService {
         }
 
         // OI change analysis (0-0.3 points)
-        if (futures.getOiChangePercent() > 5) {
+        // BUG-FIX: Add null check for getOiChangePercent()
+        Double oiChangePct = futures.getOiChangePercent();
+        if (oiChangePct != null && oiChangePct > 5) {
             score += 0.3;
-            reasons.add("Futures OI increasing (" + String.format("%.1f", futures.getOiChangePercent()) + "%)");
-        } else if (futures.getOiChangePercent() > 2) {
+            reasons.add("Futures OI increasing (" + String.format("%.1f", oiChangePct) + "%)");
+        } else if (oiChangePct != null && oiChangePct > 2) {
             score += 0.15;
         }
 

@@ -316,23 +316,29 @@ public class CuratedSignalProcessor {
     /**
      * FIX: Clean up expired breakouts that never got retested
      * Called periodically to prevent memory leaks
+     * BUG-FIX: Fixed race condition in cleanup + corrected age calculation
      */
-    private void cleanupExpiredBreakouts() {
+    private synchronized void cleanupExpiredBreakouts() {
         long now = System.currentTimeMillis();
         List<String> expired = new java.util.ArrayList<>();
+        java.util.Map<String, Long> expiredAges = new java.util.HashMap<>();
         
         breakoutTimestamps.forEach((scripCode, timestamp) -> {
-            if (now - timestamp > BREAKOUT_EXPIRY_MS) {
+            long age = now - timestamp;
+            if (age > BREAKOUT_EXPIRY_MS) {
                 expired.add(scripCode);
+                expiredAges.put(scripCode, age);  // BUG-FIX: Store age before removal
             }
         });
         
         for (String scripCode : expired) {
             MultiTFBreakout removed = activeBreakouts.remove(scripCode);
-            breakoutTimestamps.remove(scripCode);
+            Long removedTimestamp = breakoutTimestamps.remove(scripCode);
             if (removed != null) {
+                // BUG-FIX: Use stored age, not post-removal lookup
+                long ageMinutes = expiredAges.getOrDefault(scripCode, 0L) / 60000;
                 log.info("🗑️ BREAKOUT EXPIRED | scrip={} | age={}min | reason=No_retest_within_window",
-                    scripCode, (now - breakoutTimestamps.getOrDefault(scripCode, now)) / 60000);
+                    scripCode, ageMinutes);
             }
         }
     }
