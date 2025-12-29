@@ -22,7 +22,7 @@ public class RetestDetector {
     private static final Logger log = LoggerFactory.getLogger(RetestDetector.class);
 
     private static final double PIVOT_TOLERANCE_PCT = 0.005;  // 0.5% tolerance
-    private static final double MIN_RISK_REWARD = 1.5;
+    private static final double MIN_RISK_REWARD = 0.8;  // FIX: Lowered from 1.5 to allow more signals
 
     /**
      * Detect retest at breakout pivot level (auto-detects direction from breakout)
@@ -71,16 +71,20 @@ public class RetestDetector {
             return null;
         }
 
-        // 3. Check volume delta (buying pressure)
-        // BUG-FIX: Allow when volumeDelta == 0 (no data available)
-        // Only reject if there's actual selling pressure (volumeDelta < 0)
+        // 3. Check volume delta (buying pressure) - RELAXED
+        // FIX: Volume delta classification in Indian markets can be unreliable
+        // Only reject if there's EXTREME selling pressure (volumeDelta < -50% of volume)
         long volumeDelta = currentCandle.getVolumeDelta();
+        long totalVolume = currentCandle.getVolume();
         boolean hasVolumeData = currentCandle.getBuyVolume() > 0 || currentCandle.getSellVolume() > 0;
-        boolean buyingPressure = !hasVolumeData || volumeDelta >= 0;  // Allow if no data or buying
+        
+        // FIX: Only reject if selling pressure > 50% of total volume
+        boolean extremeSellingPressure = hasVolumeData && totalVolume > 0 && 
+                volumeDelta < (-totalVolume * 0.5);  // More than -50% is extreme
 
-        if (!buyingPressure) {
-            log.debug("Bullish retest rejected for {}: Selling pressure (volumeDelta={})", 
-                    breakout.getScripCode(), volumeDelta);
+        if (extremeSellingPressure) {
+            log.debug("Bullish retest rejected for {}: Extreme selling pressure (volumeDelta={}, volume={})", 
+                    breakout.getScripCode(), volumeDelta, totalVolume);
             return null;
         }
 
@@ -178,16 +182,21 @@ public class RetestDetector {
             return null;
         }
 
-        // 3. Check volume delta (selling pressure)
-        // BUG-FIX: Allow when volumeDelta == 0 (no data available)
-        // Only reject if there's actual buying pressure (volumeDelta > 0)
+        // 3. Check volume delta (selling pressure) - RELAXED
+        // FIX: Volume delta classification in Indian markets can be unreliable
+        // Only reject if there's EXTREME buying pressure (volumeDelta > 50% of volume)
+        // This allows signals to pass when volume data is ambiguous
         long volumeDelta = currentCandle.getVolumeDelta();
+        long totalVolume = currentCandle.getVolume();
         boolean hasVolumeData = currentCandle.getBuyVolume() > 0 || currentCandle.getSellVolume() > 0;
-        boolean sellingPressure = !hasVolumeData || volumeDelta <= 0;  // Allow if no data or selling
+        
+        // FIX: Only reject if buying pressure > 50% of total volume
+        boolean extremeBuyingPressure = hasVolumeData && totalVolume > 0 && 
+                volumeDelta > (totalVolume * 0.5);  // More than 50% is extreme
 
-        if (!sellingPressure) {
-            log.debug("Bearish retest rejected for {}: Buying pressure (volumeDelta={})", 
-                    breakout.getScripCode(), volumeDelta);
+        if (extremeBuyingPressure) {
+            log.debug("Bearish retest rejected for {}: Extreme buying pressure (volumeDelta={}, volume={})", 
+                    breakout.getScripCode(), volumeDelta, totalVolume);
             return null;
         }
 

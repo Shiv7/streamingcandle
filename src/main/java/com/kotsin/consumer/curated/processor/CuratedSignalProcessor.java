@@ -3,6 +3,7 @@ package com.kotsin.consumer.curated.processor;
 import com.kotsin.consumer.capital.model.FinalMagnitude;
 import com.kotsin.consumer.curated.model.*;
 import com.kotsin.consumer.curated.service.*;
+import com.kotsin.consumer.curated.service.BBSuperTrendDetector;
 import com.kotsin.consumer.data.model.SignalHistory;
 import com.kotsin.consumer.data.service.SignalHistoryService;
 import com.kotsin.consumer.domain.model.FamilyCandle;
@@ -57,6 +58,9 @@ public class CuratedSignalProcessor {
 
     @Autowired
     private RetestDetector retestDetector;
+
+    @Autowired
+    private BBSuperTrendDetector bbSuperTrendDetector;
 
     @Autowired
     private MultiModuleScorer scorer;
@@ -178,6 +182,9 @@ public class CuratedSignalProcessor {
             candle.setTimeframe(timeframe);  // Override with correct timeframe
             structureTracker.updateCandle(candle);
 
+            // 1.5 Check for BB+SuperTrend confluence (runs on all timeframes)
+            bbSuperTrendDetector.processCandle(candle);
+
             // FIX: Periodically cleanup expired breakouts (every ~100 candles)
             if (System.currentTimeMillis() % 100 == 0) {
                 cleanupExpiredBreakouts();
@@ -289,6 +296,7 @@ public class CuratedSignalProcessor {
 
     /**
      * Check if current candle creates a new breakout
+     * FIX: Now emits signal immediately on breakout acceptance (no retest required)
      */
     private void checkForNewBreakout(String scripCode) {
         // Detect multi-TF breakout
@@ -302,22 +310,145 @@ public class CuratedSignalProcessor {
                 String.format("%.1f", breakout.getAvgVolumeZScore()),
                 String.format("%.2f", breakout.getAvgKyleLambda()));
 
-            // Check gates before adding to active breakouts
+            // Check gates before emitting signal
             if (!passesGates(scripCode)) {
                 log.info("⛔ BREAKOUT REJECTED | scrip={} | reason=Failed_gates | See gate logs above", scripCode);
                 return;
             }
 
-                log.info("✅ BREAKOUT ACCEPTED | scrip={} | status=WAITING_FOR_RETEST | pivot={} | high={} | direction={}",
+            log.info("✅ BREAKOUT ACCEPTED | scrip={} | pivot={} | high={} | direction={}",
                 scripCode,
                 String.format("%.2f", breakout.getPrimaryBreakout().getPivotLevel()),
                 String.format("%.2f", breakout.getPrimaryBreakout().getBreakoutHigh()),
                 breakout.getPrimaryBreakout().getDirection());
-            activeBreakouts.put(scripCode, breakout);
-            // BUG-FIX: Use breakout timestamp (candle time) instead of System.currentTimeMillis()
-            // This ensures correct expiry during replay of historical data
-            breakoutTimestamps.put(scripCode, breakout.getTimestamp());
+            
+            // FIX: Emit signal IMMEDIATELY on breakout acceptance (no retest wait)
+            generateBreakoutSignal(breakout);
         }
+    }
+    
+    /**
+     * FIX: Generate curated signal immediately on breakout (no retest required)
+     * Entry is at breakout price, stop loss is at pivot level
+     */
+    private void generateBreakoutSignal(MultiTFBreakout breakout) {
+        String scripCode = breakout.getScripCode();
+        String direction = breakout.getPrimaryBreakout().getDirection();
+        String signalType = "BREAKOUT_IMMEDIATE";
+
+        // Fetch all module outputs
+        String relevantIndex = getRelevantIndex(scripCode);
+        IndexRegime indexRegime = indexRegimeCache.get(relevantIndex);
+        if (indexRegime == null) {
+            indexRegime = indexRegimeCache.get(DEFAULT_INDEX);
+        }
+        SecurityRegime securityRegime = securityRegimeCache.get(scripCode);
+        FamilyCandle familyCandle = familyCandleCache.get(scripCode);
+        ACLOutput acl = aclCache.get(scripCode);
+        MTVCPOutput vcp = vcpCache.get(scripCode);
+        CSSOutput css = cssCache.get(scripCode);
+        IPUOutput ipu = ipuCache.get(scripCode);
+        FinalMagnitude fma = fmaCache.get(scripCode);
+
+        // Calculate entry/stop/target based on breakout direction
+        double entryPrice = breakout.getPrimaryBreakout().getBreakoutPrice();
+        double pivotLevel = breakout.getPrimaryBreakout().getPivotLevel();
+        double atr = getATR(scripCode);
+        
+        double stopLoss, target;
+        if ("BULLISH".equals(direction)) {
+            stopLoss = pivotLevel - (0.5 * atr);  // Below pivot with buffer
+            double breakoutRange = entryPrice - pivotLevel;
+            target = entryPrice + (breakoutRange * 2);  // 2x measured move
+        } else {
+            stopLoss = pivotLevel + (0.5 * atr);  // Above pivot with buffer
+            double breakoutRange = pivotLevel - entryPrice;
+            target = entryPrice - (breakoutRange * 2);  // 2x measured move
+        }
+        
+        // Calculate R:R
+        double riskAmount = Math.abs(entryPrice - stopLoss);
+        double rewardAmount = Math.abs(target - entryPrice);
+        double riskReward = riskAmount > 0 ? rewardAmount / riskAmount : 0;
+
+        // Build entry object
+        RetestEntry entry = RetestEntry.builder()
+                .scripCode(scripCode)
+                .timestamp(breakout.getTimestamp())
+                .entryPrice(entryPrice)
+                .stopLoss(stopLoss)
+                .target(target)
+                .riskReward(riskReward)
+                .pivotLevel(pivotLevel)
+                .positionSizeMultiplier(1.0)
+                .buyingPressure("BULLISH".equals(direction))
+                .build();
+
+        // Create signal history record
+        SignalHistory history = signalHistoryService.createHistory(
+                scripCode, signalType, direction, breakout, familyCandle,
+                indexRegime, securityRegime, vcp, ipu, css, acl, fma,
+                null, null, entry, breakout.getConfirmations()
+        );
+
+        // Calculate curated score
+        double curatedScore = scorer.calculateCuratedScore(
+                breakout, indexRegime, securityRegime, acl, vcp, css, ipu,
+                null, null, entryPrice
+        );
+
+        // FIX: Lower minimum score threshold for immediate breakout signals
+        if (curatedScore < 50.0) {
+            signalHistoryService.markRejected(history, "LOW_SCORE: " + String.format("%.1f", curatedScore));
+            signalHistoryService.save(history);
+            log.info("⛔ SIGNAL REJECTED | {} | reason=LOW_SCORE | score={}", scripCode, String.format("%.1f", curatedScore));
+            return;
+        }
+
+        // Mark signal as emitted and save history
+        signalHistoryService.markEmitted(history, curatedScore, entry.getPositionSizeMultiplier());
+        signalHistoryService.save(history);
+
+        // Record signal for stats tracking
+        signalStatsService.recordSignal(scripCode, signalType);
+
+        // Build curated reason
+        String reason = buildCuratedReason(breakout, indexRegime, ipu, acl, null);
+
+        // Build final curated signal
+        CuratedSignal signal = CuratedSignal.builder()
+                .scripCode(scripCode)
+                .companyName(vcp != null ? vcp.getCompanyName() : scripCode)
+                .timestamp(System.currentTimeMillis())
+                .signalId(history.getSignalId())
+                .breakout(breakout)
+                .pattern(breakout.getPattern())
+                .indexRegime(indexRegime)
+                .securityRegime(securityRegime)
+                .acl(acl)
+                .vcp(vcp)
+                .css(css)
+                .ipu(ipu)
+                .finalMagnitude(fma)
+                .entry(entry)
+                .curatedScore(curatedScore)
+                .curatedReason(reason)
+                .positionSizeMultiplier(entry.getPositionSizeMultiplier())
+                .riskRewardRatio(riskReward)
+                .build();
+
+        // Send to Kafka
+        curatedSignalProducer.send("trading-signals-curated", scripCode, signal);
+
+        log.info("📤 CURATED SIGNAL EMITTED (IMMEDIATE) | {} | dir={} | Score={} | Entry={} | SL={} | Target={} | R:R={}",
+                scripCode,
+                direction,
+                String.format("%.1f", curatedScore),
+                String.format("%.2f", entry.getEntryPrice()),
+                String.format("%.2f", entry.getStopLoss()),
+                String.format("%.2f", entry.getTarget()),
+                String.format("%.2f", riskReward));
+        log.info("   Reason: {}", reason);
     }
 
     /**

@@ -4,6 +4,7 @@ import com.fasterxml.jackson.databind.DeserializationFeature;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.datatype.jsr310.JavaTimeModule;
 import com.kotsin.consumer.capital.model.FinalMagnitude;
+import com.kotsin.consumer.curated.model.BBSuperTrendSignal;
 import com.kotsin.consumer.curated.model.CuratedSignal;
 import com.kotsin.consumer.model.IPUOutput;
 import com.kotsin.consumer.model.MTVCPOutput;
@@ -116,5 +117,31 @@ public class CuratedKafkaConfig {
     @Bean
     public KafkaTemplate<String, CuratedSignal> curatedSignalKafkaTemplate() {
         return new KafkaTemplate<>(curatedSignalProducerFactory());
+    }
+
+    // ========== BB + SuperTrend Producer Configuration ==========
+
+    /**
+     * Producer Factory for BB+SuperTrend Signals
+     * Produces to NEW topic: bb-supertrend-signals
+     */
+    @Bean
+    public ProducerFactory<String, BBSuperTrendSignal> bbSuperTrendProducerFactory() {
+        Map<String, Object> props = new HashMap<>();
+        props.put(ProducerConfig.BOOTSTRAP_SERVERS_CONFIG, bootstrapServers);
+        props.put(ProducerConfig.KEY_SERIALIZER_CLASS_CONFIG, StringSerializer.class);
+        props.put(ProducerConfig.VALUE_SERIALIZER_CLASS_CONFIG, JsonSerializer.class);
+        props.put(ProducerConfig.ACKS_CONFIG, "1");
+        props.put(ProducerConfig.RETRIES_CONFIG, 3);
+
+        return new DefaultKafkaProducerFactory<>(props);
+    }
+
+    /**
+     * Kafka Template for sending BB+SuperTrend Signals
+     */
+    @Bean
+    public KafkaTemplate<String, BBSuperTrendSignal> bbSuperTrendKafkaTemplate() {
+        return new KafkaTemplate<>(bbSuperTrendProducerFactory());
     }
 }
