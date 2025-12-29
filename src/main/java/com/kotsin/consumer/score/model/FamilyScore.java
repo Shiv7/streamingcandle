@@ -76,6 +76,10 @@ public class FamilyScore {
 
     // ==================== KEY DATA SNAPSHOT ====================
     private double spotPrice;
+    private double open;             // Candle open price
+    private double high;             // Candle high price
+    private double low;              // Candle low price
+    private long volume;             // Candle volume
     private Double futurePrice;
     private Double pcr;
     private String oiSignal;
@@ -87,6 +91,7 @@ public class FamilyScore {
     private String cprWidth;           // "NARROW", "NORMAL", "WIDE"
     private boolean expiryDay;
     private String sessionPhase;       // "OPENING", "MORNING", "MIDDAY", etc.
+    private boolean isCommodity;       // True for MCX commodities (future is primary)
 
     // ==================== FLAGS ====================
     private boolean hasDivergence;

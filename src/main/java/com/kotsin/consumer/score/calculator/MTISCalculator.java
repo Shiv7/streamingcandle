@@ -96,7 +96,15 @@ public class MTISCalculator {
                 .windowStartMillis(family.getWindowStartMillis())
                 .windowEndMillis(family.getWindowEndMillis())
                 .triggerTimeframe(family.getTimeframe())
+                // OHLC data from equity (or commodity future acting as primary)
+                .open(equity.getOpen())
+                .high(equity.getHigh())
+                .low(equity.getLow())
                 .spotPrice(equity.getClose())
+                .volume(equity.getVolume())
+                // Commodity flag
+                .isCommodity(family.isCommodity())
+                // Future and options data
                 .futurePrice(family.getFuturePrice())
                 .pcr(family.getPcr())
                 .oiSignal(family.getOiSignal())
