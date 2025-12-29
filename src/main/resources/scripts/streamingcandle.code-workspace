@@ -5,6 +5,9 @@
 		},
 		{
 			"path": "../../../../../tradeExecutionModule"
+		},
+		{
+			"path": "../../../../../tradingDashboard"
 		}
 	]
 }

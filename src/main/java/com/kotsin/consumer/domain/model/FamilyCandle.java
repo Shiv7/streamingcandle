@@ -56,6 +56,7 @@ public class FamilyCandle {
     private boolean hasFuture;
     private boolean hasOptions;
     private int optionCount;
+    private boolean isCommodity;     // True for MCX commodities (future is primary, no equity)
 
     // ==================== SPOT-FUTURE ANALYSIS ====================
     private Double spotFuturePremium;       // (futureClose - equityClose) / equityClose * 100

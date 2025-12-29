@@ -177,8 +177,10 @@ public class FamilyCandleProcessor {
             .suppress(Suppressed.untilWindowCloses(Suppressed.BufferConfig.unbounded()));
 
         // Convert to FamilyCandle and emit with metrics tracking
+        // FIX: Allow futures-only families (for commodities like MCX Gold, Crude, etc.)
+        // Commodities don't have underlying equity - future IS the primary instrument
         collected.toStream()
-            .filter((windowedKey, collector) -> collector != null && collector.hasEquity())
+            .filter((windowedKey, collector) -> collector != null && collector.hasPrimaryInstrument())
             .mapValues((windowedKey, collector) -> {
                 FamilyCandle familyCandle = buildFamilyCandle(windowedKey, collector);
                 // Record metrics
@@ -321,19 +323,34 @@ public class FamilyCandleProcessor {
 
         // Set equity candle
         InstrumentCandle equity = collector.getEquity();
+        InstrumentCandle future = collector.getFuture();
+        
+        // Determine primary instrument: equity for NSE stocks, future for MCX commodities
+        InstrumentCandle primary = equity != null ? equity : future;
+        
         if (equity != null) {
             // VALIDATE OHLC
             validateOHLC(equity, "EQUITY", familyId);
             builder.equity(equity);
             builder.symbol(extractSymbolRoot(equity.getCompanyName()));
+        } else if (future != null) {
+            // For commodities: use future as the primary instrument
+            // Set as "equity" slot for downstream compatibility (MTISProcessor expects equity)
+            builder.equity(future);  // Commodity future acts as primary
+            builder.symbol(extractSymbolRoot(future.getCompanyName()));
+            builder.isCommodity(true);  // Flag this as commodity family
+            log.debug("Commodity family {} using future as primary: {}", familyId, future.getCompanyName());
         }
 
-        // Set future candle
-        InstrumentCandle future = collector.getFuture();
-        if (future != null) {
+        // Set future candle (already retrieved above)
+        if (future != null && equity != null) {
+            // Only validate future separately if we have both equity and future
             validateOHLC(future, "FUTURE", familyId);
+            builder.future(future);
+        } else if (future != null && equity == null) {
+            // Commodity case: future is already set as equity, don't duplicate
+            builder.future(null);  // Already used as primary
         }
-        builder.future(future);
         builder.hasFuture(future != null);
 
         // Set options (now deduplicated!)
@@ -574,6 +591,15 @@ public class FamilyCandleProcessor {
 
         public boolean hasEquity() {
             return equity != null;
+        }
+        
+        /**
+         * Check if collector has a primary instrument.
+         * For NSE stocks: equity is primary
+         * For MCX commodities: future is primary (no equity exists)
+         */
+        public boolean hasPrimaryInstrument() {
+            return equity != null || future != null;
         }
         
         public int getEquityMergeCount() {
