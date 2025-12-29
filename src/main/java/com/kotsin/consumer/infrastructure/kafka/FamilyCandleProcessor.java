@@ -291,6 +291,15 @@ public class FamilyCandleProcessor {
      * REMOVED: findEquityScripCode() - now handled by FamilyCacheAdapter
      * REMOVED: prefetchFamily() - now handled by FamilyCacheAdapter
      */
+    
+    /**
+     * Check if instrument is from MCX (Multi Commodity Exchange)
+     * MCX instruments don't have underlying equity - futures are the primary instrument
+     */
+    private boolean isMCXExchange(InstrumentCandle candle) {
+        if (candle == null) return false;
+        return "M".equalsIgnoreCase(candle.getExchange());
+    }
 
     /**
      * Build FamilyCandle from collected instruments
@@ -328,6 +337,11 @@ public class FamilyCandleProcessor {
         // Determine primary instrument: equity for NSE stocks, future for MCX commodities
         InstrumentCandle primary = equity != null ? equity : future;
         
+        // Detect if this is a commodity based on exchange (MCX = "M")
+        // MCX commodities are always flagged as commodities, even if they have both equity and future
+        boolean isCommodity = isMCXExchange(primary);
+        builder.isCommodity(isCommodity);
+        
         if (equity != null) {
             // VALIDATE OHLC
             validateOHLC(equity, "EQUITY", familyId);
@@ -338,7 +352,6 @@ public class FamilyCandleProcessor {
             // Set as "equity" slot for downstream compatibility (MTISProcessor expects equity)
             builder.equity(future);  // Commodity future acts as primary
             builder.symbol(extractSymbolRoot(future.getCompanyName()));
-            builder.isCommodity(true);  // Flag this as commodity family
             log.debug("Commodity family {} using future as primary: {}", familyId, future.getCompanyName());
         }
 
