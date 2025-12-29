@@ -76,6 +76,12 @@
 			<scope>provided</scope>
 		</dependency>
 
+		<!-- Spring Data Redis for percentile storage -->
+		<dependency>
+			<groupId>org.springframework.boot</groupId>
+			<artifactId>spring-boot-starter-data-redis</artifactId>
+		</dependency>
+
 		<!-- Test deps -->
 		<dependency>
 			<groupId>org.springframework.boot</groupId>
