@@ -61,6 +61,25 @@ public final class KafkaTopics {
     // ========== NEW: MTIS Family Score Topic ==========
     public static final String FAMILY_SCORE = "family-score";
 
+    // ========== NEW: Master Architecture Topics ==========
+    // Context Foundation (Part 1)
+    public static final String MASTER_ARCH_INDEX_REGIME = "masterarch-index-regime";
+    public static final String MASTER_ARCH_SECURITY_REGIME = "masterarch-security-regime";
+    
+    // Signal Generation (Part 2)
+    public static final String MASTER_ARCH_FUDKII = "masterarch-fudkii-output";
+    public static final String MASTER_ARCH_VOLUME = "masterarch-volume-output";
+    public static final String MASTER_ARCH_VELOCITY = "masterarch-velocity-output";
+    
+    // Signal Validation (Part 3)
+    public static final String MASTER_ARCH_STRUCTURAL = "masterarch-structural-validation";
+    public static final String MASTER_ARCH_BEHAVIOURAL = "masterarch-behavioural-validation";
+    public static final String MASTER_ARCH_CORRELATION = "masterarch-correlation-governor";
+    
+    // Final Score & Trade Construction (Part 4)
+    public static final String SCORE_FINAL_OPPORTUNITY = "score-final-opportunity";
+    public static final String TRADE_POSITION_SIZE = "trade-position-size";
+
     // ========== State Store Names ==========
     public static final String STORE_FMA_HISTORY = "fma-candle-history";
     public static final String STORE_FUDKII_HISTORY = "fudkii-candle-history";
