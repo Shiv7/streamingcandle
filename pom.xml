@@ -82,6 +82,12 @@
 			<artifactId>spring-boot-starter-data-redis</artifactId>
 		</dependency>
 
+		<!-- Caffeine Cache for high-performance caching -->
+		<dependency>
+			<groupId>com.github.ben-manes.caffeine</groupId>
+			<artifactId>caffeine</artifactId>
+		</dependency>
+
 		<!-- Test deps -->
 		<dependency>
 			<groupId>org.springframework.boot</groupId>
