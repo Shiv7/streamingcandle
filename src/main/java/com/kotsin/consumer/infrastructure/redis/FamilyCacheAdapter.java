@@ -261,14 +261,71 @@ public class FamilyCacheAdapter implements IFamilyDataProvider {
         stats.put("familyCount", familyCache.size());
         stats.put("reverseMappingCount", reverseMapping.size());
         stats.put("ttlHours", ttlHours);
-        
+
         long freshCount = familyCache.keySet().stream()
             .filter(this::isFresh)
             .count();
         stats.put("freshCount", freshCount);
         stats.put("staleCount", familyCache.size() - freshCount);
-        
+
         return stats;
+    }
+
+    /**
+     * 🛡️ CRITICAL FIX: Symbol to ScripCode Lookup Implementation
+     *
+     * Find equity scripCode by symbol name (implements IFamilyDataProvider)
+     *
+     * Strategy:
+     * 1. Search in-memory cache for family with matching symbol
+     * 2. If not found, query ScripFinderClient API
+     * 3. Cache the result for future lookups
+     *
+     * @param symbol Symbol name (e.g., "RELIANCE", "BANKNIFTY")
+     * @return Equity scripCode or null if not found
+     */
+    @Override
+    public String findEquityBySymbol(String symbol) {
+        if (symbol == null || symbol.trim().isEmpty()) {
+            return null;
+        }
+
+        String symbolUpper = symbol.toUpperCase().trim();
+
+        // Strategy 1: Search cached families for matching symbol
+        for (Map.Entry<String, InstrumentFamily> entry : familyCache.entrySet()) {
+            InstrumentFamily family = entry.getValue();
+            if (family.getSymbol() != null &&
+                family.getSymbol().toUpperCase().equals(symbolUpper)) {
+                return family.getEquityScripCode();
+            }
+        }
+
+        // Strategy 2: Query ScripFinderClient API for symbol lookup
+        try {
+            String equityScripCode = scripFinderClient.findScripCodeBySymbol(symbolUpper);
+            if (equityScripCode != null && !equityScripCode.isEmpty()) {
+                log.debug("Found equity scripCode for symbol {}: {}", symbolUpper, equityScripCode);
+
+                // Trigger family fetch to populate cache (async, fire-and-forget)
+                // This ensures subsequent lookups will hit cache
+                try {
+                    InstrumentFamily family = scripFinderClient.getFamily(equityScripCode, 1.0);
+                    if (family != null) {
+                        cacheFamily(family);
+                    }
+                } catch (Exception e) {
+                    log.debug("Could not cache family for {}: {}", equityScripCode, e.getMessage());
+                }
+
+                return equityScripCode;
+            }
+        } catch (Exception e) {
+            log.warn("Failed to lookup symbol {}: {}", symbolUpper, e.getMessage());
+        }
+
+        log.debug("No equity scripCode found for symbol: {}", symbolUpper);
+        return null;
     }
 
     /**

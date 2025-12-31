@@ -56,4 +56,21 @@ public interface IFamilyDataProvider {
      * @return true if cached and within TTL
      */
     boolean isFamilyCached(String equityScripCode);
+
+    /**
+     * 🛡️ CRITICAL FIX: Symbol to ScripCode Lookup
+     *
+     * Find equity scripCode by symbol name (reverse lookup: symbol → scripCode)
+     * Essential for mapping options to their equity family when option arrives
+     * before equity in the stream.
+     *
+     * Examples:
+     * - "RELIANCE" → "N:C:738"
+     * - "BANKNIFTY" → "N:D:26009"
+     * - "TCS" → "N:C:3456"
+     *
+     * @param symbol Symbol name (case-insensitive)
+     * @return Equity scripCode, or null if not found
+     */
+    String findEquityBySymbol(String symbol);
 }

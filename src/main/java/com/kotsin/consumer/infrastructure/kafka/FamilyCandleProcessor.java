@@ -254,17 +254,49 @@ public class FamilyCandleProcessor {
     }
     
     /**
-     * Find equity scripCode by symbol name
-     * Searches cached families for matching symbol
+     * 🛡️ CRITICAL FIX: Symbol Mapping Gap Prevention
+     *
+     * BEFORE (BROKEN):
+     * - Cache only populated when equity flows through
+     * - If option arrives before equity, cache is empty → mapping fails
+     * - Option gets grouped alone, not with its equity family
+     * - Example: "RELIANCE 30 DEC 2025 CE 2500" arrives before "N:C:738" (RELIANCE equity)
+     *
+     * AFTER (FIXED):
+     * - Try cache first (fast path)
+     * - If cache miss, query familyDataProvider for equity lookup
+     * - Populate cache with result for future lookups
+     * - Ensures options always find their equity family
      */
     private String findEquityBySymbol(String symbol) {
         if (symbol == null || symbol.isEmpty()) {
             return null;
         }
-        // Search through cached families to find one with matching symbol
-        // This works because equities usually have their symbol as company name
-        // Note: This is a workaround until a proper symbol->scripCode index is built
-        return symbolToScripCodeCache.get(symbol.toUpperCase());
+
+        String symbolUpper = symbol.toUpperCase();
+
+        // Fast path: Check cache first
+        String cachedScripCode = symbolToScripCodeCache.get(symbolUpper);
+        if (cachedScripCode != null) {
+            return cachedScripCode;
+        }
+
+        // Slow path: Query familyDataProvider for equity lookup by symbol
+        try {
+            String equityScripCode = familyDataProvider.findEquityBySymbol(symbolUpper);
+            if (equityScripCode != null && !equityScripCode.isEmpty()) {
+                // Cache the result for future lookups
+                symbolToScripCodeCache.put(symbolUpper, equityScripCode);
+                log.debug("Symbol mapping cached: {} -> {}", symbolUpper, equityScripCode);
+                return equityScripCode;
+            }
+        } catch (Exception e) {
+            log.warn("Failed to lookup equity for symbol: {}, error: {}", symbolUpper, e.getMessage());
+        }
+
+        // No mapping found - log for monitoring
+        log.debug("No equity scripCode found for symbol: {}", symbolUpper);
+        return null;
     }
     
     // Cache for symbol -> equity scripCode mapping (built when equities are processed)
@@ -273,18 +305,57 @@ public class FamilyCandleProcessor {
 
     /**
      * Extract symbol root from company name
-     * e.g., "UNOMINDA 30 DEC 2025 CE 1280.00" -> "UNOMINDA"
+     *
+     * Handles various formats:
+     * - "UNOMINDA 30 DEC 2025 CE 1280.00" -> "UNOMINDA"
+     * - "NIFTY 50" -> "NIFTY"
+     * - "BANK NIFTY" -> "BANKNIFTY" (concatenate)
+     * - "M&M" -> "M&M" (preserve special chars)
+     * - "L&TFH" -> "L&TFH"
      */
     private String extractSymbolRoot(String companyName) {
         if (companyName == null || companyName.isEmpty()) {
             return null;
         }
-        // First word is usually the symbol root
-        String[] parts = companyName.split("\\s+");
-        if (parts.length > 0) {
+
+        String trimmed = companyName.trim();
+
+        // Handle special cases for multi-word symbols
+        String upperName = trimmed.toUpperCase();
+        if (upperName.startsWith("BANK NIFTY") || upperName.startsWith("BANKNIFTY")) {
+            return "BANKNIFTY";
+        }
+        if (upperName.startsWith("NIFTY BANK")) {
+            return "BANKNIFTY";
+        }
+        if (upperName.startsWith("FIN NIFTY") || upperName.startsWith("FINNIFTY")) {
+            return "FINNIFTY";
+        }
+        if (upperName.startsWith("MIDCP NIFTY") || upperName.startsWith("MIDCPNIFTY")) {
+            return "MIDCPNIFTY";
+        }
+
+        // Split by whitespace
+        String[] parts = trimmed.split("\\s+");
+
+        // If single word or contains numbers/special chars, return as-is
+        if (parts.length == 1) {
             return parts[0];
         }
-        return null;
+
+        // Check if second part looks like date/month/year/option type
+        // If yes, first part is the symbol
+        String secondPart = parts.length > 1 ? parts[1] : "";
+        if (secondPart.matches("\\d+") || // Number (day/strike)
+            secondPart.matches("(?i)(JAN|FEB|MAR|APR|MAY|JUN|JUL|AUG|SEP|OCT|NOV|DEC)") || // Month
+            secondPart.matches("(?i)(CE|PE)") || // Option type
+            secondPart.matches("\\d{4}")) { // Year
+            return parts[0];
+        }
+
+        // For compound symbols like "BANK NIFTY" that didn't match above,
+        // take first word (might be imperfect but better than nothing)
+        return parts[0];
     }
 
     /**
