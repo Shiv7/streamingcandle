@@ -277,9 +277,8 @@ public class FamilyCacheAdapter implements IFamilyDataProvider {
      * Find equity scripCode by symbol name (implements IFamilyDataProvider)
      *
      * Strategy:
-     * 1. Search in-memory cache for family with matching symbol
-     * 2. If not found, query ScripFinderClient API
-     * 3. Cache the result for future lookups
+     * 1. Search in-memory cache for family with matching symbolRoot
+     * 2. If not found, return null (API lookup not available yet)
      *
      * @param symbol Symbol name (e.g., "RELIANCE", "BANKNIFTY")
      * @return Equity scripCode or null if not found
@@ -292,39 +291,17 @@ public class FamilyCacheAdapter implements IFamilyDataProvider {
 
         String symbolUpper = symbol.toUpperCase().trim();
 
-        // Strategy 1: Search cached families for matching symbol
+        // Strategy 1: Search cached families for matching symbolRoot
         for (Map.Entry<String, InstrumentFamily> entry : familyCache.entrySet()) {
             InstrumentFamily family = entry.getValue();
-            if (family.getSymbol() != null &&
-                family.getSymbol().toUpperCase().equals(symbolUpper)) {
+            if (family.getSymbolRoot() != null &&
+                family.getSymbolRoot().toUpperCase().equals(symbolUpper)) {
                 return family.getEquityScripCode();
             }
         }
 
-        // Strategy 2: Query ScripFinderClient API for symbol lookup
-        try {
-            String equityScripCode = scripFinderClient.findScripCodeBySymbol(symbolUpper);
-            if (equityScripCode != null && !equityScripCode.isEmpty()) {
-                log.debug("Found equity scripCode for symbol {}: {}", symbolUpper, equityScripCode);
-
-                // Trigger family fetch to populate cache (async, fire-and-forget)
-                // This ensures subsequent lookups will hit cache
-                try {
-                    InstrumentFamily family = scripFinderClient.getFamily(equityScripCode, 1.0);
-                    if (family != null) {
-                        cacheFamily(family);
-                    }
-                } catch (Exception e) {
-                    log.debug("Could not cache family for {}: {}", equityScripCode, e.getMessage());
-                }
-
-                return equityScripCode;
-            }
-        } catch (Exception e) {
-            log.warn("Failed to lookup symbol {}: {}", symbolUpper, e.getMessage());
-        }
-
-        log.debug("No equity scripCode found for symbol: {}", symbolUpper);
+        // Note: Direct symbol-to-scripCode API lookup not yet available in ScripFinderClient
+        log.debug("No equity scripCode found in cache for symbol: {}", symbolUpper);
         return null;
     }
 
