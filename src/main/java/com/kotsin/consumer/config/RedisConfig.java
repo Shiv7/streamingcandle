@@ -49,4 +49,12 @@ public class RedisConfig {
         template.setHashValueSerializer(new StringRedisSerializer());
         return template;
     }
+
+    /**
+     * StringRedisTemplate for JSON candle storage in RedisCandleHistoryService
+     */
+    @Bean
+    public org.springframework.data.redis.core.StringRedisTemplate stringRedisTemplate(RedisConnectionFactory connectionFactory) {
+        return new org.springframework.data.redis.core.StringRedisTemplate(connectionFactory);
+    }
 }

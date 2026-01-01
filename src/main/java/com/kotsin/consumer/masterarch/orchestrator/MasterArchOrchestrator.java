@@ -90,10 +90,21 @@ public class MasterArchOrchestrator {
     
     /**
      * Full processing pipeline for FamilyCandle
+     * 
+     * @param familyCandle Current family candle being processed
+     * @param securityCandles30m Historical 30m candles for the security (55+ required)
+     * @param indexCandles30m Historical 30m candles for NIFTY index (55+ required)
+     * @param vcpScore VCP score from cache
+     * @param nearestPivot Nearest pivot level
+     * @param pivotDistance Distance to pivot
+     * @param pivotType Type of pivot
+     * @param ohmScore OHM score
+     * @param optionBuyerFriendly Whether option buyer friendly
      */
     public MasterArchResult process(
             FamilyCandle familyCandle,
-            List<InstrumentCandle> indexCandles30m,
+            List<UnifiedCandle> securityCandles30m,
+            List<UnifiedCandle> indexCandles30m,
             double vcpScore,
             double nearestPivot,
             double pivotDistance,
@@ -105,16 +116,20 @@ public class MasterArchOrchestrator {
         String companyName = familyCandle.getSymbol();
         long timestamp = System.currentTimeMillis();
         
-        // Convert to UnifiedCandle list
-        List<UnifiedCandle> candles30m = convertToUnifiedCandles(familyCandle);
+        // Use passed candles directly (already fetched from Redis by MasterArchProcessor)
+        List<UnifiedCandle> candles30m = securityCandles30m;
         
         // ======================== PART 1: CONTEXT FOUNDATION ========================
         
-        // 1A. Index Regime
+        // 1A. Index Regime - convert UnifiedCandle to InstrumentCandle for calculator
+        List<InstrumentCandle> indexInstrumentCandles = indexCandles30m.stream()
+                .map(this::toInstrumentCandle)
+                .collect(Collectors.toList());
+        
         IndexContextScore indexContext = indexRegimeCalculator.calculate(
                 "NIFTY50",  // Would come from family mapping
                 "999920000",
-                indexCandles30m,
+                indexInstrumentCandles,
                 0.0  // Previous score
         );
         
@@ -301,6 +316,29 @@ public class MasterArchOrchestrator {
                 .build();
 
         return List.of(current);
+    }
+    
+    /**
+     * Convert UnifiedCandle to InstrumentCandle for calculators that need it
+     */
+    private InstrumentCandle toInstrumentCandle(UnifiedCandle uc) {
+        return InstrumentCandle.builder()
+                .scripCode(uc.getScripCode())
+                .companyName(uc.getCompanyName())
+                .exchange(uc.getExchange())
+                .exchangeType(uc.getExchangeType())
+                .timeframe(uc.getTimeframe())
+                .windowStartMillis(uc.getWindowStartMillis())
+                .windowEndMillis(uc.getWindowEndMillis())
+                .open(uc.getOpen())
+                .high(uc.getHigh())
+                .low(uc.getLow())
+                .close(uc.getClose())
+                .volume(uc.getVolume())
+                .buyVolume(uc.getBuyVolume())
+                .sellVolume(uc.getSellVolume())
+                .vwap(uc.getVwap())
+                .build();
     }
     
     private boolean checkFollowThrough(List<UnifiedCandle> candles, boolean bullish) {

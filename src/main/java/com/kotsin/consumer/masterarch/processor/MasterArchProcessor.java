@@ -3,9 +3,11 @@ package com.kotsin.consumer.masterarch.processor;
 import com.kotsin.consumer.config.KafkaTopics;
 import com.kotsin.consumer.domain.model.FamilyCandle;
 import com.kotsin.consumer.domain.model.InstrumentCandle;
+import com.kotsin.consumer.infrastructure.redis.RedisCandleHistoryService;
 import com.kotsin.consumer.masterarch.model.*;
 import com.kotsin.consumer.masterarch.orchestrator.MasterArchOrchestrator;
 import com.kotsin.consumer.model.MTVCPOutput;
+import com.kotsin.consumer.model.UnifiedCandle;
 import jakarta.annotation.PostConstruct;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.beans.factory.annotation.Autowired;
@@ -50,11 +52,17 @@ public class MasterArchProcessor {
     @Autowired
     private KafkaTemplate<String, SecurityContextScore> securityContextScoreProducer;
 
+    @Autowired
+    private RedisCandleHistoryService candleHistoryService;
+
     @Value("${masterarch.processor.enabled:true}")
     private boolean enabled;
 
     @Value("${masterarch.processor.index.scripcode:999920000}")
     private String niftyScripCode;
+
+    @Value("${masterarch.processor.history.candles:100}")
+    private int historyCandles;
 
     // ==================== STATE CACHES ====================
 
@@ -140,10 +148,28 @@ public class MasterArchProcessor {
                 return;
             }
 
-            // Get cached data
-            List<InstrumentCandle> indexCandles = indexCandleCache.get(niftyScripCode);
-            if (indexCandles == null || indexCandles.isEmpty()) {
-                log.debug("⏳ Skipping {} - waiting for NIFTY index candles", symbol);
+            // Store current candle in Redis for history
+            storeSecurityCandle(familyCandle);
+
+            // Get historical candles from Redis (100 30m candles for security)
+            String exchange = familyCandle.getEquity().getExchange();
+            String exchangeType = familyCandle.getEquity().getExchangeType();
+            List<UnifiedCandle> securityCandles = candleHistoryService.getCandles(
+                    scripCode, "30m", historyCandles, exchange, exchangeType);
+            
+            // Get historical index candles from Redis (100 30m candles for NIFTY)
+            List<UnifiedCandle> indexCandles = candleHistoryService.getCandles(
+                    niftyScripCode, "30m", historyCandles, "N", "C");
+            
+            if (indexCandles == null || indexCandles.size() < 55) {
+                log.debug("⏳ Skipping {} - need 55+ NIFTY candles, have {}", 
+                        symbol, indexCandles != null ? indexCandles.size() : 0);
+                return;
+            }
+            
+            if (securityCandles == null || securityCandles.size() < 55) {
+                log.debug("⏳ Skipping {} - need 55+ security candles, have {}", 
+                        symbol, securityCandles != null ? securityCandles.size() : 0);
                 return;
             }
 
@@ -153,9 +179,10 @@ public class MasterArchProcessor {
             OHMCache ohm = ohmCache.getOrDefault(scripCode, 
                     OHMCache.builder().ohmScore(0).optionBuyerFriendly(false).build());
 
-            // Run full MASTER ARCHITECTURE orchestration
+            // Run full MASTER ARCHITECTURE orchestration with historical candles
             MasterArchOrchestrator.MasterArchResult result = orchestrator.process(
                     familyCandle,
+                    securityCandles,
                     indexCandles,
                     vcpScore,
                     pivots.getNearestPivot(),
@@ -263,10 +290,40 @@ public class MasterArchProcessor {
 
     private void cacheIndexCandles(FamilyCandle familyCandle) {
         if (familyCandle.getEquity() != null) {
-            // For now, just cache the latest candle
-            // TODO: Maintain history for EMA/ATR calculations
-            indexCandleCache.put(niftyScripCode, List.of(familyCandle.getEquity()));
+            // Store index candle in Redis for historical retrieval
+            InstrumentCandle equity = familyCandle.getEquity();
+            UnifiedCandle candle = convertToUnifiedCandle(equity);
+            candleHistoryService.storeCandle(candle);
+            log.trace("Stored NIFTY 30m candle in Redis at {}", equity.getWindowStartMillis());
         }
+    }
+
+    private void storeSecurityCandle(FamilyCandle familyCandle) {
+        if (familyCandle.getEquity() != null) {
+            InstrumentCandle equity = familyCandle.getEquity();
+            UnifiedCandle candle = convertToUnifiedCandle(equity);
+            candleHistoryService.storeCandle(candle);
+        }
+    }
+
+    private UnifiedCandle convertToUnifiedCandle(InstrumentCandle ic) {
+        return UnifiedCandle.builder()
+                .scripCode(ic.getScripCode())
+                .companyName(ic.getCompanyName())
+                .exchange(ic.getExchange())
+                .exchangeType(ic.getExchangeType())
+                .timeframe(ic.getTimeframe())
+                .windowStartMillis(ic.getWindowStartMillis())
+                .windowEndMillis(ic.getWindowEndMillis())
+                .open(ic.getOpen())
+                .high(ic.getHigh())
+                .low(ic.getLow())
+                .close(ic.getClose())
+                .volume(ic.getVolume())
+                .buyVolume(ic.getBuyVolume())
+                .sellVolume(ic.getSellVolume())
+                .vwap(ic.getVwap())
+                .build();
     }
 
     private double getVCPScore(String scripCode) {
