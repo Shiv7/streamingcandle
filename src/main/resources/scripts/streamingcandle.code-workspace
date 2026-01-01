@@ -11,6 +11,12 @@
 		},
 		{
 			"path": "../../../../../optionProducerJava"
+		},
+		{
+			"path": "../../../../../scripFinder"
+		},
+		{
+			"path": "../../../../../strategyModule"
 		}
 	]
 }

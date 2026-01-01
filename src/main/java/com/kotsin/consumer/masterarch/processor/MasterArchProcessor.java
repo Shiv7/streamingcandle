@@ -30,7 +30,7 @@ import java.util.concurrent.ConcurrentHashMap;
  * - vcp-combined (caches VCP scores)
  * 
  * Outputs to:
- * - score-final-opportunity : Final trade decision
+ * - kotsin_FF1 : Final trade decision
  * - masterarch-index-regime : Index context scores  
  * - masterarch-security-regime : Security context scores
  * 
@@ -110,7 +110,7 @@ public class MasterArchProcessor {
     public void init() {
         log.info("🏗️ MasterArchProcessor initialized. Enabled: {}", enabled);
         log.info("🏗️ Outputs to: {}, {}, {}", 
-                KafkaTopics.SCORE_FINAL_OPPORTUNITY,
+                KafkaTopics.KOTSIN_FF1,
                 KafkaTopics.MASTER_ARCH_INDEX_REGIME,
                 KafkaTopics.MASTER_ARCH_SECURITY_REGIME);
     }
@@ -123,7 +123,7 @@ public class MasterArchProcessor {
      */
     @KafkaListener(
             topics = {KafkaTopics.FAMILY_CANDLE_30M},
-            groupId = "${kafka.consumer.masterarch-group:masterarch-processor-v1}",
+            groupId = "${kafka.consumer.masterarch-group:masterarch-processor-v2}",
             containerFactory = "curatedKafkaListenerContainerFactory"
     )
     public void process30mCandle(FamilyCandle familyCandle) {
@@ -200,21 +200,42 @@ public class MasterArchProcessor {
             // Emit all scores to respective topics
             emitScores(scripCode, result);
 
-            // Log based on actionability
+            // Log based on actionability with enhanced details
             if (result.isActionable()) {
-                log.info("🎯 MASTER ARCH SIGNAL | {} | decision={} | score={:.2f} | conf={:.2f} | lots={} | {}",
+                log.info("🎯 MASTER ARCH SIGNAL | {} | decision={} | finalScore={:.3f} | direction={} | lots={}",
                         symbol,
                         result.getDecision(),
                         result.getFinalScore().getFinalScore().getCurrent(),
-                        result.getFinalScore().getDirectionConfidence(),
-                        result.getPosition() != null ? result.getPosition().getRecommendedLots() : 0,
-                        result.getRationale());
+                        result.getFinalScore().getDirectionConfidence() > 0 ? "BULLISH" : "BEARISH",
+                        result.getPosition() != null ? result.getPosition().getRecommendedLots() : 0);
+                
+                // Log component scores
+                log.info("   📊 Components | index={:.2f} | security={:.2f} | fudkii={:.2f} | volume={:.2f}",
+                        result.getIndexContext() != null ? result.getIndexContext().getContextScore().getCurrent() : 0,
+                        result.getSecurityContext() != null ? result.getSecurityContext().getContextScore().getCurrent() : 0,
+                        result.getFudkii() != null ? result.getFudkii().getStrength() : 0,
+                        result.getVolume() != null ? result.getVolume().getVolumeCertainty() : 0);
+                
+                // Log microstructure if present
+                if (result.getMicrostructure() != null) {
+                    var micro = result.getMicrostructure();
+                    log.info("   🔬 Microstructure | VPIN={:.2f}({}) | OFI={:.2f}({}) | PCR={:.2f}({}) | oiBuildUp={} | mult={:.2f}",
+                            micro.getVpin(), micro.getVpinSignal(),
+                            micro.getOfi(), micro.getOfiDirection(),
+                            micro.getPcr(), micro.getPcrSignal(),
+                            micro.isOiBuildingUp(),
+                            micro.getMicrostructureMultiplier());
+                }
             } else {
-                log.debug("[MASTER ARCH] {} | {} | score={:.2f}",
+                // Log all signals, not just actionable ones
+                log.info("📈 {} | {} | finalScore={:.3f} | fudkii={:.2f} | micro={}",
                         symbol,
                         result.getDecision(),
                         result.getFinalScore() != null && result.getFinalScore().getFinalScore() != null 
-                            ? result.getFinalScore().getFinalScore().getCurrent() : 0.0);
+                            ? result.getFinalScore().getFinalScore().getCurrent() : 0.0,
+                        result.getFudkii() != null ? result.getFudkii().getStrength() : 0.0,
+                        result.getMicrostructure() != null ? 
+                            String.format("%.2f", result.getMicrostructure().getMicrostructureMultiplier()) : "N/A");
             }
 
         } catch (Exception e) {
@@ -229,7 +250,7 @@ public class MasterArchProcessor {
      */
     @KafkaListener(
             topics = {KafkaTopics.VCP_COMBINED},
-            groupId = "${kafka.consumer.masterarch-group:masterarch-processor-v1}",
+            groupId = "${kafka.consumer.masterarch-group:masterarch-processor-v2}",
             containerFactory = "curatedKafkaListenerContainerFactory"
     )
     public void processVCP(MTVCPOutput vcp) {
@@ -249,12 +270,12 @@ public class MasterArchProcessor {
             // 1. Emit Final Opportunity Score (main signal)
             if (result.getFinalScore() != null) {
                 finalOpportunityScoreProducer.send(
-                        KafkaTopics.SCORE_FINAL_OPPORTUNITY,
+                        KafkaTopics.KOTSIN_FF1,
                         scripCode,
                         result.getFinalScore()
                 );
                 log.debug("📤 Emitted FinalOpportunityScore for {} to {}", 
-                        scripCode, KafkaTopics.SCORE_FINAL_OPPORTUNITY);
+                        scripCode, KafkaTopics.KOTSIN_FF1);
             }
 
             // 2. Emit Index Context Score

@@ -77,7 +77,8 @@ public final class KafkaTopics {
     public static final String MASTER_ARCH_CORRELATION = "masterarch-correlation-governor";
     
     // Final Score & Trade Construction (Part 4)
-    public static final String SCORE_FINAL_OPPORTUNITY = "score-final-opportunity";
+    public static final String KOTSIN_FF1 = "kotsin_FF1";
+    public static final String KOTSIN_FUDKII = "kotsin_FUDKII";  // Standalone FUDKII strategy
     public static final String TRADE_POSITION_SIZE = "trade-position-size";
 
     // ========== State Store Names ==========

@@ -42,11 +42,13 @@ public class PositionSizer {
     private static final double VOL_EXP_T2 = 0.80;
     private static final double VOL_EXP_T3 = 0.90;
     
-    // ATR multipliers
+    // ATR multipliers (FF1 Spec)
+    // T1 = Nearest pivot (no ATR offset)
+    // T2 = Next higher TF pivot if volume continues
+    // T3 = 2.5-3.0 ATR multiple if no decay
     private static final double SL_ATR_MULT = 0.25;
-    private static final double T1_ATR_MULT = 0.50;
-    private static final double T2_ATR_MULT = 1.00;
-    private static final double T3_ATR_MULT = 1.50;
+    private static final double T3_ATR_MULT_MIN = 2.50;
+    private static final double T3_ATR_MULT_MAX = 3.00;
     
     /**
      * Position Size Output
@@ -148,31 +150,39 @@ public class PositionSizer {
         
         if (!noTrade) {
             if (isBullish) {
-                // Bullish targets
+                // Bullish targets per FF1 Spec
+                // T1 = Nearest resistance pivot
                 if (volumeExpStrength >= VOL_EXP_T1) {
-                    t1 = nextPivot + T1_ATR_MULT * atr;
+                    t1 = nextPivot;  // Pivot directly, no ATR offset
                     t1Active = true;
                 }
+                // T2 = Next higher TF pivot if volume continues
                 if (volumeExpStrength >= VOL_EXP_T2) {
-                    t2 = nextPivot + T2_ATR_MULT * atr;
+                    t2 = nextPivot * 1.02;  // Approximate next pivot (2% above)
                     t2Active = true;
                 }
+                // T3 = 2.5-3.0 ATR multiple if strong
                 if (volumeExpStrength >= VOL_EXP_T3) {
-                    t3 = nextPivot + T3_ATR_MULT * atr;
+                    double atrMult = volumeExpStrength >= 0.95 ? T3_ATR_MULT_MAX : T3_ATR_MULT_MIN;
+                    t3 = currentPrice + atrMult * atr;
                     t3Active = true;
                 }
             } else {
-                // Bearish targets
+                // Bearish targets per FF1 Spec
+                // T1 = Nearest support pivot
                 if (volumeExpStrength >= VOL_EXP_T1) {
-                    t1 = nextPivot - T1_ATR_MULT * atr;
+                    t1 = nextPivot;  // Pivot directly
                     t1Active = true;
                 }
+                // T2 = Lower TF pivot if volume continues
                 if (volumeExpStrength >= VOL_EXP_T2) {
-                    t2 = nextPivot - T2_ATR_MULT * atr;
+                    t2 = nextPivot * 0.98;  // Approximate next pivot (2% below)
                     t2Active = true;
                 }
+                // T3 = 2.5-3.0 ATR multiple downside
                 if (volumeExpStrength >= VOL_EXP_T3) {
-                    t3 = nextPivot - T3_ATR_MULT * atr;
+                    double atrMult = volumeExpStrength >= 0.95 ? T3_ATR_MULT_MAX : T3_ATR_MULT_MIN;
+                    t3 = currentPrice - atrMult * atr;
                     t3Active = true;
                 }
             }

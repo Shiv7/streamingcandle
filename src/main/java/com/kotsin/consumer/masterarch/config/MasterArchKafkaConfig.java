@@ -20,7 +20,7 @@ import java.util.Map;
  * MasterArchKafkaConfig - Kafka configuration for MASTER ARCHITECTURE signal emission.
  * 
  * Produces to:
- * - score-final-opportunity  : Final trade/no-trade decision
+ * - kotsin_FF1  : Final trade/no-trade decision
  * - masterarch-index-regime  : Index context scores
  * - masterarch-security-regime : Security context scores
  * - trade-position-size      : Position sizing recommendations

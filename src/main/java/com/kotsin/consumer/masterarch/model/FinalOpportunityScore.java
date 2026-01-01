@@ -28,7 +28,7 @@ import org.apache.kafka.common.serialization.Serializer;
  * If no follow through after N bars: Score_t = Score_t−1 × 0.90
  * Default N = 3 bars
  * 
- * Output Topic: score-final-opportunity
+ * Output Topic: kotsin_FF1
  */
 @Data
 @Builder

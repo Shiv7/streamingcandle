@@ -1,102 +1,61 @@
 package com.kotsin.consumer.masterarch.calculator;
 
+import com.kotsin.consumer.infrastructure.api.IndustryClient;
 import com.kotsin.consumer.masterarch.model.NormalizedScore;
 import lombok.AllArgsConstructor;
 import lombok.Builder;
 import lombok.Data;
+import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.stereotype.Component;
 
-import java.util.HashMap;
 import java.util.Map;
-import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
 
 /**
  * CorrelationGovernor - PART 3: CG – Correlation Governor
  * 
- * MASTER ARCHITECTURE Compliant Module
+ * MASTER ARCHITECTURE Compliant Module (FF1 Spec)
  * 
  * Purpose: Prevent over-concentration in correlated positions
  * 
  * Logic:
- * - Track rolling correlation >0.75 for cluster formation
+ * - Uses IndustryClient to get dynamic industry/cluster from ScripFinder
  * - Same cluster active → ×0.80 multiplier
  * - Opposite beta cluster active → ×0.70 multiplier
  * 
- * Clusters (examples):
- * - BANK_NIFTY cluster: HDFC, ICICI, KOTAK, AXIS, SBI, INDUS
- * - IT cluster: INFY, TCS, WIPRO, HCLTECH, TECHM
- * - AUTO cluster: MARUTI, TATAMOTORS, M&M, BAJAJ-AUTO
+ * Clusters are dynamically derived from ScripFinder's industry mapping:
+ * - Excel file: NSE_nifty_symbol_seggregation.xlsx
+ * - MongoDB: nifty100_stocks collection
  * 
  * Output Topic: validation-correlation-output
  */
 @Slf4j
 @Component
+@RequiredArgsConstructor
 public class CorrelationGovernor {
     
-    // Predefined clusters based on sector correlation
-    private static final Map<String, Set<String>> CLUSTERS = new HashMap<>();
+    // Inject IndustryClient for dynamic cluster lookup
+    private final IndustryClient industryClient;
     
     // Active positions tracked per cluster
     private final Map<String, Integer> activePositionsPerCluster = new ConcurrentHashMap<>();
     
-    // Correlation threshold
-    private static final double CORRELATION_THRESHOLD = 0.75;
-    
-    // Multipliers per spec
+    // Multipliers per FF1 spec
     private static final double SAME_CLUSTER_MULTIPLIER = 0.80;
     private static final double OPPOSITE_BETA_MULTIPLIER = 0.70;
     
-    static {
-        // Bank/Financial cluster
-        CLUSTERS.put("BANK", Set.of(
-            "HDFCBANK", "ICICIBANK", "KOTAKBANK", "AXISBANK", "SBIN", 
-            "INDUSINDBK", "BANKBARODA", "PNB", "IDFCFIRSTB", "FEDERALBNK"
-        ));
-        
-        // IT cluster
-        CLUSTERS.put("IT", Set.of(
-            "INFY", "TCS", "WIPRO", "HCLTECH", "TECHM", 
-            "LTIM", "MPHASIS", "COFORGE", "PERSISTENT"
-        ));
-        
-        // Auto cluster
-        CLUSTERS.put("AUTO", Set.of(
-            "MARUTI", "TATAMOTORS", "M&M", "BAJAJ-AUTO", "HEROMOTOCO",
-            "EICHERMOT", "TVSMOTOR", "ASHOKLEY"
-        ));
-        
-        // Metal cluster
-        CLUSTERS.put("METAL", Set.of(
-            "TATASTEEL", "JSWSTEEL", "HINDALCO", "VEDL", "SAIL",
-            "JINDALSTEL", "NATIONALUM", "NMDC"
-        ));
-        
-        // Pharma cluster
-        CLUSTERS.put("PHARMA", Set.of(
-            "SUNPHARMA", "DRREDDY", "CIPLA", "DIVISLAB", "APOLLOHOSP",
-            "LUPIN", "BIOCON", "TORNTPHARM"
-        ));
-        
-        // Energy/Oil cluster
-        CLUSTERS.put("ENERGY", Set.of(
-            "RELIANCE", "ONGC", "IOC", "BPCL", "GAIL",
-            "HINDPETRO", "POWERGRID", "NTPC", "ADANIGREEN"
-        ));
-        
-        // FMCG cluster
-        CLUSTERS.put("FMCG", Set.of(
-            "HINDUNILVR", "ITC", "NESTLEIND", "BRITANNIA", "DABUR",
-            "MARICO", "GODREJCP", "COLPAL"
-        ));
-        
-        // Realty cluster
-        CLUSTERS.put("REALTY", Set.of(
-            "DLF", "GODREJPROP", "OBEROIRLTY", "PHOENIXLTD", "PRESTIGE",
-            "LODHA", "BRIGADE"
-        ));
-    }
+    // Opposite cluster mappings (risk-on vs risk-off, export vs domestic)
+    private static final Map<String, String> OPPOSITE_CLUSTERS = Map.of(
+        "BANK", "METAL",
+        "METAL", "BANK",
+        "IT", "FMCG",
+        "FMCG", "IT",
+        "PHARMA", "ENERGY",
+        "ENERGY", "PHARMA",
+        "AUTO", "REALTY",
+        "REALTY", "AUTO"
+    );
     
     /**
      * Correlation Governor Output
@@ -225,42 +184,20 @@ public class CorrelationGovernor {
     }
     
     /**
-     * Find cluster for a company name
+     * Find cluster for a company name using IndustryClient (dynamic lookup)
      */
     private String findCluster(String companyName) {
         if (companyName == null) return null;
-        
-        String normalized = companyName.toUpperCase().replaceAll("[^A-Z]", "");
-        
-        for (Map.Entry<String, Set<String>> entry : CLUSTERS.entrySet()) {
-            for (String member : entry.getValue()) {
-                if (normalized.contains(member) || member.contains(normalized)) {
-                    return entry.getKey();
-                }
-            }
-        }
-        return null;
+        return industryClient.getCluster(companyName);
     }
     
     /**
      * Find opposite beta cluster (typically negative correlation)
-     * Examples:
-     * - BANK tends to be opposite to METAL (risk-on vs risk-off)
-     * - IT can be opposite to AUTO (export vs domestic)
+     * Uses OPPOSITE_CLUSTERS map for lookup
      */
     private String findOppositeCluster(String cluster) {
         if (cluster == null) return null;
-        
-        return switch (cluster) {
-            case "BANK" -> "METAL";
-            case "METAL" -> "BANK";
-            case "IT" -> "FMCG";  // Export sensitive vs defensive
-            case "FMCG" -> "IT";
-            case "PHARMA" -> "ENERGY";  // Defensive vs cyclical
-            case "ENERGY" -> "PHARMA";
-            case "AUTO" -> "REALTY";
-            case "REALTY" -> "AUTO";
-            default -> null;
-        };
+        return OPPOSITE_CLUSTERS.get(cluster);
     }
 }
+

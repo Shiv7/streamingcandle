@@ -169,7 +169,41 @@ public class MasterArchSecurityRegimeCalculator {
         
         // ======================== FINAL SECURITY REGIME STRENGTH ========================
         double indexRegimeStrength = indexRegime != null ? indexRegime.getRegimeStrength() : 0.5;
-        double finalStrength = rawStrength * indexRegimeStrength * flowMultiplier;
+        
+        // ======================== MICRO-LEADER OVERRIDE (FF1 SPEC) ========================
+        // Allow high-quality, low-beta leaders to express strength even when index is weak
+        // Conditions (ALL must be true):
+        // 1. Security_Weight < 0.05 (not a heavy-weight stock - assumed true for non-index)
+        // 2. Correlation(Security, Index) < 0.30 (low correlation - estimated from relative strength)
+        // 3. Raw_Security_Strength > 0.75 (strong security)
+        // 4. Index_Regime_Strength < 0.55 (weak index)
+        // Note: Volume_Certainty > 0.80 check happens at orchestrator level
+        
+        boolean microLeaderOverrideApplied = false;
+        double estimatedCorrelation = 1.0 - Math.abs(relativeStrength); // Proxy: stronger outperformance = lower correlation
+        
+        boolean microLeaderConditions = 
+            estimatedCorrelation < 0.30 &&
+            Math.abs(rawStrength) > 0.75 &&
+            indexRegimeStrength < 0.55 &&
+            // Hard guardrail: Never apply when index is strongly opposite
+            !(indexRegime != null && indexRegime.getContextScore().getCurrent() <= -0.50 && rawStrength > 0);
+        
+        double finalStrength;
+        if (microLeaderConditions) {
+            // Determine decouple factor (0.30-0.40)
+            // Higher decouple if breakoutQuality and structureQuality are strong
+            double decoupleFactor = (breakoutQuality >= 0.75 && structureQuality >= 0.50) ? 0.40 : 0.30;
+            
+            // Effective index coupling: never let index become irrelevant (min 0.35)
+            double effectiveIndexCoupling = Math.max(0.35, indexRegimeStrength * (1 - decoupleFactor));
+            
+            finalStrength = rawStrength * effectiveIndexCoupling * flowMultiplier;
+            microLeaderOverrideApplied = true;
+        } else {
+            // Normal calculation
+            finalStrength = rawStrength * indexRegimeStrength * flowMultiplier;
+        }
         finalStrength = clamp(finalStrength, -1.0, 1.0);
         
         return SecurityContextScore.builder()

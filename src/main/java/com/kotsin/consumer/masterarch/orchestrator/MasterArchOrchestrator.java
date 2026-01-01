@@ -45,6 +45,7 @@ public class MasterArchOrchestrator {
     private final StructuralValidator structuralValidator;
     private final BehaviouralValidator behaviouralValidator;
     private final CorrelationGovernor correlationGovernor;
+    private final MicrostructureGate microstructureGate;  // NEW: Uses VPIN, OFI, PCR, OI
     private final HedgeDecisionModule hedgeModule;
     private final PositionSizer positionSizer;
     private final ScoreDecayManager decayManager;
@@ -73,6 +74,9 @@ public class MasterArchOrchestrator {
         private StructuralValidator.StructuralValidationOutput structural;
         private BehaviouralValidator.BehaviouralValidationOutput behavioural;
         private CorrelationGovernor.CorrelationGovernorOutput correlation;
+        
+        // NEW: Microstructure Gate (VPIN, OFI, PCR, OI, etc.)
+        private MicrostructureGate.MicrostructureOutput microstructure;
         
         // Part 4: Signal Strength & Final
         private SignalStrengthScore signalStrength;
@@ -185,6 +189,21 @@ public class MasterArchOrchestrator {
                 scripCode, companyName, Math.abs(fudkii.getStrength()), 0.0
         );
         
+        // ========== NEW: MICROSTRUCTURE GATE (VPIN, OFI, PCR, OI) ==========
+        // Use full data from FamilyCandle and InstrumentCandle
+        InstrumentCandle currentInstrument = familyCandle.getEquity();
+        boolean isBullish = securityContext.isBullish();
+        
+        MicrostructureGate.MicrostructureOutput microstructure = microstructureGate.calculate(
+                currentInstrument, familyCandle, isBullish
+        );
+        
+        // Check for microstructure rejection (VPIN toxic, OFI against)
+        if (microstructure.isRejected()) {
+            log.debug("Microstructure rejected for {}: {}", scripCode, microstructure.getReason());
+            // Don't hard reject, just note it - multiplier will reduce score
+        }
+        
         // ======================== CALCULATE SIGNAL STRENGTH ========================
         
         SignalStrengthScore signalStrength = SignalStrengthScore.calculate(
@@ -214,6 +233,28 @@ public class MasterArchOrchestrator {
                 signalStrength.getSignalScore().getCurrent(),
                 0.0
         );
+        
+        // Apply microstructure multiplier to final score
+        double microMultiplier = microstructure.getMicrostructureMultiplier();
+        if (microMultiplier != 1.0) {
+            double adjustedScore = finalScore.getFinalScore().getCurrent() * microMultiplier;
+            adjustedScore = Math.max(0.0, Math.min(1.0, adjustedScore));
+            // Update final score with adjusted value
+            finalScore = FinalOpportunityScore.builder()
+                    .scripCode(finalScore.getScripCode())
+                    .companyName(finalScore.getCompanyName())
+                    .timestamp(finalScore.getTimestamp())
+                    .indexContextScore(finalScore.getIndexContextScore())
+                    .securityContextScore(finalScore.getSecurityContextScore())
+                    .signalStrengthScore(finalScore.getSignalStrengthScore())
+                    .finalScore(NormalizedScore.strength(adjustedScore, finalScore.getFinalScore().getPrevious(), timestamp))
+                    .directionConfidence(finalScore.getDirectionConfidence())
+                    .decision(finalScore.getDecision())
+                    .isValid(finalScore.isValid())
+                    .build();
+            log.debug("{}: Applied microstructure multiplier {:.2f} → score {:.3f}", 
+                    scripCode, microMultiplier, adjustedScore);
+        }
         
         // Apply decay if needed
         double currentPrice = candles30m.get(candles30m.size() - 1).getClose();
@@ -261,6 +302,7 @@ public class MasterArchOrchestrator {
                 .structural(structural)
                 .behavioural(behavioural)
                 .correlation(correlation)
+                .microstructure(microstructure)  // NEW: VPIN, OFI, PCR, OI
                 // Scores
                 .signalStrength(signalStrength)
                 .finalScore(finalScore)
