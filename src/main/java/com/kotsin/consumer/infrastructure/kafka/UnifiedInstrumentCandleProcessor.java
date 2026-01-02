@@ -22,6 +22,8 @@ import org.apache.kafka.streams.*;
 import org.apache.kafka.streams.errors.StreamsUncaughtExceptionHandler;
 import org.apache.kafka.streams.kstream.*;
 import org.apache.kafka.streams.state.KeyValueStore;
+import org.apache.kafka.streams.state.ReadOnlyKeyValueStore;
+import org.apache.kafka.streams.state.ValueAndTimestamp;
 import org.apache.kafka.streams.state.WindowStore;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.beans.factory.annotation.Value;
@@ -381,12 +383,13 @@ public class UnifiedInstrumentCandleProcessor {
             .transformValues(
                 () -> new org.apache.kafka.streams.kstream.ValueTransformerWithKey<Windowed<String>, TickWithOrderbook, InstrumentCandleData>() {
                     private org.apache.kafka.streams.processor.ProcessorContext context;
-                    private org.apache.kafka.streams.state.KeyValueStore<String, OIAggregate> oiStore;
+                    private org.apache.kafka.streams.state.ReadOnlyKeyValueStore<String, ?> oiStore;
                     
                     @Override
                     public void init(org.apache.kafka.streams.processor.ProcessorContext context) {
                         this.context = context;
-                        this.oiStore = (org.apache.kafka.streams.state.KeyValueStore<String, OIAggregate>) context.getStateStore("oi-latest-store");
+                        // Get state store - handle both ValueAndTimestamp<V> and direct V
+                        this.oiStore = (org.apache.kafka.streams.state.ReadOnlyKeyValueStore<String, ?>) context.getStateStore("oi-latest-store");
                     }
                     
                     @Override
@@ -401,7 +404,29 @@ public class UnifiedInstrumentCandleProcessor {
                             String oiKey = tickExch + ":" + tickExchType + ":" + scripCode;
                             
                             // Lookup OI from state store
-                            oi = oiStore.get(oiKey);
+                            // KTable stores may return ValueAndTimestamp<V> or V directly
+                            try {
+                                Object storeValue = oiStore.get(oiKey);
+                                if (storeValue != null) {
+                                    if (storeValue instanceof ValueAndTimestamp) {
+                                        // Unwrap ValueAndTimestamp
+                                        @SuppressWarnings("unchecked")
+                                        ValueAndTimestamp<OIAggregate> valueAndTimestamp = (ValueAndTimestamp<OIAggregate>) storeValue;
+                                        oi = valueAndTimestamp.value();
+                                    } else if (storeValue instanceof OIAggregate) {
+                                        // Direct value
+                                        oi = (OIAggregate) storeValue;
+                                    } else {
+                                        log.warn("[OI-LOOKUP-TYPE] {} | Unexpected store value type: {}", oiKey, storeValue.getClass().getName());
+                                    }
+                                }
+                            } catch (Exception e) {
+                                // Log error but continue without OI
+                                if (log.isDebugEnabled()) {
+                                    log.debug("[OI-LOOKUP-ERROR] {} | Failed to get OI from store: {}", oiKey, e.getMessage());
+                                }
+                                oi = null;
+                            }
                             
                             // Enhanced logging
                             if (log.isDebugEnabled()) {
