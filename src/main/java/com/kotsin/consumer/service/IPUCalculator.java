@@ -58,7 +58,16 @@ public class IPUCalculator {
         double prevAtr = computeATRAtIndex(history, 14, history.size() - 2);
 
         // ========== STEP 1: Volume Expansion Score ==========
-        double volRatio = smaVolume > 0 ? current.getVolume() / smaVolume : 1.0;
+        // FIX: Better handling when SMA is zero or very small
+        double volRatio;
+        if (smaVolume > cfg.getEpsilon()) {
+            volRatio = current.getVolume() / smaVolume;
+        } else if (current.getVolume() > 0) {
+            // If SMA is zero but we have volume, use a conservative ratio
+            volRatio = 2.0; // Assume 2x expansion (conservative)
+        } else {
+            volRatio = 0.0; // No volume at all
+        }
         double volExpansionScore = 1 - Math.exp(-volRatio / cfg.getVolumeScaleFactor());
 
         // ========== STEP 2: Price Efficiency Score ==========
@@ -69,7 +78,8 @@ public class IPUCalculator {
         double upperWick = Math.max(0, current.getHigh() - Math.max(current.getOpen(), current.getClose()));
         double lowerWick = Math.max(0, Math.min(current.getOpen(), current.getClose()) - current.getLow());
         double wickRatio = (upperWick + lowerWick) / totalRange;
-        double wickPenalty = 1 - (cfg.getEfficiencyWickPenaltyMax() * wickRatio);
+        // FIX: Clamp wick penalty to prevent negative values
+        double wickPenalty = Math.max(0.1, 1 - (cfg.getEfficiencyWickPenaltyMax() * wickRatio));
         double priceEfficiency = rawEfficiency * wickPenalty;
 
         // ========== STEP 3: Order Flow Quality Score ==========
@@ -83,7 +93,12 @@ public class IPUCalculator {
         double volumeDeltaPct = (current.getBuyVolume() - current.getSellVolume()) / totalVolume;
         double volumeDeltaAbs = Math.abs(volumeDeltaPct);
 
-        double totalDepth = current.getTotalBidDepth() + current.getTotalAskDepth() + cfg.getEpsilon();
+        // FIX: Add minimum depth threshold to prevent OFI normalization explosion
+        double totalDepth = current.getTotalBidDepth() + current.getTotalAskDepth();
+        double minDepthThreshold = current.getClose() * 0.001; // 0.1% of price as minimum depth
+        if (totalDepth < minDepthThreshold) {
+            totalDepth = minDepthThreshold; // Use threshold instead of epsilon to prevent explosion
+        }
         double ofiNormalized = current.getOfi() / totalDepth;
         double ofiAbs = Math.abs(ofiNormalized);
         double ofiPressure = Math.min(ofiAbs * cfg.getOfiScaleFactor(), 1.0);
@@ -94,10 +109,16 @@ public class IPUCalculator {
         double agreementFactor = Math.signum(volumeDeltaPct) * Math.signum(ofiNormalized) 
                                * Math.signum(current.getDepthImbalance());
 
+        // FIX: Handle zeros explicitly in geometric mean
         double ofQuality;
         if (agreementFactor > 0) {
             // All signals agree - geometric mean with bonus
-            ofQuality = Math.pow(volumeDeltaAbs * ofiPressure * depthImbalanceAbs, 1.0/3.0);
+            // FIX: Use arithmetic mean if any component is zero (geometric mean = 0)
+            if (volumeDeltaAbs <= 0 || ofiPressure <= 0 || depthImbalanceAbs <= 0) {
+                ofQuality = (volumeDeltaAbs + ofiPressure + depthImbalanceAbs) / 3.0;
+            } else {
+                ofQuality = Math.pow(volumeDeltaAbs * ofiPressure * depthImbalanceAbs, 1.0/3.0);
+            }
             ofQuality = ofQuality * cfg.getFlowAgreementBonus();
         } else {
             // Signals disagree - arithmetic mean
@@ -113,12 +134,17 @@ public class IPUCalculator {
 
         // ========== STEP 5: Momentum Context ==========
         // 5A: Momentum Slope
+        // FIX: Use configurable momentum period instead of hardcoded 3-bar
+        int momentumPeriod = cfg.getMomentumLookback() > 0 ? cfg.getMomentumLookback() : 3;
         double priceChange3bar = 0;
         double mmsSlope = 0;
-        if (history.size() >= 4) {
-            UnifiedCandle t3 = history.get(history.size() - 4);
-            priceChange3bar = current.getClose() - t3.getClose();
-            mmsSlope = atr > 0 ? priceChange3bar / atr : 0;
+        if (history.size() >= momentumPeriod + 1) {
+            UnifiedCandle tN = history.get(history.size() - momentumPeriod - 1);
+            priceChange3bar = current.getClose() - tN.getClose();
+            // FIX: Add minimum ATR threshold to prevent division by tiny values
+            double minAtr = current.getClose() * 0.001; // 0.1% of price as minimum ATR
+            double effectiveAtr = Math.max(atr, minAtr);
+            mmsSlope = effectiveAtr > 0 ? priceChange3bar / effectiveAtr : 0;
             mmsSlope = Math.max(Math.min(mmsSlope, cfg.getSlopeClamp()), -cfg.getSlopeClamp());
         }
         double slopeMagnitude = Math.abs(mmsSlope);
@@ -182,7 +208,10 @@ public class IPUCalculator {
         double volRoc = (current.getVolume() - prev.getVolume()) / prevVol;
         boolean volAccelerating = volRoc > cfg.getVolAccelerationThreshold();
 
-        double priceMoveAtr = atr > 0 ? Math.abs(current.getClose() - current.getOpen()) / atr : 0;
+        // FIX: Add minimum ATR threshold for momentum strength calculation
+        double minAtr = current.getClose() * 0.001; // 0.1% of price as minimum ATR
+        double effectiveAtr = Math.max(atr, minAtr);
+        double priceMoveAtr = effectiveAtr > 0 ? Math.abs(current.getClose() - current.getOpen()) / effectiveAtr : 0;
         double momentumStrength = Math.min(priceMoveAtr / cfg.getMomentumAtrScale(), 1.0);
 
         double tickDensity = smaTickCount > 0 ? current.getTickCount() / smaTickCount : 1.0;
@@ -336,17 +365,25 @@ public class IPUCalculator {
         boolean xfactorFlag = xfactorScore >= 0.65;
 
         // ========== STEP 11: Final IPU Score ==========
+        // FIX: Use additive modifiers instead of multiplicative to prevent explosion
         double baseScore = instProxy;
-        double momentumModifier = 1 + (cfg.getMomentumModifierStrength() * validatedMomentum);
-        double urgencyModifier = 1 + (cfg.getUrgencyModifierStrength() * urgencyScore);
-        double xfactorModifier = 1 + (cfg.getXfactorModifierStrength() * xfactorScore);
-        double exhaustionPenalty = 1 - (cfg.getExhaustionPenaltyStrength() * exhaustionScore);
+        
+        // Convert modifiers to additive adjustments (scale by baseScore magnitude)
+        double momentumAdjustment = cfg.getMomentumModifierStrength() * validatedMomentum * baseScore;
+        double urgencyAdjustment = cfg.getUrgencyModifierStrength() * urgencyScore * baseScore;
+        double xfactorAdjustment = cfg.getXfactorModifierStrength() * xfactorScore * baseScore;
+        double exhaustionAdjustment = -cfg.getExhaustionPenaltyStrength() * exhaustionScore * baseScore;
+        
+        double finalIpuScore = baseScore + momentumAdjustment + urgencyAdjustment + xfactorAdjustment + exhaustionAdjustment;
+        finalIpuScore = Math.max(0, Math.min(finalIpuScore, 1.0)); // Clamp to [0, 1]
 
-        double finalIpuScore = baseScore * momentumModifier * urgencyModifier * xfactorModifier * exhaustionPenalty;
-        finalIpuScore = Math.min(finalIpuScore, 1.0);
-
-        // Certainty
-        double certainty = directionAgreement * Math.min(volExpansionScore + 0.3, 1.0) * flowMomentumAgreement;
+        // FIX: Improve certainty formula - use validated momentum and directional conviction
+        // Certainty should reflect how confident we are in the direction
+        double certainty = directionAgreement * 0.4  // How many factors agree
+                         + Math.min(volExpansionScore, 1.0) * 0.2  // Volume confirmation
+                         + flowMomentumAgreement * 0.2  // Flow-momentum alignment
+                         + Math.min(validatedMomentum, 1.0) * 0.2;  // Momentum strength
+        certainty = Math.min(certainty, 1.0);
 
         // Build output
         return IPUOutput.builder()
@@ -391,12 +428,29 @@ public class IPUCalculator {
 
     /**
      * Build combined multi-timeframe IPU output
+     * FIX: Normalize weights by available timeframes to prevent bias
      */
     public IPUOutput buildCombinedOutput(IPUOutput ipu5m, IPUOutput ipu15m, IPUOutput ipu30m) {
-        // Weighted score fusion
-        double combinedScore = cfg.getMtfWeight5m() * ipu5m.getFinalIpuScore()
-                             + cfg.getMtfWeight15m() * ipu15m.getFinalIpuScore()
-                             + cfg.getMtfWeight30m() * ipu30m.getFinalIpuScore();
+        // FIX: Check if outputs are valid (non-null and non-empty)
+        boolean has5m = ipu5m != null && ipu5m.getFinalIpuScore() > 0;
+        boolean has15m = ipu15m != null && ipu15m.getFinalIpuScore() > 0;
+        boolean has30m = ipu30m != null && ipu30m.getFinalIpuScore() > 0;
+        
+        // Calculate available weights
+        double totalWeight = 0;
+        if (has5m) totalWeight += cfg.getMtfWeight5m();
+        if (has15m) totalWeight += cfg.getMtfWeight15m();
+        if (has30m) totalWeight += cfg.getMtfWeight30m();
+        
+        // Normalize weights by available timeframes
+        double normalizedWeight5m = totalWeight > 0 && has5m ? cfg.getMtfWeight5m() / totalWeight : 0;
+        double normalizedWeight15m = totalWeight > 0 && has15m ? cfg.getMtfWeight15m() / totalWeight : 0;
+        double normalizedWeight30m = totalWeight > 0 && has30m ? cfg.getMtfWeight30m() / totalWeight : 0;
+        
+        // Weighted score fusion with normalized weights
+        double combinedScore = normalizedWeight5m * (has5m ? ipu5m.getFinalIpuScore() : 0)
+                             + normalizedWeight15m * (has15m ? ipu15m.getFinalIpuScore() : 0)
+                             + normalizedWeight30m * (has30m ? ipu30m.getFinalIpuScore() : 0);
 
         // Dominant momentum state (higher TF dominates)
         IPUOutput.MomentumState dominantMomentum;

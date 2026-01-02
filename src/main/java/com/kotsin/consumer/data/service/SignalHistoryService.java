@@ -97,9 +97,9 @@ public class SignalHistoryService {
         // Populate Security Regime features
         if (securityRegime != null) {
             history.setSecurityRegimeLabel(securityRegime.getLabel() != null ? securityRegime.getLabel().name() : null);
-            history.setSecurityStrength(securityRegime.getSecurityStrength());
+            history.setSecurityStrength(securityRegime.getSecurityContextScore());
             history.setSecurityAligned(securityRegime.isAlignedWithIndex());
-            history.setSecurityEmaAlignment(securityRegime.getEmaAlignment() != null ? securityRegime.getEmaAlignment().name() : null);
+            history.setSecurityEmaAlignment("EMA20/50"); // Simplified for new formula
             history.setSecurityAtrState(securityRegime.getAtrState() != null ? securityRegime.getAtrState().name() : null);
         }
         

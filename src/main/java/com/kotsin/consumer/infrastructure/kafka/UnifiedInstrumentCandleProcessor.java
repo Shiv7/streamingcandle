@@ -56,6 +56,9 @@ public class UnifiedInstrumentCandleProcessor {
     @Autowired
     private InstrumentMetadataService instrumentMetadataService;
 
+    @Autowired(required = false)
+    private com.kotsin.consumer.logging.PipelineTraceLogger traceLogger;
+
     @Value("${unified.input.topic.ticks:forwardtesting-data}")
     private String tickTopic;
 
@@ -74,6 +77,16 @@ public class UnifiedInstrumentCandleProcessor {
     @Value("${unified.processor.enabled:true}")
     private boolean processorEnabled;
 
+    // Consumer fetch optimization for high-throughput orderbook consumption
+    @Value("${unified.processor.max.poll.records:2000}")
+    private int maxPollRecords;  // Max records per poll (higher = faster consumption)
+
+    @Value("${unified.processor.fetch.min.bytes:2097152}")
+    private int fetchMinBytes;  // 2MB - wait for more data before returning
+
+    @Value("${unified.processor.fetch.max.wait.ms:50}")
+    private int fetchMaxWaitMs;  // Max wait time for fetch.min.bytes
+
     private KafkaStreams streams;
 
     /**
@@ -89,11 +102,21 @@ public class UnifiedInstrumentCandleProcessor {
      * - Max 10,000 instruments (sufficient for all NSE/BSE instruments)
      * - Evict after 2 hours of inactivity
      * - Prevents memory leak while maintaining performance
+     * 
+     * NEW: VPIN reset at market open
+     * - Tracks last trading day per instrument
+     * - Resets VPIN calculator when crossing into new trading day
      */
     private final Cache<String, AdaptiveVPINCalculator> vpinCalculators = Caffeine.newBuilder()
             .maximumSize(10_000)  // Max instruments to cache
             .expireAfterAccess(2, TimeUnit.HOURS)  // Evict if not accessed for 2 hours
             .recordStats()  // Enable cache statistics
+            .build();
+    
+    // Track last trading day per instrument for VPIN reset detection
+    private final Cache<String, LocalDate> vpinLastTradingDay = Caffeine.newBuilder()
+            .maximumSize(10_000)
+            .expireAfterAccess(2, TimeUnit.HOURS)
             .build();
 
     /**
@@ -111,6 +134,18 @@ public class UnifiedInstrumentCandleProcessor {
                 log.info("🚀 Starting UnifiedInstrumentCandleProcessor...");
                 
                 Properties props = kafkaConfig.getStreamProperties("unified-instrument-candle-processor");
+                
+                // Optimize consumer settings for high-throughput orderbook consumption
+                // These settings help process orderbook data faster to avoid missing JOINs
+                props.put(StreamsConfig.CONSUMER_PREFIX + "max.poll.records", maxPollRecords);
+                props.put(StreamsConfig.CONSUMER_PREFIX + "fetch.min.bytes", fetchMinBytes);
+                props.put(StreamsConfig.CONSUMER_PREFIX + "fetch.max.wait.ms", fetchMaxWaitMs);
+                props.put(StreamsConfig.CONSUMER_PREFIX + "fetch.max.bytes", 52428800);  // 50MB max fetch
+                props.put(StreamsConfig.CONSUMER_PREFIX + "max.partition.fetch.bytes", 10485760);  // 10MB per partition
+                
+                log.info("Consumer optimization applied: maxPollRecords={}, fetchMinBytes={} bytes, fetchMaxWaitMs={} ms", 
+                    maxPollRecords, fetchMinBytes, fetchMaxWaitMs);
+                
                 StreamsBuilder builder = new StreamsBuilder();
                 
                 buildTopology(builder);
@@ -131,29 +166,117 @@ public class UnifiedInstrumentCandleProcessor {
      * Build the stream topology
      */
     private void buildTopology(StreamsBuilder builder) {
-        // ========== 1. CONSUME TICK DATA ==========
+        // 🛡️ CRITICAL FIX: Event-Time Processing for Replay & Live Consistency
+        //
+        // BEFORE (BROKEN):
+        // - All streams used Kafka record timestamp (ingestion time = wall clock)
+        // - Replay of Dec 24 data couldn't aggregate properly because wall clock is Jan 1
+        // - LEFT JOIN windows never aligned correctly during replay
+        //
+        // AFTER (FIXED):
+        // - TickData uses tick.timestamp (actual trade time)
+        // - OrderBookSnapshot uses snapshot.getTimestamp() (actual snapshot time)
+        // - OpenInterest uses oi.receivedTimestamp (actual OI update time)
+        // - All streams align in time → JOIN works correctly for both replay and live
+        //
+        // ========== 1. CONSUME TICK DATA WITH EVENT-TIME ==========
         KStream<String, TickData> ticks = builder.stream(
             tickTopic,
             Consumed.with(Serdes.String(), TickData.serde())
+                .withTimestampExtractor(new com.kotsin.consumer.timeExtractor.TickDataTimestampExtractor())
         )
-        .filter((key, tick) -> tick != null && tick.getToken() > 0)
-        .filter((key, tick) -> withinTradingHours(tick))
+        .filter((key, tick) -> {
+            boolean valid = tick != null && tick.getToken() > 0;
+            if (!valid && traceLogger != null && tick != null) {
+                java.util.Map<String, Object> indicators = new java.util.HashMap<>();
+                indicators.put("token", tick.getToken());
+                indicators.put("price", tick.getLastRate());
+                indicators.put("volume", tick.getLastQuantity());
+                traceLogger.logSignalRejected("TICK", tick.getScripCode(),
+                    tick.getTimestamp(), "Invalid token", indicators);
+            }
+            return valid;
+        })
+        .filter((key, tick) -> {
+            boolean withinHours = withinTradingHours(tick);
+            if (!withinHours && traceLogger != null) {
+                java.util.Map<String, Object> indicators = new java.util.HashMap<>();
+                indicators.put("timestamp", tick.getTimestamp());
+                indicators.put("exchange", tick.getExchange());
+                traceLogger.logSignalRejected("TICK", tick.getScripCode(),
+                    tick.getTimestamp(), "Outside trading hours", indicators);
+            }
+            return withinHours;
+        })
+        .peek((key, tick) -> {
+            if (traceLogger != null) {
+                traceLogger.logInputReceived("TICK", tick.getScripCode(), tick.getCompanyName(),
+                    tick.getTimestamp(),
+                    String.format("price=%.2f vol=%d ltp=%.2f",
+                        tick.getLastRate(), tick.getLastQuantity(), tick.getLastRate()));
+            }
+        })
         .selectKey((key, tick) -> buildInstrumentKey(tick));
 
-        // ========== 2. CONSUME ORDERBOOK DATA ==========
+        // ========== 2. CONSUME ORDERBOOK DATA WITH EVENT-TIME ==========
         KStream<String, OrderBookSnapshot> orderbooks = builder.stream(
             orderbookTopic,
             Consumed.with(Serdes.String(), OrderBookSnapshot.serde())
+                .withTimestampExtractor(new com.kotsin.consumer.timeExtractor.OrderBookSnapshotTimestampExtractor())
         )
-        .filter((key, ob) -> ob != null && ob.isValid())
+        .filter((key, ob) -> {
+            boolean valid = ob != null && ob.isValid();
+            if (!valid && traceLogger != null && ob != null) {
+                java.util.Map<String, Object> indicators = new java.util.HashMap<>();
+                indicators.put("token", ob.getToken());
+                indicators.put("bestBid", ob.getBestBid());
+                indicators.put("bestAsk", ob.getBestAsk());
+                traceLogger.logSignalRejected("OB", String.valueOf(ob.getToken()),
+                    ob.getTimestamp(), "Invalid orderbook data", indicators);
+            }
+            return valid;
+        })
+        .peek((key, ob) -> {
+            if (traceLogger != null) {
+                traceLogger.logInputReceived("OB", String.valueOf(ob.getToken()), ob.getCompanyName(),
+                    ob.getTimestamp(),
+                    String.format("bid=%.2f ask=%.2f spread=%.2f imbalance=%.2f",
+                        ob.getBestBid(), ob.getBestAsk(),
+                        ob.getBestAsk() - ob.getBestBid(),
+                        (ob.getTotalBidQty() != null && ob.getTotalOffQty() != null ?
+                        (ob.getTotalBidQty() - ob.getTotalOffQty()) /
+                        (double)(ob.getTotalBidQty() + ob.getTotalOffQty() + 1) : 0.0)));
+            }
+        })
         .selectKey((key, ob) -> buildOrderbookKey(ob));
 
-        // ========== 3. CONSUME OI DATA ==========
+        // ========== 3. CONSUME OI DATA WITH EVENT-TIME ==========
         KStream<String, OpenInterest> ois = builder.stream(
             oiTopic,
             Consumed.with(Serdes.String(), OpenInterest.serde())
+                .withTimestampExtractor(new com.kotsin.consumer.timeExtractor.OpenInterestTimestampExtractor())
         )
-        .filter((key, oi) -> oi != null && oi.getOpenInterest() != null)
+        .filter((key, oi) -> {
+            boolean valid = oi != null && oi.getOpenInterest() != null;
+            if (!valid && traceLogger != null && oi != null) {
+                java.util.Map<String, Object> indicators = new java.util.HashMap<>();
+                indicators.put("token", oi.getToken());
+                indicators.put("OI", oi.getOpenInterest());
+                traceLogger.logSignalRejected("OI", String.valueOf(oi.getToken()),
+                    oi.getReceivedTimestamp(), "Null OI value", indicators);
+            }
+            return valid;
+        })
+        .peek((key, oi) -> {
+            if (traceLogger != null) {
+                traceLogger.logInputReceived("OI", String.valueOf(oi.getToken()), oi.getCompanyName(),
+                    oi.getReceivedTimestamp(),
+                    String.format("OI=%d change=%d changePct=%.2f",
+                        oi.getOpenInterest(),
+                        oi.getOiChange() != null ? oi.getOiChange() : 0,
+                        oi.getOiChangePercent() != null ? oi.getOiChangePercent() : 0.0));
+            }
+        })
         .selectKey((key, oi) -> buildOIKey(oi));
 
         // ========== 4. AGGREGATE TICKS INTO CANDLES ==========
@@ -171,6 +294,7 @@ public class UnifiedInstrumentCandleProcessor {
                 Materialized.<String, TickAggregate, WindowStore<Bytes, byte[]>>as("tick-aggregate-store")
                     .withKeySerde(Serdes.String())
                     .withValueSerde(TickAggregate.serde())
+                    .withRetention(Duration.ofDays(14))  // 2 weeks retention for replay scenarios
             );
 
         // ========== 5. AGGREGATE ORDERBOOK INTO OFI/LAMBDA ==========
@@ -186,6 +310,7 @@ public class UnifiedInstrumentCandleProcessor {
                 Materialized.<String, OrderbookAggregate, WindowStore<Bytes, byte[]>>as("orderbook-aggregate-store")
                     .withKeySerde(Serdes.String())
                     .withValueSerde(OrderbookAggregate.serde())
+                    .withRetention(Duration.ofDays(14))  // 2 weeks retention for replay scenarios
             );
 
         // ========== 6. AGGREGATE OI ==========
@@ -201,18 +326,32 @@ public class UnifiedInstrumentCandleProcessor {
                 Materialized.<String, OIAggregate, WindowStore<Bytes, byte[]>>as("oi-aggregate-store")
                     .withKeySerde(Serdes.String())
                     .withValueSerde(OIAggregate.serde())
+                    .withRetention(Duration.ofDays(14))  // 2 weeks retention for replay scenarios
             );
 
         // ========== 7. LEFT JOIN: TICK (mandatory) + ORDERBOOK (optional) ==========
-        KTable<Windowed<String>, TickWithOrderbook> tickWithOb = tickCandles.leftJoin(
+        KTable<Windowed<String>, TickWithOrderbook> tickCandlesWithOb = tickCandles.leftJoin(
             obAggregates,
-            (tick, ob) -> new TickWithOrderbook(tick, ob)
+            (tick, ob) -> {
+                if (log.isDebugEnabled() && tick != null) {
+                    String scripCode = tick.getScripCode();
+                    log.debug("[JOIN] {} | TICK+OB | hasOB={}", scripCode, ob != null);
+                }
+                return new TickWithOrderbook(tick, ob);
+            }
         );
 
         // ========== 8. LEFT JOIN: TICK+OB + OI (optional) ==========
-        KTable<Windowed<String>, InstrumentCandleData> fullData = tickWithOb.leftJoin(
+        KTable<Windowed<String>, InstrumentCandleData> fullData = tickCandlesWithOb.leftJoin(
             oiAggregates,
-            (tickOb, oi) -> new InstrumentCandleData(tickOb.tick, tickOb.orderbook, oi)
+            (tickOb, oi) -> {
+                if (log.isDebugEnabled() && tickOb != null && tickOb.tick != null) {
+                    String scripCode = tickOb.tick.getScripCode();
+                    log.debug("[JOIN] {} | TICK+OB+OI | hasOB={} hasOI={}", 
+                        scripCode, tickOb.orderbook != null, oi != null);
+                }
+                return new InstrumentCandleData(tickOb.tick, tickOb.orderbook, oi);
+            }
         );
 
         // ========== 9. EMIT ON WINDOW CLOSE ==========
@@ -222,8 +361,40 @@ public class UnifiedInstrumentCandleProcessor {
             .toStream()
             .filter((windowedKey, data) -> data != null && data.tick != null)
             .mapValues((windowedKey, data) -> buildInstrumentCandle(windowedKey, data))
-            .peek((windowedKey, candle) -> logCandle(candle))
             .map((windowedKey, candle) -> KeyValue.pair(windowedKey.key(), candle))
+            .peek((key, candle) -> {
+                if (traceLogger != null) {
+                    // Log candle with ALL indicator values
+                    java.util.Map<String, Object> indicators = new java.util.HashMap<>();
+                    indicators.put("open", candle.getOpen());
+                    indicators.put("high", candle.getHigh());
+                    indicators.put("low", candle.getLow());
+                    indicators.put("close", candle.getClose());
+                    indicators.put("volume", candle.getVolume());
+                    indicators.put("vwap", candle.getVwap());
+                    indicators.put("vpin", candle.getVpin() > 0 ? candle.getVpin() : 0.0);
+
+                    if (candle.hasOrderbook()) {
+                        indicators.put("ofi", candle.getOfi() != null ? candle.getOfi() : 0.0);
+                        indicators.put("kyle_lambda", candle.getKyleLambda() != null ? candle.getKyleLambda() : 0.0);
+                        indicators.put("depth_imbalance", candle.getDepthImbalance() != null ? candle.getDepthImbalance() : 0.0);
+                    }
+
+                    if (candle.hasOI()) {
+                        indicators.put("OI", candle.getOpenInterest());
+                        indicators.put("OI_change", candle.getOiChange());
+                        indicators.put("OI_change_pct", candle.getOiChangePercent() != null ? candle.getOiChangePercent() : 0.0);
+                    }
+
+                    String reason = String.format("hasOB=%s hasOI=%s quality=%s",
+                        candle.hasOrderbook() ? "✓" : "✗",
+                        candle.hasOI() ? "✓" : "✗",
+                        candle.getQuality() != null ? candle.getQuality() : "UNKNOWN");
+
+                    traceLogger.logSignalAccepted("CANDLE", candle.getScripCode(),
+                        candle.getWindowStartMillis(), reason, indicators);
+                }
+            })
             .to(outputTopic, Produced.with(Serdes.String(), InstrumentCandle.serde()));
 
         log.info("Topology built: {} + {} + {} -> {}", tickTopic, orderbookTopic, oiTopic, outputTopic);
@@ -240,11 +411,12 @@ public class UnifiedInstrumentCandleProcessor {
 
     /**
      * Build key from orderbook
+     * Fixed: token is now int, no need for String conversion
      */
     private String buildOrderbookKey(OrderBookSnapshot ob) {
         String exch = ob.getExchange() != null ? ob.getExchange() : "N";
         String exchType = ob.getExchangeType() != null ? ob.getExchangeType() : "C";
-        return exch + ":" + exchType + ":" + ob.getToken();
+        return exch + ":" + exchType + ":" + ob.getToken();  // int token auto-converts to String in concatenation
     }
 
     /**
@@ -293,12 +465,31 @@ public class UnifiedInstrumentCandleProcessor {
             .vwap(tick.getVwap())
             .tickCount(tick.getTickCount());
 
-        // Calculate adaptive VPIN
+        // Calculate adaptive VPIN with market open reset
         double avgDailyVolume = instrumentMetadataService.getAverageDailyVolume(
             tick.getExchange(), tick.getExchangeType(), tick.getScripCode()
         );
         String vpinKey = tick.getScripCode();
+        
+        // Detect trading day from window start time
+        LocalDate currentTradingDay = ZonedDateTime.ofInstant(
+            Instant.ofEpochMilli(windowedKey.window().start()),
+            ZoneId.of("Asia/Kolkata")
+        ).toLocalDate();
+        
+        // Get or create VPIN calculator
         AdaptiveVPINCalculator vpinCalc = vpinCalculators.get(vpinKey, k -> new AdaptiveVPINCalculator(avgDailyVolume));
+        
+        // Reset VPIN if we've crossed into a new trading day (market open)
+        LocalDate lastTradingDay = vpinLastTradingDay.getIfPresent(vpinKey);
+        if (lastTradingDay != null && !lastTradingDay.equals(currentTradingDay)) {
+            // New trading day detected - reset VPIN to prevent cross-day contamination
+            log.debug("VPIN reset for {}: {} -> {}", vpinKey, lastTradingDay, currentTradingDay);
+            vpinCalc.reset();
+        }
+        vpinLastTradingDay.put(vpinKey, currentTradingDay);
+        
+        // Update VPIN with candle data
         vpinCalc.updateFromCandle(tick.getBuyVolume(), tick.getSellVolume());
         builder.vpin(vpinCalc.calculate());
         builder.vpinBucketSize(vpinCalc.getBucketSize());
@@ -388,6 +579,13 @@ public class UnifiedInstrumentCandleProcessor {
 
     /**
      * Check if within trading hours
+     * FIX: MCX handles overnight trading (some commodities trade past midnight)
+     * 
+     * Trading Hours:
+     * - NSE/BSE Cash: 09:15 - 15:30
+     * - NSE/BSE F&O: 09:15 - 15:30
+     * - MCX: 09:00 - 23:30 (some commodities 23:55)
+     * - MCX Overnight: Can extend past midnight for certain contracts
      */
     private boolean withinTradingHours(TickData tick) {
         try {
@@ -399,9 +597,15 @@ public class UnifiedInstrumentCandleProcessor {
             String exch = tick.getExchange();
 
             if ("N".equalsIgnoreCase(exch)) {
+                // NSE: 09:15 - 15:30
                 return !t.isBefore(LocalTime.of(9, 15)) && !t.isAfter(LocalTime.of(15, 30));
             } else if ("M".equalsIgnoreCase(exch)) {
-                return !t.isBefore(LocalTime.of(9, 0)) && !t.isAfter(LocalTime.of(23, 30));
+                // MCX: 09:00 - 23:55, OR overnight session (00:00 - 02:30 for some commodities)
+                // Session 1: 09:00 - 23:55
+                // Session 2 (overnight): 00:00 - 02:30 (next day continuation)
+                boolean inDaySession = !t.isBefore(LocalTime.of(9, 0)) && !t.isAfter(LocalTime.of(23, 55));
+                boolean inOvernightSession = !t.isBefore(LocalTime.of(0, 0)) && !t.isAfter(LocalTime.of(2, 30));
+                return inDaySession || inOvernightSession;
             }
             return false;
         } catch (Exception e) {
@@ -450,6 +654,7 @@ public class UnifiedInstrumentCandleProcessor {
             logVpinCacheStats();
             streams.close(Duration.ofSeconds(30));
             vpinCalculators.invalidateAll();  // Clear cache on shutdown
+            vpinLastTradingDay.invalidateAll();  // Clear trading day tracking cache
             log.info("✅ UnifiedInstrumentCandleProcessor stopped");
         }
     }
@@ -543,18 +748,18 @@ public class UnifiedInstrumentCandleProcessor {
             volume += deltaVol;
             totalValue += deltaVol * tick.getLastRate();
 
-            // Classify buy/sell using bid/offer rates from TickData
-            double askRate = tick.getOfferRate();
-            double bidRate = tick.getBidRate();
+            // REMOVED: Buy/Sell classification using stale BBO from TickData
+            // Problem: Bid/Ask in TickData may be from different timestamp than trade
+            // Without quote-stamped trade data, classification is unreliable
+            // Solution: Split volume 50/50 (neutral assumption) for VPIN calculation
+            // Note: This makes VPIN less accurate, but avoids misleading classifications
             if (deltaVol > 0) {
-                if (askRate > 0 && tick.getLastRate() >= askRate) {
-                    buyVolume += deltaVol;
-                } else if (bidRate > 0 && tick.getLastRate() <= bidRate) {
-                    sellVolume += deltaVol;
-                } else {
-                    // Mid - split 50/50
+                // Simple 50/50 split - no classification based on stale BBO
                     buyVolume += deltaVol / 2;
                     sellVolume += deltaVol / 2;
+                // Handle odd volumes (add remainder to buyVolume)
+                if (deltaVol % 2 == 1) {
+                    buyVolume += 1;
                 }
             }
 

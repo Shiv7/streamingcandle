@@ -5,6 +5,7 @@ import com.kotsin.consumer.regime.model.IndexRegime;
 import com.kotsin.consumer.regime.model.IndexRegime.*;
 import com.kotsin.consumer.regime.model.RegimeLabel;
 import lombok.extern.slf4j.Slf4j;
+import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Service;
 
@@ -43,6 +44,9 @@ public class IndexRegimeCalculator {
 
     @Value("${regime.tf.weight.5m:0.05}")
     private double tfWeight5m;
+
+    @Autowired(required = false)
+    private com.kotsin.consumer.logging.PipelineTraceLogger traceLogger;
 
     // Index scrip codes
     public static final String NIFTY50_CODE = "999920000";
@@ -93,19 +97,36 @@ public class IndexRegimeCalculator {
         if (tf5m != null && tf5m.getLabel() != null && tf5m.getLabel().isBearish()) bearishCount++;
 
         // Multi-TF agreement score
+        // FIX: Use actual available timeframe count instead of hardcoded 4
+        int availableTfCount = 0;
+        if (tf1D != null) availableTfCount++;
+        if (tf2H != null) availableTfCount++;
+        if (tf30m != null) availableTfCount++;
+        if (tf5m != null) availableTfCount++;
+
         int maxCount = Math.max(bullishCount, bearishCount);
-        double mtfAgreementScore = maxCount / 4.0;
+        double mtfAgreementScore = availableTfCount > 0 ? (double) maxCount / availableTfCount : 0;
 
         // Determine overall label
         int direction = bullishCount > bearishCount ? 1 : (bearishCount > bullishCount ? -1 : 0);
         RegimeLabel overallLabel = RegimeLabel.fromStrengthAndDirection(aggregatedStrength, direction);
 
         // Step 9: Session confidence modifier
+        // FIX: Use event time from candle instead of wall clock for historical replay
+        // For now, use wall clock but TODO: pass event time from processor
         ZonedDateTime now = ZonedDateTime.now(ZoneId.of("Asia/Kolkata"));
+        // TODO: Extract timestamp from candles30m.get(candles30m.size()-1) and use that
         SessionPhase sessionPhase = SessionPhase.fromTime(now.getHour(), now.getMinute());
         double sessionModifier = sessionPhase.getConfidenceMultiplier();
 
-        return IndexRegime.builder()
+        // MASTER ARCHITECTURE - Calculate Index_Context_Score
+        // Index_Context_Score = Index_Trend_Dir × Index_Regime_Strength
+        double indexContextScore = direction * (aggregatedStrength * sessionModifier);
+
+        log.info("[IndexRegime] {} | EMA-based formula | trendDir={} strength={:.3f} contextScore={:.3f} session={}",
+            indexName, direction, aggregatedStrength * sessionModifier, indexContextScore, sessionPhase);
+
+        IndexRegime result = IndexRegime.builder()
                 .indexName(indexName)
                 .scripCode(scripCode)
                 .timestamp(System.currentTimeMillis())
@@ -123,7 +144,22 @@ public class IndexRegimeCalculator {
                 .bearishTfCount(bearishCount)
                 .sessionPhase(sessionPhase)
                 .sessionConfidenceModifier(sessionModifier)
+                .indexContextScore(indexContextScore)
                 .build();
+
+        // Log index regime calculation with integrated logging
+        if (traceLogger != null) {
+            traceLogger.logIndexRegimeCalculated(
+                scripCode, indexName,
+                result.getTimestamp(),
+                result.getLabel() != null ? result.getLabel().name() : "N/A",
+                result.getRegimeStrength(),
+                result.getFlowAgreement(),
+                result.getVolatilityState() != null ? result.getVolatilityState().name() : "N/A"
+            );
+        }
+
+        return result;
     }
 
     /**
@@ -133,6 +169,13 @@ public class IndexRegimeCalculator {
         if (candles == null || candles.isEmpty()) {
             return TimeframeRegimeData.builder()
                     .timeframe(timeframe)
+                    .ema20(0.0)
+                    .ema50(0.0)
+                    .indexTrendDir(0)
+                    .indexTrendStrength(0.0)
+                    .indexPersistence(0.0)
+                    .atrPct(0.0)
+                    .volumeROC5(0.0)
                     .regimeStrength(0)
                     .regimeCoherence(0)
                     .label(RegimeLabel.NEUTRAL)
@@ -142,75 +185,80 @@ public class IndexRegimeCalculator {
         }
 
         InstrumentCandle current = candles.get(candles.size() - 1);
+        double close = current.getClose();
         
         // Calculate ATR14
         double atr14 = calculateATR(candles, 14);
         double avgAtr = calculateAverageATR(candles, 20);
+        double minAtr = close * 0.001; // 0.1% of price as minimum ATR
+        double effectiveAtr = Math.max(atr14, minAtr);
+
+        // MASTER ARCHITECTURE - EMA-based Index Regime Formula
         
-        // Get VWAP
-        double vwap = current.getVwap() > 0 ? current.getVwap() : current.getClose();
-        double close = current.getClose();
-
-        // Step 1: VWAP Control Score
-        // VWAP_control = min(|VWAP_bias|, 1.5) / 1.5
-        // High deviation = high control (directional control)
-        double vwapDeviation = Math.abs(close - vwap);
-        double vwapControl = Math.min(vwapDeviation / (atr14 + 0.0001), 1.5) / 1.5;
-        // NOTE: Per spec, high deviation = high control, so NO inversion
-
-        // Step 2: Participation Score
-        // For INDICES: buyVolume/sellVolume are 0, use price-based fallback
-        double volumeDelta = current.getBuyVolume() - current.getSellVolume();
-        double participation;
+        // Step 1: Calculate EMA20 and EMA50
+        double ema20 = calculateEMA(candles, 20);
+        double ema50 = calculateEMA(candles, 50);
         
-        if (Math.abs(volumeDelta) > 0) {
-            // Normal case: use volume delta
-            double expectedImbalance = calculateExpectedVolumeImbalance(candles);
-            participation = Math.min(Math.abs(volumeDelta) / (expectedImbalance + 1), 1.5) / 1.5;
-        } else {
-            // INDEX FALLBACK: Use price range participation
-            // Participation = how much of ATR the price moved
-            double priceMove = Math.abs(current.getClose() - current.getOpen());
-            double range = current.getHigh() - current.getLow();
-            double rangeRatio = range / (atr14 + 0.0001);
-            
-            // High range = high participation (volatility expansion = institutional activity)
-            participation = Math.min(rangeRatio, 1.5) / 1.5;
-            
-            // Boost if close near high/low (directional conviction)
-            double closePosition = (current.getClose() - current.getLow()) / (range + 0.0001);
-            if (closePosition > 0.7 || closePosition < 0.3) {
-                participation = Math.min(participation * 1.2, 1.0);
-            }
-        }
-
-        // Step 3: Flow Agreement (3-bar smoothed)
-        int flowAgreement = calculateFlowAgreement(candles, 3);
-
-        // Step 4: Volatility State
+        // Step 2: Index_Trend_Dir = sign(EMA20 - EMA50)
+        int indexTrendDir = (ema20 > ema50) ? 1 : ((ema20 < ema50) ? -1 : 0);
+        
+        // Step 3: Index_Trend_Strength = |EMA20 - EMA50| / ATR14 (clamp to [0,1])
+        double emaDiff = Math.abs(ema20 - ema50);
+        double indexTrendStrength = effectiveAtr > 0 ? Math.min(emaDiff / effectiveAtr, 1.0) : 0.0;
+        
+        // Step 4: Index_Persistence = Consecutive bars with same Trend_Dir / 20
+        int consecutiveBars = calculatePersistence(candles, 20);
+        double indexPersistence = Math.min((double) consecutiveBars / 20.0, 1.0);
+        
+        // Step 5: ATR_Pct = ATR14 / SMA(ATR14, 50)
+        double atrSMA50 = calculateSMA_ATR(candles, 14, 50);
+        double atrPct = atrSMA50 > 0 ? atr14 / atrSMA50 : 1.0;
+        
+        // Step 6: Volume_ROC_5 = (Vol_t - Vol_t-5) / Vol_t-5
+        double volumeROC5 = calculateVolumeROC(candles, 5);
+        
+        // Step 7: Index_Regime_Strength = 0.40*Index_Trend_Strength + 0.35*Index_Persistence + 0.25*ATR_Pct
+        double regimeStrength = 0.40 * indexTrendStrength + 0.35 * indexPersistence + 0.25 * atrPct;
+        regimeStrength = Math.min(regimeStrength, 1.0); // Clamp to [0,1]
+        
+        // Step 8: Flow Agreement = sign(Volume_ROC_5)
+        int flowAgreement = (volumeROC5 > 0) ? 1 : ((volumeROC5 < 0) ? -1 : 0);
+        
+        // Step 9: Volatility State (keep existing calculation)
         VolatilityState volState = VolatilityState.fromATRRatio(atr14, avgAtr);
-        double volScore = volState == VolatilityState.EXPANDING ? 0.8 :
-                         (volState == VolatilityState.COMPRESSED ? 0.3 : 0.5);
-
-        // Step 5: Regime Coherence = 1 - stdev(vwapControl, participation, volScore)
-        double mean = (vwapControl + participation + volScore) / 3.0;
-        double variance = (Math.pow(vwapControl - mean, 2) + 
-                          Math.pow(participation - mean, 2) + 
-                          Math.pow(volScore - mean, 2)) / 3.0;
-        double stdev = Math.sqrt(variance);
-        double regimeCoherence = 1 - Math.min(stdev, 1.0);
-
-        // Step 6: Regime Strength = weighted combination
-        double regimeStrength = 0.40 * vwapControl + 0.35 * participation + 0.25 * volScore;
-
-        // Step 7: Label classification
-        int direction = flowAgreement;
+        
+        // Step 10: Regime Coherence (simplified for EMA-based formula)
+        // Coherence based on consistency of trend direction vs strength
+        double regimeCoherence = 1.0; // Default coherence (can be enhanced later)
+        
+        // Step 11: Label classification
+        int direction = indexTrendDir;
         RegimeLabel label = RegimeLabel.fromStrengthAndDirection(regimeStrength, direction);
+        
+        // Logging at each step
+        log.debug("[IndexRegime-{}] EMA20={:.2f} EMA50={:.2f} trendDir={} trendStrength={:.3f}", 
+            timeframe, ema20, ema50, indexTrendDir, indexTrendStrength);
+        log.debug("[IndexRegime-{}] persistence={:.3f} ({} bars) atrPct={:.3f} volumeROC5={:.3f}", 
+            timeframe, indexPersistence, consecutiveBars, atrPct, volumeROC5);
+        log.debug("[IndexRegime-{}] NEW EMA-based regimeStrength={:.3f}", 
+            timeframe, regimeStrength);
 
+        // Get VWAP for legacy fields (still stored but not used in new formula)
+        double vwap = current.getVwap() > 0 ? current.getVwap() : current.getClose();
+        
         return TimeframeRegimeData.builder()
                 .timeframe(timeframe)
-                .vwapControl(vwapControl)
-                .participation(participation)
+                // MASTER ARCHITECTURE - EMA-based fields
+                .ema20(ema20)
+                .ema50(ema50)
+                .indexTrendDir(indexTrendDir)
+                .indexTrendStrength(indexTrendStrength)
+                .indexPersistence(indexPersistence)
+                .atrPct(atrPct)
+                .volumeROC5(volumeROC5)
+                // Legacy fields (kept for backward reference, not used in new formula)
+                .vwapControl(0.0) // Not used in new formula
+                .participation(0.0) // Not used in new formula
                 .flowAgreement(flowAgreement)
                 .volState(volState)
                 .regimeStrength(regimeStrength)
@@ -220,6 +268,124 @@ public class IndexRegimeCalculator {
                 .atr14(atr14)
                 .vwap(vwap)
                 .build();
+    }
+
+    /**
+     * Calculate EMA for given period
+     */
+    private double calculateEMA(List<InstrumentCandle> candles, int period) {
+        if (candles == null || candles.isEmpty()) return 0;
+        
+        int actualPeriod = Math.min(period, candles.size());
+        if (actualPeriod <= 0) return candles.get(candles.size() - 1).getClose();
+        
+        double multiplier = 2.0 / (actualPeriod + 1);
+        
+        // Start with SMA for initial value
+        double sum = 0;
+        for (int i = 0; i < actualPeriod && i < candles.size(); i++) {
+            sum += candles.get(i).getClose();
+        }
+        double ema = actualPeriod > 0 ? sum / actualPeriod : candles.get(candles.size() - 1).getClose();
+        
+        // Calculate EMA for remaining candles
+        for (int i = actualPeriod; i < candles.size(); i++) {
+            ema = (candles.get(i).getClose() - ema) * multiplier + ema;
+        }
+        
+        return ema;
+    }
+
+    /**
+     * Calculate persistence: count consecutive bars with same trend direction
+     * 
+     * @param candles Candle history
+     * @param lookback Maximum lookback period (default 20)
+     * @return Number of consecutive bars with same trend direction
+     */
+    private int calculatePersistence(List<InstrumentCandle> candles, int lookback) {
+        if (candles == null || candles.size() < 2) return 0;
+        
+        int actualLookback = Math.min(lookback, candles.size() - 1);
+        if (actualLookback <= 0) return 0;
+        
+        // Calculate EMA20 and EMA50 to determine current trend
+        double ema20 = calculateEMA(candles, 20);
+        double ema50 = calculateEMA(candles, 50);
+        int currentTrendDir = (ema20 > ema50) ? 1 : ((ema20 < ema50) ? -1 : 0);
+        
+        if (currentTrendDir == 0) return 0;
+        
+        // Count consecutive bars with same trend direction
+        int consecutiveCount = 0;
+        for (int i = candles.size() - 1; i > 0 && consecutiveCount < actualLookback; i--) {
+            // Need enough candles to calculate EMA for this bar
+            if (i < 20) break;
+            
+            List<InstrumentCandle> sublist = candles.subList(0, i + 1);
+            double prevEma20 = calculateEMA(sublist, 20);
+            double prevEma50 = calculateEMA(sublist, 50);
+            int prevTrendDir = (prevEma20 > prevEma50) ? 1 : ((prevEma20 < prevEma50) ? -1 : 0);
+            
+            if (prevTrendDir == currentTrendDir) {
+                consecutiveCount++;
+            } else {
+                break;
+            }
+        }
+        
+        return consecutiveCount;
+    }
+
+    /**
+     * Calculate Volume ROC (Rate of Change) over N periods
+     * Volume_ROC_5 = (Vol_t - Vol_t-5) / Vol_t-5
+     * 
+     * For indices (where volume is 0 or unreliable), fallback to price-based calculation
+     */
+    private double calculateVolumeROC(List<InstrumentCandle> candles, int period) {
+        if (candles == null || candles.size() < period + 1) return 0.0;
+        
+        InstrumentCandle current = candles.get(candles.size() - 1);
+        InstrumentCandle lag = candles.get(candles.size() - 1 - period);
+        
+        long volCurrent = current.getVolume();
+        long volLag = lag.getVolume();
+        
+        // Check if we have valid volume data
+        if (volLag > 0) {
+            // Normal case: use volume ROC
+            return (volCurrent - volLag) / (double) volLag;
+        } else {
+            // INDEX FALLBACK: Use price-based ROC as proxy
+            // This approximates volume movement using price momentum
+            double priceROC = (current.getClose() - lag.getClose()) / lag.getClose();
+            return priceROC * 0.5; // Scale down to approximate volume sensitivity
+        }
+    }
+
+    /**
+     * Calculate Simple Moving Average of ATR values
+     * Used for ATR_Pct calculation: ATR14 / SMA(ATR14, 50)
+     */
+    private double calculateSMA_ATR(List<InstrumentCandle> candles, int atrPeriod, int smaPeriod) {
+        if (candles == null || candles.size() < atrPeriod + smaPeriod) {
+            // Not enough data, return current ATR
+            return calculateATR(candles, atrPeriod);
+        }
+        
+        double sum = 0.0;
+        int count = 0;
+        
+        // Calculate ATR for each position and average them
+        for (int i = atrPeriod; i < candles.size() && count < smaPeriod; i++) {
+            List<InstrumentCandle> sublist = candles.subList(0, i + 1);
+            double atr = calculateATR(sublist, atrPeriod);
+            sum += atr;
+            count++;
+        }
+        
+        return count > 0 ? sum / count : calculateATR(candles, atrPeriod);
     }
 
     /**
@@ -313,22 +479,28 @@ public class IndexRegimeCalculator {
             InstrumentCandle c = candles.get(i);
             
             // Step 3.1: Price Sign (ATR normalized)
-            double priceChangeNorm = (c.getClose() - c.getOpen()) / (atr + 0.0001);
+            // FIX: Use minimum ATR threshold instead of epsilon
+            double minAtr = c.getClose() * 0.001;
+            double effectiveAtr = Math.max(atr, minAtr);
+            double priceChangeNorm = effectiveAtr > 0 ? (c.getClose() - c.getOpen()) / effectiveAtr : 0;
             int priceSign = priceChangeNorm > EPSILON_PRICE ? 1 : 
                            (priceChangeNorm < -EPSILON_PRICE ? -1 : 0);
             
             int volumeSign;
             if (hasVolumeData) {
                 // Normal case: use volume delta
+                // FIX: Use minimum threshold instead of adding 1
                 double volumeDelta = c.getBuyVolume() - c.getSellVolume();
-                double volNorm = volumeDelta / (expectedImbalance + 1);
+                double minImbalance = Math.max(expectedImbalance, c.getClose() * 0.0001); // 0.01% of price
+                double volNorm = minImbalance > 0 ? volumeDelta / minImbalance : 0;
                 volumeSign = volNorm > EPSILON_VOLUME ? 1 : 
                             (volNorm < -EPSILON_VOLUME ? -1 : 0);
             } else {
                 // INDEX FALLBACK: Use close position within range as proxy
                 // If close near high = bullish flow, close near low = bearish flow
+                // FIX: Already handled range > 0 check
                 double range = c.getHigh() - c.getLow();
-                if (range > 0) {
+                if (range > 0.0001) {
                     double closePosition = (c.getClose() - c.getLow()) / range;
                     volumeSign = closePosition > 0.6 ? 1 : (closePosition < 0.4 ? -1 : 0);
                 } else {
@@ -351,22 +523,24 @@ public class IndexRegimeCalculator {
      */
     private double calculateAggregatedStrength(TimeframeRegimeData tf1D, TimeframeRegimeData tf2H,
                                                TimeframeRegimeData tf30m, TimeframeRegimeData tf5m) {
+        // FIX: Include all timeframes, not just those with strength > 0
+        // Zero strength is valid (neutral regime), should be included
         double totalWeight = 0;
         double weightedSum = 0;
         
-        if (tf1D != null && tf1D.getRegimeStrength() > 0) {
+        if (tf1D != null) {
             weightedSum += tfWeight1D * tf1D.getRegimeStrength();
             totalWeight += tfWeight1D;
         }
-        if (tf2H != null && tf2H.getRegimeStrength() > 0) {
+        if (tf2H != null) {
             weightedSum += tfWeight2H * tf2H.getRegimeStrength();
             totalWeight += tfWeight2H;
         }
-        if (tf30m != null && tf30m.getRegimeStrength() > 0) {
+        if (tf30m != null) {
             weightedSum += tfWeight30m * tf30m.getRegimeStrength();
             totalWeight += tfWeight30m;
         }
-        if (tf5m != null && tf5m.getRegimeStrength() > 0) {
+        if (tf5m != null) {
             weightedSum += tfWeight5m * tf5m.getRegimeStrength();
             totalWeight += tfWeight5m;
         }
@@ -386,9 +560,13 @@ public class IndexRegimeCalculator {
         if (tf5m != null) strengths.add(tf5m.getRegimeStrength());
         
         if (strengths.isEmpty()) return 0;
+        if (strengths.size() == 1) return 1.0; // Perfect coherence with single TF
         
+        // FIX: Use sample variance (n-1) instead of population variance (n)
         double mean = strengths.stream().mapToDouble(d -> d).average().orElse(0);
-        double variance = strengths.stream().mapToDouble(d -> Math.pow(d - mean, 2)).average().orElse(0);
+        double variance = strengths.stream()
+                .mapToDouble(d -> Math.pow(d - mean, 2))
+                .sum() / (strengths.size() - 1); // Sample variance
         double stdev = Math.sqrt(variance);
         
         return 1 - Math.min(stdev, 1.0);

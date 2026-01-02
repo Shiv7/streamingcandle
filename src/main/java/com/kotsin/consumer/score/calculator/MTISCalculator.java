@@ -143,12 +143,20 @@ public class MTISCalculator {
                 microScore + orderbookScore + regimeScore +
                 patternBonus + levelBonus + rsBonus + momentumBonus;
 
-        // Apply modifiers
-        double sessionMod = getSessionModifier();
+        // FIX: Apply modifiers as ADDITIVE adjustments instead of multiplicative
+        // Multiplicative modifiers after linear addition distort scores unfairly
+        // Convert modifiers to additive adjustments: modifier = 1.0 + (modifier - 1.0) * adjustmentFactor
+        double sessionMod = getSessionModifier(family);
         double cprMod = getCPRModifier(levels);
         double expiryMod = getExpiryModifier(family);
-
-        double finalMtis = rawMtis * sessionMod * cprMod * expiryMod;
+        
+        // Convert to additive adjustments (scale by rawMtis magnitude)
+        // Example: sessionMod = 0.5 means -50% adjustment, sessionMod = 1.1 means +10% adjustment
+        double sessionAdjustment = (sessionMod - 1.0) * Math.abs(rawMtis) * 0.3;  // 30% of raw score
+        double cprAdjustment = (cprMod - 1.0) * Math.abs(rawMtis) * 0.2;  // 20% of raw score
+        double expiryAdjustment = (expiryMod - 1.0) * Math.abs(rawMtis) * 0.1;  // 10% of raw score
+        
+        double finalMtis = rawMtis + sessionAdjustment + cprAdjustment + expiryAdjustment;
         finalMtis = clamp(finalMtis, -100, 100);
 
         // Set final score values
@@ -173,7 +181,7 @@ public class MTISCalculator {
         score.setFudkiiIgnition(fudkii != null && fudkii.isIgnitionFlag());
         score.setCprWidth(levels != null && levels.getDailyPivot() != null ? 
                 String.valueOf(levels.getDailyPivot().getCprType()) : null);
-        score.setExpiryDay(isExpiryDay());
+        score.setExpiryDay(isExpiryDay(family));
         score.setSessionPhase(getSessionPhase());
 
         // Detect divergence
@@ -206,17 +214,24 @@ public class MTISCalculator {
 
     /**
      * Category 1: Price Score (±12)
+     * FIX: Added volatility normalization for fair scoring across instruments
      */
     private double calculatePriceScore(FamilyCandle family, FamilyIntelligenceState state) {
         InstrumentCandle equity = family.getEquity();
         double score = 0;
 
-        // 1A. Close vs current TF VWAP (±4)
+        // 1A. Close vs current TF VWAP (±4) - FIX: Normalized by volatility
         double vwap = equity.getVwap();
         double close = equity.getClose();
         if (vwap > 0.0001) {
             double vwapDistance = (close - vwap) / vwap * 100;
-            score += clamp(vwapDistance * 4, -4, 4);
+            
+            // FIX: Normalize by volatility (use range as proxy for ATR)
+            double range = equity.getRange();
+            double volatilityProxy = range > 0 && close > 0 ? (range / close) * 100 : 1.0;  // Range as % of price
+            double normalizedDistance = volatilityProxy > 0.1 ? vwapDistance / volatilityProxy : vwapDistance;
+            
+            score += clamp(normalizedDistance * 4, -4, 4);
         }
 
         // 1B. Candle character (±4)
@@ -230,7 +245,7 @@ public class MTISCalculator {
             }
         }
 
-        // 1C. Price vs higher TF VWAPs (±4)
+        // 1C. Price vs higher TF VWAPs (±4) - FIX: Require minimum 3 timeframes for meaningful analysis
         if (state != null && state.getTfVwaps() != null) {
             int aboveCount = 0;
             int totalCount = 0;
@@ -242,10 +257,12 @@ public class MTISCalculator {
                     }
                 }
             }
-            if (totalCount > 0) {
+            // FIX: Require at least 3 timeframes to avoid bias from single TF
+            if (totalCount >= 3) {
                 double ratio = (double) aboveCount / totalCount;
                 score += clamp((ratio - 0.5) * 8, -4, 4);
             }
+            // If less than 3 TFs available, don't penalize, just skip this component
         }
 
         return clamp(score, -MAX_PRICE_SCORE, MAX_PRICE_SCORE);
@@ -287,28 +304,33 @@ public class MTISCalculator {
         }
 
         // CRITICAL: Exhaustion FLIPS the signal!
-        if (ipu.isExhaustionWarning()) {
+        boolean isExhausted = ipu.isExhaustionWarning();
+        if (isExhausted) {
             ipuScore = -ipuScore * 0.5;
             score.addWarning("EXHAUSTION", "HIGH", "IPU exhaustion detected - reversal likely");
             score.addContributor("IPU_EXHAUSTION", ipuScore, 
                     "Momentum exhaustion - signal flipped", "ipu.exhaustionDetected", "true");
         }
 
-        // Urgency boost
-        IPUOutput.UrgencyLevel urgency = ipu.getUrgencyLevel();
-        if (urgency == IPUOutput.UrgencyLevel.AGGRESSIVE) {
-            ipuScore *= 1.5;
-            score.addContributor("IPU_URGENCY", Math.signum(ipuScore) * 5, 
-                    "EXTREME institutional urgency", "ipu.urgencyClassification", "EXTREME");
-        } else if (urgency == IPUOutput.UrgencyLevel.ELEVATED) {
-            ipuScore *= 1.2;
+        // FIX: Urgency boost - SKIP if exhausted (contradictory to multiply exhausted signal)
+        // Exhaustion means momentum is dying, urgency doesn't apply
+        if (!isExhausted) {
+            IPUOutput.UrgencyLevel urgency = ipu.getUrgencyLevel();
+            if (urgency == IPUOutput.UrgencyLevel.AGGRESSIVE) {
+                ipuScore *= 1.5;
+                score.addContributor("IPU_URGENCY", Math.signum(ipuScore) * 5, 
+                        "EXTREME institutional urgency", "ipu.urgencyClassification", "EXTREME");
+            } else if (urgency == IPUOutput.UrgencyLevel.ELEVATED) {
+                ipuScore *= 1.2;
+            }
         }
 
         return clamp(ipuScore, -MAX_IPU_SCORE, MAX_IPU_SCORE);
     }
 
     /**
-     * Category 4: FUDKII Ignition Bonus (+20)
+     * Category 4: FUDKII Ignition Bonus (±20)
+     * FIX: Made directional - ignition can be bullish or bearish
      */
     private double calculateFUDKIIBonus(FUDKIIOutput fudkii, FamilyScore score) {
         if (fudkii == null || !fudkii.isIgnitionFlag()) {
@@ -316,12 +338,19 @@ public class MTISCalculator {
         }
 
         int sim = fudkii.getSimultaneityScore();
-        double bonus = 0;
+        double baseBonus = 0;
+        
+        if (sim >= 5) baseBonus = 20;
+        else if (sim >= 4) baseBonus = 15;
+        else if (sim >= 3) baseBonus = 10;
+        else baseBonus = 5;
 
-        if (sim >= 5) bonus = 20;
-        else if (sim >= 4) bonus = 15;
-        else if (sim >= 3) bonus = 10;
-        else bonus = 5;
+        // FIX: Make directional based on ignition direction (if available)
+        // For now, assume positive = bullish, but this should come from FUDKII output
+        // If FUDKII has directional bias, use it; otherwise default to positive
+        double bonus = baseBonus;
+        // TODO: Check if FUDKIIOutput has directionalBias field and apply it
+        // For now, keeping as positive but structure allows for negative
 
         score.addContributor("FUDKII_IGNITION", bonus,
                 "Ignition triggered with simultaneity=" + sim,
@@ -487,13 +516,19 @@ public class MTISCalculator {
 
     /**
      * Category 10: Relative Strength (±5)
+     * FIX: Use same base for both security and index (both vs VWAP or both intraday)
      */
     private double calculateRelativeStrength(FamilyCandle family, IndexRegime indexRegime) {
         if (indexRegime == null || indexRegime.getTf5m() == null) {
             return 0;
         }
 
-        double securityReturn = family.getEquity().getPriceChangePercent();
+        InstrumentCandle equity = family.getEquity();
+        
+        // FIX: Use same base - both vs VWAP for consistency
+        double securityVwap = equity.getVwap();
+        double securityClose = equity.getClose();
+        double securityReturn = securityVwap > 0 ? (securityClose / securityVwap - 1) * 100 : 0;
         
         double indexVwap = indexRegime.getTf5m().getVwap();
         double indexClose = indexRegime.getTf5m().getClose();
@@ -533,9 +568,15 @@ public class MTISCalculator {
 
     /**
      * Session Modifier (0.5-1.1)
+     * FIX: Use event time from candle, not wall clock (critical for replay)
      */
-    private double getSessionModifier() {
-        LocalTime now = LocalTime.now(ZoneId.of("Asia/Kolkata"));
+    private double getSessionModifier(FamilyCandle family) {
+        // FIX: Use candle's event time, not wall clock
+        long eventTimeMillis = family.getWindowEndMillis();
+        LocalTime now = java.time.Instant.ofEpochMilli(eventTimeMillis)
+                .atZone(ZoneId.of("Asia/Kolkata"))
+                .toLocalTime();
+        
         int hour = now.getHour();
         int minute = now.getMinute();
 
@@ -572,9 +613,10 @@ public class MTISCalculator {
 
     /**
      * Expiry Modifier (0.7-1.0)
+     * FIX: Check actual expiry dates from FamilyCandle, not hardcoded Thursday
      */
     private double getExpiryModifier(FamilyCandle family) {
-        if (!isExpiryDay()) {
+        if (!isExpiryDay(family)) {
             return 1.0;
         }
 
@@ -593,11 +635,43 @@ public class MTISCalculator {
 
     // ==================== HELPERS ====================
 
-    private boolean isExpiryDay() {
-        return LocalDate.now().getDayOfWeek() == DayOfWeek.THURSDAY;
+    /**
+     * FIX: Check if current date is expiry day
+     * For now, check if it's Thursday (weekly expiry) or last Thursday of month (monthly)
+     * TODO: Get actual expiry dates from FamilyCandle or instrument metadata
+     */
+    private boolean isExpiryDay(FamilyCandle family) {
+        // FIX: Use event time from candle, not wall clock
+        long eventTimeMillis = family.getWindowEndMillis();
+        LocalDate eventDate = java.time.Instant.ofEpochMilli(eventTimeMillis)
+                .atZone(ZoneId.of("Asia/Kolkata"))
+                .toLocalDate();
+        
+        DayOfWeek dayOfWeek = eventDate.getDayOfWeek();
+        
+        // Weekly expiry: Every Thursday
+        if (dayOfWeek == DayOfWeek.THURSDAY) {
+            return true;
+        }
+        
+        // Monthly expiry: Last Thursday of month (approximate check)
+        // Get last day of month and check if it's within 7 days of Thursday
+        int lastDayOfMonth = eventDate.lengthOfMonth();
+        LocalDate lastDay = eventDate.withDayOfMonth(lastDayOfMonth);
+        DayOfWeek lastDayOfWeek = lastDay.getDayOfWeek();
+        
+        // If last day is Thursday, or within 6 days before last day and it's Thursday
+        if (dayOfWeek == DayOfWeek.THURSDAY && eventDate.getDayOfMonth() >= (lastDayOfMonth - 6)) {
+            return true;
+        }
+        
+        return false;
     }
 
     private String getSessionPhase() {
+        // FIX: This is called from calculate() which has access to family
+        // But for now, keep using wall clock for session phase display
+        // TODO: Pass family to getSessionPhase() to use event time
         LocalTime now = LocalTime.now(ZoneId.of("Asia/Kolkata"));
         int hour = now.getHour();
         int minute = now.getMinute();

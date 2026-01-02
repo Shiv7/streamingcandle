@@ -126,12 +126,17 @@ public class TimeframeAggregator {
     }
 
     /**
+     * 🛡️ CRITICAL FIX: Event-Time Processing for Multi-Timeframe Aggregation
+     *
      * Build topology for minute-based timeframe aggregation
      */
     private void buildTimeframeTopology(StreamsBuilder builder, String timeframe, int minutes, String outputTopic) {
+        // Use event-time (candle windowStartMillis) instead of ingestion time
+        // This ensures 1m → 5m → 15m → 1h aggregation works for both replay and live data
         KStream<String, FamilyCandle> input = builder.stream(
             inputTopic,
             Consumed.with(Serdes.String(), FamilyCandle.serde())
+                .withTimestampExtractor(new com.kotsin.consumer.timeExtractor.FamilyCandleTimestampExtractor())
         );
 
         // Window by target timeframe with alignment to market open
@@ -217,9 +222,11 @@ public class TimeframeAggregator {
             StreamsBuilder builder = new StreamsBuilder();
 
             // Daily uses session windows aligned to market hours (9:15 AM - 3:30 PM)
+            // Use event-time for consistent replay/live behavior
             KStream<String, FamilyCandle> input = builder.stream(
                 inputTopic,
                 Consumed.with(Serdes.String(), FamilyCandle.serde())
+                    .withTimestampExtractor(new com.kotsin.consumer.timeExtractor.FamilyCandleTimestampExtractor())
             );
 
             // Use 6h 15m window (market session length) with gap detection

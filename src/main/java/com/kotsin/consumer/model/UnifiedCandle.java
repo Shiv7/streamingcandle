@@ -96,9 +96,8 @@ public class UnifiedCandle {
     private Long oiClose;
     private Long oiChange;
     private Double oiChangePercent;
-    private Long putOI;
-    private Long callOI;
-    private Double putCallRatio;
+    // REMOVED: putOI, callOI, putCallRatio - meaningless at instrument level
+    // Put/Call ratio should be calculated at underlying/family level, not per instrument
 
     // ========== Derived Convenience Fields ==========
     private double volumeDeltaPercent;  // (buyVolume - sellVolume) / volume
@@ -201,10 +200,8 @@ public class UnifiedCandle {
                    .oiLow(oi.getOiLow())
                    .oiClose(oi.getOiClose())
                    .oiChange(oi.getOiChange())
-                   .oiChangePercent(oi.getOiChangePercent())
-                   .putOI(oi.getPutOI())
-                   .callOI(oi.getCallOI())
-                   .putCallRatio(oi.getPutCallRatio());
+                   .oiChangePercent(oi.getOiChangePercent());
+                   // REMOVED: putOI, callOI, putCallRatio - meaningless at instrument level
 
             // Use scripCode from OI if not already set
             if (candle == null && orderbook == null && oi.getScripCode() != null) {

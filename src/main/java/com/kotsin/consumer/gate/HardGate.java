@@ -96,7 +96,8 @@ public class HardGate {
 
         if (!security.isAlignedWithIndex()) {
             String detail = String.format("secLabel=%s, idxLabel=%s, divergence=%.2f",
-                    security.getLabel(), index.getLabel(), security.getDivergenceScore());
+                    security.getLabel(), index.getLabel(), 
+                    Math.abs(security.getSecurityContextScore() - index.getRegimeStrength()));
             log.debug("HARD_GATE | {} | FAILED | reason=SECURITY_NOT_ALIGNED | {}", scripCode, detail);
             return GateResult.fail("SECURITY_NOT_ALIGNED", detail);
         }

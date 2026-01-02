@@ -33,7 +33,7 @@ public class AdaptiveVPINCalculator {
     private static final int DEFAULT_BUCKETS_PER_DAY = 50;
     private static final int DEFAULT_MAX_BUCKETS = 50;  // Rolling window
     private static final double MIN_BUCKET_SIZE = 100.0;  // Minimum for low-volume stocks
-    private static final double EWMA_ALPHA = 0.05;  // For adaptive adjustment
+    // REMOVED: private static final double EWMA_ALPHA = 0.05; (dead code - was never used)
 
     // Instance state
     private final double bucketSize;

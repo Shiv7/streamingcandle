@@ -33,30 +33,38 @@ public class SecurityRegime {
     private String parentIndexCode;     // Which index this security relates to
     private long timestamp;
     
-    // EMA Analysis (30m timeframe)
-    private double ema12;
-    private double ema60;
-    private double ema240;
-    private EMAAlignment emaAlignment;   // BULLISH_ALIGNED, BEARISH_ALIGNED, MIXED
+    // MASTER ARCHITECTURE - EMA20/50 for trend (30m timeframe)
+    private double ema20;
+    private double ema50;
+    private int trendDirection;          // +1/-1/0 from EMA20 vs EMA50
+    private double trendPersistence;     // consecutive bars / 20
+    private double relativeStrength;     // (Sec_ROC20 - Idx_ROC20) / max(|Idx_ROC20|, 0.001)
+    private double atrExpansion;         // (ATR14 - AvgATR20) / AvgATR20
+    private double structureQuality;     // HigherHigh/HigherLow analysis [-1, +1]
+    private double breakoutQuality;      // distance from resistance/ATR [0, 1]
+    private double rawSecurityStrength;  // before index multiplication
     
-    // ATR Analysis
+    // Micro-Leader Override fields
+    private boolean microLeaderOverrideApplied;
+    private double effectiveIndexCoupling;
+    private double microLeaderDecoupleFactor;
+    
+    // ATR Analysis (keep for reference)
     private double atr14;
     private double avgAtr20;             // 20-period average ATR
-    private double atrExpansionRatio;    // atr14 / avgAtr20
+    private double atrExpansionRatio;    // atr14 / avgAtr20 (legacy, same as atrExpansion)
     private ATRState atrState;           // COMPRESSED, NORMAL, EXPANDING
     
     // Regime Scores
-    private double securityStrength;     // [0,1] - based on EMA + ATR
-    private double indexAlignmentScore;  // [0,1] - how aligned with parent index
-    private double divergenceScore;      // [0,1] - how much it diverges
+    private double securityContextScore; // MASTER ARCHITECTURE: Final security context score
     private RegimeLabel label;           // Classification
     
     // Index-relative penalties/boosts
-    private double indexFlowMultiplier;  // 0.75 if diverging, 1.10 if aligned
+    private double indexFlowMultiplier;  // Flow alignment multiplier (0.75 if diverging, 1.10 if aligned)
     private boolean alignedWithIndex;    // true if same direction as index
     
-    // Combined regime score (after index adjustment)
-    private double finalRegimeScore;     // securityStrength * indexFlowMultiplier
+    // Legacy fields (for backward reference, deprecated)
+    private double finalRegimeScore;     // @Deprecated - use securityContextScore instead
     
     // Flow information
     private int securityFlowSign;        // +1/-1/0 based on volume delta
@@ -125,7 +133,15 @@ public class SecurityRegime {
      * Check if security is tradeable
      */
     public boolean isTradeable() {
-        return finalRegimeScore >= 0.5 && alignedWithIndex;
+        return securityContextScore >= 0.5 && alignedWithIndex;
+    }
+    
+    /**
+     * @deprecated Use getSecurityContextScore() instead
+     */
+    @Deprecated
+    public double getFinalRegimeScore() {
+        return securityContextScore;
     }
     
     /**

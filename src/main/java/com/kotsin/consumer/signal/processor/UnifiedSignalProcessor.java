@@ -169,10 +169,15 @@ public class UnifiedSignalProcessor {
                 new VCPProcessor.CandleHistorySerde()
         ));
 
-        // Read family candle stream
+        // 🛡️ CRITICAL FIX: Event-Time Processing for Signal Generation
+        //
+        // Read family candle stream with event-time extraction
+        // CRITICAL: Signal generation must use candle event time, not ingestion time
+        // This ensures signals generated during replay match signals from live trading
         KStream<String, FamilyCandle> candleStream = builder.stream(
                 KafkaTopics.FAMILY_CANDLE_5M,
                 Consumed.with(Serdes.String(), FamilyCandle.serde())
+                    .withTimestampExtractor(new com.kotsin.consumer.timeExtractor.FamilyCandleTimestampExtractor())
         );
 
         // Consume VCP for CSS calculation

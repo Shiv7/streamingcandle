@@ -52,9 +52,14 @@ public class FuturesBuildupDetector {
         }
 
         double priceChange = futureCandle.getPriceChangePercent();
+        // FIX: Handle NaN/Infinity values
+        if (Double.isNaN(priceChange) || Double.isInfinite(priceChange)) {
+            return BuildupType.NEUTRAL;
+        }
+        
         Double oiChangePercent = futureCandle.getOiChangePercent();
 
-        if (oiChangePercent == null) {
+        if (oiChangePercent == null || Double.isNaN(oiChangePercent) || Double.isInfinite(oiChangePercent)) {
             return BuildupType.NEUTRAL;
         }
 
@@ -84,8 +89,20 @@ public class FuturesBuildupDetector {
      */
     public static BuildupType detectWithATR(double priceChange, double atr14, double oiChangePercent) {
         if (atr14 <= 0) {
-            // Fallback to percentage if ATR not available
-            return detect(priceChange, oiChangePercent);
+            // FIX: Fallback - need to convert absolute priceChange to percentage
+            // But we don't have the base price here, so use absolute threshold instead
+            // This is a limitation - caller should provide percentage or base price
+            double priceThresholdAbs = DEFAULT_PRICE_CHANGE_THRESHOLD;  // Use default as fallback
+            boolean priceUp = priceChange > priceThresholdAbs;
+            boolean priceDown = priceChange < -priceThresholdAbs;
+            boolean oiUp = oiChangePercent > OI_CHANGE_THRESHOLD;
+            boolean oiDown = oiChangePercent < -OI_CHANGE_THRESHOLD;
+            
+            if (priceUp && oiUp) return BuildupType.LONG_BUILDUP;
+            if (priceDown && oiUp) return BuildupType.SHORT_BUILDUP;
+            if (priceDown && oiDown) return BuildupType.LONG_UNWINDING;
+            if (priceUp && oiDown) return BuildupType.SHORT_COVERING;
+            return BuildupType.NEUTRAL;
         }
         
         // FIX: Use ATR-relative threshold for price significance
@@ -110,34 +127,7 @@ public class FuturesBuildupDetector {
         }
     }
 
-    /**
-     * Detect buildup type from price and OI change percentages with custom thresholds
-     *
-     * @param priceChangePercent Price change in percentage
-     * @param oiChangePercent OI change in percentage
-     * @param priceThreshold Custom price threshold
-     * @param oiThreshold Custom OI threshold  
-     * @return BuildupType classification
-     */
-    private static BuildupType detectWithThresholdsInternal(double priceChangePercent, double oiChangePercent,
-                                                             double priceThreshold, double oiThreshold) {
-        boolean priceUp = priceChangePercent > priceThreshold;
-        boolean priceDown = priceChangePercent < -priceThreshold;
-        boolean oiUp = oiChangePercent > oiThreshold;
-        boolean oiDown = oiChangePercent < -oiThreshold;
-
-        if (priceUp && oiUp) {
-            return BuildupType.LONG_BUILDUP;
-        } else if (priceDown && oiUp) {
-            return BuildupType.SHORT_BUILDUP;
-        } else if (priceDown && oiDown) {
-            return BuildupType.LONG_UNWINDING;
-        } else if (priceUp && oiDown) {
-            return BuildupType.SHORT_COVERING;
-        } else {
-            return BuildupType.NEUTRAL;
-        }
-    }
+    // REMOVED: detectWithThresholdsInternal() - dead code, never called
 
     /**
      * Detect buildup type with custom thresholds

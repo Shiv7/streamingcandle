@@ -59,6 +59,12 @@ public class RegimeProcessor {
     @Autowired
     private AntiCycleLimiter antiCycleLimiter;
 
+    @Autowired(required = false)
+    private com.kotsin.consumer.infrastructure.redis.RedisCorrelationService correlationService;
+
+    @Autowired(required = false)
+    private com.kotsin.consumer.masterarch.calculator.VolumeCanonicalCalculator volumeCanonicalCalculator;
+
     private final Map<String, KafkaStreams> streamsInstances = new HashMap<>();
 
     // Output topics
@@ -224,14 +230,15 @@ public class RegimeProcessor {
                 })
                 .filter((k, v) -> v != null && v.getRegimeStrength() > 0)
                 .peek((k, v) -> {
-                    LOGGER.info("📊 INDEX REGIME | {} | strength={} label={} flow={} volatility={} 1D={} 2H={}",
+                    LOGGER.info("[REGIME-INDEX] {} | strength={} label={} flow={} volatility={} 1D={} 2H={} | emitted to {}", 
                             v.getIndexName(),
                             String.format("%.2f", v.getRegimeStrength()),
                             v.getLabel(),
                             v.getFlowAgreement(),
                             v.getVolatilityState(),
                             v.getTf1D() != null ? v.getTf1D().getRegimeStrength() : "N/A",
-                            v.getTf2H() != null ? v.getTf2H().getRegimeStrength() : "N/A");
+                            v.getTf2H() != null ? v.getTf2H().getRegimeStrength() : "N/A",
+                            indexOutputTopic);
                 })
                 .to(indexOutputTopic, Produced.with(Serdes.String(), IndexRegime.serde()));
 
@@ -274,7 +281,8 @@ public class RegimeProcessor {
         // Process with state store
         KStream<String, SecurityRegime> regimeStream = equityStream.process(
                 () -> new SecurityRegimeHistoryProcessor(historyStore, historyLookback, 
-                        securityRegimeCalculator, cachedIndexRegimes),
+                        securityRegimeCalculator, cachedIndexRegimes,
+                        correlationService, volumeCanonicalCalculator),
                 historyStore
         );
 
@@ -282,14 +290,13 @@ public class RegimeProcessor {
         regimeStream
                 .filter((k, v) -> v != null && v.getFinalRegimeScore() > 0)
                 .peek((k, v) -> {
-                    if (LOGGER.isDebugEnabled()) {
-                        LOGGER.debug("📈 SECURITY REGIME | {} | score={} label={} aligned={} ema={}",
-                                v.getScripCode(),
-                                String.format("%.2f", v.getFinalRegimeScore()),
-                                v.getLabel(),
-                                v.isAlignedWithIndex(),
-                                v.getEmaAlignment());
-                    }
+                    LOGGER.info("[REGIME-SECURITY] {} | score={} label={} aligned={} ema={} | emitted to {}", 
+                            v.getScripCode(),
+                            String.format("%.2f", v.getFinalRegimeScore()),
+                            v.getLabel(),
+                            v.isAlignedWithIndex(),
+                            "EMA20/50", // EMA alignment simplified for new formula
+                            securityOutputTopic);
                 })
                 .to(securityOutputTopic, Produced.with(Serdes.String(), SecurityRegime.serde()));
 
@@ -360,16 +367,22 @@ public class RegimeProcessor {
         private final int lookback;
         private final SecurityRegimeCalculator calculator;
         private final Map<String, IndexRegime> indexRegimes;
+        private final com.kotsin.consumer.infrastructure.redis.RedisCorrelationService correlationService;
+        private final com.kotsin.consumer.masterarch.calculator.VolumeCanonicalCalculator volumeCanonicalCalculator;
         private ProcessorContext<String, SecurityRegime> context;
         private KeyValueStore<String, VCPProcessor.CandleHistory> historyStore;
 
         SecurityRegimeHistoryProcessor(String storeName, int lookback, 
                                        SecurityRegimeCalculator calculator,
-                                       Map<String, IndexRegime> indexRegimes) {
+                                       Map<String, IndexRegime> indexRegimes,
+                                       com.kotsin.consumer.infrastructure.redis.RedisCorrelationService correlationService,
+                                       com.kotsin.consumer.masterarch.calculator.VolumeCanonicalCalculator volumeCanonicalCalculator) {
             this.storeName = storeName;
             this.lookback = lookback;
             this.calculator = calculator;
             this.indexRegimes = indexRegimes;
+            this.correlationService = correlationService;
+            this.volumeCanonicalCalculator = volumeCanonicalCalculator;
         }
 
         @Override
@@ -408,12 +421,49 @@ public class RegimeProcessor {
             // Get parent index regime (use NIFTY50 as default)
             IndexRegime parentRegime = indexRegimes.get(IndexRegimeCalculator.NIFTY50_CODE);
 
+            // Get candles1D (TODO: populate from 1D state store when available)
+            List<UnifiedCandle> candles1D = new ArrayList<>();
+
+            // Get volume certainty (default to 0.5 if not available)
+            double volumeCertainty = 0.5;
+            if (volumeCanonicalCalculator != null) {
+                try {
+                    var volumeOutput = volumeCanonicalCalculator.calculate(
+                            candle.getScripCode(),
+                            candle.getCompanyName(),
+                            history.getCandles(),
+                            0.0
+                    );
+                    if (volumeOutput != null) {
+                        volumeCertainty = volumeOutput.getVolumeCertainty();
+                    }
+                } catch (Exception e) {
+                    LOGGER.warn("Failed to get volume certainty for {}: {}", candle.getScripCode(), e.getMessage());
+                }
+            }
+
+            // Get correlation with index
+            double correlation = 0.0;
+            if (correlationService != null && parentRegime != null) {
+                try {
+                    correlation = correlationService.calculateCorrelation(
+                            candle.getScripCode(),
+                            parentRegime.getScripCode()
+                    );
+                } catch (Exception e) {
+                    LOGGER.warn("Failed to get correlation for {}: {}", candle.getScripCode(), e.getMessage());
+                }
+            }
+
             // Calculate security regime
             SecurityRegime regime = calculator.calculate(
                     candle.getScripCode(),
                     candle.getCompanyName(),
                     history.getCandles(),
-                    parentRegime
+                    candles1D,
+                    parentRegime,
+                    volumeCertainty,
+                    correlation
             );
 
             context.forward(new Record<>(key, regime, record.timestamp()));

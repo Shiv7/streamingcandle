@@ -84,6 +84,12 @@ public class FMAProcessor {
     @Autowired(required = false)
     private RegimeProcessor regimeProcessor;
 
+    @Autowired(required = false)
+    private com.kotsin.consumer.infrastructure.redis.RedisCorrelationService correlationService;
+
+    @Autowired(required = false)
+    private com.kotsin.consumer.masterarch.calculator.VolumeCanonicalCalculator volumeCanonicalCalculator;
+
     private final Map<String, KafkaStreams> streamsInstances = new HashMap<>();
 
     // Feature toggle
@@ -239,7 +245,7 @@ public class FMAProcessor {
                         KafkaTopics.STORE_FMA_HISTORY, historyLookback, fmaService, fudkiiCalculator,
                         securityRegimeCalculator, antiCycleLimiter,
                         cachedIPU, cachedVCP, cachedSecurityRegime, cachedACL, cachedFUDKII,
-                        regimeProcessor
+                        regimeProcessor, correlationService, volumeCanonicalCalculator
                 ),
                 KafkaTopics.STORE_FMA_HISTORY
         );
@@ -300,6 +306,8 @@ public class FMAProcessor {
         private final TTLCache<String, ACLOutput> cachedACL;
         private final TTLCache<String, FUDKIIOutput> cachedFUDKII;
         private final RegimeProcessor regimeProcessor;
+        private final com.kotsin.consumer.infrastructure.redis.RedisCorrelationService correlationService;
+        private final com.kotsin.consumer.masterarch.calculator.VolumeCanonicalCalculator volumeCanonicalCalculator;
 
         private ProcessorContext<String, FinalMagnitude> context;
         private KeyValueStore<String, VCPProcessor.CandleHistory> historyStore;
@@ -314,7 +322,9 @@ public class FMAProcessor {
                            TTLCache<String, SecurityRegime> cachedSecurityRegime,
                            TTLCache<String, ACLOutput> cachedACL,
                            TTLCache<String, FUDKIIOutput> cachedFUDKII,
-                           RegimeProcessor regimeProcessor) {
+                           RegimeProcessor regimeProcessor,
+                           com.kotsin.consumer.infrastructure.redis.RedisCorrelationService correlationService,
+                           com.kotsin.consumer.masterarch.calculator.VolumeCanonicalCalculator volumeCanonicalCalculator) {
             this.storeName = storeName;
             this.lookback = lookback;
             this.fma = fma;
@@ -327,6 +337,8 @@ public class FMAProcessor {
             this.cachedACL = cachedACL;
             this.cachedFUDKII = cachedFUDKII;
             this.regimeProcessor = regimeProcessor;
+            this.correlationService = correlationService;
+            this.volumeCanonicalCalculator = volumeCanonicalCalculator;
         }
 
         @Override
@@ -403,11 +415,48 @@ public class FMAProcessor {
 
             // Calculate security regime if not cached
             if (securityRegime == null) {
+                // Get candles1D (TODO: populate from 1D state store when available)
+                List<UnifiedCandle> candles1D = new ArrayList<>();
+
+                // Get volume certainty (default to 0.5 if not available)
+                double volumeCertainty = 0.5;
+                if (volumeCanonicalCalculator != null) {
+                    try {
+                        var volumeOutput = volumeCanonicalCalculator.calculate(
+                                candle.getScripCode(),
+                                candle.getCompanyName(),
+                                candles,
+                                0.0
+                        );
+                        if (volumeOutput != null) {
+                            volumeCertainty = volumeOutput.getVolumeCertainty();
+                        }
+                    } catch (Exception e) {
+                        LOGGER.warn("Failed to get volume certainty for {}: {}", candle.getScripCode(), e.getMessage());
+                    }
+                }
+
+                // Get correlation with index
+                double correlation = 0.0;
+                if (correlationService != null && indexRegime != null) {
+                    try {
+                        correlation = correlationService.calculateCorrelation(
+                                candle.getScripCode(),
+                                indexRegime.getScripCode()
+                        );
+                    } catch (Exception e) {
+                        LOGGER.warn("Failed to get correlation for {}: {}", candle.getScripCode(), e.getMessage());
+                    }
+                }
+
                 securityRegime = securityRegimeCalculator.calculate(
                         candle.getScripCode(),
                         candle.getCompanyName(),
                         candles,
-                        indexRegime
+                        candles1D,
+                        indexRegime,
+                        volumeCertainty,
+                        correlation
                 );
                 if (securityRegime != null) {
                     cachedSecurityRegime.put(key, securityRegime);

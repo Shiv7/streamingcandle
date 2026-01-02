@@ -59,13 +59,20 @@ public class OrderbookAggregate {
     private static final int LAMBDA_WINDOW_SIZE = 100;  // Rolling window size
     private static final int LAMBDA_CALC_FREQUENCY = 20;  // Recalculate every N updates
     private static final int LAMBDA_MIN_OBSERVATIONS = 10;  // BUG-FIX: Lowered from 30 - most windows don't get 30 updates
-    @JsonIgnore private Deque<PriceImpactObservation> priceImpactHistory = new ArrayDeque<>(); // ring buffer for rolling window
+    @JsonIgnore private Deque<PriceImpactObservation> priceImpactHistory = new ArrayDeque<>(); // ring buffer (transient - rebuilt on restart)
     private double kyleLambda = 0.0;
-    @JsonIgnore private double lastMidPrice = 0.0;
-    @JsonIgnore private int updatesSinceLastLambdaCalc = 0;
-    // Rolling stats for Welford-style mergeable lambda
-    @JsonIgnore private long lambdaObsCount = 0;
-    @JsonIgnore private double sumOFI = 0.0, sumDP = 0.0, sumOFI2 = 0.0, sumDP2 = 0.0, sumOFIDP = 0.0;
+    
+    // FIX: Removed @JsonIgnore - these fields MUST persist for Kyle's Lambda to survive restarts
+    private double lastMidPrice = 0.0;           // Needed for next price delta
+    private int updatesSinceLastLambdaCalc = 0;  // Frequency tracking
+    
+    // Rolling stats for Welford-style mergeable lambda (MUST persist for reliable λ after restart)
+    private long lambdaObsCount = 0;
+    private double sumOFI = 0.0;
+    private double sumDP = 0.0;
+    private double sumOFI2 = 0.0;
+    private double sumDP2 = 0.0;
+    private double sumOFIDP = 0.0;
 
     // ========== Depth Metrics (Averaged) ==========
     private double depthImbalance = 0.0;
@@ -89,8 +96,9 @@ public class OrderbookAggregate {
     private long weightedImbalanceCount = 0L;
 
     // ========== Iceberg Detection State ==========
-    private List<Integer> recentBidQuantities = new ArrayList<>();
-    private List<Integer> recentAskQuantities = new ArrayList<>();
+    // FIX: Changed from ArrayList to ArrayDeque for O(1) remove operations
+    private Deque<Integer> recentBidQuantities = new ArrayDeque<>();
+    private Deque<Integer> recentAskQuantities = new ArrayDeque<>();
     private static final int ICEBERG_HISTORY_SIZE = 20;
     private static final double ICEBERG_CV_THRESHOLD = 0.1;
     private static final int ICEBERG_MIN_SIZE = 1000;
@@ -195,7 +203,8 @@ public class OrderbookAggregate {
         }
 
         // Initialize metadata on first update
-        if (scripCode == null && orderbook.getToken() != null) {
+        // FIX: token is now int, check > 0 instead of != null
+        if (scripCode == null && orderbook.getToken() > 0) {
             scripCode = String.valueOf(orderbook.getToken());
             companyName = orderbook.getCompanyName();
             exchange = orderbook.getExch();
@@ -476,6 +485,9 @@ public class OrderbookAggregate {
      * Interpretation: λ represents price impact per unit of signed order flow.
      * Higher λ = more illiquid market (large flows move price more).
      * 
+     * FIX: Uses SAMPLE variance (n-1) instead of population variance (n)
+     * for unbiased estimation per Bessel's correction.
+     * 
      * References:
      * - Kyle, A. S. (1985). "Continuous Auctions and Insider Trading"
      * - Hasbrouck, J. (2007). "Empirical Market Microstructure"
@@ -484,31 +496,36 @@ public class OrderbookAggregate {
         long n = lambdaObsCount;
         OrderbookConfig cfg = getConfig();
         if (n < cfg.lambdaMinObs) return;
-        double meanOFI = sumOFI / n;
-        double meanDP = sumDP / n;
-        double varOFI = (sumOFI2 - sumOFI * sumOFI / n) / n;
-        double cov = (sumOFIDP - sumOFI * sumDP / n) / n;
+        
+        // FIX: Need at least 2 observations for sample variance (n-1 denominator)
+        if (n < 2) return;
+        
+        // FIX: Use sample variance (n-1) instead of population variance (n) - Bessel's correction
+        double varOFI = (sumOFI2 - sumOFI * sumOFI / n) / (n - 1);    // Sample variance
+        double cov = (sumOFIDP - sumOFI * sumDP / n) / (n - 1);       // Sample covariance
+        
         kyleLambda = (Math.abs(varOFI) < 1e-10) ? 0.0 : (cov / varOFI);
         updatesSinceLastLambdaCalc = 0;
     }
 
     /**
      * Track iceberg patterns (unusually consistent quantities)
+     * FIX: Uses Deque addLast/removeFirst for O(1) operations instead of O(n) ArrayList.remove(0)
      */
     private void trackIcebergPatterns(OrderBookSnapshot orderbook) {
         if (orderbook.getAllBids() != null && !orderbook.getAllBids().isEmpty()) {
             int qty = orderbook.getAllBids().get(0).getQuantity();
-            recentBidQuantities.add(qty);
+            recentBidQuantities.addLast(qty);
             if (recentBidQuantities.size() > ICEBERG_HISTORY_SIZE) {
-                recentBidQuantities.remove(0);
+                recentBidQuantities.removeFirst();  // O(1) vs O(n)
             }
         }
 
         if (orderbook.getAllAsks() != null && !orderbook.getAllAsks().isEmpty()) {
             int qty = orderbook.getAllAsks().get(0).getQuantity();
-            recentAskQuantities.add(qty);
+            recentAskQuantities.addLast(qty);
             if (recentAskQuantities.size() > ICEBERG_HISTORY_SIZE) {
-                recentAskQuantities.remove(0);
+                recentAskQuantities.removeFirst();  // O(1) vs O(n)
             }
         }
     }
@@ -590,6 +607,7 @@ public class OrderbookAggregate {
 
     /**
      * Detect iceberg orders on bid side
+     * Note: Deque.stream() works the same as List.stream()
      */
     public boolean detectIcebergBid() {
         if (recentBidQuantities.size() < 10) return false;
@@ -607,6 +625,7 @@ public class OrderbookAggregate {
 
     /**
      * Detect iceberg orders on ask side
+     * Note: Deque.stream() works the same as List.stream()
      */
     public boolean detectIcebergAsk() {
         if (recentAskQuantities.size() < 10) return false;

@@ -44,6 +44,9 @@ public class IndexRegime {
     private RegimeLabel label;           // STRONG_BULL, WEAK_BULL, NEUTRAL, etc.
     private int flowAgreement;           // +1/-1/0 - net flow direction
     private VolatilityState volatilityState;  // COMPRESSED, NORMAL, EXPANDING
+
+    // MASTER ARCHITECTURE - Index Context Score
+    private double indexContextScore;    // Index_Trend_Dir × Regime_Strength (directional)
     
     // Multi-TF metrics
     private double multiTfAgreementScore;  // How aligned are all TFs
@@ -63,11 +66,23 @@ public class IndexRegime {
     @AllArgsConstructor
     public static class TimeframeRegimeData {
         private String timeframe;           // "1D", "2H", "30m", "5m"
+
+        // MASTER ARCHITECTURE - EMA-based trend (SPEC FORMULA)
+        private double ema20;               // EMA 20-period
+        private double ema50;               // EMA 50-period
+        private int indexTrendDir;          // +1/-1/0 from sign(EMA20 - EMA50)
+        private double indexTrendStrength;  // |EMA20 - EMA50| / ATR14 (clamped 0..1)
+        private double indexPersistence;    // Consecutive bars same trend / 20
+        private double atrPct;              // ATR14 / SMA(ATR14, 50)
+        private double volumeROC5;          // (Vol_t - Vol_t-5) / Vol_t-5
+
+        // Legacy fields (for backward reference, not used in new formula)
         private double vwapControl;         // [0,1] - price vs VWAP relationship
         private double participation;       // [0,1] - volume delta / expected imbalance
-        private int flowAgreement;          // +1/-1/0
+
+        private int flowAgreement;          // +1/-1/0 (now based on Volume ROC sign)
         private VolatilityState volState;   // ATR-based volatility state
-        private double regimeStrength;      // [0,1] - strength for this TF
+        private double regimeStrength;      // [0,1] - strength for this TF (NEW FORMULA!)
         private double regimeCoherence;     // [0,1] - internal coherence for this TF
         private RegimeLabel label;          // Label for this TF
         private double close;               // Current close price

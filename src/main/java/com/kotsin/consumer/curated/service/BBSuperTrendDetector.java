@@ -171,7 +171,7 @@ public class BBSuperTrendDetector {
      * Calculate Bollinger Bands (20-period SMA, 2 StdDev)
      * Returns [upper, middle, lower]
      */
-    private double[] calculateBollingerBands(List<UnifiedCandle> candles) {
+    public double[] calculateBollingerBands(List<UnifiedCandle> candles) {
         int period = Math.min(bbPeriod, candles.size());
         int start = candles.size() - period;
         
@@ -199,7 +199,7 @@ public class BBSuperTrendDetector {
     /**
      * Calculate ATR (Average True Range)
      */
-    private double calculateATR(List<UnifiedCandle> candles, int period) {
+    public double calculateATR(List<UnifiedCandle> candles, int period) {
         int actualPeriod = Math.min(period, candles.size());
         if (actualPeriod <= 1) return 0;
 
@@ -223,7 +223,7 @@ public class BBSuperTrendDetector {
      * Calculate SuperTrend
      * Returns [superTrendValue, isBullish (1 or -1)]
      */
-    private double[] calculateSuperTrend(List<UnifiedCandle> candles, double atr) {
+    public double[] calculateSuperTrend(List<UnifiedCandle> candles, double atr) {
         if (candles.isEmpty() || atr <= 0) {
             return new double[] { 0, 0 };
         }
@@ -264,7 +264,7 @@ public class BBSuperTrendDetector {
     /**
      * Calculate volume Z-score vs 20-period average
      */
-    private double calculateVolumeZScore(List<UnifiedCandle> candles) {
+    public double calculateVolumeZScore(List<UnifiedCandle> candles) {
         int period = Math.min(20, candles.size());
         if (period < 2) return 0;
         
@@ -351,4 +351,5 @@ public class BBSuperTrendDetector {
         return sb.toString();
     }
 }
+
 

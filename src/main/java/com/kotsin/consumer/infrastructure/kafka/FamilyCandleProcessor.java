@@ -147,10 +147,23 @@ public class FamilyCandleProcessor {
         // State store name - Materialized.as() will handle creation
         String stateStoreName = "family-members-store-" + windowSizeMinutes + "m";
 
-        // Consume instrument candles
+        // 🛡️ CRITICAL FIX: Event-Time Processing for Replay & Live Consistency
+        //
+        // BEFORE (BROKEN):
+        // - Used Kafka record timestamp (ingestion time)
+        // - Replay of Dec 24 data never closed windows because wall clock is Jan 1
+        // - Inconsistent behavior between replay and live data
+        //
+        // AFTER (FIXED):
+        // - Uses InstrumentCandle.windowStartMillis (event time)
+        // - Windows close based on DATA time, not wall clock
+        // - Replay and live data behave identically
+        //
+        // Consume instrument candles with event-time extraction
         KStream<String, InstrumentCandle> instruments = builder.stream(
             inputTopic,
             Consumed.with(Serdes.String(), InstrumentCandle.serde())
+                .withTimestampExtractor(new com.kotsin.consumer.timeExtractor.InstrumentCandleTimestampExtractor())
         );
 
         // Key by family ID (equity scripCode)
@@ -190,6 +203,23 @@ public class FamilyCandleProcessor {
                 return familyCandle;
             })
             .map((windowedKey, familyCandle) -> KeyValue.pair(windowedKey.key(), familyCandle))
+            .peek((key, familyCandle) -> {
+                if (log.isDebugEnabled() && familyCandle != null) {
+                    String familyId = familyCandle.getFamilyId();
+                    InstrumentCandle equity = familyCandle.getEquity();
+                    String scripCode = equity != null ? equity.getScripCode() : "N/A";
+                    log.debug("[FAMILY] {} | {} | equity={} future={} options={} | OHLC={}/{}/{}/{} vol={} | emitted to {}", 
+                        familyId, scripCode,
+                        equity != null ? "YES" : "NO",
+                        familyCandle.getFuture() != null ? "YES" : "NO",
+                        familyCandle.getOptions() != null ? familyCandle.getOptions().size() : 0,
+                        equity != null ? equity.getOpen() : 0.0, 
+                        equity != null ? equity.getHigh() : 0.0, 
+                        equity != null ? equity.getLow() : 0.0,
+                        equity != null ? equity.getClose() : 0.0,
+                        equity != null ? equity.getVolume() : 0L, outputTopic);
+                }
+            })
             .to(outputTopic, Produced.with(Serdes.String(), FamilyCandle.serde()));
 
         log.info("FamilyCandleProcessor topology built successfully");
@@ -209,8 +239,9 @@ public class FamilyCandleProcessor {
         // Use IFamilyDataProvider for reverse mapping (DIP compliance)
         String equityScripCode = familyDataProvider.getEquityScripCode(scripCode);
 
+        // FIX: Check for null before comparing (BUG-001)
         // If mapping found and different from input, we have the equity
-        if (!equityScripCode.equals(scripCode)) {
+        if (equityScripCode != null && !equityScripCode.equals(scripCode)) {
             return equityScripCode;
         }
         
@@ -510,17 +541,20 @@ public class FamilyCandleProcessor {
         List<OptionCandle> options
     ) {
         // Spot-Future Premium
+        // FIX: Only calculate for NSE (equity-based families), not MCX commodities
+        // MCX commodities have no underlying equity to compare against
         if (equity != null && future != null && equity.getClose() > 0) {
             double premium = (future.getClose() - equity.getClose()) / equity.getClose() * 100;
             builder.spotFuturePremium(premium);
-            
-            // Futures buildup
-            if (future.hasOI()) {
-                FuturesBuildupDetector.BuildupType buildup = FuturesBuildupDetector.detect(future);
-                builder.futuresBuildup(buildup.name());
-                builder.futureOiBuildingUp(future.getOiChangePercent() != null && future.getOiChangePercent() > 2);
-                builder.futureOIChange(future.getOiChange());
-            }
+        }
+        // Note: For MCX commodities (future-only families), spotFuturePremium remains null
+        
+        // Futures buildup (works for both NSE and MCX)
+        if (future != null && future.hasOI()) {
+            FuturesBuildupDetector.BuildupType buildup = FuturesBuildupDetector.detect(future);
+            builder.futuresBuildup(buildup.name());
+            builder.futureOiBuildingUp(future.getOiChangePercent() != null && future.getOiChangePercent() > 2);
+            builder.futureOIChange(future.getOiChange());
         }
 
         // Options metrics
@@ -543,9 +577,14 @@ public class FamilyCandleProcessor {
         }
 
         // OI Signal (using the full family)
-        if (equity != null) {
+        // FIX: Calculate OI signal for both equity-based families (NSE) and future-only families (MCX commodities)
+        // MCX commodities don't have equity - future is the primary instrument
+        if (equity != null || future != null) {
+            // Use equity if available, otherwise use future as primary (for MCX commodities)
+            InstrumentCandle primary = equity != null ? equity : future;
+            
             FamilyCandle tempFamily = FamilyCandle.builder()
-                .equity(equity)
+                .equity(equity)  // null for MCX commodities
                 .future(future)
                 .options(options)
                 .build();
@@ -574,7 +613,7 @@ public class FamilyCandleProcessor {
     public static class FamilyCandleCollector {
         private InstrumentCandle equity;
         private InstrumentCandle future;
-        private List<InstrumentCandle> options = new ArrayList<>();
+        // REMOVED: private List<InstrumentCandle> options = new ArrayList<>(); (dead code - never populated)
         private Map<String, InstrumentCandle> optionsByScripCode = new HashMap<>();
         
         // Track merge counts for debugging
@@ -664,13 +703,11 @@ public class FamilyCandleProcessor {
         
         /**
          * Get deduplicated options list
+         * FIX: Removed dead code - options list was never populated, only optionsByScripCode map is used
          */
         public List<InstrumentCandle> getOptions() {
             // Return deduplicated options from map
-            if (!optionsByScripCode.isEmpty()) {
-                return new ArrayList<>(optionsByScripCode.values());
-            }
-            return options;
+            return new ArrayList<>(optionsByScripCode.values());
         }
 
         public boolean hasEquity() {

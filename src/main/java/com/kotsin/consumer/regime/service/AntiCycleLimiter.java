@@ -99,11 +99,13 @@ public class AntiCycleLimiter {
         int currentFlow = calculateFlowDirection(candles30m, 3);
 
         // Check if trend has changed
+        // FIX: Handle neutral flow (0) - don't increment age if flow becomes neutral
         if (state.direction != currentFlow && currentFlow != 0) {
             state.reset(currentFlow);
-        } else if (currentFlow == state.direction) {
+        } else if (currentFlow == state.direction && currentFlow != 0) {
             state.incrementAge("30m");
         }
+        // If currentFlow == 0 (neutral), don't increment age - trend is unclear
 
         // Get flow agreements from index
         int[] tfFlowAgreements = new int[4];

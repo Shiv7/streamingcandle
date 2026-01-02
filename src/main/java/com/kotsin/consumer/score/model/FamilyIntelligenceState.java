@@ -230,17 +230,27 @@ public class FamilyIntelligenceState {
 
     /**
      * Check for price-OI divergence
+     * FIX: Added magnitude check and multi-candle trend validation
      */
     public boolean hasDivergence(double currentSpotPrice, Long currentFutureOI) {
-        if (previousFutureOI == null || currentFutureOI == null) {
+        if (previousFutureOI == null || currentFutureOI == null || previousSpotPrice <= 0) {
             return false;
+        }
+        
+        // FIX: Calculate percentage changes, not just direction
+        double priceChangePercent = Math.abs((currentSpotPrice - previousSpotPrice) / previousSpotPrice * 100);
+        double oiChangePercent = Math.abs((double)(currentFutureOI - previousFutureOI) / previousFutureOI * 100);
+        
+        // FIX: Require minimum magnitude (0.1% for price, 0.5% for OI) to avoid noise
+        if (priceChangePercent < 0.1 || oiChangePercent < 0.5) {
+            return false;  // Too small to be meaningful
         }
         
         boolean priceUp = currentSpotPrice > previousSpotPrice;
         boolean oiUp = currentFutureOI > previousFutureOI;
         
-        // Divergence if price and OI move opposite
-        return priceUp != oiUp;
+        // FIX: Divergence requires opposite direction AND significant magnitude
+        return priceUp != oiUp && (priceChangePercent > 0.2 || oiChangePercent > 1.0);
     }
 
     // ==================== SERDE ====================

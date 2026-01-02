@@ -212,7 +212,7 @@ public class FinalMagnitudeAssembly {
      */
     private double calculateCSSMultiplier(MTVCPOutput vcp, SecurityRegime security) {
         double vcpStructure = vcp != null ? vcp.getStructuralBias() : 0;
-        double securityStrength = security != null ? security.getSecurityStrength() : 0.5;
+        double securityStrength = security != null ? security.getSecurityContextScore() : 0.5;
         
         // Combine fast (VCP) and slow (regime) structure
         double css = 0.5 * Math.abs(vcpStructure) + 0.5 * securityStrength;

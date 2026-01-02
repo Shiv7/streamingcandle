@@ -43,18 +43,12 @@ public class OIAggregate {
     private Long oiLow;
     private Long oiClose;
 
-    // ========== Put/Call Tracking ==========
-    private Long putOI = 0L;
-    private Long callOI = 0L;
-    private Long putOIStart;
-    private Long callOIStart;
-
     // ========== Derived Metrics ==========
     private Long oiChange;
     private Double oiChangePercent;
-    private Double putCallRatio;
-    private Long putOIChange;
-    private Long callOIChange;
+    
+    // REMOVED: Put/Call tracking - meaningless at instrument level (single option is either PUT or CALL, never both)
+    // Put/Call ratio should be calculated at underlying/family level, not per instrument
 
     // ========== Processing State ==========
     private int updateCount = 0;
@@ -98,33 +92,9 @@ public class OIAggregate {
             oiLow = currentOI;
         }
 
-        // ========== Put/Call Tracking ==========
-        // BUG-042 FIX: Robust option type detection using multiple patterns
-        if (companyName != null) {
-            String upperName = companyName.toUpperCase();
-            boolean isCall = upperName.contains(" CE ") || 
-                            upperName.endsWith("CE") ||
-                            upperName.contains("-CE-") ||
-                            upperName.contains("CALL");
-            boolean isPut = upperName.contains(" PE ") || 
-                           upperName.endsWith("PE") ||
-                           upperName.contains("-PE-") ||
-                           upperName.contains("PUT");
-            
-            if (isCall) {
-                // Call option
-                if (callOIStart == null) {
-                    callOIStart = currentOI;
-                }
-                callOI = currentOI;
-            } else if (isPut) {
-                // Put option
-                if (putOIStart == null) {
-                    putOIStart = currentOI;
-                }
-                putOI = currentOI;
-            }
-        }
+        // REMOVED: Put/Call tracking - meaningless at instrument level
+        // A single option is either PUT or CALL, never both
+        // Put/Call ratio should be calculated at underlying/family level
 
         updateCount++;
     }
@@ -139,18 +109,7 @@ public class OIAggregate {
             oiChangePercent = oiOpen != 0 ? (double) oiChange / oiOpen * 100.0 : 0.0;
         }
 
-        // Put/Call Ratio
-        if (putOI > 0 && callOI > 0) {
-            putCallRatio = (double) putOI / callOI;
-        }
-
-        // Put/Call Changes
-        if (putOIStart != null && putOI > 0) {
-            putOIChange = putOI - putOIStart;
-        }
-        if (callOIStart != null && callOI > 0) {
-            callOIChange = callOI - callOIStart;
-        }
+        // REMOVED: Put/Call ratio and changes - meaningless at instrument level
     }
 
     /**
@@ -175,21 +134,7 @@ public class OIAggregate {
             this.oiLow = (this.oiLow == null) ? other.oiLow : Math.min(this.oiLow, other.oiLow);
         }
 
-        // Aggregate put/call (use latest values)
-        if (other.putOI > 0) {
-            this.putOI = other.putOI;
-        }
-        if (other.callOI > 0) {
-            this.callOI = other.callOI;
-        }
-
-        // Preserve starting put/call OI from earliest minute in the window
-        if (this.putOIStart == null && other.putOIStart != null) {
-            this.putOIStart = other.putOIStart;
-        }
-        if (this.callOIStart == null && other.callOIStart != null) {
-            this.callOIStart = other.callOIStart;
-        }
+        // REMOVED: Put/Call aggregation - meaningless at instrument level
 
         // Update metadata
         this.exchange = other.exchange;

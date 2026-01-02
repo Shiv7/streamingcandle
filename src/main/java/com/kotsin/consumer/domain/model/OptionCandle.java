@@ -109,7 +109,8 @@ public class OptionCandle {
      * Create from InstrumentCandle
      */
     public static OptionCandle fromInstrumentCandle(InstrumentCandle candle) {
-        if (candle == null || !candle.getInstrumentType().isOption()) {
+        // FIX: Check for null InstrumentType before calling isOption() (BUG-004)
+        if (candle == null || candle.getInstrumentType() == null || !candle.getInstrumentType().isOption()) {
             return null;
         }
 
