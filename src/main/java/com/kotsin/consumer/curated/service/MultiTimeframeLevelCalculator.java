@@ -22,9 +22,11 @@ import java.time.format.DateTimeFormatter;
 import java.util.*;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.TimeoutException;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
+import java.util.concurrent.atomic.AtomicReference;
 
 /**
  * MultiTimeframeLevelCalculator - Calculates Fibonacci and Pivot levels
@@ -216,54 +218,66 @@ public class MultiTimeframeLevelCalculator {
                     .build();
 
             log.debug("Fetching historical candles: {}", url);
-            
+
             Request request = new Request.Builder().url(url).get().build();
-            
-            // Make async HTTP call to avoid blocking
-            CompletableFuture<Response> responseFuture = CompletableFuture.supplyAsync(() -> {
+
+            // Make async HTTP call with proper resource cleanup
+            final AtomicReference<Response> responseRef = new AtomicReference<>();
+            CompletableFuture<List<OHLCData>> dataFuture = CompletableFuture.supplyAsync(() -> {
+                Response response = null;
                 try {
-                    return httpClient.newCall(request).execute();
+                    response = httpClient.newCall(request).execute();
+                    responseRef.set(response);  // Track for cleanup
+
+                    if (!response.isSuccessful() || response.body() == null) {
+                        log.warn("Historical API non-200/empty for {}: status={}", scripCode, response.code());
+                        return Collections.emptyList();
+                    }
+
+                    // Parse JSON array response
+                    List<OHLCData> candles = objectMapper.readValue(
+                            response.body().byteStream(),
+                            new TypeReference<List<OHLCData>>() {}
+                    );
+
+                    log.info("Fetched {} 1m candles for {} from {} to {}",
+                            candles.size(), scripCode, startDate, endDate);
+
+                    return candles;
+
                 } catch (Exception e) {
                     log.error("HTTP call failed for {}: {}", scripCode, e.getMessage());
-                    return null;
+                    return Collections.emptyList();
+                } finally {
+                    // Always close response to prevent leaks
+                    if (response != null) {
+                        response.close();
+                    }
                 }
             }, httpExecutor);
-            
+
             // Wait for response with timeout
-            Response response = responseFuture.get(8, TimeUnit.SECONDS);
-            
-            if (response == null) {
-                log.warn("Historical API call failed for {}", scripCode);
+            List<OHLCData> candles;
+            try {
+                candles = dataFuture.get(8, TimeUnit.SECONDS);
+            } catch (TimeoutException e) {
+                log.error("HTTP call timed out for {}: timeout", scripCode);
+                // Cancel future and close any pending response
+                dataFuture.cancel(true);
+                Response pendingResponse = responseRef.get();
+                if (pendingResponse != null) {
+                    pendingResponse.close();
+                }
                 return Collections.emptyList();
             }
-            
-            try {
-                if (!response.isSuccessful() || response.body() == null) {
-                    log.warn("Historical API non-200/empty for {}: status={}", scripCode, response.code());
-                    return Collections.emptyList();
-                }
-                
-                // Parse JSON array response - same format as TradeExecutionModule
-                List<OHLCData> candles = objectMapper.readValue(
-                        response.body().byteStream(), 
-                        new TypeReference<List<OHLCData>>() {}
-                );
-                
-                log.info("Fetched {} 1m candles for {} from {} to {}", 
-                        candles.size(), scripCode, startDate, endDate);
-                
-                // Cache the result
-                if (!candles.isEmpty()) {
-                    ohlcCache.put(scripCode, candles);
-                    ohlcCacheTimestamp.put(scripCode, System.currentTimeMillis());
-                }
-                
-                return candles;
-            } finally {
-                if (response != null) {
-                    response.close();
-                }
+
+            // Cache the result if not empty
+            if (candles != null && !candles.isEmpty()) {
+                ohlcCache.put(scripCode, candles);
+                ohlcCacheTimestamp.put(scripCode, System.currentTimeMillis());
             }
+
+            return candles != null ? candles : Collections.emptyList();
 
         } catch (Exception e) {
             log.error("Error fetching historical data for {}: {}", scripCode, e.getMessage());
