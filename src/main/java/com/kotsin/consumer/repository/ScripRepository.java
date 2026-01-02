@@ -10,4 +10,10 @@ import java.util.Optional;
 public interface ScripRepository extends MongoRepository<Scrip, String> {
     Optional<Scrip> findFirstByExchAndExchTypeAndScripCode(String exch, String exchType, String scripCode);
     Optional<Scrip> findFirstByExchAndExchTypeAndName(String exch, String exchType, String name);
+    
+    /**
+     * Find equity by symbolRoot - critical for options-to-equity mapping
+     * ExchType "C" = Cash segment = Equity
+     */
+    Optional<Scrip> findFirstBySymbolRootAndExchType(String symbolRoot, String exchType);
 }

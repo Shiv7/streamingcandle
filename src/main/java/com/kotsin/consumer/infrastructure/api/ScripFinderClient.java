@@ -206,6 +206,29 @@ public class ScripFinderClient {
         }, null); // null fallback - caller handles null responses
     }
 
+    /**
+     * Get ALL equities from ScripFinder API
+     * Called on startup to preload all equity mappings
+     * 
+     * @return List of equity info with symbolRoot and scripCode
+     */
+    public AllEquitiesResponse getAllEquities() {
+        String url = baseUrl + "/getDesiredWebSocket?tradingType=EQUITY";
+        log.info("Fetching all equities from: {}", url);
+
+        try {
+            CompletableFuture<AllEquitiesResponse> future = CompletableFuture.supplyAsync(() ->
+                    restTemplate.getForObject(url, AllEquitiesResponse.class));
+            return future.get(30000, TimeUnit.MILLISECONDS); // 30 second timeout for bulk fetch
+        } catch (TimeoutException e) {
+            log.error("Timeout fetching all equities");
+            return null;
+        } catch (Exception e) {
+            log.error("Error fetching all equities: {}", e.getMessage());
+            return null;
+        }
+    }
+
     // ==================== RESPONSE DTOs ====================
 
     @Data
@@ -226,6 +249,36 @@ public class ScripFinderClient {
         private int status;
         private String message;
         private List<ScripInfo> response;
+    }
+
+    /**
+     * Response from /getDesiredWebSocket?tradingType=EQUITY
+     */
+    @Data
+    @NoArgsConstructor
+    @AllArgsConstructor
+    @JsonIgnoreProperties(ignoreUnknown = true)
+    public static class AllEquitiesResponse {
+        private int status;
+        private String message;
+        private List<EquityInfo> response;
+    }
+
+    /**
+     * Equity info from getDesiredWebSocket API
+     */
+    @Data
+    @NoArgsConstructor
+    @AllArgsConstructor
+    @JsonIgnoreProperties(ignoreUnknown = true)
+    public static class EquityInfo {
+        private String equityScripCode;
+        private String tradingType;
+        private String companyName;
+        private ScripInfo equity;
+        private List<ScripInfo> futures;
+        private List<ScripInfo> options;
+        private double closePrice;
     }
 
     @Data
