@@ -137,7 +137,20 @@ public class KafkaConfig {
         props.put(StreamsConfig.CONSUMER_PREFIX + "auto.offset.reset", autoOffsetReset);
 
         // Producer configuration
-        props.put("producer.message.timestamp.type", producerTimestampType);
+        props.put(StreamsConfig.PRODUCER_PREFIX + "message.timestamp.type", producerTimestampType);
+
+        // CRITICAL FIX: Configure internal repartition topics to use LogAppendTime
+        // This prevents InvalidTimestampException when producing to repartition topics
+        // with future timestamps. The broker will assign timestamps instead of using
+        // the record's embedded timestamp.
+        props.put(StreamsConfig.TOPIC_PREFIX + "log.message.timestamp.type", "LogAppendTime");
+
+        // Allow larger timestamp differences for repartition topics (1 hour = 3600000ms)
+        props.put(StreamsConfig.TOPIC_PREFIX + "max.message.time.difference.ms", "3600000");
+
+        // Configure production exception handler to continue on timestamp errors
+        props.put(StreamsConfig.DEFAULT_PRODUCTION_EXCEPTION_HANDLER_CLASS_CONFIG,
+                "org.apache.kafka.streams.errors.LogAndContinueExceptionHandler");
 
         // Resilience configuration
         props.put(StreamsConfig.RETRY_BACKOFF_MS_CONFIG, retryBackoffMs);
