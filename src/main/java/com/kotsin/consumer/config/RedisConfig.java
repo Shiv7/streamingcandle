@@ -44,9 +44,10 @@ public class RedisConfig {
         RedisTemplate<String, Double> template = new RedisTemplate<>();
         template.setConnectionFactory(connectionFactory);
         template.setKeySerializer(new StringRedisSerializer());
-        template.setValueSerializer(new StringRedisSerializer());
+        // Use GenericToStringSerializer for Double values - converts Double to/from String
+        template.setValueSerializer(new org.springframework.data.redis.serializer.GenericToStringSerializer<>(Double.class));
         template.setHashKeySerializer(new StringRedisSerializer());
-        template.setHashValueSerializer(new StringRedisSerializer());
+        template.setHashValueSerializer(new org.springframework.data.redis.serializer.GenericToStringSerializer<>(Double.class));
         return template;
     }
 
