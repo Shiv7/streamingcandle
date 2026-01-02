@@ -120,6 +120,15 @@ public class UnifiedInstrumentCandleProcessor {
             .build();
 
     /**
+     * Cache to track previous window's OI close per instrument key
+     * Used to calculate OI change from previous window to current window
+     */
+    private final Cache<String, Long> previousOICloseCache = Caffeine.newBuilder()
+            .maximumSize(10_000)  // Max instruments to cache
+            .expireAfterWrite(1, TimeUnit.DAYS)  // Clear after 1 day
+            .build();
+
+    /**
      * Build and start the unified processor
      */
     @PostConstruct
@@ -464,6 +473,22 @@ public class UnifiedInstrumentCandleProcessor {
     }
 
     /**
+     * Build OI key from TickAggregate and windowed key
+     * Used to look up previous OI close in cache
+     */
+    private String buildOIKeyFromCandle(TickAggregate tick, String windowedKey) {
+        // windowedKey format is "exchange:exchangeType:token"
+        // We can use it directly, or extract from tick
+        if (windowedKey != null && windowedKey.contains(":")) {
+            return windowedKey;  // Already in correct format
+        }
+        // Fallback: build from tick
+        String exch = tick.getExchange() != null ? tick.getExchange() : "N";
+        String exchType = tick.getExchangeType() != null ? tick.getExchangeType() : "C";
+        return exch + ":" + exchType + ":" + tick.getScripCode();
+    }
+
+    /**
      * Build InstrumentCandle from aggregated data
      */
     private InstrumentCandle buildInstrumentCandle(Windowed<String> windowedKey, InstrumentCandleData data) {
@@ -555,8 +580,34 @@ public class UnifiedInstrumentCandleProcessor {
             builder.oiHigh(oi.getOiHigh());
             builder.oiLow(oi.getOiLow());
             builder.oiClose(oi.getOiClose());
-            builder.oiChange(oi.getOiChange());
-            builder.oiChangePercent(oi.getOiChangePercent());
+            
+            // Calculate OI change from PREVIOUS window (not within current window)
+            String oiKey = buildOIKeyFromCandle(tick, windowedKey.key());
+            Long previousOIClose = previousOICloseCache.getIfPresent(oiKey);
+            
+            if (previousOIClose != null && previousOIClose > 0 && oi.getOiClose() != null) {
+                // Calculate change from previous window's close to current window's close
+                Long oiChange = oi.getOiClose() - previousOIClose;
+                Double oiChangePercent = (double) oiChange / previousOIClose * 100.0;
+                
+                builder.oiChange(oiChange);
+                builder.oiChangePercent(oiChangePercent);
+                
+                if (log.isDebugEnabled()) {
+                    log.debug("[OI-CHANGE] {} | prevOI={} currOI={} change={} changePct={}%", 
+                        oiKey, previousOIClose, oi.getOiClose(), oiChange, 
+                        String.format("%.2f", oiChangePercent));
+                }
+            } else {
+                // First window or no previous OI - use within-window change
+                builder.oiChange(oi.getOiChange());
+                builder.oiChangePercent(oi.getOiChangePercent());
+            }
+            
+            // Update cache with current OI close for next window
+            if (oi.getOiClose() != null) {
+                previousOICloseCache.put(oiKey, oi.getOiClose());
+            }
         }
 
         // Add option-specific fields
@@ -690,6 +741,7 @@ public class UnifiedInstrumentCandleProcessor {
             streams.close(Duration.ofSeconds(30));
             vpinCalculators.invalidateAll();  // Clear cache on shutdown
             vpinLastTradingDay.invalidateAll();  // Clear trading day tracking cache
+            previousOICloseCache.invalidateAll();  // Clear previous OI cache on shutdown
             log.info("✅ UnifiedInstrumentCandleProcessor stopped");
         }
     }

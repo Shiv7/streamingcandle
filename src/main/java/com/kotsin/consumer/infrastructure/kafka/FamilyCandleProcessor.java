@@ -471,11 +471,14 @@ public class FamilyCandleProcessor {
         } else if (future != null && equity == null && isCommodity) {
             // Commodity case: future is already set as equity, don't duplicate
             builder.future(null);  // Already used as primary
+            builder.hasFuture(false);  // For commodities, future is in equity slot, not separate
         } else if (future != null && equity == null) {
             // NSE case: future is fallback, also set it in future field
             builder.future(future);
+            builder.hasFuture(true);
+        } else {
+            builder.hasFuture(future != null);
         }
-        builder.hasFuture(future != null);
 
         // Set options (now deduplicated!)
         List<OptionCandle> options = collector.getOptions().stream()

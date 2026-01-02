@@ -123,9 +123,17 @@ public class FamilyCandle {
 
     /**
      * Get future close price
+     * For commodities: future is in equity slot, so use equity.getClose() if future is null
      */
     public double getFuturePrice() {
-        return future != null ? future.getClose() : 0.0;
+        if (future != null) {
+            return future.getClose();
+        }
+        // For commodities: future is stored in equity slot
+        if (isCommodity && equity != null) {
+            return equity.getClose();
+        }
+        return 0.0;
     }
 
     /**

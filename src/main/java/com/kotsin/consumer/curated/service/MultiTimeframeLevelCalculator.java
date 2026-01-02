@@ -79,7 +79,9 @@ public class MultiTimeframeLevelCalculator {
     // Cache for historical OHLC data (key: scripCode, value: list of candles)
     private final ConcurrentHashMap<String, List<OHLCData>> ohlcCache = new ConcurrentHashMap<>();
     private final ConcurrentHashMap<String, Long> ohlcCacheTimestamp = new ConcurrentHashMap<>();
-    private static final long OHLC_CACHE_TTL_MS = 5 * 60 * 1000; // 5 minutes
+    // Cache for whole day - pivots/Fibonacci don't change during the day
+    // Only refresh when day changes (checked in fetchHistoricalData)
+    private static final long OHLC_CACHE_TTL_MS = 24 * 60 * 60 * 1000; // 24 hours (whole day)
 
     public MultiTimeframeLevelCalculator() {
         this.httpClient = new OkHttpClient.Builder()
@@ -158,13 +160,25 @@ public class MultiTimeframeLevelCalculator {
      * Uses same approach as TradeExecutionModule's HistoricalDataClient
      */
     private List<OHLCData> fetchHistoricalData(String scripCode) {
-        // Check cache
+        // Check cache - cache is valid for whole day (pivots/Fibonacci don't change during day)
         Long cacheTime = ohlcCacheTimestamp.get(scripCode);
-        if (cacheTime != null && (System.currentTimeMillis() - cacheTime) < OHLC_CACHE_TTL_MS) {
-            List<OHLCData> cached = ohlcCache.get(scripCode);
-            if (cached != null && !cached.isEmpty()) {
-                log.debug("Cache HIT for {}: {} candles", scripCode, cached.size());
-                return cached;
+        if (cacheTime != null) {
+            long age = System.currentTimeMillis() - cacheTime;
+            // Check if cached data is from same day (not just TTL)
+            LocalDate cacheDate = Instant.ofEpochMilli(cacheTime).atZone(IST).toLocalDate();
+            LocalDate today = LocalDate.now(IST);
+            
+            if (cacheDate.equals(today) && age < OHLC_CACHE_TTL_MS) {
+                List<OHLCData> cached = ohlcCache.get(scripCode);
+                if (cached != null && !cached.isEmpty()) {
+                    log.debug("Cache HIT for {}: {} candles (cached today)", scripCode, cached.size());
+                    return cached;
+                }
+            } else {
+                // Cache expired (new day) - clear it
+                log.debug("Cache expired for {} (new day), will fetch fresh data", scripCode);
+                ohlcCache.remove(scripCode);
+                ohlcCacheTimestamp.remove(scripCode);
             }
         }
 
