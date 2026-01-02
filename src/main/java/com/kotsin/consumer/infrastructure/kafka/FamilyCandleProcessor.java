@@ -220,7 +220,21 @@ public class FamilyCandleProcessor {
         // FIX: Allow futures-only families (for commodities like MCX Gold, Crude, etc.)
         // Commodities don't have underlying equity - future IS the primary instrument
         collected.toStream()
-            .filter((windowedKey, collector) -> collector != null && collector.hasPrimaryInstrument())
+            .filter((windowedKey, collector) -> {
+                boolean passes = collector != null && collector.hasPrimaryInstrument();
+                // #region agent log
+                if (passes) {
+                    try {
+                        java.io.FileWriter fw = new java.io.FileWriter("logs/debug.log", true);
+                        String json = String.format("{\"sessionId\":\"debug-session\",\"runId\":\"run1\",\"hypothesisId\":\"STREAM-A\",\"location\":\"FamilyCandleProcessor.java:223\",\"message\":\"Collector before buildFamilyCandle\",\"data\":{\"familyId\":\"%s\",\"equityNotNull\":%s,\"futureNotNull\":%s,\"futureScripCode\":\"%s\",\"optionsSize\":%d},\"timestamp\":%d}\n",
+                            windowedKey.key(), collector.getEquity() != null, collector.getFuture() != null, collector.getFuture() != null ? collector.getFuture().getScripCode() : "null", collector.getOptions().size(), System.currentTimeMillis());
+                        fw.write(json);
+                        fw.close();
+                    } catch (Exception e) {}
+                }
+                // #endregion
+                return passes;
+            })
             .mapValues((windowedKey, collector) -> {
                 FamilyCandle familyCandle = buildFamilyCandle(windowedKey, collector);
                 // Record metrics
@@ -445,6 +459,18 @@ public class FamilyCandleProcessor {
                 collector.getOptions().size());
         }
         
+        // #region agent log
+        try {
+            java.io.FileWriter fw = new java.io.FileWriter("logs/debug.log", true);
+            InstrumentCandle equityCheck = collector.getEquity();
+            InstrumentCandle futureCheck = collector.getFuture();
+            String json = String.format("{\"sessionId\":\"debug-session\",\"runId\":\"run1\",\"hypothesisId\":\"BUILD-A\",\"location\":\"FamilyCandleProcessor.java:437\",\"message\":\"Collector state at buildFamilyCandle\",\"data\":{\"familyId\":\"%s\",\"equityNotNull\":%s,\"futureNotNull\":%s,\"futureScripCode\":\"%s\",\"optionsSize\":%d},\"timestamp\":%d}\n",
+                familyId, equityCheck != null, futureCheck != null, futureCheck != null ? futureCheck.getScripCode() : "null", collector.getOptions().size(), System.currentTimeMillis());
+            fw.write(json);
+            fw.close();
+        } catch (Exception e) {}
+        // #endregion
+        
         FamilyCandle.FamilyCandleBuilder builder = FamilyCandle.builder()
             .familyId(familyId)
             .timestamp(System.currentTimeMillis())
@@ -521,20 +547,65 @@ public class FamilyCandleProcessor {
         }
 
         // Set future candle (already retrieved above)
+        // #region agent log
+        try {
+            java.io.FileWriter fw = new java.io.FileWriter("logs/debug.log", true);
+            String json = String.format("{\"sessionId\":\"debug-session\",\"runId\":\"run1\",\"hypothesisId\":\"BUILD-B\",\"location\":\"FamilyCandleProcessor.java:524\",\"message\":\"Setting future in builder\",\"data\":{\"familyId\":\"%s\",\"futureNotNull\":%s,\"equityNotNull\":%s,\"isCommodity\":%s,\"futureScripCode\":\"%s\",\"futureHasOI\":%s},\"timestamp\":%d}\n",
+                familyId, future != null, equity != null, isCommodity, future != null ? future.getScripCode() : "null", future != null && future.hasOI(), System.currentTimeMillis());
+            fw.write(json);
+            fw.close();
+        } catch (Exception e) {}
+        // #endregion
         if (future != null && equity != null) {
             // Only validate future separately if we have both equity and future
             validateOHLC(future, "FUTURE", familyId);
             builder.future(future);
+            // #region agent log
+            try {
+                java.io.FileWriter fw = new java.io.FileWriter("logs/debug.log", true);
+                String json = String.format("{\"sessionId\":\"debug-session\",\"runId\":\"run1\",\"hypothesisId\":\"BUILD-C\",\"location\":\"FamilyCandleProcessor.java:528\",\"message\":\"Future set in builder (equity+future case)\",\"data\":{\"familyId\":\"%s\",\"futureScripCode\":\"%s\"},\"timestamp\":%d}\n",
+                    familyId, future.getScripCode(), System.currentTimeMillis());
+                fw.write(json);
+                fw.close();
+            } catch (Exception e) {}
+            // #endregion
         } else if (future != null && equity == null && isCommodity) {
             // Commodity case: future is already set as equity, don't duplicate
             builder.future(null);  // Already used as primary
             builder.hasFuture(false);  // For commodities, future is in equity slot, not separate
+            // #region agent log
+            try {
+                java.io.FileWriter fw = new java.io.FileWriter("logs/debug.log", true);
+                String json = String.format("{\"sessionId\":\"debug-session\",\"runId\":\"run1\",\"hypothesisId\":\"BUILD-D\",\"location\":\"FamilyCandleProcessor.java:532\",\"message\":\"Commodity: future in equity slot\",\"data\":{\"familyId\":\"%s\",\"futureScripCode\":\"%s\"},\"timestamp\":%d}\n",
+                    familyId, future.getScripCode(), System.currentTimeMillis());
+                fw.write(json);
+                fw.close();
+            } catch (Exception e) {}
+            // #endregion
         } else if (future != null && equity == null) {
             // NSE case: future is fallback, also set it in future field
             builder.future(future);
             builder.hasFuture(true);
+            // #region agent log
+            try {
+                java.io.FileWriter fw = new java.io.FileWriter("logs/debug.log", true);
+                String json = String.format("{\"sessionId\":\"debug-session\",\"runId\":\"run1\",\"hypothesisId\":\"BUILD-E\",\"location\":\"FamilyCandleProcessor.java:536\",\"message\":\"Future set in builder (future-only case)\",\"data\":{\"familyId\":\"%s\",\"futureScripCode\":\"%s\"},\"timestamp\":%d}\n",
+                    familyId, future.getScripCode(), System.currentTimeMillis());
+                fw.write(json);
+                fw.close();
+            } catch (Exception e) {}
+            // #endregion
         } else {
             builder.hasFuture(future != null);
+            // #region agent log
+            try {
+                java.io.FileWriter fw = new java.io.FileWriter("logs/debug.log", true);
+                String json = String.format("{\"sessionId\":\"debug-session\",\"runId\":\"run1\",\"hypothesisId\":\"BUILD-F\",\"location\":\"FamilyCandleProcessor.java:540\",\"message\":\"No future in builder\",\"data\":{\"familyId\":\"%s\",\"futureNotNull\":%s},\"timestamp\":%d}\n",
+                    familyId, future != null, System.currentTimeMillis());
+                fw.write(json);
+                fw.close();
+            } catch (Exception e) {}
+            // #endregion
         }
 
         // Set options (now deduplicated!)
@@ -835,10 +906,28 @@ public class FamilyCandleProcessor {
                 case FUTURE:
                     if (this.future == null) {
                         this.future = candle;
+                        // #region agent log
+                        try {
+                            java.io.FileWriter fw = new java.io.FileWriter("logs/debug.log", true);
+                            String json = String.format("{\"sessionId\":\"debug-session\",\"runId\":\"run1\",\"hypothesisId\":\"FUTURE-ADD\",\"location\":\"FamilyCandleCollector.add:FUTURE\",\"message\":\"Future set in collector\",\"data\":{\"scripCode\":\"%s\",\"futureScripCode\":\"%s\",\"futureNotNull\":%s,\"futureHasOI\":%s,\"futureOI\":%s},\"timestamp\":%d}\n",
+                                candle.getScripCode(), this.future != null ? this.future.getScripCode() : "null", this.future != null, this.future != null && this.future.hasOI(), this.future != null && this.future.getOpenInterest() != null ? this.future.getOpenInterest() : "null", System.currentTimeMillis());
+                            fw.write(json);
+                            fw.close();
+                        } catch (Exception e) {}
+                        // #endregion
                     } else {
                         // MERGE instead of replace!
                         mergeInstrumentCandle(this.future, candle);
                         futureMergeCount++;
+                        // #region agent log
+                        try {
+                            java.io.FileWriter fw = new java.io.FileWriter("logs/debug.log", true);
+                            String json = String.format("{\"sessionId\":\"debug-session\",\"runId\":\"run1\",\"hypothesisId\":\"FUTURE-MERGE\",\"location\":\"FamilyCandleCollector.add:FUTURE\",\"message\":\"Future merged in collector\",\"data\":{\"scripCode\":\"%s\",\"futureScripCode\":\"%s\",\"futureNotNull\":%s,\"mergeCount\":%d},\"timestamp\":%d}\n",
+                                candle.getScripCode(), this.future != null ? this.future.getScripCode() : "null", this.future != null, futureMergeCount, System.currentTimeMillis());
+                            fw.write(json);
+                            fw.close();
+                        } catch (Exception e) {}
+                        // #endregion
                     }
                     break;
                 case OPTION_CE:
@@ -856,6 +945,15 @@ public class FamilyCandleProcessor {
                     }
                     break;
             }
+            // #region agent log
+            try {
+                java.io.FileWriter fw = new java.io.FileWriter("logs/debug.log", true);
+                String json = String.format("{\"sessionId\":\"debug-session\",\"runId\":\"run1\",\"hypothesisId\":\"GROUP-C\",\"location\":\"FamilyCandleCollector.add:AFTER\",\"message\":\"Collector state after add\",\"data\":{\"scripCode\":\"%s\",\"instrumentType\":\"%s\",\"equityAfter\":%s,\"futureAfter\":%s,\"futureScripCode\":\"%s\",\"optionsCountAfter\":%d},\"timestamp\":%d}\n",
+                    candle.getScripCode(), type.name(), equity != null ? equity.getScripCode() : "null", future != null ? future.getScripCode() : "null", future != null ? future.getScripCode() : "null", optionsByScripCode.size(), System.currentTimeMillis());
+                fw.write(json);
+                fw.close();
+            } catch (Exception e) {}
+            // #endregion
             return this;
         }
         
