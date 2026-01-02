@@ -347,8 +347,13 @@ public class UnifiedInstrumentCandleProcessor {
             (tickOb, oi) -> {
                 if (log.isDebugEnabled() && tickOb != null && tickOb.tick != null) {
                     String scripCode = tickOb.tick.getScripCode();
-                    log.debug("[JOIN] {} | TICK+OB+OI | hasOB={} hasOI={}", 
-                        scripCode, tickOb.orderbook != null, oi != null);
+                    String tickKey = tickOb.tick.getExchange() + ":" + tickOb.tick.getExchangeType() + ":" + tickOb.tick.getToken();
+                    log.debug("[JOIN] {} | TICK+OB+OI | hasOB={} hasOI={} | tickKey={} tickExchType={}", 
+                        scripCode, tickOb.orderbook != null, oi != null, tickKey, tickOb.tick.getExchangeType());
+                    if (oi == null && (tickOb.tick.getExchangeType() != null && tickOb.tick.getExchangeType().equals("D"))) {
+                        log.warn("[JOIN-MISS] {} | OI missing for derivative! tickKey={} tickExchType={} token={}", 
+                            scripCode, tickKey, tickOb.tick.getExchangeType(), tickOb.tick.getToken());
+                    }
                 }
                 return new InstrumentCandleData(tickOb.tick, tickOb.orderbook, oi);
             }
