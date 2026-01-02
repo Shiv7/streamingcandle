@@ -570,13 +570,15 @@ public class FamilyCandleProcessor {
             } catch (Exception e) {}
             // #endregion
         } else if (future != null && equity == null && isCommodity) {
-            // Commodity case: future is already set as equity, don't duplicate
-            builder.future(null);  // Already used as primary
-            builder.hasFuture(false);  // For commodities, future is in equity slot, not separate
+            // Commodity case: future is set as equity for compatibility, but ALSO set in future field
+            // so that MTISProcessor can access OI/PCR via getFuture()
+            // Both equity and future slots point to the same InstrumentCandle object
+            builder.future(future);  // CRITICAL FIX: Set future field so OI/PCR can be accessed
+            builder.hasFuture(true);  // Mark that we have a future
             // #region agent log
             try {
                 java.io.FileWriter fw = new java.io.FileWriter("logs/debug.log", true);
-                String json = String.format("{\"sessionId\":\"debug-session\",\"runId\":\"run1\",\"hypothesisId\":\"BUILD-D\",\"location\":\"FamilyCandleProcessor.java:532\",\"message\":\"Commodity: future in equity slot\",\"data\":{\"familyId\":\"%s\",\"futureScripCode\":\"%s\"},\"timestamp\":%d}\n",
+                String json = String.format("{\"sessionId\":\"debug-session\",\"runId\":\"run1\",\"hypothesisId\":\"BUILD-D\",\"location\":\"FamilyCandleProcessor.java:532\",\"message\":\"Commodity: future in both equity and future slots\",\"data\":{\"familyId\":\"%s\",\"futureScripCode\":\"%s\"},\"timestamp\":%d}\n",
                     familyId, future.getScripCode(), System.currentTimeMillis());
                 fw.write(json);
                 fw.close();
