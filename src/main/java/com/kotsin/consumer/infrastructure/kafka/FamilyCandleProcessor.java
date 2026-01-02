@@ -656,7 +656,7 @@ public class FamilyCandleProcessor {
         // #region agent log
         try {
             String familyId = builder.build().getFamilyId();
-            java.io.FileWriter fw = new java.io.FileWriter(".cursor/debug.log", true);
+            java.io.FileWriter fw = new java.io.FileWriter("logs/debug.log", true);
             String json = String.format("{\"sessionId\":\"debug-session\",\"runId\":\"run1\",\"hypothesisId\":\"OI-C\",\"location\":\"FamilyCandleProcessor.java:656\",\"message\":\"Future OI check in FamilyCandle\",\"data\":{\"familyId\":\"%s\",\"futureNotNull\":%s,\"futureHasOI\":%s,\"futureOiPresent\":%s,\"futureOpenInterest\":%s},\"timestamp\":%d}\n",
                 familyId, future != null, future != null ? future.hasOI() : false, future != null ? future.isOiPresent() : false, future != null && future.getOpenInterest() != null ? future.getOpenInterest() : "null", System.currentTimeMillis());
             fw.write(json);
@@ -674,7 +674,7 @@ public class FamilyCandleProcessor {
         // #region agent log
         try {
             String familyId = builder.build().getFamilyId();
-            java.io.FileWriter fw = new java.io.FileWriter(".cursor/debug.log", true);
+            java.io.FileWriter fw = new java.io.FileWriter("logs/debug.log", true);
             String json = String.format("{\"sessionId\":\"debug-session\",\"runId\":\"run1\",\"hypothesisId\":\"PCR-A\",\"location\":\"FamilyCandleProcessor.java:664\",\"message\":\"PCR calculation check\",\"data\":{\"familyId\":\"%s\",\"optionsNotNull\":%s,\"optionsNotEmpty\":%s,\"optionsSize\":%d},\"timestamp\":%d}\n",
                 familyId, options != null, options != null && !options.isEmpty(), options != null ? options.size() : 0, System.currentTimeMillis());
             fw.write(json);
@@ -687,7 +687,7 @@ public class FamilyCandleProcessor {
             // #region agent log
             try {
                 String familyId = builder.build().getFamilyId();
-                java.io.FileWriter fw = new java.io.FileWriter(".cursor/debug.log", true);
+                java.io.FileWriter fw = new java.io.FileWriter("logs/debug.log", true);
                 String json = String.format("{\"sessionId\":\"debug-session\",\"runId\":\"run1\",\"hypothesisId\":\"PCR-B\",\"location\":\"FamilyCandleProcessor.java:667\",\"message\":\"PCR calculated\",\"data\":{\"familyId\":\"%s\",\"pcr\":%s,\"pcrNotNull\":%s},\"timestamp\":%d}\n",
                     familyId, pcr != null ? pcr : "null", pcr != null, System.currentTimeMillis());
                 fw.write(json);
