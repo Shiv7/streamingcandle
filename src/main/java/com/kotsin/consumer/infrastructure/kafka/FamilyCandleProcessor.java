@@ -169,7 +169,20 @@ public class FamilyCandleProcessor {
         // Key by family ID (equity scripCode)
         KStream<String, InstrumentCandle> keyedByFamily = instruments
             .filter((key, candle) -> candle != null && candle.getScripCode() != null)
-            .selectKey((key, candle) -> getFamilyId(candle));
+            .selectKey((key, candle) -> {
+                String familyId = getFamilyId(candle);
+                // #region agent log
+                try {
+                    java.io.FileWriter fw = new java.io.FileWriter("logs/debug.log", true);
+                    String instrumentType = candle.getInstrumentType() != null ? candle.getInstrumentType().name() : "UNKNOWN";
+                    String json = String.format("{\"sessionId\":\"debug-session\",\"runId\":\"run1\",\"hypothesisId\":\"GROUP-A\",\"location\":\"FamilyCandleProcessor.java:172\",\"message\":\"FamilyId grouping\",\"data\":{\"scripCode\":\"%s\",\"originalKey\":\"%s\",\"familyId\":\"%s\",\"instrumentType\":\"%s\",\"hasOI\":%s,\"openInterest\":%s},\"timestamp\":%d}\n",
+                        candle.getScripCode(), key, familyId, instrumentType, candle.hasOI(), candle.getOpenInterest() != null ? candle.getOpenInterest() : "null", System.currentTimeMillis());
+                    fw.write(json);
+                    fw.close();
+                } catch (Exception e) {}
+                // #endregion
+                return familyId;
+            });
 
         // Window and aggregate
         TimeWindows windows = TimeWindows.ofSizeAndGrace(
@@ -784,6 +797,15 @@ public class FamilyCandleProcessor {
                 );
                 candle.setInstrumentType(type);
             }
+            // #region agent log
+            try {
+                java.io.FileWriter fw = new java.io.FileWriter("logs/debug.log", true);
+                String json = String.format("{\"sessionId\":\"debug-session\",\"runId\":\"run1\",\"hypothesisId\":\"GROUP-B\",\"location\":\"FamilyCandleCollector.add\",\"message\":\"Adding candle to collector\",\"data\":{\"scripCode\":\"%s\",\"instrumentType\":\"%s\",\"hasOI\":%s,\"openInterest\":%s,\"equityBefore\":%s,\"futureBefore\":%s,\"optionsCountBefore\":%d},\"timestamp\":%d}\n",
+                    candle.getScripCode(), type.name(), candle.hasOI(), candle.getOpenInterest() != null ? candle.getOpenInterest() : "null", equity != null ? equity.getScripCode() : "null", future != null ? future.getScripCode() : "null", optionsByScripCode.size(), System.currentTimeMillis());
+                fw.write(json);
+                fw.close();
+            } catch (Exception e) {}
+            // #endregion
 
             switch (type) {
                 case EQUITY:
