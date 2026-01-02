@@ -252,6 +252,19 @@ public class MTISProcessor {
             }
             
             // Log actionable signals at INFO, all others at DEBUG
+            // #region agent log
+            try {
+                boolean futureNotNull = familyCandle.getFuture() != null;
+                boolean futureHasOI = futureNotNull && familyCandle.getFuture().hasOI();
+                Long futureOI = futureNotNull ? familyCandle.getFuture().getOpenInterest() : null;
+                Double pcr = familyCandle.getPcr();
+                java.io.FileWriter fw = new java.io.FileWriter(".cursor/debug.log", true);
+                String json = String.format("{\"sessionId\":\"debug-session\",\"runId\":\"run1\",\"hypothesisId\":\"OI-D\",\"location\":\"MTISProcessor.java:260\",\"message\":\"MTIS OI/PCR check\",\"data\":{\"familyId\":\"%s\",\"futureNotNull\":%s,\"futureHasOI\":%s,\"futureOpenInterest\":%s,\"pcr\":%s,\"pcrNotNull\":%s},\"timestamp\":%d}\n",
+                    familyId, futureNotNull, futureHasOI, futureOI != null ? futureOI : "null", pcr != null ? pcr : "null", pcr != null, System.currentTimeMillis());
+                fw.write(json);
+                fw.close();
+            } catch (Exception e) {}
+            // #endregion
             if (score.isActionable()) {
                 log.info("🎯 [MTIS-SCORE] {} | {} | price={} | OI={} PCR={}",
                         symbol,

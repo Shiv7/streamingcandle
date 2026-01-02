@@ -448,18 +448,48 @@ public class FamilyCandleProcessor {
             // VALIDATE OHLC
             validateOHLC(equity, "EQUITY", familyId);
             builder.equity(equity);
-            builder.symbol(extractSymbolRoot(equity.getCompanyName()));
+            String symbol = extractSymbolRoot(equity.getCompanyName());
+            // Fallback: if symbol is null, try to get from family data or use scripCode
+            if (symbol == null || symbol.isEmpty()) {
+                try {
+                    InstrumentFamily family = familyDataProvider.getFamily(familyId, equity.getClose());
+                    if (family != null && family.getSymbolRoot() != null && !family.getSymbolRoot().isEmpty()) {
+                        symbol = family.getSymbolRoot();
+                        log.debug("Family {}: Using symbol from family data: {}", familyId, symbol);
+                    } else if (family != null && family.getCompanyName() != null && !family.getCompanyName().isEmpty()) {
+                        symbol = extractSymbolRoot(family.getCompanyName());
+                        log.debug("Family {}: Using symbol from family companyName: {}", familyId, symbol);
+                    } else {
+                        symbol = familyId; // Last resort: use scripCode
+                        log.warn("Family {}: companyName is null, using scripCode as symbol fallback", familyId);
+                    }
+                } catch (Exception e) {
+                    symbol = familyId; // Fallback to scripCode on error
+                    log.warn("Family {}: Failed to get symbol from family data, using scripCode: {}", familyId, e.getMessage());
+                }
+            }
+            builder.symbol(symbol);
         } else if (future != null && isCommodity) {
             // ONLY for commodities (MCX): use future as the primary instrument
             // Set as "equity" slot for downstream compatibility (MTISProcessor expects equity)
             builder.equity(future);  // Commodity future acts as primary
-            builder.symbol(extractSymbolRoot(future.getCompanyName()));
+            String symbol = extractSymbolRoot(future.getCompanyName());
+            if (symbol == null || symbol.isEmpty()) {
+                symbol = familyId; // Fallback to scripCode
+                log.warn("Commodity family {}: companyName is null, using scripCode as symbol fallback", familyId);
+            }
+            builder.symbol(symbol);
             log.debug("Commodity family {} using future as primary: {}", familyId, future.getCompanyName());
         } else if (future != null) {
             // NSE stock with only future (no equity) - set future in equity slot for now
             // but mark as incomplete so downstream knows equity is missing
             builder.equity(future);  // Use future as fallback, NOT ideal
-            builder.symbol(extractSymbolRoot(future.getCompanyName()));
+            String symbol = extractSymbolRoot(future.getCompanyName());
+            if (symbol == null || symbol.isEmpty()) {
+                symbol = familyId; // Fallback to scripCode
+                log.warn("Family {}: companyName is null, using scripCode as symbol fallback", familyId);
+            }
+            builder.symbol(symbol);
             log.warn("Family {} has future but NO equity - using future as fallback (incomplete family)", familyId);
         }
 
@@ -623,6 +653,16 @@ public class FamilyCandleProcessor {
         // Note: For MCX commodities (future-only families), spotFuturePremium remains null
         
         // Futures buildup (works for both NSE and MCX)
+        // #region agent log
+        try {
+            String familyId = builder.build().getFamilyId();
+            java.io.FileWriter fw = new java.io.FileWriter(".cursor/debug.log", true);
+            String json = String.format("{\"sessionId\":\"debug-session\",\"runId\":\"run1\",\"hypothesisId\":\"OI-C\",\"location\":\"FamilyCandleProcessor.java:656\",\"message\":\"Future OI check in FamilyCandle\",\"data\":{\"familyId\":\"%s\",\"futureNotNull\":%s,\"futureHasOI\":%s,\"futureOiPresent\":%s,\"futureOpenInterest\":%s},\"timestamp\":%d}\n",
+                familyId, future != null, future != null ? future.hasOI() : false, future != null ? future.isOiPresent() : false, future != null && future.getOpenInterest() != null ? future.getOpenInterest() : "null", System.currentTimeMillis());
+            fw.write(json);
+            fw.close();
+        } catch (Exception e) {}
+        // #endregion
         if (future != null && future.hasOI()) {
             FuturesBuildupDetector.BuildupType buildup = FuturesBuildupDetector.detect(future);
             builder.futuresBuildup(buildup.name());
@@ -631,9 +671,29 @@ public class FamilyCandleProcessor {
         }
 
         // Options metrics
+        // #region agent log
+        try {
+            String familyId = builder.build().getFamilyId();
+            java.io.FileWriter fw = new java.io.FileWriter(".cursor/debug.log", true);
+            String json = String.format("{\"sessionId\":\"debug-session\",\"runId\":\"run1\",\"hypothesisId\":\"PCR-A\",\"location\":\"FamilyCandleProcessor.java:664\",\"message\":\"PCR calculation check\",\"data\":{\"familyId\":\"%s\",\"optionsNotNull\":%s,\"optionsNotEmpty\":%s,\"optionsSize\":%d},\"timestamp\":%d}\n",
+                familyId, options != null, options != null && !options.isEmpty(), options != null ? options.size() : 0, System.currentTimeMillis());
+            fw.write(json);
+            fw.close();
+        } catch (Exception e) {}
+        // #endregion
         if (options != null && !options.isEmpty()) {
             // PCR
             Double pcr = PCRCalculator.calculate(options);
+            // #region agent log
+            try {
+                String familyId = builder.build().getFamilyId();
+                java.io.FileWriter fw = new java.io.FileWriter(".cursor/debug.log", true);
+                String json = String.format("{\"sessionId\":\"debug-session\",\"runId\":\"run1\",\"hypothesisId\":\"PCR-B\",\"location\":\"FamilyCandleProcessor.java:667\",\"message\":\"PCR calculated\",\"data\":{\"familyId\":\"%s\",\"pcr\":%s,\"pcrNotNull\":%s},\"timestamp\":%d}\n",
+                    familyId, pcr != null ? pcr : "null", pcr != null, System.currentTimeMillis());
+                fw.write(json);
+                fw.close();
+            } catch (Exception e) {}
+            // #endregion
             builder.pcr(pcr);
             
             // Total OI

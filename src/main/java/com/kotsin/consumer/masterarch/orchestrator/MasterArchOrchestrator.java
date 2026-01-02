@@ -118,6 +118,16 @@ public class MasterArchOrchestrator {
     ) {
         String scripCode = familyCandle.getFamilyId();
         String companyName = familyCandle.getSymbol();
+        // Fallback: if symbol is null, try to get from equity's companyName or use scripCode
+        if (companyName == null || companyName.isEmpty()) {
+            if (familyCandle.getEquity() != null && familyCandle.getEquity().getCompanyName() != null) {
+                companyName = familyCandle.getEquity().getCompanyName();
+                log.debug("{}: Using companyName from equity: {}", scripCode, companyName);
+            } else {
+                companyName = scripCode; // Last resort: use scripCode
+                log.warn("{}: companyName is null, using scripCode as fallback", scripCode);
+            }
+        }
         long timestamp = System.currentTimeMillis();
         
         // Use passed candles directly (already fetched from Redis by MasterArchProcessor)

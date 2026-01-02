@@ -690,9 +690,27 @@ public class UnifiedInstrumentCandleProcessor {
 
         // Add OI metrics if available
         builder.oiPresent(oi != null);
+        // #region agent log
+        try {
+            java.io.FileWriter fw = new java.io.FileWriter(".cursor/debug.log", true);
+            String json = String.format("{\"sessionId\":\"debug-session\",\"runId\":\"run1\",\"hypothesisId\":\"OI-A\",\"location\":\"UnifiedInstrumentCandleProcessor.java:692\",\"message\":\"OI join result\",\"data\":{\"scripCode\":\"%s\",\"oiNotNull\":%s,\"oiClose\":%s,\"oiPresentSet\":%s},\"timestamp\":%d}\n",
+                tick.getScripCode(), oi != null, oi != null ? oi.getOiClose() : "null", oi != null, System.currentTimeMillis());
+            fw.write(json);
+            fw.close();
+        } catch (Exception e) {}
+        // #endregion
         if (oi != null) {
             oi.calculateDerivedMetrics();
             builder.openInterest(oi.getOiClose());
+            // #region agent log
+            try {
+                java.io.FileWriter fw = new java.io.FileWriter(".cursor/debug.log", true);
+                String json = String.format("{\"sessionId\":\"debug-session\",\"runId\":\"run1\",\"hypothesisId\":\"OI-B\",\"location\":\"UnifiedInstrumentCandleProcessor.java:695\",\"message\":\"OI data set on InstrumentCandle\",\"data\":{\"scripCode\":\"%s\",\"openInterest\":%s,\"oiPresent\":true},\"timestamp\":%d}\n",
+                    tick.getScripCode(), oi.getOiClose() != null ? oi.getOiClose() : "null", System.currentTimeMillis());
+                fw.write(json);
+                fw.close();
+            } catch (Exception e) {}
+            // #endregion
             builder.oiOpen(oi.getOiOpen());
             builder.oiHigh(oi.getOiHigh());
             builder.oiLow(oi.getOiLow());
