@@ -377,7 +377,8 @@ public class UnifiedInstrumentCandleProcessor {
         // ========== 8. LEFT JOIN: TICK+OB + OI (optional) ==========
         // FIX: Use transformValues with state store lookup for OI
         // This allows OI to be available regardless of window timing
-        // We manually lookup OI from the KTable's state store
+        // The state store is properly accessible from the transformer context
+        // Note: OI may arrive after window closes - this is expected behavior with sparse OI updates
         KStream<Windowed<String>, InstrumentCandleData> fullDataStream = tickCandlesWithOb
             .toStream()
             .transformValues(
@@ -406,36 +407,33 @@ public class UnifiedInstrumentCandleProcessor {
                             // Lookup OI from state store
                             // KTable stores may return ValueAndTimestamp<V> or V directly
                             try {
-                                if (oiStore == null) {
-                                    log.warn("[OI-LOOKUP-NULL-STORE] {} | State store is null!", oiKey);
+                                Object storeValue = oiStore.get(oiKey);
+                                if (storeValue == null) {
+                                    // Store value is null - OI hasn't arrived yet or key mismatch
+                                    // This is expected when OI arrives after the tick window closes
+                                    if (log.isDebugEnabled()) {
+                                        log.debug("[OI-LOOKUP-NULL] {} | No OI found in store. OI may arrive later.", oiKey);
+                                    }
                                 } else {
-                                    Object storeValue = oiStore.get(oiKey);
-                                    if (storeValue == null) {
-                                        // Store value is null - OI hasn't arrived yet or key mismatch
+                                    if (storeValue instanceof ValueAndTimestamp) {
+                                        // Unwrap ValueAndTimestamp
+                                        @SuppressWarnings("unchecked")
+                                        ValueAndTimestamp<OIAggregate> valueAndTimestamp = (ValueAndTimestamp<OIAggregate>) storeValue;
+                                        oi = valueAndTimestamp.value();
+                                        if (log.isDebugEnabled() && oi != null) {
+                                            log.debug("[OI-LOOKUP-SUCCESS-VAT] {} | Found OI wrapped in ValueAndTimestamp: OI={}", 
+                                                oiKey, oi.getOiClose());
+                                        }
+                                    } else if (storeValue instanceof OIAggregate) {
+                                        // Direct value
+                                        oi = (OIAggregate) storeValue;
                                         if (log.isDebugEnabled()) {
-                                            log.debug("[OI-LOOKUP-NULL] {} | No OI found in store. Store might be empty or key mismatch.", oiKey);
+                                            log.debug("[OI-LOOKUP-SUCCESS-DIRECT] {} | Found OI directly: OI={}", 
+                                                oiKey, oi.getOiClose());
                                         }
                                     } else {
-                                        if (storeValue instanceof ValueAndTimestamp) {
-                                            // Unwrap ValueAndTimestamp
-                                            @SuppressWarnings("unchecked")
-                                            ValueAndTimestamp<OIAggregate> valueAndTimestamp = (ValueAndTimestamp<OIAggregate>) storeValue;
-                                            oi = valueAndTimestamp.value();
-                                            if (log.isDebugEnabled() && oi != null) {
-                                                log.debug("[OI-LOOKUP-SUCCESS-VAT] {} | Found OI wrapped in ValueAndTimestamp: OI={}", 
-                                                    oiKey, oi.getOiClose());
-                                            }
-                                        } else if (storeValue instanceof OIAggregate) {
-                                            // Direct value
-                                            oi = (OIAggregate) storeValue;
-                                            if (log.isDebugEnabled()) {
-                                                log.debug("[OI-LOOKUP-SUCCESS-DIRECT] {} | Found OI directly: OI={}", 
-                                                    oiKey, oi.getOiClose());
-                                            }
-                                        } else {
-                                            log.warn("[OI-LOOKUP-TYPE] {} | Unexpected store value type: {} | value={}", 
-                                                oiKey, storeValue.getClass().getName(), storeValue);
-                                        }
+                                        log.warn("[OI-LOOKUP-TYPE] {} | Unexpected store value type: {} | value={}", 
+                                            oiKey, storeValue.getClass().getName(), storeValue);
                                     }
                                 }
                             } catch (Exception e) {
@@ -476,6 +474,7 @@ public class UnifiedInstrumentCandleProcessor {
                         // No cleanup needed
                     }
                 },
+                Named.as("oi-lookup-transformer"), // Name the transformer
                 "oi-latest-store"  // State store name for OI lookup
             );
         
