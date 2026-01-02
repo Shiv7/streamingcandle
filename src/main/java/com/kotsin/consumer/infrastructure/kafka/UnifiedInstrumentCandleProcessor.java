@@ -25,6 +25,10 @@ import org.apache.kafka.streams.state.KeyValueStore;
 import org.apache.kafka.streams.state.ReadOnlyKeyValueStore;
 import org.apache.kafka.streams.state.ValueAndTimestamp;
 import org.apache.kafka.streams.state.WindowStore;
+import org.apache.kafka.clients.admin.AdminClient;
+import org.apache.kafka.clients.admin.AdminClientConfig;
+import org.apache.kafka.clients.admin.NewTopic;
+import org.apache.kafka.common.config.TopicConfig;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Component;
@@ -32,6 +36,7 @@ import org.springframework.stereotype.Component;
 import java.time.*;
 import java.util.*;
 import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.ExecutionException;
 import java.util.concurrent.TimeUnit;
 
 /**
@@ -157,6 +162,9 @@ public class UnifiedInstrumentCandleProcessor {
                 
                 log.info("Consumer optimization applied: maxPollRecords={}, fetchMinBytes={} bytes, fetchMaxWaitMs={} ms", 
                     maxPollRecords, fetchMinBytes, fetchMaxWaitMs);
+                
+                // Create internal topic for OI aggregation before building topology
+                createInternalTopicIfNeeded(props.getProperty(StreamsConfig.BOOTSTRAP_SERVERS_CONFIG));
                 
                 StreamsBuilder builder = new StreamsBuilder();
                 
@@ -852,6 +860,40 @@ public class UnifiedInstrumentCandleProcessor {
             vpinLastTradingDay.invalidateAll();  // Clear trading day tracking cache
             previousOICloseCache.invalidateAll();  // Clear previous OI cache on shutdown
             log.info("✅ UnifiedInstrumentCandleProcessor stopped");
+        }
+    }
+
+    /**
+     * Create internal topic for OI aggregation if it doesn't exist
+     */
+    private void createInternalTopicIfNeeded(String bootstrapServers) {
+        String topicName = "oi-aggregate-internal";
+        int partitions = 6; // Match OpenInterest topic partitions
+        short replicationFactor = 1;
+        
+        Properties adminProps = new Properties();
+        adminProps.put(AdminClientConfig.BOOTSTRAP_SERVERS_CONFIG, bootstrapServers);
+        
+        try (AdminClient adminClient = AdminClient.create(adminProps)) {
+            // Check if topic exists
+            boolean topicExists = adminClient.listTopics().names().get().contains(topicName);
+            
+            if (!topicExists) {
+                log.info("Creating internal topic: {} with {} partitions", topicName, partitions);
+                NewTopic newTopic = new NewTopic(topicName, partitions, replicationFactor);
+                newTopic.configs(Collections.singletonMap(TopicConfig.RETENTION_MS_CONFIG, "86400000")); // 1 day retention
+                
+                adminClient.createTopics(Collections.singleton(newTopic)).all().get();
+                log.info("✅ Successfully created internal topic: {}", topicName);
+            } else {
+                log.debug("Internal topic {} already exists", topicName);
+            }
+        } catch (InterruptedException | ExecutionException e) {
+            log.warn("Failed to create internal topic {}: {}. Will try to use existing topic.", topicName, e.getMessage());
+            // Don't fail startup - topic might be created externally or already exist
+        } catch (Exception e) {
+            log.error("Unexpected error creating internal topic {}: {}", topicName, e.getMessage(), e);
+            // Don't fail startup - topic might be created externally
         }
     }
 
