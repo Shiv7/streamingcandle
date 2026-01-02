@@ -56,8 +56,14 @@ public enum InstrumentType {
      * @return InstrumentType
      */
     public static InstrumentType detect(String exchange, String exchType, String companyName) {
+        // CRITICAL FIX: Check exchangeType FIRST when companyName is null
+        // If exchangeType is "D" (derivatives) but companyName is null, default to FUTURE
+        // This fixes the bug where derivatives with null companyName were misclassified as EQUITY
         if (companyName == null) {
-            return EQUITY;  // Default
+            if ("D".equalsIgnoreCase(exchType)) {
+                return FUTURE;  // Derivatives default to FUTURE when name is missing
+            }
+            return EQUITY;  // Cash segment defaults to EQUITY
         }
 
         String upperName = companyName.toUpperCase();
