@@ -56,7 +56,7 @@ delete_topics() {
     for topic in $(kafka-topics.sh --bootstrap-server "$KAFKA_BROKER" --list 2>/dev/null | grep "$pattern" || true); do
         echo -e "  Deleting: $topic"
         kafka-topics.sh --bootstrap-server "$KAFKA_BROKER" --delete --topic "$topic" 2>/dev/null || true
-        ((count++))
+        count=$((count + 1))
     done
 
     echo "$count"
