@@ -164,7 +164,9 @@ public class UnifiedInstrumentCandleProcessor {
                     maxPollRecords, fetchMinBytes, fetchMaxWaitMs);
                 
                 // Create internal topic for OI aggregation before building topology
-                createInternalTopicIfNeeded(props.getProperty(StreamsConfig.BOOTSTRAP_SERVERS_CONFIG));
+                // Also clean up old repartition topics with incorrect partition counts
+                String appId = props.getProperty(StreamsConfig.APPLICATION_ID_CONFIG);
+                createInternalTopicIfNeeded(props.getProperty(StreamsConfig.BOOTSTRAP_SERVERS_CONFIG), appId);
                 
                 StreamsBuilder builder = new StreamsBuilder();
                 
@@ -865,8 +867,9 @@ public class UnifiedInstrumentCandleProcessor {
 
     /**
      * Create internal topic for OI aggregation if it doesn't exist
+     * Also clean up old repartition topics with incorrect partition counts
      */
-    private void createInternalTopicIfNeeded(String bootstrapServers) {
+    private void createInternalTopicIfNeeded(String bootstrapServers, String appId) {
         String topicName = "oi-aggregate-internal";
         int partitions = 6; // Match OpenInterest topic partitions
         short replicationFactor = 1;
@@ -875,6 +878,12 @@ public class UnifiedInstrumentCandleProcessor {
         adminProps.put(AdminClientConfig.BOOTSTRAP_SERVERS_CONFIG, bootstrapServers);
         
         try (AdminClient adminClient = AdminClient.create(adminProps)) {
+            // Clean up old repartition topics with incorrect partition counts
+            if (appId != null) {
+                String repartitionTopicPattern = appId + "-oi-aggregate-store-repartition";
+                cleanupOldRepartitionTopics(adminClient, repartitionTopicPattern);
+            }
+            
             // Check if topic exists
             boolean topicExists = adminClient.listTopics().names().get().contains(topicName);
             
@@ -894,6 +903,34 @@ public class UnifiedInstrumentCandleProcessor {
         } catch (Exception e) {
             log.error("Unexpected error creating internal topic {}: {}", topicName, e.getMessage(), e);
             // Don't fail startup - topic might be created externally
+        }
+    }
+    
+    /**
+     * Clean up old repartition topics with incorrect partition counts
+     */
+    private void cleanupOldRepartitionTopics(AdminClient adminClient, String topicPattern) {
+        try {
+            Set<String> allTopics = adminClient.listTopics().names().get();
+            Set<String> topicsToDelete = new HashSet<>();
+            
+            for (String topic : allTopics) {
+                if (topic.contains(topicPattern)) {
+                    topicsToDelete.add(topic);
+                }
+            }
+            
+            if (!topicsToDelete.isEmpty()) {
+                log.warn("Found {} old repartition topic(s) to clean up: {}", topicsToDelete.size(), topicsToDelete);
+                adminClient.deleteTopics(topicsToDelete).all().get();
+                log.info("✅ Successfully deleted {} old repartition topic(s)", topicsToDelete.size());
+            }
+        } catch (InterruptedException | ExecutionException e) {
+            log.warn("Failed to cleanup old repartition topics: {}. Kafka Streams will recreate them.", e.getMessage());
+            // Don't fail startup - topics will be recreated by Kafka Streams
+        } catch (Exception e) {
+            log.warn("Unexpected error cleaning up repartition topics: {}", e.getMessage());
+            // Don't fail startup
         }
     }
 
