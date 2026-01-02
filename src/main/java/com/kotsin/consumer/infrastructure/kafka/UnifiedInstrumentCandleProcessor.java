@@ -406,25 +406,42 @@ public class UnifiedInstrumentCandleProcessor {
                             // Lookup OI from state store
                             // KTable stores may return ValueAndTimestamp<V> or V directly
                             try {
-                                Object storeValue = oiStore.get(oiKey);
-                                if (storeValue != null) {
-                                    if (storeValue instanceof ValueAndTimestamp) {
-                                        // Unwrap ValueAndTimestamp
-                                        @SuppressWarnings("unchecked")
-                                        ValueAndTimestamp<OIAggregate> valueAndTimestamp = (ValueAndTimestamp<OIAggregate>) storeValue;
-                                        oi = valueAndTimestamp.value();
-                                    } else if (storeValue instanceof OIAggregate) {
-                                        // Direct value
-                                        oi = (OIAggregate) storeValue;
+                                if (oiStore == null) {
+                                    log.warn("[OI-LOOKUP-NULL-STORE] {} | State store is null!", oiKey);
+                                } else {
+                                    Object storeValue = oiStore.get(oiKey);
+                                    if (storeValue == null) {
+                                        // Store value is null - OI hasn't arrived yet or key mismatch
+                                        if (log.isDebugEnabled()) {
+                                            log.debug("[OI-LOOKUP-NULL] {} | No OI found in store. Store might be empty or key mismatch.", oiKey);
+                                        }
                                     } else {
-                                        log.warn("[OI-LOOKUP-TYPE] {} | Unexpected store value type: {}", oiKey, storeValue.getClass().getName());
+                                        if (storeValue instanceof ValueAndTimestamp) {
+                                            // Unwrap ValueAndTimestamp
+                                            @SuppressWarnings("unchecked")
+                                            ValueAndTimestamp<OIAggregate> valueAndTimestamp = (ValueAndTimestamp<OIAggregate>) storeValue;
+                                            oi = valueAndTimestamp.value();
+                                            if (log.isDebugEnabled() && oi != null) {
+                                                log.debug("[OI-LOOKUP-SUCCESS-VAT] {} | Found OI wrapped in ValueAndTimestamp: OI={}", 
+                                                    oiKey, oi.getOiClose());
+                                            }
+                                        } else if (storeValue instanceof OIAggregate) {
+                                            // Direct value
+                                            oi = (OIAggregate) storeValue;
+                                            if (log.isDebugEnabled()) {
+                                                log.debug("[OI-LOOKUP-SUCCESS-DIRECT] {} | Found OI directly: OI={}", 
+                                                    oiKey, oi.getOiClose());
+                                            }
+                                        } else {
+                                            log.warn("[OI-LOOKUP-TYPE] {} | Unexpected store value type: {} | value={}", 
+                                                oiKey, storeValue.getClass().getName(), storeValue);
+                                        }
                                     }
                                 }
                             } catch (Exception e) {
                                 // Log error but continue without OI
-                                if (log.isDebugEnabled()) {
-                                    log.debug("[OI-LOOKUP-ERROR] {} | Failed to get OI from store: {}", oiKey, e.getMessage());
-                                }
+                                log.warn("[OI-LOOKUP-ERROR] {} | Exception getting OI from store: {} | {}", 
+                                    oiKey, e.getClass().getSimpleName(), e.getMessage());
                                 oi = null;
                             }
                             
