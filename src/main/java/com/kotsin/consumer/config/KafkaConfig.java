@@ -156,10 +156,6 @@ public class KafkaConfig {
         props.put(StreamsConfig.PRODUCER_PREFIX + "max.block.ms", "60000");
         props.put(StreamsConfig.PRODUCER_PREFIX + "delivery.timeout.ms", "120000");
         
-        // Use a custom production exception handler that logs and continues
-        props.put(StreamsConfig.DEFAULT_PRODUCTION_EXCEPTION_HANDLER_CLASS_CONFIG,
-                "org.apache.kafka.streams.errors.LogAndContinueExceptionHandler");
-        
         log.info("Kafka Streams configured with timestamp clamping in extractors for safe replay");
 
         return props;
