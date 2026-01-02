@@ -22,6 +22,9 @@ import java.time.format.DateTimeFormatter;
 import java.util.*;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
 
 /**
  * MultiTimeframeLevelCalculator - Calculates Fibonacci and Pivot levels
@@ -66,6 +69,9 @@ public class MultiTimeframeLevelCalculator {
 
     private final OkHttpClient httpClient;
     private final ObjectMapper objectMapper;
+    
+    // Thread pool for async HTTP calls
+    private final ExecutorService httpExecutor;
 
     // Cache levels (valid until next period)
     private final ConcurrentHashMap<String, MultiTimeframeLevels> levelsCache = new ConcurrentHashMap<>();
@@ -81,6 +87,12 @@ public class MultiTimeframeLevelCalculator {
                 .readTimeout(10, TimeUnit.SECONDS)
                 .build();
         this.objectMapper = new ObjectMapper();
+        // Thread pool for async HTTP calls (I/O bound work)
+        this.httpExecutor = Executors.newFixedThreadPool(10, r -> {
+            Thread t = new Thread(r, "level-calc-http");
+            t.setDaemon(true);
+            return t;
+        });
     }
 
     /**
@@ -176,7 +188,25 @@ public class MultiTimeframeLevelCalculator {
             
             Request request = new Request.Builder().url(url).get().build();
             
-            try (Response response = httpClient.newCall(request).execute()) {
+            // Make async HTTP call to avoid blocking
+            CompletableFuture<Response> responseFuture = CompletableFuture.supplyAsync(() -> {
+                try {
+                    return httpClient.newCall(request).execute();
+                } catch (Exception e) {
+                    log.error("HTTP call failed for {}: {}", scripCode, e.getMessage());
+                    return null;
+                }
+            }, httpExecutor);
+            
+            // Wait for response with timeout
+            Response response = responseFuture.get(8, TimeUnit.SECONDS);
+            
+            if (response == null) {
+                log.warn("Historical API call failed for {}", scripCode);
+                return Collections.emptyList();
+            }
+            
+            try {
                 if (!response.isSuccessful() || response.body() == null) {
                     log.warn("Historical API non-200/empty for {}: status={}", scripCode, response.code());
                     return Collections.emptyList();
@@ -198,6 +228,10 @@ public class MultiTimeframeLevelCalculator {
                 }
                 
                 return candles;
+            } finally {
+                if (response != null) {
+                    response.close();
+                }
             }
 
         } catch (Exception e) {

@@ -72,7 +72,12 @@ public class CuratedKafkaConfig {
         props.put(ConsumerConfig.VALUE_DESERIALIZER_CLASS_CONFIG, StringDeserializer.class);
         props.put(ConsumerConfig.AUTO_OFFSET_RESET_CONFIG, autoOffsetReset);
         props.put(ConsumerConfig.ENABLE_AUTO_COMMIT_CONFIG, true);
-
+        
+        // CRITICAL: Increase poll interval to prevent timeout during async processing
+        // Default is 5 minutes, but with async processing we can handle longer operations
+        props.put(ConsumerConfig.MAX_POLL_INTERVAL_MS_CONFIG, 300000); // 5 minutes
+        props.put(ConsumerConfig.MAX_POLL_RECORDS_CONFIG, 10); // Process smaller batches
+        
         return new DefaultKafkaConsumerFactory<>(props);
     }
 

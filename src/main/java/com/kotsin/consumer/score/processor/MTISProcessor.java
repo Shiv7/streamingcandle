@@ -15,6 +15,7 @@ import com.kotsin.consumer.score.model.FamilyIntelligenceState;
 import com.kotsin.consumer.score.model.FamilyScore;
 import com.kotsin.consumer.signal.model.FUDKIIOutput;
 import jakarta.annotation.PostConstruct;
+import jakarta.annotation.PreDestroy;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.beans.factory.annotation.Value;
@@ -24,6 +25,10 @@ import org.springframework.stereotype.Component;
 
 import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.TimeUnit;
 
 /**
  * MTISProcessor - Main processor for Multi-Timeframe Intelligence Score.
@@ -75,10 +80,21 @@ public class MTISProcessor {
     // Cache for latest NIFTY regime (for relative strength calculation)
     private volatile IndexRegime latestNiftyRegime;
 
+    // Thread pool for async processing (prevents blocking Kafka consumer)
+    private ExecutorService asyncProcessorPool;
+
     @PostConstruct
     public void init() {
+        // Create thread pool for async processing (size = CPU cores * 2 for I/O bound work)
+        int poolSize = Runtime.getRuntime().availableProcessors() * 2;
+        asyncProcessorPool = Executors.newFixedThreadPool(poolSize, r -> {
+            Thread t = new Thread(r, "mtis-async-processor");
+            t.setDaemon(true);
+            return t;
+        });
         log.info("🎯 MTISProcessor initialized. Enabled: {}, Output topic: {}", enabled, outputTopic);
         log.info("🎯 Listening to: family-candle-*, regime-*, ipu-combined, fudkii-output, vcp-combined");
+        log.info("🎯 Async processing pool size: {}", poolSize);
     }
 
     // ==================== MAIN LISTENER ====================
@@ -100,91 +116,115 @@ public class MTISProcessor {
     public void processCandle(FamilyCandle familyCandle) {
         if (!enabled) return;
 
+        // Quick validation - return immediately to keep consumer thread free
+        if (familyCandle == null) return;
+
+        InstrumentCandle equity = familyCandle.getEquity();
+        if (equity == null) {
+            log.debug("No equity in FamilyCandle for {}", familyCandle.getFamilyId());
+            return;
+        }
+
+        // Process asynchronously - don't block Kafka consumer thread
+        CompletableFuture.runAsync(() -> {
+            try {
+                processCandleAsync(familyCandle);
+            } catch (Exception e) {
+                log.error("❌ Error in async processing for {}: {}", 
+                        familyCandle.getFamilyId(), e.getMessage(), e);
+            }
+        }, asyncProcessorPool).exceptionally(ex -> {
+            log.error("❌ Async processing failed for {}: {}", 
+                    familyCandle.getFamilyId(), ex.getMessage());
+            return null;
+        });
+    }
+
+    /**
+     * Async processing method - runs in thread pool, not blocking Kafka consumer
+     */
+    private void processCandleAsync(FamilyCandle familyCandle) {
+        String familyId = familyCandle.getFamilyId();
+        String timeframe = familyCandle.getTimeframe();
+
+        // 1. Get or create state
+        FamilyIntelligenceState state = stateCache.computeIfAbsent(familyId, 
+                k -> FamilyIntelligenceState.builder()
+                        .familyId(familyId)
+                        .symbol(familyCandle.getSymbol())
+                        .build());
+
+        // 2. Update TF state
+        updateTFState(state, familyCandle, timeframe);
+
+        // 3. Get cached external data (fast - in-memory lookups)
+        IndexRegime indexRegime = getIndexRegime(familyId);
+        SecurityRegime securityRegime = securityRegimeCache.get(familyId);
+        IPUOutput ipu = ipuCache.get(familyId);
+        FUDKIIOutput fudkii = fudkiiCache.get(familyId);
+        FuturesOptionsAlignment foAlignment = foAlignmentCache.get(familyId);
+        double vcpScore = getVCPScore(familyId);
+
+        // 4. Get levels ASYNC (this is the blocking HTTP call - make it async with timeout)
+        MultiTimeframeLevels levels = null;
         try {
-            if (familyCandle == null) return;
-
-            InstrumentCandle equity = familyCandle.getEquity();
-            if (equity == null) {
-                log.debug("No equity in FamilyCandle for {}", familyCandle.getFamilyId());
-                return;
-            }
-
-            String familyId = familyCandle.getFamilyId();
-            String timeframe = familyCandle.getTimeframe();
-
-            // 1. Get or create state
-            FamilyIntelligenceState state = stateCache.computeIfAbsent(familyId, 
-                    k -> FamilyIntelligenceState.builder()
-                            .familyId(familyId)
-                            .symbol(familyCandle.getSymbol())
-                            .build());
-
-            // 2. Update TF state
-            updateTFState(state, familyCandle, timeframe);
-
-            // 3. Get cached external data
-            IndexRegime indexRegime = getIndexRegime(familyId);
-            SecurityRegime securityRegime = securityRegimeCache.get(familyId);
-            IPUOutput ipu = ipuCache.get(familyId);
-            FUDKIIOutput fudkii = fudkiiCache.get(familyId);
-            FuturesOptionsAlignment foAlignment = foAlignmentCache.get(familyId);
-            double vcpScore = getVCPScore(familyId);
-
-            // 4. Get levels (use existing calculator)
-            MultiTimeframeLevels levels = null;
-            try {
-                levels = levelCalculator.calculateLevels(familyId, familyCandle.getSpotPrice());
-            } catch (Exception e) {
-                log.debug("Could not calculate levels for {}: {}", familyId, e.getMessage());
-            }
-
-            // 5. Calculate MTIS
-            FamilyScore score = mtisCalculator.calculate(
-                    familyCandle,
-                    state,
-                    indexRegime,
-                    securityRegime,
-                    ipu,
-                    fudkii,
-                    foAlignment,
-                    levels,
-                    vcpScore
+            // Use CompletableFuture with timeout to prevent blocking
+            CompletableFuture<MultiTimeframeLevels> levelsFuture = CompletableFuture.supplyAsync(
+                    () -> levelCalculator.calculateLevels(familyId, familyCandle.getSpotPrice()),
+                    asyncProcessorPool
             );
-
-            if (score == null) {
-                return;
-            }
-
-            // 6. Update state with new MTIS
-            updateStateAfterCalculation(state, score, familyCandle);
-
-            // 7. Emit to output topic
-            try {
-                familyScoreProducer.send(outputTopic, familyId, score);
-                
-                // Log at INFO for actionable signals, DEBUG for others
-                if (score.isActionable()) {
-                    log.info("🎯 MTIS | {} | score={} ({}) | {} | F&O={} IPU={} FUDKII={}",
-                            familyCandle.getSymbol(),
-                            String.format("%+.1f", score.getMtis()),
-                            score.getMtisLabel(),
-                            timeframe,
-                            String.format("%.0f", score.getBreakdown().getFoAlignmentScore()),
-                            String.format("%.0f", score.getBreakdown().getIpuScore()),
-                            score.isFudkiiIgnition() ? "🔥" : "-");
-                } else {
-                    log.debug("[{}] MTIS={} ({}) triggered by {} candle",
-                            familyCandle.getSymbol(),
-                            String.format("%.1f", score.getMtis()),
-                            score.getMtisLabel(),
-                            timeframe);
-                }
-            } catch (Exception e) {
-                log.error("❌ Failed to send FamilyScore for {}: {}", familyId, e.getMessage());
-            }
-
+            
+            // Wait max 3 seconds for levels (non-blocking for consumer thread)
+            levels = levelsFuture.get(3, TimeUnit.SECONDS);
         } catch (Exception e) {
-            log.error("❌ Error processing candle for MTIS: {}", e.getMessage(), e);
+            log.debug("Could not calculate levels for {} (timeout or error): {}", 
+                    familyId, e.getMessage());
+            // Continue without levels - not critical
+        }
+
+        // 5. Calculate MTIS (fast - pure computation)
+        FamilyScore score = mtisCalculator.calculate(
+                familyCandle,
+                state,
+                indexRegime,
+                securityRegime,
+                ipu,
+                fudkii,
+                foAlignment,
+                levels,
+                vcpScore
+        );
+
+        if (score == null) {
+            return;
+        }
+
+        // 6. Update state with new MTIS
+        updateStateAfterCalculation(state, score, familyCandle);
+
+        // 7. Emit to output topic (async send - non-blocking)
+        try {
+            familyScoreProducer.send(outputTopic, familyId, score);
+            
+            // Log at INFO for actionable signals, DEBUG for others
+            if (score.isActionable()) {
+                log.info("🎯 MTIS | {} | score={} ({}) | {} | F&O={} IPU={} FUDKII={}",
+                        familyCandle.getSymbol(),
+                        String.format("%+.1f", score.getMtis()),
+                        score.getMtisLabel(),
+                        timeframe,
+                        String.format("%.0f", score.getBreakdown().getFoAlignmentScore()),
+                        String.format("%.0f", score.getBreakdown().getIpuScore()),
+                        score.isFudkiiIgnition() ? "🔥" : "-");
+            } else {
+                log.debug("[{}] MTIS={} ({}) triggered by {} candle",
+                        familyCandle.getSymbol(),
+                        String.format("%.1f", score.getMtis()),
+                        score.getMtisLabel(),
+                        timeframe);
+            }
+        } catch (Exception e) {
+            log.error("❌ Failed to send FamilyScore for {}: {}", familyId, e.getMessage());
         }
     }
 
@@ -389,5 +429,22 @@ public class MTISProcessor {
         vcpCache.clear();
         foAlignmentCache.clear();
         log.info("MTIS caches cleared");
+    }
+
+    @PreDestroy
+    public void shutdown() {
+        if (asyncProcessorPool != null) {
+            log.info("Shutting down MTIS async processor pool...");
+            asyncProcessorPool.shutdown();
+            try {
+                if (!asyncProcessorPool.awaitTermination(10, TimeUnit.SECONDS)) {
+                    asyncProcessorPool.shutdownNow();
+                }
+            } catch (InterruptedException e) {
+                asyncProcessorPool.shutdownNow();
+                Thread.currentThread().interrupt();
+            }
+            log.info("MTIS async processor pool shut down");
+        }
     }
 }
