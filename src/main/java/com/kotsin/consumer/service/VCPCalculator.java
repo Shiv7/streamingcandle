@@ -229,9 +229,26 @@ public class VCPCalculator {
         // FIX: Store ratio for downstream quality assessment
         this.estimatedDataRatio = totalCount > 0 ? (double) estimatedCount / totalCount : 0.0;
         
+        // 🔍 ENHANCED LOGGING: Investigate why volumeAtPrice is missing
         if (estimatedDataRatio > 0.5) {
             log.warn("VCP volume profile is {}% estimated data - clusters may be unreliable", 
                     String.format("%.0f", estimatedDataRatio * 100));
+            
+            // Debug: Log sample of candles to understand why volumeAtPrice is missing
+            if (log.isDebugEnabled() && !history.isEmpty()) {
+                int sampleSize = Math.min(5, history.size());
+                log.debug("[VCP-DEBUG] Sample of {} candles (showing why volumeAtPrice is missing):", sampleSize);
+                for (int i = Math.max(0, history.size() - sampleSize); i < history.size(); i++) {
+                    UnifiedCandle candle = history.get(i);
+                    boolean hasVolumeAtPrice = candle.getVolumeAtPrice() != null && !candle.getVolumeAtPrice().isEmpty();
+                    log.debug("[VCP-DEBUG] Candle {}: hasVolumeAtPrice={} volume={} vwap={} | source={}",
+                        i,
+                        hasVolumeAtPrice,
+                        candle.getVolume(),
+                        candle.getVwap(),
+                        candle.getClass().getSimpleName());
+                }
+            }
         }
 
         return profile;

@@ -206,22 +206,40 @@ public class MTISProcessor {
         try {
             familyScoreProducer.send(outputTopic, familyId, score);
             
-            // Log at INFO for actionable signals, DEBUG for others
+            // 🔍 ENHANCED LOGGING: Always log MTIS scores with full breakdown
+            String symbol = familyCandle.getSymbol() != null ? familyCandle.getSymbol() : familyId;
+            double mtis = score.getMtis();
+            String mtisLabel = score.getMtisLabel();
+            
+            // Build detailed breakdown string
+            StringBuilder breakdown = new StringBuilder();
+            breakdown.append(String.format("MTIS=%.1f (%s)", mtis, mtisLabel));
+            breakdown.append(String.format(" | TF=%s", timeframe));
+            breakdown.append(String.format(" | F&O=%.0f", score.getBreakdown().getFoAlignmentScore()));
+            breakdown.append(String.format(" | IPU=%.0f", score.getBreakdown().getIpuScore()));
+            breakdown.append(String.format(" | VCP=%.0f", score.getBreakdown().getVcpScore()));
+            breakdown.append(String.format(" | Regime=%.0f", score.getBreakdown().getRegimeScore()));
+            if (score.isFudkiiIgnition()) {
+                breakdown.append(" | FUDKII=🔥");
+            }
+            
+            // Log actionable signals at INFO, all others at DEBUG
             if (score.isActionable()) {
-                log.info("🎯 MTIS | {} | score={} ({}) | {} | F&O={} IPU={} FUDKII={}",
-                        familyCandle.getSymbol(),
-                        String.format("%+.1f", score.getMtis()),
-                        score.getMtisLabel(),
-                        timeframe,
-                        String.format("%.0f", score.getBreakdown().getFoAlignmentScore()),
-                        String.format("%.0f", score.getBreakdown().getIpuScore()),
-                        score.isFudkiiIgnition() ? "🔥" : "-");
+                log.info("🎯 [MTIS-SCORE] {} | {} | price={} | OI={} PCR={}",
+                        symbol,
+                        breakdown.toString(),
+                        String.format("%.2f", familyCandle.getSpotPrice()),
+                        familyCandle.getFuture() != null && familyCandle.getFuture().hasOI() ? 
+                            String.format("%d", familyCandle.getFuture().getOpenInterest()) : "N/A",
+                        familyCandle.getPcr() != null ? String.format("%.2f", familyCandle.getPcr()) : "N/A");
             } else {
-                log.debug("[{}] MTIS={} ({}) triggered by {} candle",
-                        familyCandle.getSymbol(),
-                        String.format("%.1f", score.getMtis()),
-                        score.getMtisLabel(),
-                        timeframe);
+                log.debug("[MTIS-SCORE] {} | {} | price={} | OI={} PCR={}",
+                        symbol,
+                        breakdown.toString(),
+                        String.format("%.2f", familyCandle.getSpotPrice()),
+                        familyCandle.getFuture() != null && familyCandle.getFuture().hasOI() ? 
+                            String.format("%d", familyCandle.getFuture().getOpenInterest()) : "N/A",
+                        familyCandle.getPcr() != null ? String.format("%.2f", familyCandle.getPcr()) : "N/A");
             }
         } catch (Exception e) {
             log.error("❌ Failed to send FamilyScore for {}: {}", familyId, e.getMessage());

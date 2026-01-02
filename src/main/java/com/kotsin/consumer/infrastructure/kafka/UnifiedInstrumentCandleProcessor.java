@@ -21,6 +21,7 @@ import org.apache.kafka.common.utils.Bytes;
 import org.apache.kafka.streams.*;
 import org.apache.kafka.streams.errors.StreamsUncaughtExceptionHandler;
 import org.apache.kafka.streams.kstream.*;
+import org.apache.kafka.streams.state.KeyValueStore;
 import org.apache.kafka.streams.state.WindowStore;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.beans.factory.annotation.Value;
@@ -337,10 +338,12 @@ public class UnifiedInstrumentCandleProcessor {
                     .withRetention(Duration.ofDays(14))  // 2 weeks retention for replay scenarios
             );
 
-        // ========== 6. AGGREGATE OI ==========
-        KTable<Windowed<String>, OIAggregate> oiAggregates = ois
+        // ========== 6. AGGREGATE OI (NON-WINDOWED KTABLE) ==========
+        // FIX: Use non-windowed KTable instead of windowed aggregation
+        // This ensures OI is always available regardless of window timing
+        // OI updates are sparse, so we keep the latest value per key
+        KTable<String, OIAggregate> oiLatestTable = ois
             .groupByKey(Grouped.with(Serdes.String(), OpenInterest.serde()))
-            .windowedBy(windows)
             .aggregate(
                 OIAggregate::new,
                 (key, oi, agg) -> {
@@ -352,10 +355,9 @@ public class UnifiedInstrumentCandleProcessor {
                     agg.updateWithOI(oi);
                     return agg;
                 },
-                Materialized.<String, OIAggregate, WindowStore<Bytes, byte[]>>as("oi-aggregate-store")
+                Materialized.<String, OIAggregate, KeyValueStore<Bytes, byte[]>>as("oi-latest-store")
                     .withKeySerde(Serdes.String())
                     .withValueSerde(OIAggregate.serde())
-                    .withRetention(Duration.ofDays(14))  // 2 weeks retention for replay scenarios
             );
 
         // ========== 7. LEFT JOIN: TICK (mandatory) + ORDERBOOK (optional) ==========
@@ -371,39 +373,72 @@ public class UnifiedInstrumentCandleProcessor {
         );
 
         // ========== 8. LEFT JOIN: TICK+OB + OI (optional) ==========
-        KTable<Windowed<String>, InstrumentCandleData> fullData = tickCandlesWithOb.leftJoin(
-            oiAggregates,
-            (tickOb, oi) -> {
-                if (tickOb != null && tickOb.tick != null) {
-                    String scripCode = tickOb.tick.getScripCode();
-                    String tickExch = tickOb.tick.getExchange() != null ? tickOb.tick.getExchange() : "N";
-                    String tickExchType = tickOb.tick.getExchangeType() != null ? tickOb.tick.getExchangeType() : "C";
-                    // Note: Can't get token from TickAggregate, but we know the key format
-                    String expectedOIKey = tickExch + ":" + tickExchType + ":<token>";
-                    
-                    if (log.isDebugEnabled()) {
-                        log.debug("[JOIN] {} | TICK+OB+OI | hasOB={} hasOI={} | tickExch={} tickExchType={} expectedOIKey={}", 
-                            scripCode, tickOb.orderbook != null, oi != null, tickExch, tickExchType, expectedOIKey);
+        // FIX: Convert windowed KTable to stream, extract key, then join with non-windowed OI KTable
+        // This allows OI to be available regardless of window timing
+        KStream<Windowed<String>, InstrumentCandleData> fullDataStream = tickCandlesWithOb
+            .toStream()
+            .leftJoin(
+                oiLatestTable,
+                (windowedKey, tickOb) -> {
+                    // Extract the key from Windowed<String> for OI lookup
+                    // The key format is "exchange:exchangeType:token"
+                    return windowedKey.key();
+                },
+                (tickOb, oi) -> {
+                    // Note: windowedKey is not available in ValueJoiner, so we extract info from tickOb
+                    if (tickOb != null && tickOb.tick != null) {
+                        String scripCode = tickOb.tick.getScripCode();
+                        String tickExch = tickOb.tick.getExchange() != null ? tickOb.tick.getExchange() : "N";
+                        String tickExchType = tickOb.tick.getExchangeType() != null ? tickOb.tick.getExchangeType() : "C";
+                        
+                        // Build expected OI key for logging
+                        String expectedOIKey = tickExch + ":" + tickExchType + ":" + scripCode;
+                        
+                        // Enhanced logging with window timing
+                        if (log.isDebugEnabled()) {
+                            log.debug("[JOIN-OI] {} | hasOB={} hasOI={} | key={}", 
+                                scripCode, 
+                                tickOb.orderbook != null, 
+                                oi != null, 
+                                expectedOIKey);
+                        }
+                        
+                        if (oi == null && tickExchType.equals("D")) {
+                            log.warn("[JOIN-MISS] {} | OI missing for derivative! tickExch={} tickExchType={} scripCode={} | OI key used: {}", 
+                                scripCode, tickExch, tickExchType, scripCode, expectedOIKey);
+                        } else if (oi != null) {
+                            if (log.isDebugEnabled()) {
+                                log.debug("[JOIN-SUCCESS] {} | OI joined! OI={} OIChange={} OIChangePct={}", 
+                                    scripCode, 
+                                    oi.getOiClose(), 
+                                    oi.getOiChange() != null ? oi.getOiChange() : 0,
+                                    oi.getOiChangePercent() != null ? String.format("%.2f%%", oi.getOiChangePercent()) : "N/A");
+                            }
+                        }
                     }
-                    
-                    if (oi == null && tickExchType.equals("D")) {
-                        log.warn("[JOIN-MISS] {} | OI missing for derivative! tickExch={} tickExchType={} scripCode={} | Check if OI key matches: {}", 
-                            scripCode, tickExch, tickExchType, scripCode, expectedOIKey);
-                    } else if (oi != null && log.isDebugEnabled()) {
-                        log.debug("[JOIN-SUCCESS] {} | OI joined! OI={} OIChange={}", 
-                            scripCode, oi.getOiClose(), oi.getOiChange());
+                    return new InstrumentCandleData(tickOb.tick, tickOb.orderbook, oi);
+                }
+            );
+        
+        // ========== 9. EMIT ON WINDOW CLOSE ==========
+        // Note: We work directly with the stream since we need to convert to stream anyway
+        // The windowed key is preserved through the join
+        fullDataStream
+            .filter((windowedKey, data) -> {
+                if (data == null || data.tick == null) {
+                    return false;
+                }
+                // Additional validation: log if OI is missing for derivatives
+                if (data.tick != null && "D".equals(data.tick.getExchangeType()) && data.oi == null) {
+                    if (log.isDebugEnabled()) {
+                        log.debug("[OI-MISS-DEBUG] {} | window=[{} - {}] | OI not found in KTable lookup",
+                            data.tick.getScripCode(),
+                            new java.util.Date(windowedKey.window().start()),
+                            new java.util.Date(windowedKey.window().end()));
                     }
                 }
-                return new InstrumentCandleData(tickOb.tick, tickOb.orderbook, oi);
-            }
-        );
-
-        // ========== 9. EMIT ON WINDOW CLOSE ==========
-        // Note: Instead of suppress() which requires custom Serdes for complex types,
-        // we rely on the windowed aggregate's natural behavior with grace period
-        fullData
-            .toStream()
-            .filter((windowedKey, data) -> data != null && data.tick != null)
+                return true;
+            })
             .mapValues((windowedKey, data) -> buildInstrumentCandle(windowedKey, data))
             .map((windowedKey, candle) -> KeyValue.pair(windowedKey.key(), candle))
             .peek((key, candle) -> {
