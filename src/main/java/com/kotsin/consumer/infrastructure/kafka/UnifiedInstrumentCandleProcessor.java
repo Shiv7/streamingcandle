@@ -277,7 +277,14 @@ public class UnifiedInstrumentCandleProcessor {
                         oi.getOiChangePercent() != null ? oi.getOiChangePercent() : 0.0));
             }
         })
-        .selectKey((key, oi) -> buildOIKey(oi));
+        .selectKey((key, oi) -> {
+            String newKey = buildOIKey(oi);
+            if (log.isDebugEnabled() && oi != null && (oi.getToken() == 49229 || oi.getToken() == 49614 || oi.getToken() == 49992)) {
+                log.debug("[OI-KEY] token={} oldKey={} newKey={} exch={} exchType={}", 
+                    oi.getToken(), key, newKey, oi.getExchange(), oi.getExchangeType());
+            }
+            return newKey;
+        });
 
         // ========== 4. AGGREGATE TICKS INTO CANDLES ==========
         TimeWindows windows = TimeWindows.ofSizeAndGrace(
@@ -293,10 +300,11 @@ public class UnifiedInstrumentCandleProcessor {
                 (key, tick, agg) -> {
                     if (log.isDebugEnabled() && tick != null && agg.getTickCount() == 0) {
                         // Log first tick in window to see the key
-                        String tickKey = tick.getExchange() + ":" + tick.getExchangeType() + ":" + tick.getToken();
+                        String windowInfo = key != null ? String.format("[%d-%d]", 
+                            key.window().start(), key.window().end()) : "null";
                         log.debug("[TICK-AGG] key={} token={} scripCode={} exch={} exchType={} window={}", 
-                            key, tick.getToken(), tick.getScripCode(), tick.getExchange(), 
-                            tick.getExchangeType(), key != null ? key.toString() : "null");
+                            key != null ? key.key() : "null", tick.getToken(), tick.getScripCode(), tick.getExchange(), 
+                            tick.getExchangeType(), windowInfo);
                     }
                     return agg.update(tick);
                 },
@@ -331,9 +339,11 @@ public class UnifiedInstrumentCandleProcessor {
                 (key, oi, agg) -> {
                     if (log.isDebugEnabled() && oi != null) {
                         String oiKey = oi.getExchange() + ":" + oi.getExchangeType() + ":" + oi.getToken();
-                        log.debug("[OI-AGG] key={} token={} exch={} exchType={} OI={} window={}", 
-                            key, oi.getToken(), oi.getExchange(), oi.getExchangeType(), 
-                            oi.getOpenInterest(), key != null ? key.toString() : "null");
+                        String windowInfo = key != null ? String.format("[%d-%d]", 
+                            key.window().start(), key.window().end()) : "null";
+                        log.debug("[OI-AGG] key={} token={} exch={} exchType={} OI={} window={} updateCount={}", 
+                            key != null ? key.key() : "null", oi.getToken(), oi.getExchange(), oi.getExchangeType(), 
+                            oi.getOpenInterest(), windowInfo, agg.getUpdateCount());
                     }
                     agg.updateWithOI(oi);
                     return agg;
