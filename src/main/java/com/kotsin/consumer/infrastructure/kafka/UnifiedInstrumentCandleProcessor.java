@@ -340,11 +340,15 @@ public class UnifiedInstrumentCandleProcessor {
                     .withRetention(Duration.ofDays(14))  // 2 weeks retention for replay scenarios
             );
 
-        // ========== 6. AGGREGATE OI (NON-WINDOWED KTABLE) ==========
-        // FIX: Use non-windowed KTable instead of windowed aggregation
-        // This ensures OI is always available regardless of window timing
-        // OI updates are sparse, so we keep the latest value per key
-        KTable<String, OIAggregate> oiLatestTable = ois
+        // ========== 6. AGGREGATE OI (KTABLE -> TOPIC -> GLOBAL KTABLE) ==========
+        // FIX: Use GlobalKTable to fix partition/threading issue
+        // Problem: KTable state stores are partitioned - each thread only sees its own partition
+        // Solution: Aggregate OI into KTable, write to topic, then read as GlobalKTable
+        // GlobalKTable replicates entire table to all threads, making OI accessible from any thread
+        String oiAggregateTopic = "oi-aggregate-internal"; // Internal topic for OI aggregation
+        
+        // Step 1: Aggregate OI into KTable
+        KTable<String, OIAggregate> oiAggregateTable = ois
             .groupByKey(Grouped.with(Serdes.String(), OpenInterest.serde()))
             .aggregate(
                 OIAggregate::new,
@@ -357,10 +361,22 @@ public class UnifiedInstrumentCandleProcessor {
                     agg.updateWithOI(oi);
                     return agg;
                 },
-                Materialized.<String, OIAggregate, KeyValueStore<Bytes, byte[]>>as("oi-latest-store")
+                Materialized.<String, OIAggregate, KeyValueStore<Bytes, byte[]>>as("oi-aggregate-store")
                     .withKeySerde(Serdes.String())
                     .withValueSerde(OIAggregate.serde())
             );
+        
+        // Step 2: Write aggregated OI to internal topic (changelog stream)
+        oiAggregateTable.toStream().to(oiAggregateTopic, Produced.with(Serdes.String(), OIAggregate.serde()));
+        
+        // Step 3: Read as GlobalKTable - this replicates to all threads
+        GlobalKTable<String, OIAggregate> oiLatestTable = builder.globalTable(
+            oiAggregateTopic,
+            Consumed.with(Serdes.String(), OIAggregate.serde()),
+            Materialized.<String, OIAggregate, KeyValueStore<Bytes, byte[]>>as("oi-latest-store")
+                .withKeySerde(Serdes.String())
+                .withValueSerde(OIAggregate.serde())
+        );
 
         // ========== 7. LEFT JOIN: TICK (mandatory) + ORDERBOOK (optional) ==========
         KTable<Windowed<String>, TickWithOrderbook> tickCandlesWithOb = tickCandles.leftJoin(
