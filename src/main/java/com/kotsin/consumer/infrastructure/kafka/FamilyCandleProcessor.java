@@ -539,9 +539,24 @@ public class FamilyCandleProcessor {
             // Set as "equity" slot for downstream compatibility (MTISProcessor expects equity)
             builder.equity(future);  // Commodity future acts as primary
             String symbol = extractSymbolRoot(future.getCompanyName());
+            // Fallback: if symbol is null, try to get from family data or use scripCode
             if (symbol == null || symbol.isEmpty()) {
-                symbol = familyId; // Fallback to scripCode
-                log.warn("Commodity family {}: companyName is null, using scripCode as symbol fallback", familyId);
+                try {
+                    InstrumentFamily family = familyDataProvider.getFamily(familyId, future.getClose());
+                    if (family != null && family.getSymbolRoot() != null && !family.getSymbolRoot().isEmpty()) {
+                        symbol = family.getSymbolRoot();
+                        log.debug("Commodity family {}: Using symbol from family data: {}", familyId, symbol);
+                    } else if (family != null && family.getCompanyName() != null && !family.getCompanyName().isEmpty()) {
+                        symbol = extractSymbolRoot(family.getCompanyName());
+                        log.debug("Commodity family {}: Using symbol from family companyName: {}", familyId, symbol);
+                    } else {
+                        symbol = familyId; // Last resort: use scripCode
+                        log.warn("Commodity family {}: companyName is null and no family data, using scripCode as symbol fallback", familyId);
+                    }
+                } catch (Exception e) {
+                    symbol = familyId; // Fallback to scripCode on error
+                    log.warn("Commodity family {}: Failed to get symbol from family data, using scripCode: {}", familyId, e.getMessage());
+                }
             }
             builder.symbol(symbol);
             log.debug("Commodity family {} using future as primary: {}", familyId, future.getCompanyName());
@@ -964,6 +979,16 @@ public class FamilyCandleProcessor {
                         InstrumentCandle existing = optionsByScripCode.get(scripCode);
                         if (existing == null) {
                             optionsByScripCode.put(scripCode, candle);
+                            // #region agent log
+                            try {
+                                java.io.FileWriter fw = new java.io.FileWriter("logs/debug.log", true);
+                                String companyName = candle.getCompanyName() != null ? candle.getCompanyName() : "null";
+                                String json = String.format("{\"sessionId\":\"debug-session\",\"runId\":\"run1\",\"hypothesisId\":\"OPTION-ADD\",\"location\":\"FamilyCandleCollector.add:OPTION\",\"message\":\"Option added to collector\",\"data\":{\"scripCode\":\"%s\",\"instrumentType\":\"%s\",\"companyName\":\"%s\",\"optionsCountAfter\":%d},\"timestamp\":%d}\n",
+                                    scripCode, type.name(), companyName, optionsByScripCode.size(), System.currentTimeMillis());
+                                fw.write(json);
+                                fw.close();
+                            } catch (Exception e) {}
+                            // #endregion
                         } else {
                             // Merge OHLCV for same option
                             mergeInstrumentCandle(existing, candle);
