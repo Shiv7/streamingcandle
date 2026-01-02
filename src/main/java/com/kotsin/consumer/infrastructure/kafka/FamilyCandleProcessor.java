@@ -492,9 +492,70 @@ public class FamilyCandleProcessor {
         // Calculate cross-instrument metrics
         calculateCrossInstrumentMetrics(builder, equity, future, options);
 
+        // 🛡️ CRITICAL FIX: Propagate quality from underlying instruments
+        // Family candle quality = worst quality among all members
+        DataQuality familyQuality = determineFamilyQuality(equity, future, collector.getOptions());
+
+        if (log.isDebugEnabled()) {
+            log.debug("[FAMILY-QUALITY] {} | equity={} future={} options={} -> FAMILY={}",
+                familyId,
+                equity != null ? equity.getQuality() : "N/A",
+                future != null ? future.getQuality() : "N/A",
+                collector.getOptions().size(),
+                familyQuality);
+        }
+
         return builder
-            .quality(DataQuality.VALID)
+            .quality(familyQuality)
             .build();
+    }
+
+    /**
+     * Determine family candle quality based on member instrument quality
+     * Worst quality wins: CONFLICT > WARNING > VALID
+     */
+    private DataQuality determineFamilyQuality(InstrumentCandle equity, InstrumentCandle future,
+                                                List<InstrumentCandle> options) {
+        DataQuality worstQuality = DataQuality.VALID;
+
+        // Check equity quality
+        if (equity != null && equity.getQuality() != null) {
+            worstQuality = getWorseQuality(worstQuality, equity.getQuality());
+        }
+
+        // Check future quality
+        if (future != null && future.getQuality() != null) {
+            worstQuality = getWorseQuality(worstQuality, future.getQuality());
+        }
+
+        // Check options quality
+        if (options != null) {
+            for (InstrumentCandle option : options) {
+                if (option != null && option.getQuality() != null) {
+                    worstQuality = getWorseQuality(worstQuality, option.getQuality());
+                    // Short circuit if we hit CONFLICT (worst possible)
+                    if (worstQuality == DataQuality.CONFLICT) {
+                        break;
+                    }
+                }
+            }
+        }
+
+        return worstQuality;
+    }
+
+    /**
+     * Compare two quality levels and return the worse one
+     * CONFLICT (worst) > WARNING > VALID (best)
+     */
+    private DataQuality getWorseQuality(DataQuality q1, DataQuality q2) {
+        if (q1 == DataQuality.CONFLICT || q2 == DataQuality.CONFLICT) {
+            return DataQuality.CONFLICT;
+        }
+        if (q1 == DataQuality.WARNING || q2 == DataQuality.WARNING) {
+            return DataQuality.WARNING;
+        }
+        return DataQuality.VALID;
     }
     
     /**
@@ -594,15 +655,34 @@ public class FamilyCandleProcessor {
         if (equity != null || future != null) {
             // Use equity if available, otherwise use future as primary (for MCX commodities)
             InstrumentCandle primary = equity != null ? equity : future;
-            
+
             FamilyCandle tempFamily = FamilyCandle.builder()
+                .familyId(builder.build().getFamilyId())
                 .equity(equity)  // null for MCX commodities
                 .future(future)
                 .options(options)
                 .build();
             OISignalDetector.OISignalType oiSignal = OISignalDetector.detect(tempFamily);
             builder.oiSignal(oiSignal.name());
-            
+
+            // 🔍 DEBUG: Log OI signal detection details
+            if (log.isDebugEnabled() && oiSignal != OISignalDetector.OISignalType.NEUTRAL) {
+                String familyId = tempFamily.getFamilyId();
+                double priceChange = primary.getPriceChangePercent();
+                Long futureOIChange = future != null && future.hasOI() ? future.getOiChange() : null;
+                Double futureOIChangePct = future != null && future.hasOI() ? future.getOiChangePercent() : null;
+                long callOIChange = options != null ? PCRCalculator.getTotalCallOIChange(options) : 0;
+                long putOIChange = options != null ? PCRCalculator.getTotalPutOIChange(options) : 0;
+                Double pcr = options != null ? PCRCalculator.calculate(options) : null;
+
+                log.debug("[OI-SIGNAL] {} | SIGNAL={} | price={}% | futOI={}({}) | callOI={} putOI={} | PCR={}",
+                    familyId, oiSignal.name(),
+                    String.format("%.2f", priceChange),
+                    futureOIChange, futureOIChangePct != null ? String.format("%.2f%%", futureOIChangePct) : "N/A",
+                    callOIChange, putOIChange,
+                    pcr != null ? String.format("%.2f", pcr) : "N/A");
+            }
+
             // Directional bias
             int bias = OISignalDetector.getDirectionalBias(oiSignal);
             if (bias > 0) {

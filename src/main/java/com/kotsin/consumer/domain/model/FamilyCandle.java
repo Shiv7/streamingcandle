@@ -178,13 +178,37 @@ public class FamilyCandle {
             }
         }
 
-        // Check PCR confirmation
+        // Check PCR confirmation with CONTRARIAN LOGIC
         if (pcr != null) {
             signals++;
-            // PCR > 1 = bearish sentiment, PCR < 1 = bullish sentiment
-            // Confirmation: sentiment matches equity direction (not contrarian here)
-            boolean pcrBullish = pcr < 1.0;
-            if (pcrBullish == equityBullish) {
+
+            // 🎯 CRITICAL FIX: Respect contrarian PCR extremes
+            // Extreme PCR values often predict reversals (fear/greed indicators)
+            boolean extremeBearishPCR = pcr > 1.5;  // Panic = Contrarian BUY signal
+            boolean extremeBullishPCR = pcr < 0.5;  // Euphoria = Contrarian SELL signal
+            boolean normalBullishPCR = pcr < 1.0 && pcr >= 0.5;
+            boolean normalBearishPCR = pcr > 1.0 && pcr <= 1.5;
+
+            boolean pcrConfirms = false;
+
+            // Case 1: Normal PCR - confirm if matches equity direction (trend-following)
+            if ((normalBullishPCR && equityBullish) || (normalBearishPCR && equityBearish)) {
+                pcrConfirms = true;
+            }
+            // Case 2: Extreme bearish PCR (panic) - confirms if setup for reversal
+            else if (extremeBearishPCR) {
+                // Extreme fear confirms BULLISH setup (contrarian)
+                // Either price already turning up, OR still falling (early entry)
+                pcrConfirms = true;  // Always confirm - extreme fear is tradeable
+            }
+            // Case 3: Extreme bullish PCR (euphoria) - confirms if setup for reversal
+            else if (extremeBullishPCR) {
+                // Extreme greed confirms BEARISH setup (contrarian)
+                // Either price already turning down, OR still rising (early entry)
+                pcrConfirms = true;  // Always confirm - extreme greed is tradeable
+            }
+
+            if (pcrConfirms) {
                 confirmedSignals++;
             }
         }
