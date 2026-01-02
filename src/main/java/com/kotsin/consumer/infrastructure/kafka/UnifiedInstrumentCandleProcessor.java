@@ -344,8 +344,8 @@ public class UnifiedInstrumentCandleProcessor {
 
         // ========== 6. AGGREGATE OI (NON-WINDOWED KTABLE) ==========
         // Use non-windowed KTable to keep latest OI value per key
-        // OI updates are sparse, so we keep the latest value per key
-        // Note: Some OI may be missing due to timing - this is expected with sparse updates
+        // Note: Producer now uses same key format (exch:exchType:token) for all topics
+        // This ensures OI data is co-partitioned with tick data
         KTable<String, OIAggregate> oiLatestTable = ois
             .groupByKey(Grouped.with(Serdes.String(), OpenInterest.serde()))
             .aggregate(
