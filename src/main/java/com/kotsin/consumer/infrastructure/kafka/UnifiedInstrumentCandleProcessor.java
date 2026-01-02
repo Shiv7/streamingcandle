@@ -373,51 +373,68 @@ public class UnifiedInstrumentCandleProcessor {
         );
 
         // ========== 8. LEFT JOIN: TICK+OB + OI (optional) ==========
-        // FIX: Convert windowed KTable to stream, extract key, then join with non-windowed OI KTable
+        // FIX: Use transformValues with state store lookup for OI
         // This allows OI to be available regardless of window timing
+        // We manually lookup OI from the KTable's state store
         KStream<Windowed<String>, InstrumentCandleData> fullDataStream = tickCandlesWithOb
             .toStream()
-            .leftJoin(
-                oiLatestTable,
-                (windowedKey, tickOb) -> {
-                    // Extract the key from Windowed<String> for OI lookup
-                    // The key format is "exchange:exchangeType:token"
-                    return windowedKey.key();
-                },
-                (tickOb, oi) -> {
-                    // Note: windowedKey is not available in ValueJoiner, so we extract info from tickOb
-                    if (tickOb != null && tickOb.tick != null) {
-                        String scripCode = tickOb.tick.getScripCode();
-                        String tickExch = tickOb.tick.getExchange() != null ? tickOb.tick.getExchange() : "N";
-                        String tickExchType = tickOb.tick.getExchangeType() != null ? tickOb.tick.getExchangeType() : "C";
+            .transformValues(
+                () -> new org.apache.kafka.streams.kstream.ValueTransformerWithKey<Windowed<String>, TickWithOrderbook, InstrumentCandleData>() {
+                    private org.apache.kafka.streams.processor.ProcessorContext context;
+                    private org.apache.kafka.streams.state.KeyValueStore<String, OIAggregate> oiStore;
+                    
+                    @Override
+                    public void init(org.apache.kafka.streams.processor.ProcessorContext context) {
+                        this.context = context;
+                        this.oiStore = (org.apache.kafka.streams.state.KeyValueStore<String, OIAggregate>) context.getStateStore("oi-latest-store");
+                    }
+                    
+                    @Override
+                    public InstrumentCandleData transform(Windowed<String> windowedKey, TickWithOrderbook tickOb) {
+                        OIAggregate oi = null;
                         
-                        // Build expected OI key for logging
-                        String expectedOIKey = tickExch + ":" + tickExchType + ":" + scripCode;
-                        
-                        // Enhanced logging with window timing
-                        if (log.isDebugEnabled()) {
-                            log.debug("[JOIN-OI] {} | hasOB={} hasOI={} | key={}", 
-                                scripCode, 
-                                tickOb.orderbook != null, 
-                                oi != null, 
-                                expectedOIKey);
-                        }
-                        
-                        if (oi == null && tickExchType.equals("D")) {
-                            log.warn("[JOIN-MISS] {} | OI missing for derivative! tickExch={} tickExchType={} scripCode={} | OI key used: {}", 
-                                scripCode, tickExch, tickExchType, scripCode, expectedOIKey);
-                        } else if (oi != null) {
+                        if (tickOb != null && tickOb.tick != null && oiStore != null) {
+                            // Build OI key from tick data
+                            String tickExch = tickOb.tick.getExchange() != null ? tickOb.tick.getExchange() : "N";
+                            String tickExchType = tickOb.tick.getExchangeType() != null ? tickOb.tick.getExchangeType() : "C";
+                            String scripCode = tickOb.tick.getScripCode();
+                            String oiKey = tickExch + ":" + tickExchType + ":" + scripCode;
+                            
+                            // Lookup OI from state store
+                            oi = oiStore.get(oiKey);
+                            
+                            // Enhanced logging
                             if (log.isDebugEnabled()) {
-                                log.debug("[JOIN-SUCCESS] {} | OI joined! OI={} OIChange={} OIChangePct={}", 
+                                log.debug("[JOIN-OI] {} | hasOB={} hasOI={} | key={}", 
                                     scripCode, 
-                                    oi.getOiClose(), 
-                                    oi.getOiChange() != null ? oi.getOiChange() : 0,
-                                    oi.getOiChangePercent() != null ? String.format("%.2f%%", oi.getOiChangePercent()) : "N/A");
+                                    tickOb.orderbook != null, 
+                                    oi != null, 
+                                    oiKey);
+                            }
+                            
+                            if (oi == null && tickExchType.equals("D")) {
+                                log.warn("[JOIN-MISS] {} | OI missing for derivative! tickExch={} tickExchType={} scripCode={} | OI key used: {}", 
+                                    scripCode, tickExch, tickExchType, scripCode, oiKey);
+                            } else if (oi != null) {
+                                if (log.isDebugEnabled()) {
+                                    log.debug("[JOIN-SUCCESS] {} | OI joined! OI={} OIChange={} OIChangePct={}", 
+                                        scripCode, 
+                                        oi.getOiClose(), 
+                                        oi.getOiChange() != null ? oi.getOiChange() : 0,
+                                        oi.getOiChangePercent() != null ? String.format("%.2f%%", oi.getOiChangePercent()) : "N/A");
+                                }
                             }
                         }
+                        
+                        return new InstrumentCandleData(tickOb.tick, tickOb.orderbook, oi);
                     }
-                    return new InstrumentCandleData(tickOb.tick, tickOb.orderbook, oi);
-                }
+                    
+                    @Override
+                    public void close() {
+                        // No cleanup needed
+                    }
+                },
+                "oi-latest-store"  // State store name for OI lookup
             );
         
         // ========== 9. EMIT ON WINDOW CLOSE ==========

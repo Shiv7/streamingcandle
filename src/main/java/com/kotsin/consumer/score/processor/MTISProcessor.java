@@ -217,8 +217,7 @@ public class MTISProcessor {
             breakdown.append(String.format(" | TF=%s", timeframe));
             breakdown.append(String.format(" | F&O=%.0f", score.getBreakdown().getFoAlignmentScore()));
             breakdown.append(String.format(" | IPU=%.0f", score.getBreakdown().getIpuScore()));
-            breakdown.append(String.format(" | VCP=%.0f", score.getBreakdown().getVcpScore()));
-            breakdown.append(String.format(" | Regime=%.0f", score.getBreakdown().getRegimeScore()));
+            breakdown.append(String.format(" | Regime=%.0f", score.getBreakdown().getMtfRegimeScore()));
             if (score.isFudkiiIgnition()) {
                 breakdown.append(" | FUDKII=🔥");
             }
