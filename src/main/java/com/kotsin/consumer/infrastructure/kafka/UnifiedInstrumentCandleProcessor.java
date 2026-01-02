@@ -300,11 +300,9 @@ public class UnifiedInstrumentCandleProcessor {
                 (key, tick, agg) -> {
                     if (log.isDebugEnabled() && tick != null && agg.getTickCount() == 0) {
                         // Log first tick in window to see the key
-                        String windowInfo = key != null ? String.format("[%d-%d]", 
-                            key.window().start(), key.window().end()) : "null";
-                        log.debug("[TICK-AGG] key={} token={} scripCode={} exch={} exchType={} window={}", 
-                            key != null ? key.key() : "null", tick.getToken(), tick.getScripCode(), tick.getExchange(), 
-                            tick.getExchangeType(), windowInfo);
+                        log.debug("[TICK-AGG] key={} token={} scripCode={} exch={} exchType={}", 
+                            key, tick.getToken(), tick.getScripCode(), tick.getExchange(), 
+                            tick.getExchangeType());
                     }
                     return agg.update(tick);
                 },
@@ -338,12 +336,9 @@ public class UnifiedInstrumentCandleProcessor {
                 OIAggregate::new,
                 (key, oi, agg) -> {
                     if (log.isDebugEnabled() && oi != null) {
-                        String oiKey = oi.getExchange() + ":" + oi.getExchangeType() + ":" + oi.getToken();
-                        String windowInfo = key != null ? String.format("[%d-%d]", 
-                            key.window().start(), key.window().end()) : "null";
-                        log.debug("[OI-AGG] key={} token={} exch={} exchType={} OI={} window={} updateCount={}", 
-                            key != null ? key.key() : "null", oi.getToken(), oi.getExchange(), oi.getExchangeType(), 
-                            oi.getOpenInterest(), windowInfo, agg.getUpdateCount());
+                        log.debug("[OI-AGG] key={} token={} exch={} exchType={} OI={} updateCount={}", 
+                            key, oi.getToken(), oi.getExchange(), oi.getExchangeType(), 
+                            oi.getOpenInterest(), agg.getUpdateCount());
                     }
                     agg.updateWithOI(oi);
                     return agg;
