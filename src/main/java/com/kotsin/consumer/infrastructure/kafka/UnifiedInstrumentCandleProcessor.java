@@ -290,7 +290,16 @@ public class UnifiedInstrumentCandleProcessor {
             .windowedBy(windows)
             .aggregate(
                 TickAggregate::new,
-                (key, tick, agg) -> agg.update(tick),
+                (key, tick, agg) -> {
+                    if (log.isDebugEnabled() && tick != null && agg.getTickCount() == 0) {
+                        // Log first tick in window to see the key
+                        String tickKey = tick.getExchange() + ":" + tick.getExchangeType() + ":" + tick.getToken();
+                        log.debug("[TICK-AGG] key={} token={} scripCode={} exch={} exchType={} window={}", 
+                            key, tick.getToken(), tick.getScripCode(), tick.getExchange(), 
+                            tick.getExchangeType(), key != null ? key.toString() : "null");
+                    }
+                    return agg.update(tick);
+                },
                 Materialized.<String, TickAggregate, WindowStore<Bytes, byte[]>>as("tick-aggregate-store")
                     .withKeySerde(Serdes.String())
                     .withValueSerde(TickAggregate.serde())
@@ -320,6 +329,12 @@ public class UnifiedInstrumentCandleProcessor {
             .aggregate(
                 OIAggregate::new,
                 (key, oi, agg) -> {
+                    if (log.isDebugEnabled() && oi != null) {
+                        String oiKey = oi.getExchange() + ":" + oi.getExchangeType() + ":" + oi.getToken();
+                        log.debug("[OI-AGG] key={} token={} exch={} exchType={} OI={} window={}", 
+                            key, oi.getToken(), oi.getExchange(), oi.getExchangeType(), 
+                            oi.getOpenInterest(), key != null ? key.toString() : "null");
+                    }
                     agg.updateWithOI(oi);
                     return agg;
                 },
@@ -345,14 +360,24 @@ public class UnifiedInstrumentCandleProcessor {
         KTable<Windowed<String>, InstrumentCandleData> fullData = tickCandlesWithOb.leftJoin(
             oiAggregates,
             (tickOb, oi) -> {
-                if (log.isDebugEnabled() && tickOb != null && tickOb.tick != null) {
+                if (tickOb != null && tickOb.tick != null) {
                     String scripCode = tickOb.tick.getScripCode();
-                    String tickKey = tickOb.tick.getExchange() + ":" + tickOb.tick.getExchangeType() + ":" + scripCode;
-                    log.debug("[JOIN] {} | TICK+OB+OI | hasOB={} hasOI={} | tickKey={} tickExchType={}", 
-                        scripCode, tickOb.orderbook != null, oi != null, tickKey, tickOb.tick.getExchangeType());
-                    if (oi == null && (tickOb.tick.getExchangeType() != null && tickOb.tick.getExchangeType().equals("D"))) {
-                        log.warn("[JOIN-MISS] {} | OI missing for derivative! tickKey={} tickExchType={} scripCode={}", 
-                            scripCode, tickKey, tickOb.tick.getExchangeType(), scripCode);
+                    String tickExch = tickOb.tick.getExchange() != null ? tickOb.tick.getExchange() : "N";
+                    String tickExchType = tickOb.tick.getExchangeType() != null ? tickOb.tick.getExchangeType() : "C";
+                    // Note: Can't get token from TickAggregate, but we know the key format
+                    String expectedOIKey = tickExch + ":" + tickExchType + ":<token>";
+                    
+                    if (log.isDebugEnabled()) {
+                        log.debug("[JOIN] {} | TICK+OB+OI | hasOB={} hasOI={} | tickExch={} tickExchType={} expectedOIKey={}", 
+                            scripCode, tickOb.orderbook != null, oi != null, tickExch, tickExchType, expectedOIKey);
+                    }
+                    
+                    if (oi == null && tickExchType.equals("D")) {
+                        log.warn("[JOIN-MISS] {} | OI missing for derivative! tickExch={} tickExchType={} scripCode={} | Check if OI key matches: {}", 
+                            scripCode, tickExch, tickExchType, scripCode, expectedOIKey);
+                    } else if (oi != null && log.isDebugEnabled()) {
+                        log.debug("[JOIN-SUCCESS] {} | OI joined! OI={} OIChange={}", 
+                            scripCode, oi.getOiClose(), oi.getOiChange());
                     }
                 }
                 return new InstrumentCandleData(tickOb.tick, tickOb.orderbook, oi);
