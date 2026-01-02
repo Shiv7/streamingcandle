@@ -144,6 +144,32 @@ public class KafkaConfig {
         props.put(StreamsConfig.RECONNECT_BACKOFF_MS_CONFIG, reconnectBackoffMs);
         props.put(StreamsConfig.REQUEST_TIMEOUT_MS_CONFIG, requestTimeoutMs);
 
+        // ═══════════════════════════════════════════════════════════════════════
+        // CRITICAL FIX: Prevent InvalidTimestampException on repartition topics
+        // ═══════════════════════════════════════════════════════════════════════
+        // When replaying historical data, record timestamps may be in the "future"
+        // relative to broker time (e.g., replaying 12:42 data at 07:13 broker time).
+        // 
+        // By default, Kafka Streams uses CreateTime which embeds the record's 
+        // timestamp into repartition topics. The broker rejects these as:
+        //   "Timestamp X is out of range. Should be within [min, max]"
+        //
+        // Solution: Use LogAppendTime so broker assigns its own timestamp to 
+        // internal topics, ignoring the record's embedded timestamp.
+        // ═══════════════════════════════════════════════════════════════════════
+        
+        // Configure internal repartition/changelog topics to use broker timestamp
+        props.put("topic.internal.log.message.timestamp.type", "LogAppendTime");
+        
+        // Allow 24 hours of timestamp drift for internal topics
+        props.put("topic.internal.max.message.time.difference.ms", "86400000");
+        
+        // Also configure producer to handle timestamp drift gracefully
+        props.put(StreamsConfig.PRODUCER_PREFIX + "max.block.ms", "60000");
+        props.put(StreamsConfig.PRODUCER_PREFIX + "delivery.timeout.ms", "120000");
+        
+        log.info("Configured internal topics with LogAppendTime to prevent timestamp issues during replay");
+
         return props;
     }
     

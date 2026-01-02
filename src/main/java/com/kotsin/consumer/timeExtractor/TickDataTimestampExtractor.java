@@ -15,26 +15,19 @@ import org.slf4j.LoggerFactory;
  * CRITICAL: Ensures consistent windowing behavior for both replay and live data.
  * Without this, replay of historical tick data won't aggregate correctly into candles.
  *
- * BEFORE (BROKEN):
- * - Used Kafka record timestamp (ingestion time = wall clock time)
- * - Replaying Dec 24 tick data in Jan 1 results in wrong candle windows
- * - Live data and replay data behave differently
- *
- * AFTER (FIXED):
- * - Uses TickData.timestamp (actual market event time)
- * - Replay and live data use identical windowing logic
- * - Candles correctly aggregated based on when trade occurred, not when we received it
+ * TIMESTAMP CLAMPING:
+ * Uses wall clock time as reference to prevent repartition topic failures.
+ * If event time is too far in the future (relative to now), clamp it to prevent
+ * InvalidTimestampException on internal Kafka Streams topics.
  */
 public class TickDataTimestampExtractor implements TimestampExtractor {
 
     private static final Logger LOGGER = LoggerFactory.getLogger(TickDataTimestampExtractor.class);
     private static final long MIN_VALID_TIMESTAMP = 1577836800000L; // Jan 1, 2020
 
-    // Maximum allowed timestamp drift (1 hour = 3600000 ms)
+    // Maximum allowed future drift from wall clock (1 hour = 3600000 ms)
+    // This aligns with typical Kafka broker max.message.time.difference.ms
     private static final long MAX_FUTURE_DRIFT_MS = 3600000L;
-
-    // Track stream time
-    private long lastObservedTimestamp = -1L;
 
     @Override
     public long extract(ConsumerRecord<Object, Object> record, long partitionTime) {
@@ -51,31 +44,26 @@ public class TickDataTimestampExtractor implements TimestampExtractor {
                 return record.timestamp() > 0 ? record.timestamp() : partitionTime;
             }
 
-            // Initialize stream time tracking
-            if (lastObservedTimestamp < 0) {
-                lastObservedTimestamp = eventTime;
-            }
+            // Use wall clock as reference point for clamping
+            // This ensures consistent behavior regardless of processing order
+            long wallClock = System.currentTimeMillis();
+            long maxAllowedTimestamp = wallClock + MAX_FUTURE_DRIFT_MS;
 
             // Check if timestamp is too far in the future
-            long currentStreamTime = Math.max(lastObservedTimestamp, partitionTime);
-            long drift = eventTime - currentStreamTime;
+            if (eventTime > maxAllowedTimestamp) {
+                // Clamp to prevent InvalidTimestampException on repartition topics
+                long clampedTimestamp = maxAllowedTimestamp;
 
-            if (drift > MAX_FUTURE_DRIFT_MS) {
-                // Timestamp is too far ahead - clamp it to acceptable range
-                long clampedTimestamp = currentStreamTime + MAX_FUTURE_DRIFT_MS;
-
-                LOGGER.warn("TickData timestamp {} is {}ms ahead of stream time {}. " +
+                LOGGER.warn("TickData timestamp {} is {}ms ahead of wall clock {}. " +
                         "Clamping to {} to prevent InvalidTimestampException. " +
                         "Topic: {}, Partition: {}, Offset: {}, Token: {}",
-                    eventTime, drift, currentStreamTime, clampedTimestamp,
+                    eventTime, eventTime - wallClock, wallClock, clampedTimestamp,
                     record.topic(), record.partition(), record.offset(), tick.getToken());
 
-                lastObservedTimestamp = clampedTimestamp;
                 return clampedTimestamp;
             }
 
             // Timestamp is acceptable - use as-is
-            lastObservedTimestamp = Math.max(lastObservedTimestamp, eventTime);
             return eventTime;
         }
 
@@ -83,3 +71,4 @@ public class TickDataTimestampExtractor implements TimestampExtractor {
         return record.timestamp() > 0 ? record.timestamp() : partitionTime;
     }
 }
+
