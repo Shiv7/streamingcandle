@@ -145,30 +145,22 @@ public class KafkaConfig {
         props.put(StreamsConfig.REQUEST_TIMEOUT_MS_CONFIG, requestTimeoutMs);
 
         // ═══════════════════════════════════════════════════════════════════════
-        // CRITICAL FIX: Prevent InvalidTimestampException on repartition topics
+        // TIMESTAMP HANDLING FOR REPLAY
         // ═══════════════════════════════════════════════════════════════════════
-        // When replaying historical data, record timestamps may be in the "future"
-        // relative to broker time (e.g., replaying 12:42 data at 07:13 broker time).
-        // 
-        // By default, Kafka Streams uses CreateTime which embeds the record's 
-        // timestamp into repartition topics. The broker rejects these as:
-        //   "Timestamp X is out of range. Should be within [min, max]"
-        //
-        // Solution: Use LogAppendTime so broker assigns its own timestamp to 
-        // internal topics, ignoring the record's embedded timestamp.
+        // The TimestampExtractors (TickDataTimestampExtractor, etc.) now clamp
+        // future timestamps to wall clock + 1 hour to prevent broker rejection.
+        // This allows replaying historical data with "future" timestamps safely.
         // ═══════════════════════════════════════════════════════════════════════
         
-        // Configure internal repartition/changelog topics to use broker timestamp
-        props.put("topic.internal.log.message.timestamp.type", "LogAppendTime");
-        
-        // Allow 24 hours of timestamp drift for internal topics
-        props.put("topic.internal.max.message.time.difference.ms", "86400000");
-        
-        // Also configure producer to handle timestamp drift gracefully
+        // Producer resilience settings for handling message production delays
         props.put(StreamsConfig.PRODUCER_PREFIX + "max.block.ms", "60000");
         props.put(StreamsConfig.PRODUCER_PREFIX + "delivery.timeout.ms", "120000");
         
-        log.info("Configured internal topics with LogAppendTime to prevent timestamp issues during replay");
+        // Use a custom production exception handler that logs and continues
+        props.put(StreamsConfig.DEFAULT_PRODUCTION_EXCEPTION_HANDLER_CLASS_CONFIG,
+                "org.apache.kafka.streams.errors.LogAndContinueExceptionHandler");
+        
+        log.info("Kafka Streams configured with timestamp clamping in extractors for safe replay");
 
         return props;
     }
