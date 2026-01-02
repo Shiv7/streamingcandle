@@ -301,12 +301,22 @@ public class UnifiedInstrumentCandleProcessor {
         });
 
         // ========== 4. AGGREGATE TICKS INTO CANDLES ==========
+        // FIX: Repartition all streams to ensure co-partitioning
+        // Source topics have different partition counts (tick=15, OI=6, orderbook=20)
+        // Repartitioning to 20 ensures same key -> same partition across all streams
         TimeWindows windows = TimeWindows.ofSizeAndGrace(
             Duration.ofMinutes(1),
             Duration.ofSeconds(graceSeconds)
         );
 
-        KTable<Windowed<String>, TickAggregate> tickCandles = ticks
+        // Repartition ticks to 20 partitions for co-partitioning
+        KStream<String, TickData> ticksRepartitioned = ticks
+            .repartition(Repartitioned.<String, TickData>as("tick-repartitioned")
+                .withKeySerde(Serdes.String())
+                .withValueSerde(TickData.serde())
+                .withNumberOfPartitions(20));
+
+        KTable<Windowed<String>, TickAggregate> tickCandles = ticksRepartitioned
             .groupByKey(Grouped.with(Serdes.String(), TickData.serde()))
             .windowedBy(windows)
             .aggregate(
@@ -327,7 +337,14 @@ public class UnifiedInstrumentCandleProcessor {
             );
 
         // ========== 5. AGGREGATE ORDERBOOK INTO OFI/LAMBDA ==========
-        KTable<Windowed<String>, OrderbookAggregate> obAggregates = orderbooks
+        // Repartition orderbooks to 20 partitions for co-partitioning
+        KStream<String, OrderBookSnapshot> orderbooksRepartitioned = orderbooks
+            .repartition(Repartitioned.<String, OrderBookSnapshot>as("orderbook-repartitioned")
+                .withKeySerde(Serdes.String())
+                .withValueSerde(OrderBookSnapshot.serde())
+                .withNumberOfPartitions(20));
+
+        KTable<Windowed<String>, OrderbookAggregate> obAggregates = orderbooksRepartitioned
             .groupByKey(Grouped.with(Serdes.String(), OrderBookSnapshot.serde()))
             .windowedBy(windows)
             .aggregate(
@@ -343,10 +360,15 @@ public class UnifiedInstrumentCandleProcessor {
             );
 
         // ========== 6. AGGREGATE OI (NON-WINDOWED KTABLE) ==========
-        // Use non-windowed KTable to keep latest OI value per key
-        // Note: Producer now uses same key format (exch:exchType:token) for all topics
-        // This ensures OI data is co-partitioned with tick data
-        KTable<String, OIAggregate> oiLatestTable = ois
+        // Repartition OI to 20 partitions for co-partitioning with tick stream
+        // This ensures OI data lands on the same partition as its corresponding tick data
+        KStream<String, OpenInterest> oisRepartitioned = ois
+            .repartition(Repartitioned.<String, OpenInterest>as("oi-repartitioned")
+                .withKeySerde(Serdes.String())
+                .withValueSerde(OpenInterest.serde())
+                .withNumberOfPartitions(20));
+
+        KTable<String, OIAggregate> oiLatestTable = oisRepartitioned
             .groupByKey(Grouped.with(Serdes.String(), OpenInterest.serde()))
             .aggregate(
                 OIAggregate::new,
