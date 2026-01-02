@@ -25,10 +25,6 @@ import org.apache.kafka.streams.state.KeyValueStore;
 import org.apache.kafka.streams.state.ReadOnlyKeyValueStore;
 import org.apache.kafka.streams.state.ValueAndTimestamp;
 import org.apache.kafka.streams.state.WindowStore;
-import org.apache.kafka.clients.admin.AdminClient;
-import org.apache.kafka.clients.admin.AdminClientConfig;
-import org.apache.kafka.clients.admin.NewTopic;
-import org.apache.kafka.common.config.TopicConfig;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Component;
@@ -36,7 +32,6 @@ import org.springframework.stereotype.Component;
 import java.time.*;
 import java.util.*;
 import java.util.concurrent.CompletableFuture;
-import java.util.concurrent.ExecutionException;
 import java.util.concurrent.TimeUnit;
 
 /**
@@ -163,10 +158,7 @@ public class UnifiedInstrumentCandleProcessor {
                 log.info("Consumer optimization applied: maxPollRecords={}, fetchMinBytes={} bytes, fetchMaxWaitMs={} ms", 
                     maxPollRecords, fetchMinBytes, fetchMaxWaitMs);
                 
-                // Create internal topic for OI aggregation before building topology
-                // Also clean up old repartition topics with incorrect partition counts
-                String appId = props.getProperty(StreamsConfig.APPLICATION_ID_CONFIG);
-                createInternalTopicIfNeeded(props.getProperty(StreamsConfig.BOOTSTRAP_SERVERS_CONFIG), appId);
+                // No need to create internal topics - using simple KTable approach
                 
                 StreamsBuilder builder = new StreamsBuilder();
                 
@@ -350,15 +342,11 @@ public class UnifiedInstrumentCandleProcessor {
                     .withRetention(Duration.ofDays(14))  // 2 weeks retention for replay scenarios
             );
 
-        // ========== 6. AGGREGATE OI (KTABLE -> TOPIC -> GLOBAL KTABLE) ==========
-        // FIX: Use GlobalKTable to fix partition/threading issue
-        // Problem: KTable state stores are partitioned - each thread only sees its own partition
-        // Solution: Aggregate OI into KTable, write to topic, then read as GlobalKTable
-        // GlobalKTable replicates entire table to all threads, making OI accessible from any thread
-        String oiAggregateTopic = "oi-aggregate-internal"; // Internal topic for OI aggregation
-        
-        // Step 1: Aggregate OI into KTable
-        KTable<String, OIAggregate> oiAggregateTable = ois
+        // ========== 6. AGGREGATE OI (NON-WINDOWED KTABLE) ==========
+        // Use non-windowed KTable to keep latest OI value per key
+        // OI updates are sparse, so we keep the latest value per key
+        // Note: Some OI may be missing due to timing - this is expected with sparse updates
+        KTable<String, OIAggregate> oiLatestTable = ois
             .groupByKey(Grouped.with(Serdes.String(), OpenInterest.serde()))
             .aggregate(
                 OIAggregate::new,
@@ -371,22 +359,10 @@ public class UnifiedInstrumentCandleProcessor {
                     agg.updateWithOI(oi);
                     return agg;
                 },
-                Materialized.<String, OIAggregate, KeyValueStore<Bytes, byte[]>>as("oi-aggregate-store")
+                Materialized.<String, OIAggregate, KeyValueStore<Bytes, byte[]>>as("oi-latest-store")
                     .withKeySerde(Serdes.String())
                     .withValueSerde(OIAggregate.serde())
             );
-        
-        // Step 2: Write aggregated OI to internal topic (changelog stream)
-        oiAggregateTable.toStream().to(oiAggregateTopic, Produced.with(Serdes.String(), OIAggregate.serde()));
-        
-        // Step 3: Read as GlobalKTable - this replicates to all threads
-        GlobalKTable<String, OIAggregate> oiLatestTable = builder.globalTable(
-            oiAggregateTopic,
-            Consumed.with(Serdes.String(), OIAggregate.serde()),
-            Materialized.<String, OIAggregate, KeyValueStore<Bytes, byte[]>>as("oi-latest-store")
-                .withKeySerde(Serdes.String())
-                .withValueSerde(OIAggregate.serde())
-        );
 
         // ========== 7. LEFT JOIN: TICK (mandatory) + ORDERBOOK (optional) ==========
         KTable<Windowed<String>, TickWithOrderbook> tickCandlesWithOb = tickCandles.leftJoin(
@@ -500,8 +476,8 @@ public class UnifiedInstrumentCandleProcessor {
                         // No cleanup needed
                     }
                 },
-                Named.as("oi-lookup-transformer") // Name the transformer
-                // Note: GlobalKTable state store is automatically available, don't pass it explicitly
+                Named.as("oi-lookup-transformer"), // Name the transformer
+                "oi-latest-store"  // State store name for OI lookup
             );
         
         // ========== 9. EMIT ON WINDOW CLOSE ==========
@@ -865,74 +841,6 @@ public class UnifiedInstrumentCandleProcessor {
         }
     }
 
-    /**
-     * Create internal topic for OI aggregation if it doesn't exist
-     * Also clean up old repartition topics with incorrect partition counts
-     */
-    private void createInternalTopicIfNeeded(String bootstrapServers, String appId) {
-        String topicName = "oi-aggregate-internal";
-        int partitions = 6; // Match OpenInterest topic partitions
-        short replicationFactor = 1;
-        
-        Properties adminProps = new Properties();
-        adminProps.put(AdminClientConfig.BOOTSTRAP_SERVERS_CONFIG, bootstrapServers);
-        
-        try (AdminClient adminClient = AdminClient.create(adminProps)) {
-            // Clean up old repartition topics with incorrect partition counts
-            if (appId != null) {
-                String repartitionTopicPattern = appId + "-oi-aggregate-store-repartition";
-                cleanupOldRepartitionTopics(adminClient, repartitionTopicPattern);
-            }
-            
-            // Check if topic exists
-            boolean topicExists = adminClient.listTopics().names().get().contains(topicName);
-            
-            if (!topicExists) {
-                log.info("Creating internal topic: {} with {} partitions", topicName, partitions);
-                NewTopic newTopic = new NewTopic(topicName, partitions, replicationFactor);
-                newTopic.configs(Collections.singletonMap(TopicConfig.RETENTION_MS_CONFIG, "86400000")); // 1 day retention
-                
-                adminClient.createTopics(Collections.singleton(newTopic)).all().get();
-                log.info("✅ Successfully created internal topic: {}", topicName);
-            } else {
-                log.debug("Internal topic {} already exists", topicName);
-            }
-        } catch (InterruptedException | ExecutionException e) {
-            log.warn("Failed to create internal topic {}: {}. Will try to use existing topic.", topicName, e.getMessage());
-            // Don't fail startup - topic might be created externally or already exist
-        } catch (Exception e) {
-            log.error("Unexpected error creating internal topic {}: {}", topicName, e.getMessage(), e);
-            // Don't fail startup - topic might be created externally
-        }
-    }
-    
-    /**
-     * Clean up old repartition topics with incorrect partition counts
-     */
-    private void cleanupOldRepartitionTopics(AdminClient adminClient, String topicPattern) {
-        try {
-            Set<String> allTopics = adminClient.listTopics().names().get();
-            Set<String> topicsToDelete = new HashSet<>();
-            
-            for (String topic : allTopics) {
-                if (topic.contains(topicPattern)) {
-                    topicsToDelete.add(topic);
-                }
-            }
-            
-            if (!topicsToDelete.isEmpty()) {
-                log.warn("Found {} old repartition topic(s) to clean up: {}", topicsToDelete.size(), topicsToDelete);
-                adminClient.deleteTopics(topicsToDelete).all().get();
-                log.info("✅ Successfully deleted {} old repartition topic(s)", topicsToDelete.size());
-            }
-        } catch (InterruptedException | ExecutionException e) {
-            log.warn("Failed to cleanup old repartition topics: {}. Kafka Streams will recreate them.", e.getMessage());
-            // Don't fail startup - topics will be recreated by Kafka Streams
-        } catch (Exception e) {
-            log.warn("Unexpected error cleaning up repartition topics: {}", e.getMessage());
-            // Don't fail startup
-        }
-    }
 
     /**
      * Log VPIN cache statistics for monitoring
