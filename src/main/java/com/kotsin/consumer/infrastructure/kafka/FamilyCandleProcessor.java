@@ -168,7 +168,21 @@ public class FamilyCandleProcessor {
 
         // Key by family ID (equity scripCode)
         KStream<String, InstrumentCandle> keyedByFamily = instruments
-            .filter((key, candle) -> candle != null && candle.getScripCode() != null)
+            .filter((key, candle) -> {
+                boolean passes = candle != null && candle.getScripCode() != null;
+                // #region agent log
+                if (!passes) {
+                    try {
+                        java.io.FileWriter fw = new java.io.FileWriter("logs/debug.log", true);
+                        String json = String.format("{\"sessionId\":\"debug-session\",\"runId\":\"run1\",\"hypothesisId\":\"FILTER-A\",\"location\":\"FamilyCandleProcessor.java:171\",\"message\":\"Candle filtered out\",\"data\":{\"key\":\"%s\",\"candleNull\":%s,\"scripCodeNull\":%s},\"timestamp\":%d}\n",
+                            key, candle == null, candle != null && candle.getScripCode() == null, System.currentTimeMillis());
+                        fw.write(json);
+                        fw.close();
+                    } catch (Exception e) {}
+                }
+                // #endregion
+                return passes;
+            })
             .selectKey((key, candle) -> {
                 String familyId = getFamilyId(candle);
                 // #region agent log
@@ -800,8 +814,8 @@ public class FamilyCandleProcessor {
             // #region agent log
             try {
                 java.io.FileWriter fw = new java.io.FileWriter("logs/debug.log", true);
-                String json = String.format("{\"sessionId\":\"debug-session\",\"runId\":\"run1\",\"hypothesisId\":\"GROUP-B\",\"location\":\"FamilyCandleCollector.add\",\"message\":\"Adding candle to collector\",\"data\":{\"scripCode\":\"%s\",\"instrumentType\":\"%s\",\"hasOI\":%s,\"openInterest\":%s,\"equityBefore\":%s,\"futureBefore\":%s,\"optionsCountBefore\":%d},\"timestamp\":%d}\n",
-                    candle.getScripCode(), type.name(), candle.hasOI(), candle.getOpenInterest() != null ? candle.getOpenInterest() : "null", equity != null ? equity.getScripCode() : "null", future != null ? future.getScripCode() : "null", optionsByScripCode.size(), System.currentTimeMillis());
+                String json = String.format("{\"sessionId\":\"debug-session\",\"runId\":\"run1\",\"hypothesisId\":\"GROUP-B\",\"location\":\"FamilyCandleCollector.add\",\"message\":\"Adding candle to collector\",\"data\":{\"scripCode\":\"%s\",\"instrumentType\":\"%s\",\"exchangeType\":\"%s\",\"companyName\":\"%s\",\"hasOI\":%s,\"openInterest\":%s,\"equityBefore\":%s,\"futureBefore\":%s,\"optionsCountBefore\":%d},\"timestamp\":%d}\n",
+                    candle.getScripCode(), type.name(), candle.getExchangeType() != null ? candle.getExchangeType() : "null", candle.getCompanyName() != null ? candle.getCompanyName() : "null", candle.hasOI(), candle.getOpenInterest() != null ? candle.getOpenInterest() : "null", equity != null ? equity.getScripCode() : "null", future != null ? future.getScripCode() : "null", optionsByScripCode.size(), System.currentTimeMillis());
                 fw.write(json);
                 fw.close();
             } catch (Exception e) {}

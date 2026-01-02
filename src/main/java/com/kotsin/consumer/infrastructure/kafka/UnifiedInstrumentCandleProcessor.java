@@ -619,6 +619,15 @@ public class UnifiedInstrumentCandleProcessor {
             tick.getExchangeType(), 
             tick.getCompanyName()
         );
+        // #region agent log
+        try {
+            java.io.FileWriter fw = new java.io.FileWriter("logs/debug.log", true);
+            String json = String.format("{\"sessionId\":\"debug-session\",\"runId\":\"run1\",\"hypothesisId\":\"TYPE-DETECT\",\"location\":\"UnifiedInstrumentCandleProcessor.java:621\",\"message\":\"Instrument type detection\",\"data\":{\"scripCode\":\"%s\",\"exchange\":\"%s\",\"exchangeType\":\"%s\",\"companyName\":\"%s\",\"detectedType\":\"%s\",\"hasOI\":%s},\"timestamp\":%d}\n",
+                tick.getScripCode(), tick.getExchange() != null ? tick.getExchange() : "null", tick.getExchangeType() != null ? tick.getExchangeType() : "null", tick.getCompanyName() != null ? tick.getCompanyName() : "null", type != null ? type.name() : "null", oi != null, System.currentTimeMillis());
+            fw.write(json);
+            fw.close();
+        } catch (Exception e) {}
+        // #endregion
 
         // Build base candle
         InstrumentCandle.InstrumentCandleBuilder builder = InstrumentCandle.builder()
