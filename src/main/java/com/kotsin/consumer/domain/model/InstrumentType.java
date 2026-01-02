@@ -62,12 +62,11 @@ public enum InstrumentType {
 
         String upperName = companyName.toUpperCase();
 
-        // Check for index instruments first
-        if (isIndex(upperName)) {
-            return INDEX;
-        }
-
-        // Derivatives (ExchType = D)
+        // CRITICAL FIX: Check derivatives FIRST before index detection!
+        // Otherwise "NIFTY 27 JAN 2026 CE 26150.00" would be detected as INDEX
+        // because isIndex() checks if name contains "NIFTY"
+        
+        // Derivatives (ExchType = D) - check FIRST
         if ("D".equalsIgnoreCase(exchType)) {
             if (upperName.contains(" CE ") || upperName.endsWith("CE") || 
                 upperName.contains("-CE-") || upperName.contains("CE ")) {
@@ -79,6 +78,11 @@ public enum InstrumentType {
             }
             // Default derivative is future
             return FUTURE;
+        }
+
+        // Now check for index instruments (ExchType = C)
+        if (isIndex(upperName)) {
+            return INDEX;
         }
 
         // Cash segment (ExchType = C)

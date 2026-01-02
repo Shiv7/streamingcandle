@@ -449,12 +449,18 @@ public class FamilyCandleProcessor {
             validateOHLC(equity, "EQUITY", familyId);
             builder.equity(equity);
             builder.symbol(extractSymbolRoot(equity.getCompanyName()));
-        } else if (future != null) {
-            // For commodities: use future as the primary instrument
+        } else if (future != null && isCommodity) {
+            // ONLY for commodities (MCX): use future as the primary instrument
             // Set as "equity" slot for downstream compatibility (MTISProcessor expects equity)
             builder.equity(future);  // Commodity future acts as primary
             builder.symbol(extractSymbolRoot(future.getCompanyName()));
             log.debug("Commodity family {} using future as primary: {}", familyId, future.getCompanyName());
+        } else if (future != null) {
+            // NSE stock with only future (no equity) - set future in equity slot for now
+            // but mark as incomplete so downstream knows equity is missing
+            builder.equity(future);  // Use future as fallback, NOT ideal
+            builder.symbol(extractSymbolRoot(future.getCompanyName()));
+            log.warn("Family {} has future but NO equity - using future as fallback (incomplete family)", familyId);
         }
 
         // Set future candle (already retrieved above)
@@ -462,9 +468,12 @@ public class FamilyCandleProcessor {
             // Only validate future separately if we have both equity and future
             validateOHLC(future, "FUTURE", familyId);
             builder.future(future);
-        } else if (future != null && equity == null) {
+        } else if (future != null && equity == null && isCommodity) {
             // Commodity case: future is already set as equity, don't duplicate
             builder.future(null);  // Already used as primary
+        } else if (future != null && equity == null) {
+            // NSE case: future is fallback, also set it in future field
+            builder.future(future);
         }
         builder.hasFuture(future != null);
 

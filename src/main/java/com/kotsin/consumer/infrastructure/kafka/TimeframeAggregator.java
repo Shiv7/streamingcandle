@@ -329,10 +329,42 @@ public class TimeframeAggregator {
             }
         }
         
-        // ========== MERGE OPTIONS (use latest with OI aggregation) ==========
+        // ========== MERGE OPTIONS (dedupe by scripCode, merge OHLCV) ==========
         if (incoming.getOptions() != null && !incoming.getOptions().isEmpty()) {
-            aggregate.setOptions(incoming.getOptions());  // Options are point-in-time, use latest
+            if (aggregate.getOptions() == null) {
+                aggregate.setOptions(new ArrayList<>(incoming.getOptions()));
+            } else {
+                // Merge options by scripCode
+                Map<String, com.kotsin.consumer.domain.model.OptionCandle> optionMap = new HashMap<>();
+                for (com.kotsin.consumer.domain.model.OptionCandle opt : aggregate.getOptions()) {
+                    if (opt.getScripCode() != null) {
+                        optionMap.put(opt.getScripCode(), opt);
+                    }
+                }
+                for (com.kotsin.consumer.domain.model.OptionCandle incomingOpt : incoming.getOptions()) {
+                    if (incomingOpt.getScripCode() == null) continue;
+                    com.kotsin.consumer.domain.model.OptionCandle existing = optionMap.get(incomingOpt.getScripCode());
+                    if (existing == null) {
+                        optionMap.put(incomingOpt.getScripCode(), incomingOpt);
+                    } else {
+                        // Merge OHLCV: Open=first, High=max, Low=min, Close=last, Volume=sum
+                        existing.setHigh(Math.max(existing.getHigh(), incomingOpt.getHigh()));
+                        existing.setLow(Math.min(existing.getLow(), incomingOpt.getLow()));
+                        existing.setClose(incomingOpt.getClose());
+                        existing.setVolume(existing.getVolume() + incomingOpt.getVolume());
+                        // OI uses latest
+                        existing.setOpenInterest(incomingOpt.getOpenInterest());
+                        existing.setOiChange(existing.getOiChange() + incomingOpt.getOiChange());
+                    }
+                }
+                aggregate.setOptions(new ArrayList<>(optionMap.values()));
+            }
         }
+        
+        // CRITICAL FIX: Recalculate hasOptions and optionCount after merge
+        List<?> opts = aggregate.getOptions();
+        aggregate.setHasOptions(opts != null && !opts.isEmpty());
+        aggregate.setOptionCount(opts != null ? opts.size() : 0);
 
         // ========== AGGREGATE OI CHANGES ==========
         if (incoming.getTotalCallOIChange() != null) {
