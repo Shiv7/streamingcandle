@@ -236,7 +236,7 @@ class OrderbookAggregateKyleLambdaTest {
         double bid = midPrice - spread / 2.0;
         double ask = midPrice + spread / 2.0;
         
-        snapshot.setToken("12345");  // Token is String
+        snapshot.setToken(12345);  // Token is int
         snapshot.setCompanyName("TEST");
         snapshot.setExchange("N");  // Correct field name
         snapshot.setExchangeType("D");  // Correct field name
