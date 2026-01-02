@@ -490,8 +490,8 @@ public class UnifiedInstrumentCandleProcessor {
                         // No cleanup needed
                     }
                 },
-                Named.as("oi-lookup-transformer"), // Name the transformer
-                "oi-latest-store"  // State store name for OI lookup
+                Named.as("oi-lookup-transformer") // Name the transformer
+                // Note: GlobalKTable state store is automatically available, don't pass it explicitly
             );
         
         // ========== 9. EMIT ON WINDOW CLOSE ==========
