@@ -245,6 +245,18 @@ public class FamilyCandleProcessor {
             })
             .map((windowedKey, familyCandle) -> KeyValue.pair(windowedKey.key(), familyCandle))
             .peek((key, familyCandle) -> {
+                // #region agent log
+                try {
+                    if (familyCandle != null) {
+                        String familyId = familyCandle.getFamilyId();
+                        java.io.FileWriter fw = new java.io.FileWriter("logs/debug.log", true);
+                        String json = String.format("{\"sessionId\":\"debug-session\",\"runId\":\"run1\",\"hypothesisId\":\"KAFKA-EMIT\",\"location\":\"FamilyCandleProcessor.java:247\",\"message\":\"FamilyCandle before Kafka emit\",\"data\":{\"familyId\":\"%s\",\"futureNotNull\":%s,\"futureScripCode\":\"%s\",\"isCommodity\":%s},\"timestamp\":%d}\n",
+                            familyId, familyCandle.getFuture() != null, familyCandle.getFuture() != null ? familyCandle.getFuture().getScripCode() : "null", familyCandle.isCommodity(), System.currentTimeMillis());
+                        fw.write(json);
+                        fw.close();
+                    }
+                } catch (Exception e) {}
+                // #endregion
                 if (log.isDebugEnabled() && familyCandle != null) {
                     String familyId = familyCandle.getFamilyId();
                     InstrumentCandle equity = familyCandle.getEquity();
@@ -635,9 +647,21 @@ public class FamilyCandleProcessor {
                 familyQuality);
         }
 
-        return builder
+        FamilyCandle familyCandle = builder
             .quality(familyQuality)
             .build();
+        
+        // #region agent log
+        try {
+            java.io.FileWriter fw = new java.io.FileWriter("logs/debug.log", true);
+            String json = String.format("{\"sessionId\":\"debug-session\",\"runId\":\"run1\",\"hypothesisId\":\"BUILD-FINAL\",\"location\":\"FamilyCandleProcessor.java:640\",\"message\":\"FamilyCandle built - verifying future field\",\"data\":{\"familyId\":\"%s\",\"futureNotNull\":%s,\"futureScripCode\":\"%s\",\"isCommodity\":%s},\"timestamp\":%d}\n",
+                familyId, familyCandle.getFuture() != null, familyCandle.getFuture() != null ? familyCandle.getFuture().getScripCode() : "null", familyCandle.isCommodity(), System.currentTimeMillis());
+            fw.write(json);
+            fw.close();
+        } catch (Exception e) {}
+        // #endregion
+        
+        return familyCandle;
     }
 
     /**
