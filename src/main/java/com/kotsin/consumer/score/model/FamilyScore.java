@@ -162,17 +162,21 @@ public class FamilyScore {
 
     /**
      * Get MTIS label from score value
+     *
+     * FIX: Tightened thresholds for better signal granularity
+     * - Neutral zone reduced from ±20 to ±10 (was 40 points, now 20 points)
+     * - Lower thresholds allow catching more alpha opportunities
      */
     public static String getLabelFromScore(double mtis) {
-        if (mtis >= 80) return "EXTREME_BULLISH";
-        if (mtis >= 60) return "STRONG_BULLISH";
-        if (mtis >= 40) return "BULLISH";
-        if (mtis >= 20) return "MILD_BULLISH";
-        if (mtis >= -20) return "NEUTRAL";
-        if (mtis >= -40) return "MILD_BEARISH";
-        if (mtis >= -60) return "BEARISH";
-        if (mtis >= -80) return "STRONG_BEARISH";
-        return "EXTREME_BEARISH";
+        if (mtis >= 70) return "EXTREME_BULLISH";   // 70+ (was 80+)
+        if (mtis >= 50) return "STRONG_BULLISH";    // 50-69 (was 60-79)
+        if (mtis >= 30) return "BULLISH";           // 30-49 (was 40-59)
+        if (mtis >= 10) return "MILD_BULLISH";      // 10-29 (was 20-39)
+        if (mtis >= -10) return "NEUTRAL";          // -10 to +10 (was -20 to +20)
+        if (mtis >= -30) return "MILD_BEARISH";     // -30 to -11 (was -40 to -21)
+        if (mtis >= -50) return "BEARISH";          // -50 to -31 (was -60 to -41)
+        if (mtis >= -70) return "STRONG_BEARISH";   // -70 to -51 (was -80 to -61)
+        return "EXTREME_BEARISH";                   // < -70 (was < -80)
     }
 
     /**
@@ -186,18 +190,24 @@ public class FamilyScore {
 
     /**
      * Check if score is actionable
+     *
+     * FIX: Lowered threshold from 60 to 25 for more signals
+     * FIX: Allow HIGH warnings - exhaustion/divergence can BE the trading signal
      */
     public boolean isActionable() {
-        // Not actionable if has critical warnings
+        // Only reject if MULTIPLE high severity warnings (not just one)
         if (warnings != null) {
-            for (Warning w : warnings) {
-                if ("HIGH".equals(w.getSeverity())) {
-                    return false;
-                }
+            long highWarningCount = warnings.stream()
+                    .filter(w -> "HIGH".equals(w.getSeverity()))
+                    .count();
+            // Reject only if 2+ HIGH warnings (too many red flags)
+            if (highWarningCount >= 2) {
+                return false;
             }
         }
-        // Actionable if strong enough signal (MTIS > 60 or < -60 per spec)
-        return Math.abs(mtis) >= 60;
+        // Actionable if moderate signal strength (MTIS >= 25 or <= -25)
+        // Lowered from 60 to capture more alpha
+        return Math.abs(mtis) >= 25;
     }
 
     /**

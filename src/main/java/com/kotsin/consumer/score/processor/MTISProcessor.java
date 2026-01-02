@@ -57,6 +57,9 @@ public class MTISProcessor {
     @Autowired
     private MultiTimeframeLevelCalculator levelCalculator;
 
+    @Autowired(required = false)  // Optional - may not be configured
+    private com.kotsin.consumer.curated.service.FuturesOptionsService futuresOptionsService;
+
     @Autowired
     private KafkaTemplate<String, FamilyScore> familyScoreProducer;
 
@@ -162,8 +165,34 @@ public class MTISProcessor {
         SecurityRegime securityRegime = securityRegimeCache.get(familyId);
         IPUOutput ipu = ipuCache.get(familyId);
         FUDKIIOutput fudkii = fudkiiCache.get(familyId);
-        FuturesOptionsAlignment foAlignment = foAlignmentCache.get(familyId);
         double vcpScore = getVCPScore(familyId);
+
+        // 3B. Calculate F&O alignment (inline - not cached from Kafka)
+        // FIX: Was always null because no Kafka listener populated it
+        // Now calculated on-demand with timeout protection
+        FuturesOptionsAlignment foAlignment = null;
+        if (futuresOptionsService != null && familyCandle.getSpotPrice() > 0) {
+            try {
+                CompletableFuture<FuturesOptionsAlignment> foFuture = CompletableFuture.supplyAsync(
+                        () -> futuresOptionsService.calculateAlignment(familyId, familyCandle.getSpotPrice()),
+                        asyncProcessorPool
+                );
+                // Wait max 2 seconds for F&O alignment (non-blocking)
+                foAlignment = foFuture.get(2, TimeUnit.SECONDS);
+
+                // Cache result for subsequent use
+                if (foAlignment != null && foAlignment.isUsable()) {
+                    foAlignmentCache.put(familyId, foAlignment);
+                    log.debug("F&O alignment calculated for {}: bias={}, score={}",
+                            familyId, foAlignment.getBias(), foAlignment.getAlignmentScore());
+                }
+            } catch (Exception e) {
+                log.debug("Could not calculate F&O alignment for {} (timeout or error): {}",
+                        familyId, e.getMessage());
+                // Try cache as fallback
+                foAlignment = foAlignmentCache.get(familyId);
+            }
+        }
 
         // 4. Get levels ASYNC (this is the blocking HTTP call - make it async with timeout)
         MultiTimeframeLevels levels = null;

@@ -543,6 +543,11 @@ public class MTISCalculator {
 
     /**
      * Category 11: MTIS Momentum (±5)
+     *
+     * FIX: Reduced penalties for mean reversion
+     * - Old: -3 to -5 penalty was killing reversal signals
+     * - New: -1 to -2 penalty, allowing reversal opportunities
+     * - Trend continuation still rewarded (+3 to +5)
      */
     private double calculateMTISMomentum(FamilyIntelligenceState state) {
         if (state == null) {
@@ -553,13 +558,18 @@ public class MTISCalculator {
         double previousMtis = state.getPreviousMtis();
         double change = currentMtis - previousMtis;
 
-        // Same direction and accelerating
-        if (currentMtis > 0 && change > 5) return 5;
-        if (currentMtis < 0 && change < -5) return -5;
+        // Strong trend continuation (accelerating) - reward
+        if (currentMtis > 0 && change > 5) return 5;    // Bullish accelerating
+        if (currentMtis < 0 && change < -5) return -5;  // Bearish accelerating
 
-        // Decelerating
-        if (currentMtis > 0 && change < -3) return -3;
-        if (currentMtis < 0 && change > 3) return 3;
+        // Moderate trend continuation - small reward
+        if (currentMtis > 0 && change > 2) return 3;    // Bullish continuing
+        if (currentMtis < 0 && change < -2) return -3;  // Bearish continuing
+
+        // Mean reversion / deceleration - REDUCED PENALTY (was -3, now -1)
+        // Reversals can be profitable signals, don't kill them
+        if (currentMtis > 0 && change < -3) return -1;  // Bullish weakening (was -3)
+        if (currentMtis < 0 && change > 3) return 1;    // Bearish weakening (was +3)
 
         return 0;
     }
