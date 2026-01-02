@@ -186,6 +186,23 @@ public class MultiTimeframeLevelCalculator {
             LocalDate endDate = LocalDate.now(IST).plusDays(1); // API needs +1 day to include last day
             LocalDate startDate = endDate.minusDays(51); // 50 days back from today
 
+            // FIX: Detect MCX commodities based on scripCode range
+            // MCX commodity tokens are typically in the 400000-550000 range
+            String exch = defaultExch;
+            String exchType = defaultExchType;
+            try {
+                int token = Integer.parseInt(scripCode);
+                if (token >= 400000 && token < 550000) {
+                    // MCX commodity - use M:D
+                    exch = "m";
+                    exchType = "d";
+                    log.debug("Detected MCX commodity for scripCode {}, using exch={} exchType={}", 
+                            scripCode, exch, exchType);
+                }
+            } catch (NumberFormatException e) {
+                // Not a numeric scripCode, use defaults
+            }
+
             // Build URL exactly like TradeExecutionModule
             HttpUrl url = HttpUrl.parse(historicalApiBaseUrl)
                     .newBuilder()
@@ -193,8 +210,8 @@ public class MultiTimeframeLevelCalculator {
                     .addQueryParameter("scrip_code", scripCode)
                     .addQueryParameter("start_date", startDate.toString())
                     .addQueryParameter("end_date", endDate.toString())
-                    .addQueryParameter("exch", defaultExch.toLowerCase())
-                    .addQueryParameter("exch_type", defaultExchType.toLowerCase())
+                    .addQueryParameter("exch", exch.toLowerCase())
+                    .addQueryParameter("exch_type", exchType.toLowerCase())
                     .addQueryParameter("interval", "1m")
                     .build();
 
