@@ -1185,7 +1185,7 @@ public class UnifiedInstrumentCandleProcessor {
                 candle.hasOrderbook(),
                 candle.hasOI(),
                 candle.getVpin(),
-                candle.getVpinBucketCount() != null ? candle.getVpinBucketCount().intValue() : 0,
+                candle.getVpinBucketCount(),
                 isReplay,
                 candle.getQuality() != null ? candle.getQuality().name() : "UNKNOWN"
             );
