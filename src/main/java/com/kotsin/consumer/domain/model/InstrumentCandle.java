@@ -66,6 +66,14 @@ public class InstrumentCandle {
     private double vwap;
     private int tickCount;
 
+    // ==================== TRADE CLASSIFICATION (Phase 1.2) ====================
+    private Long aggressiveBuyVolume;        // Buyer-initiated trades
+    private Long aggressiveSellVolume;       // Seller-initiated trades
+    private Long midpointVolume;             // Mid-market trades
+    private Double classificationReliability; // % of trades with valid BBO (0-1)
+    private Double buyPressure;              // Aggressive buy / total volume
+    private Double sellPressure;             // Aggressive sell / total volume
+
     // ==================== VOLUME PROFILE ====================
     private Map<Double, Long> volumeAtPrice;
     private Double poc;              // Point of Control
@@ -101,6 +109,26 @@ public class InstrumentCandle {
     private Boolean icebergBidDetected;
     private Boolean icebergAskDetected;
 
+    // ==================== ORDERBOOK DEPTH FRAGMENTATION (Phase 3) ====================
+    private Integer totalBidOrders;
+    private Integer totalAskOrders;
+    private Integer ordersAtBestBid;
+    private Integer ordersAtBestAsk;
+    private Double avgBidOrderSize;
+    private Double avgAskOrderSize;
+    private Double depthConcentration;
+    private Integer maxDepthLevels;
+    private Boolean icebergAtBestBid;
+    private Boolean icebergAtBestAsk;
+
+    // ==================== ORDERBOOK UPDATE DYNAMICS (Phase 7) ====================
+    private Double spreadVolatility;
+    private Double maxSpread;
+    private Double minSpread;
+    private Integer orderbookUpdateCount;
+    private Double spreadChangeRate;
+    private Double orderbookMomentum;
+
     // ==================== OI METRICS (Optional - only for derivatives) ====================
     private boolean oiPresent;
     private Long openInterest;
@@ -111,6 +139,13 @@ public class InstrumentCandle {
     private Long oiChange;
     private Double oiChangePercent;
 
+    // ==================== OI CORRELATION (Phase 5) ====================
+    private Double priceAtOIUpdate;          // Price when OI last updated
+    private Long volumeAtOIUpdate;           // Volume when OI last updated
+    private Double spreadAtOIUpdate;         // Spread when OI last updated
+    private Long oiUpdateLatency;            // Time since last OI update (ms)
+    private Integer oiUpdateCount;           // Number of OI updates in window
+
     // ==================== OPTIONS SPECIFIC (only for OPTION_CE/PE) ====================
     private Double strikePrice;      // Strike price for options
     private String optionType;       // "CE" or "PE"
@@ -119,6 +154,32 @@ public class InstrumentCandle {
     // ==================== DATA QUALITY ====================
     private DataQuality quality;
     private String qualityReason;
+
+    // ==================== TEMPORAL METRICS (Phase 2) ====================
+    private Long firstTickTimestamp;        // First tick in window (Kafka timestamp)
+    private Long lastTickTimestamp;         // Last tick in window (Kafka timestamp)
+    private Long minTickGap;                // Min gap between ticks (ms)
+    private Long maxTickGap;                // Max gap between ticks (ms)
+    private Double avgTickGap;              // Avg gap between ticks (ms)
+    private Integer ticksPerSecond;         // Event frequency
+    private Double tickAcceleration;        // Change in tick frequency
+
+    // ==================== TRADE SIZE DISTRIBUTION (Phase 4) ====================
+    private Long maxTradeSize;              // Largest trade in window
+    private Long minTradeSize;              // Smallest trade in window
+    private Double avgTradeSize;            // Average trade size
+    private Double medianTradeSize;         // Median trade size
+    private Integer largeTradeCount;        // Trades > 10x average
+    private Double priceImpactPerUnit;      // Price change per unit volume (per million)
+
+    // ==================== CROSS-STREAM LATENCY (Phase 6) ====================
+    private Long tickToOrderbookLatency;     // ms between tick and OB update
+    private Long tickToOILatency;            // ms between tick and OI update
+    private Boolean tickStale;               // Tick data > 5 seconds old
+    private Boolean orderbookStale;          // OB data > 5 seconds old
+    private Boolean oiStale;                 // OI data > 5 minutes old
+    private Long maxDataAge;                 // Age of oldest data point
+    private String stalenessReason;          // Why data is stale (if applicable)
 
     // ==================== LATENCY TRACKING ====================
     private long processingLatencyMs;

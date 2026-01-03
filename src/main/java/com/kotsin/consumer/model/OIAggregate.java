@@ -53,6 +53,12 @@ public class OIAggregate {
     // ========== Processing State ==========
     private int updateCount = 0;
 
+    // ==================== PHASE 5: OI CORRELATION TRACKING ====================
+    private Double priceAtUpdate;        // Price when OI last updated (from tick)
+    private Long volumeAtUpdate;         // Volume at that moment
+    private Double spreadAtUpdate;       // Spread from orderbook
+    private long lastUpdateTimestamp = 0; // Timestamp of last OI update
+
     /**
      * Creates a new empty OI aggregate
      */
@@ -90,6 +96,15 @@ public class OIAggregate {
 
         if (oiLow == null || currentOI < oiLow) {
             oiLow = currentOI;
+        }
+
+        // ========== PHASE 5: Track OI update timestamp ==========
+        // Store the timestamp when OI was actually updated (from OI stream)
+        if (oi.getReceivedTimestamp() != null && oi.getReceivedTimestamp() > 0) {
+            lastUpdateTimestamp = oi.getReceivedTimestamp();
+        } else {
+            // Fallback to current time if receivedTimestamp not available
+            lastUpdateTimestamp = System.currentTimeMillis();
         }
 
         // REMOVED: Put/Call tracking - meaningless at instrument level
@@ -143,6 +158,30 @@ public class OIAggregate {
         this.scripCode = other.scripCode;
 
         this.updateCount += other.updateCount;
+    }
+
+    /**
+     * PHASE 5: Update market context at OI join time
+     *
+     * Call this when joining OI with tick/orderbook to capture market state at join time.
+     * This allows correlation analysis: "What was the price/volume when we used this OI value?"
+     * 
+     * Note: lastUpdateTimestamp is set separately in updateWithOI() from the OI stream's receivedTimestamp.
+     * This tracks when OI was actually updated, not when we joined it.
+     */
+    public void updateMarketContext(double price, Long volume, Double spread) {
+        this.priceAtUpdate = price;
+        this.volumeAtUpdate = volume;
+        this.spreadAtUpdate = spread;
+        // Note: lastUpdateTimestamp is NOT updated here - it tracks OI stream update time, not join time
+    }
+
+    /**
+     * PHASE 5: Get OI update latency (time since last update)
+     */
+    public long getOIUpdateLatency() {
+        if (lastUpdateTimestamp == 0) return 0;
+        return System.currentTimeMillis() - lastUpdateTimestamp;
     }
 
     /**

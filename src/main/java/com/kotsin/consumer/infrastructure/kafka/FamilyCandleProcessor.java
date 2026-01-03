@@ -559,6 +559,15 @@ public class FamilyCandleProcessor {
                 }
             }
             builder.symbol(symbol);
+            // #region agent log
+            try {
+                java.io.FileWriter fw = new java.io.FileWriter("logs/debug.log", true);
+                String json = String.format("{\"sessionId\":\"debug-session\",\"runId\":\"run1\",\"hypothesisId\":\"SYMBOL-SET\",\"location\":\"FamilyCandleProcessor.java:561\",\"message\":\"Symbol set for commodity family\",\"data\":{\"familyId\":\"%s\",\"symbol\":\"%s\",\"companyName\":\"%s\",\"fromFamilyData\":%s},\"timestamp\":%d}\n",
+                    familyId, symbol, future.getCompanyName() != null ? future.getCompanyName() : "null", symbol != null && !symbol.equals(familyId), System.currentTimeMillis());
+                fw.write(json);
+                fw.close();
+            } catch (Exception e) {}
+            // #endregion
             log.debug("Commodity family {} using future as primary: {}", familyId, future.getCompanyName());
         } else if (future != null) {
             // NSE stock with only future (no equity) - set future in equity slot for now

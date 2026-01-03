@@ -115,6 +115,37 @@ public class OrderbookAggregate {
     private static final int MIN_OBSERVATIONS = 20;
     @JsonIgnore private OrderBookSnapshot previousOrderbook;
 
+    // ==================== PHASE 3: DEPTH FRAGMENTATION TRACKING ====================
+    // Per-level tracking (5 levels deep)
+    private Map<Integer, DepthLevelInfo> bidLevelInfo = new HashMap<>();
+    private Map<Integer, DepthLevelInfo> askLevelInfo = new HashMap<>();
+
+    // Aggregated metrics
+    private int totalBidOrders = 0;
+    private int totalAskOrders = 0;
+    private int ordersAtBestBid = 0;
+    private int ordersAtBestAsk = 0;
+    private double avgBidOrderSize = 0.0;
+    private double avgAskOrderSize = 0.0;
+
+    // Concentration metrics
+    private double depthConcentration = 0.0;
+    private int maxDepthLevels = 0;
+    private double depthConcentrationSum = 0.0;
+    private long depthConcentrationCount = 0L;
+
+    // PHASE 7: Orderbook Update Dynamics
+    private List<Double> spreadHistory;
+    private double spreadVolatility = 0.0;
+    private double maxSpread = 0.0;
+    private double minSpread = Double.MAX_VALUE;
+    private int orderbookUpdateCount = 0;
+    private double spreadChangeRate = 0.0;
+    private double orderbookMomentum = 0.0;
+    private long firstUpdateTimestamp = 0;
+    private long lastUpdateTimestamp = 0;
+    private double previousTotalDepth = 0.0;
+
     // ========== Configurable Parameters ==========
     @JsonIgnore private double instrumentTickSize = 0.0; // per-instance tick size
     @JsonIgnore private Double instrumentSpoofSizeRatio = null;
@@ -212,7 +243,19 @@ public class OrderbookAggregate {
         }
 
         orderbook.parseDetails();
-        
+
+        // ========== PHASE 3 & 7: INITIALIZATION ==========
+        if (updateCount == 0) {
+            firstUpdateTimestamp = orderbook.getReceivedTimestamp();
+            spreadHistory = new ArrayList<>(50);
+        }
+
+        lastUpdateTimestamp = orderbook.getReceivedTimestamp();
+        orderbookUpdateCount++;
+
+        // ========== PHASE 3: EXTRACT DEPTH FRAGMENTATION ==========
+        extractDepthFragmentation(orderbook);
+
         // ========== Calculate Basic Metrics ==========
         double bestBid = orderbook.getBestBid();
         double bestAsk = orderbook.getBestAsk();
@@ -222,7 +265,17 @@ public class OrderbookAggregate {
             bidAskSpread = bestAsk - bestBid;
             spreadSum += bidAskSpread;
             spreadCount++;
-            
+
+            // ========== PHASE 7: TRACK SPREAD DYNAMICS ==========
+            spreadHistory.add(bidAskSpread);
+            if (spreadHistory.size() > 50) {
+                spreadHistory.remove(0);
+            }
+            maxSpread = Math.max(maxSpread, bidAskSpread);
+            if (bidAskSpread > 0) {
+                minSpread = Math.min(minSpread, bidAskSpread);
+            }
+
             // Calculate microprice (volume-weighted)
             int bidQty = (orderbook.getAllBids() != null && !orderbook.getAllBids().isEmpty()) ? 
                 orderbook.getAllBids().get(0).getQuantity() : 0;
@@ -237,13 +290,24 @@ public class OrderbookAggregate {
         // ========== Calculate Depth Imbalance ==========
         int totalBidQty = (orderbook.getTotalBidQty() != null) ? orderbook.getTotalBidQty().intValue() : 0;
         int totalAskQty = (orderbook.getTotalOffQty() != null) ? orderbook.getTotalOffQty().intValue() : 0;
-        
+
         if (totalBidQty + totalAskQty > 0) {
             depthImbalance = (totalBidQty - totalAskQty) / (double)(totalBidQty + totalAskQty);
             totalBidDepthSum += totalBidQty;
             totalBidDepthCount++;
             totalAskDepthSum += totalAskQty;
             totalAskDepthCount++;
+
+            // ========== PHASE 7: CALCULATE ORDERBOOK MOMENTUM ==========
+            double totalDepth = totalBidQty + totalAskQty;
+            if (previousTotalDepth > 0) {
+                double depthChange = totalDepth - previousTotalDepth;
+                long timeDelta = lastUpdateTimestamp - firstUpdateTimestamp;
+                if (timeDelta > 0) {
+                    orderbookMomentum = depthChange / timeDelta * 1000;  // Change per second
+                }
+            }
+            previousTotalDepth = totalDepth;
         }
 
         // ========== Calculate OFI (Full Depth) ==========
@@ -753,6 +817,232 @@ public class OrderbookAggregate {
     }
 
     // BUG-022 FIX: Removed VPINBucket class (VPIN is in EnrichedCandlestick, not here)
+
+    // ==================== PHASE 3 & 7: NEW METHODS ====================
+
+    /**
+     * PHASE 3: Extract depth fragmentation metrics from orderbook
+     */
+    private void extractDepthFragmentation(OrderBookSnapshot orderbook) {
+        List<OrderBookSnapshot.OrderBookLevel> bids = orderbook.getAllBids();
+        List<OrderBookSnapshot.OrderBookLevel> asks = orderbook.getAllAsks();
+
+        // Reset per-update counters
+        totalBidOrders = 0;
+        totalAskOrders = 0;
+
+        // ========== PROCESS BID LEVELS ==========
+        if (bids != null && !bids.isEmpty()) {
+            for (int i = 0; i < Math.min(5, bids.size()); i++) {
+                OrderBookSnapshot.OrderBookLevel level = bids.get(i);
+
+                int numOrders = level.getNumberOfOrders();
+                long quantity = level.getQuantity();
+                double price = level.getPrice();
+
+                // Track level info
+                DepthLevelInfo info = bidLevelInfo.getOrDefault(i,
+                    new DepthLevelInfo(i, price, 0, 0, 0.0, 0));
+
+                info.price = price;
+                info.totalQuantity = quantity;
+                info.numberOfOrders = numOrders;
+                info.avgOrderSize = numOrders > 0 ? (double) quantity / numOrders : 0.0;
+                info.updateCount++;
+
+                bidLevelInfo.put(i, info);
+                totalBidOrders += numOrders;
+
+                // Track best bid separately
+                if (i == 0) {
+                    ordersAtBestBid = numOrders;
+                }
+            }
+
+            maxDepthLevels = Math.max(maxDepthLevels, Math.min(5, bids.size()));
+
+            // Calculate average bid order size
+            long totalBidQty = bids.stream()
+                .limit(5)
+                .mapToLong(OrderBookSnapshot.OrderBookLevel::getQuantity)
+                .sum();
+            avgBidOrderSize = totalBidOrders > 0 ? (double) totalBidQty / totalBidOrders : 0.0;
+        }
+
+        // ========== PROCESS ASK LEVELS ==========
+        if (asks != null && !asks.isEmpty()) {
+            for (int i = 0; i < Math.min(5, asks.size()); i++) {
+                OrderBookSnapshot.OrderBookLevel level = asks.get(i);
+
+                int numOrders = level.getNumberOfOrders();
+                long quantity = level.getQuantity();
+                double price = level.getPrice();
+
+                DepthLevelInfo info = askLevelInfo.getOrDefault(i,
+                    new DepthLevelInfo(i, price, 0, 0, 0.0, 0));
+
+                info.price = price;
+                info.totalQuantity = quantity;
+                info.numberOfOrders = numOrders;
+                info.avgOrderSize = numOrders > 0 ? (double) quantity / numOrders : 0.0;
+                info.updateCount++;
+
+                askLevelInfo.put(i, info);
+                totalAskOrders += numOrders;
+
+                if (i == 0) {
+                    ordersAtBestAsk = numOrders;
+                }
+            }
+
+            maxDepthLevels = Math.max(maxDepthLevels, Math.min(5, asks.size()));
+
+            // Calculate average ask order size
+            long totalAskQty = asks.stream()
+                .limit(5)
+                .mapToLong(OrderBookSnapshot.OrderBookLevel::getQuantity)
+                .sum();
+            avgAskOrderSize = totalAskOrders > 0 ? (double) totalAskQty / totalAskOrders : 0.0;
+        }
+
+        // ========== CALCULATE DEPTH CONCENTRATION ==========
+        calculateDepthConcentration(bids, asks);
+    }
+
+    /**
+     * PHASE 3: Calculate depth concentration (% of volume in top 3 levels)
+     */
+    private void calculateDepthConcentration(
+        List<OrderBookSnapshot.OrderBookLevel> bids,
+        List<OrderBookSnapshot.OrderBookLevel> asks
+    ) {
+        long top3Volume = 0;
+        long totalVolume = 0;
+
+        // Sum top 3 levels
+        if (bids != null) {
+            for (int i = 0; i < Math.min(3, bids.size()); i++) {
+                top3Volume += bids.get(i).getQuantity();
+            }
+            totalVolume += bids.stream().mapToLong(OrderBookSnapshot.OrderBookLevel::getQuantity).sum();
+        }
+
+        if (asks != null) {
+            for (int i = 0; i < Math.min(3, asks.size()); i++) {
+                top3Volume += asks.get(i).getQuantity();
+            }
+            totalVolume += asks.stream().mapToLong(OrderBookSnapshot.OrderBookLevel::getQuantity).sum();
+        }
+
+        double concentration = totalVolume > 0 ? (double) top3Volume / totalVolume : 0.0;
+        depthConcentrationSum += concentration;
+        depthConcentrationCount++;
+    }
+
+    /**
+     * PHASE 3: Get average depth concentration
+     */
+    public double getDepthConcentration() {
+        return depthConcentrationCount > 0 ? depthConcentrationSum / depthConcentrationCount : 0.0;
+    }
+
+    /**
+     * PHASE 3: Detect iceberg at best bid based on order fragmentation
+     */
+    public boolean detectIcebergAtBestBid() {
+        DepthLevelInfo bestBid = bidLevelInfo.get(0);
+        if (bestBid == null || bestBid.numberOfOrders == 0) return false;
+
+        // If 1 order with large size = potential iceberg
+        if (bestBid.numberOfOrders == 1 && bestBid.totalQuantity > 10000) {
+            return true;
+        }
+
+        // If avg order size >> overall average = potential iceberg
+        if (avgBidOrderSize > 0 && bestBid.avgOrderSize > avgBidOrderSize * 5) {
+            return true;
+        }
+
+        return false;
+    }
+
+    /**
+     * PHASE 3: Detect iceberg at best ask
+     */
+    public boolean detectIcebergAtBestAsk() {
+        DepthLevelInfo bestAsk = askLevelInfo.get(0);
+        if (bestAsk == null || bestAsk.numberOfOrders == 0) return false;
+
+        if (bestAsk.numberOfOrders == 1 && bestAsk.totalQuantity > 10000) {
+            return true;
+        }
+
+        if (avgAskOrderSize > 0 && bestAsk.avgOrderSize > avgAskOrderSize * 5) {
+            return true;
+        }
+
+        return false;
+    }
+
+    /**
+     * PHASE 7: Calculate spread volatility (call at end of window)
+     */
+    public void calculateSpreadVolatility() {
+        if (spreadHistory == null || spreadHistory.size() < 2) return;
+
+        double mean = spreadHistory.stream()
+            .mapToDouble(Double::doubleValue)
+            .average()
+            .orElse(0.0);
+
+        double variance = spreadHistory.stream()
+            .mapToDouble(s -> Math.pow(s - mean, 2))
+            .average()
+            .orElse(0.0);
+
+        spreadVolatility = Math.sqrt(variance);
+
+        // Calculate spread change rate
+        if (firstUpdateTimestamp > 0 && lastUpdateTimestamp > firstUpdateTimestamp) {
+            long duration = lastUpdateTimestamp - firstUpdateTimestamp;
+            double spreadChange = maxSpread - (minSpread == Double.MAX_VALUE ? 0 : minSpread);
+            spreadChangeRate = spreadChange / duration * 1000;  // Per second
+        }
+    }
+
+    // ========== PHASE 3 & 7: GETTERS ==========
+
+    public int getTotalBidOrders() { return totalBidOrders; }
+    public int getTotalAskOrders() { return totalAskOrders; }
+    public int getOrdersAtBestBid() { return ordersAtBestBid; }
+    public int getOrdersAtBestAsk() { return ordersAtBestAsk; }
+    public double getAvgBidOrderSize() { return avgBidOrderSize; }
+    public double getAvgAskOrderSize() { return avgAskOrderSize; }
+    public int getMaxDepthLevels() { return maxDepthLevels; }
+    public Map<Integer, DepthLevelInfo> getBidLevelInfo() { return bidLevelInfo; }
+    public Map<Integer, DepthLevelInfo> getAskLevelInfo() { return askLevelInfo; }
+
+    public double getSpreadVolatility() { return spreadVolatility; }
+    public double getMaxSpread() { return maxSpread; }
+    public double getMinSpread() { return minSpread == Double.MAX_VALUE ? 0 : minSpread; }
+    public int getOrderbookUpdateCount() { return orderbookUpdateCount; }
+    public double getSpreadChangeRate() { return spreadChangeRate; }
+    public double getOrderbookMomentum() { return orderbookMomentum; }
+
+    /**
+     * PHASE 3: Depth information for a single level
+     */
+    @Data
+    @NoArgsConstructor
+    @AllArgsConstructor
+    public static class DepthLevelInfo {
+        public int level;
+        public double price;
+        public long totalQuantity;
+        public int numberOfOrders;
+        public double avgOrderSize;
+        public int updateCount;
+    }
 
     /**
      * Price impact observation for Kyle's Lambda
