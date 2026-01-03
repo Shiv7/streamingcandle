@@ -90,6 +90,17 @@ public class InstrumentCandle {
     private boolean trbTriggered;
     private boolean vrbTriggered;
 
+    // ==================== TICK-LEVEL BID/ASK IMBALANCE (P0 Fix) ====================
+    private Long sumTotalBidQty;          // Sum of TBidQ from all ticks in window
+    private Long sumTotalOffQty;          // Sum of TOffQ from all ticks in window
+    private Double tickBidAskImbalance;   // (TBidQ - TOffQ) / (TBidQ + TOffQ), range -1 to +1
+
+    // ==================== OVERNIGHT GAP ANALYSIS (P0 Fix) ====================
+    private Double previousClose;         // Previous day's close (from TickData.PClose)
+    private Double overnightGap;          // (open - previousClose) / previousClose * 100
+    private Boolean isGapUp;              // gap > 0.5%
+    private Boolean isGapDown;            // gap < -0.5%
+
     // ==================== VPIN (Adaptive) ====================
     private double vpin;
     private double vpinBucketSize;   // Adaptive based on daily volume
@@ -185,6 +196,28 @@ public class InstrumentCandle {
     private long processingLatencyMs;
     private long maxTickAgeMs;
     private long minTickAgeMs;
+
+    // ==================== P1: VWAP VALIDATION ====================
+    private Double exchangeVwap;              // From TickData.averageRate
+    private Double vwapDrift;                 // (calculated - exchange) / exchange * 100
+
+    // ==================== P1: OI VELOCITY ====================
+    private Double oiVelocity;                // OI change per minute
+    private Double oiAcceleration;            // Velocity change from previous window
+
+    // ==================== P2: ORDERBOOK DEPTH ANALYSIS ====================
+    private Double levelWeightedBidDepth;     // Bid depth weighted by 1/(level+1)
+    private Double levelWeightedAskDepth;     // Ask depth weighted by 1/(level+1)
+    private Double levelWeightedImbalance;    // (bid - ask) / (bid + ask)
+    private Double bidFragmentation;          // Total bid qty / total bid orders
+    private Double askFragmentation;          // Total ask qty / total ask orders
+    private Double institutionalBias;         // askFragmentation / bidFragmentation
+
+    // ==================== P2: TICK INTENSITY ZONES ====================
+    private Integer maxTicksInAnySecond;      // Peak tick rate (algo detection)
+    private Integer secondsWithTicks;         // Active seconds in window
+    private Double tickBurstRatio;            // maxTicksInAnySecond / avgTicksPerSecond
+    private Boolean algoActivityDetected;     // burstRatio > 3.0
 
     // ==================== VALIDATION ====================
 

@@ -58,7 +58,7 @@ public class OrderbookAggregate {
     // ========== Kyle's Lambda State ==========
     private static final int LAMBDA_WINDOW_SIZE = 100;  // Rolling window size
     private static final int LAMBDA_CALC_FREQUENCY = 20;  // Recalculate every N updates
-    private static final int LAMBDA_MIN_OBSERVATIONS = 10;  // BUG-FIX: Lowered from 30 - most windows don't get 30 updates
+    private static final int LAMBDA_MIN_OBSERVATIONS = 5;  // FIX: Lowered from 10 - most windows don't get 10+ updates with OFI > threshold
     @JsonIgnore private Deque<PriceImpactObservation> priceImpactHistory = new ArrayDeque<>(); // ring buffer (transient - rebuilt on restart)
     private double kyleLambda = 0.0;
     

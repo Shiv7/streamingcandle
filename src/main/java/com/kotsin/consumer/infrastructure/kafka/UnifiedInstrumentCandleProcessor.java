@@ -11,6 +11,7 @@ import com.kotsin.consumer.model.OpenInterest;
 import com.kotsin.consumer.model.OrderBookSnapshot;
 import com.kotsin.consumer.model.OrderbookAggregate;
 import com.kotsin.consumer.model.TickData;
+import com.kotsin.consumer.infrastructure.kafka.aggregate.TickAggregate;
 import com.kotsin.consumer.service.InstrumentMetadataService;
 import com.kotsin.consumer.util.MarketTimeAligner;
 import jakarta.annotation.PostConstruct;
@@ -868,6 +869,34 @@ public class UnifiedInstrumentCandleProcessor {
                         oi.getVolumeAtUpdate());
                 }
             }
+            
+            // P1: OI Velocity = OI change per minute (window is 60 seconds)
+            Long oiChangeVal = oi.getOiChange();
+            if (oiChangeVal != null) {
+                double oiVelocity = (double) oiChangeVal;  // Already per-minute since window = 1min
+                builder.oiVelocity(oiVelocity);
+                // Note: oiAcceleration requires previous window's velocity - would need cross-window state
+            }
+        }
+
+        // P2: Level-weighted depth imbalance from orderbook
+        if (orderbook != null) {
+            // Use existing OrderbookAggregate fields for depth analysis
+            double bidDepth = orderbook.getTotalBidDepthSum() / Math.max(1, orderbook.getTotalBidDepthCount());
+            double askDepth = orderbook.getTotalAskDepthSum() / Math.max(1, orderbook.getTotalAskDepthCount());
+            double total = bidDepth + askDepth;
+            double levelWeightedImbalance = total > 0 ? (bidDepth - askDepth) / total : 0.0;
+            
+            builder.levelWeightedBidDepth(bidDepth);
+            builder.levelWeightedAskDepth(askDepth);
+            builder.levelWeightedImbalance(levelWeightedImbalance);
+            
+            // Fragmentation: avg order size = total qty / total orders
+            double bidFrag = orderbook.getAvgBidOrderSize();
+            double askFrag = orderbook.getAvgAskOrderSize();
+            builder.bidFragmentation(bidFrag);
+            builder.askFragmentation(askFrag);
+            builder.institutionalBias(bidFrag > 0 ? askFrag / bidFrag : 0.0);
         }
 
         // Add option-specific fields
@@ -946,6 +975,77 @@ public class UnifiedInstrumentCandleProcessor {
                 tick.getLargeTradeCount(),
                 tick.getMaxTradeSize(),
                 tick.getAvgTradeSize());
+        }
+
+        // ========== IMBALANCE BARS (Fix #1) ==========
+        builder.volumeImbalance(tick.getVolumeImbalance());
+        builder.dollarImbalance(tick.getDollarImbalance());
+        builder.tickRuns(tick.getTickRuns());
+        builder.volumeRuns(tick.getVolumeRuns());
+        builder.vibTriggered(tick.isVibTriggered());
+        builder.dibTriggered(tick.isDibTriggered());
+        builder.trbTriggered(tick.isTrbTriggered());
+        builder.vrbTriggered(tick.isVrbTriggered());
+
+        // Log imbalance bar triggers for monitoring
+        if (tick.isVibTriggered() || tick.isDibTriggered() || tick.isTrbTriggered() || tick.isVrbTriggered()) {
+            java.util.List<String> triggered = new java.util.ArrayList<>();
+            if (tick.isVibTriggered()) triggered.add("VIB");
+            if (tick.isDibTriggered()) triggered.add("DIB");
+            if (tick.isTrbTriggered()) triggered.add("TRB");
+            if (tick.isVrbTriggered()) triggered.add("VRB");
+            log.info("[IMBALANCE-TRIGGER] {} | {} | VIB={} DIB={:.0f} TRB={} VRB={}",
+                tick.getScripCode(),
+                String.join(",", triggered),
+                tick.getVolumeImbalance(),
+                tick.getDollarImbalance(),
+                tick.getTickRuns(),
+                tick.getVolumeRuns());
+        }
+
+        // ========== P0 FIX: TICK-LEVEL BID/ASK IMBALANCE ==========
+        builder.sumTotalBidQty(tick.getSumTotalBidQty());
+        builder.sumTotalOffQty(tick.getSumTotalOffQty());
+        builder.tickBidAskImbalance(tick.getTickBidAskImbalance());
+
+        // ========== P0 FIX: OVERNIGHT GAP ANALYSIS ==========
+        builder.previousClose(tick.getPreviousClose());
+        double gap = tick.getOvernightGap();
+        builder.overnightGap(gap);
+        builder.isGapUp(tick.isGapUp());
+        builder.isGapDown(tick.isGapDown());
+
+        // Log significant gaps
+        if (Math.abs(gap) > 1.0) {  // > 1% gap
+            log.info("[GAP-DETECT] {} | gap={:.2f}% prevClose={:.2f} open={:.2f} {}",
+                tick.getScripCode(),
+                gap,
+                tick.getPreviousClose(),
+                tick.getOpen(),
+                gap > 0 ? "⬆ GAP_UP" : "⬇ GAP_DOWN");
+        }
+
+        // ========== P1: VWAP VALIDATION ==========
+        builder.exchangeVwap(tick.getExchangeVwap());
+        double vwapDrift = tick.getVwapDrift();
+        builder.vwapDrift(vwapDrift);
+        
+        // Warn if VWAP drifts > 1% from exchange
+        if (Math.abs(vwapDrift) > 1.0 && tick.getExchangeVwap() > 0) {
+            log.warn("[VWAP-DRIFT] {} | calculated={:.2f} exchange={:.2f} drift={:.2f}%",
+                tick.getScripCode(), tick.getVwap(), tick.getExchangeVwap(), vwapDrift);
+        }
+
+        // ========== P2: TICK INTENSITY ZONES ==========
+        builder.maxTicksInAnySecond(tick.getMaxTicksInAnySecond());
+        builder.secondsWithTicks(tick.getSecondsWithTicks());
+        builder.tickBurstRatio(tick.getTickBurstRatio());
+        builder.algoActivityDetected(tick.isAlgoActivityDetected());
+        
+        // Log algo detection
+        if (tick.isAlgoActivityDetected()) {
+            log.info("[ALGO-DETECTED] {} | maxTicks/sec={} burstRatio={:.2f} (threshold=3.0)",
+                tick.getScripCode(), tick.getMaxTicksInAnySecond(), tick.getTickBurstRatio());
         }
 
         // ========== PHASE 6: CROSS-STREAM LATENCY MEASUREMENT ==========
@@ -1346,462 +1446,8 @@ public class UnifiedInstrumentCandleProcessor {
         return ob.getTotalAskDepthSum() / ob.getTotalAskDepthCount();
     }
 
-    // ========== INNER CLASSES ==========
-
-    /**
-     * Enhanced Tick aggregate for windowed processing
-     *
-     * PHASE 1-4 ENHANCEMENTS:
-     * - Accurate volume delta calculation with TotalQty reset detection
-     * - Lee-Ready trade classification using TickData BBO
-     * - Complete temporal tracking (tick velocity, gaps, acceleration)
-     * - Trade-level history (last 100 trades with full context)
-     */
-    @lombok.Data
-    @lombok.NoArgsConstructor
-    public static class TickAggregate {
-        // ==================== BASIC OHLCV ====================
-        private String scripCode;
-        private String symbol;
-        private String companyName;
-        private String exchange;
-        private String exchangeType;
-        private double open;
-        private double high;
-        private double low;
-        private double close;
-        private long volume;
-        private long buyVolume;
-        private long sellVolume;
-        private double vwap;
-        private int tickCount;
-        private double totalValue;
-
-        // ==================== VOLUME DELTA TRACKING (Phase 1.1) ====================
-        private long previousTotalQty = 0;  // Track previous TotalQty for delta calculation
-
-        // ==================== TRADE CLASSIFICATION (Phase 1.2) ====================
-        private long aggressiveBuyVolume = 0;    // Trades at/above ask
-        private long aggressiveSellVolume = 0;   // Trades at/below bid
-        private long midpointVolume = 0;         // Trades between bid/ask
-        private int classifiedTradeCount = 0;    // Trades with valid BBO
-        private int unclassifiedTradeCount = 0;  // Trades without BBO
-        private double previousTradePrice = 0.0; // For tick rule
-        private String previousTradeClassification = null;
-
-        // ==================== TEMPORAL TRACKING (Phase 2) ====================
-        private long firstTickTimestamp;        // Kafka timestamp of first tick
-        private long lastTickTimestamp;         // Kafka timestamp of last tick
-        private long firstTickEventTime;        // TickDt of first tick
-        private long lastTickEventTime;         // TickDt of last tick
-        private transient java.util.List<Long> tickTimestamps;  // Kafka timestamps (last 100)
-        private long minTickGap = Long.MAX_VALUE;
-        private long maxTickGap = 0;
-        private double avgTickGap = 0.0;
-        private int ticksPerSecond = 0;
-        private double tickAcceleration = 0.0;
-        private long previousTickTimestamp = 0;
-        private int previousTicksPerSecond = 0;
-
-        // ==================== TRADE-LEVEL TRACKING (Phase 4) ====================
-        private transient java.util.List<TradeInfo> tradeHistory;  // Last 100 trades
-        private static final int MAX_TRADE_HISTORY = 100;
-        private long maxTradeSize = 0;
-        private long minTradeSize = Long.MAX_VALUE;
-        private double avgTradeSize = 0.0;
-        private double medianTradeSize = 0.0;
-        private int largeTradeCount = 0;
-        private double priceImpactPerUnit = 0.0;
-
-        /**
-         * Enhanced update method with all Phase 1-4 features
-         *
-         * @param tick TickData from Kafka
-         * @param kafkaTimestamp Kafka record timestamp
-         * @return this (for chaining)
-         */
-        public TickAggregate update(TickData tick, long kafkaTimestamp) {
-            if (tick == null) return this;
-
-            // ========== INITIALIZATION (First tick) ==========
-            if (tickCount == 0) {
-                scripCode = tick.getScripCode();
-                symbol = tick.getScripCode();
-                companyName = tick.getCompanyName();
-                exchange = tick.getExchange();
-                exchangeType = tick.getExchangeType();
-                open = tick.getLastRate();
-                high = tick.getLastRate();
-                low = tick.getLastRate();
-
-                // Initialize temporal tracking
-                firstTickTimestamp = kafkaTimestamp;
-                firstTickEventTime = tick.getTimestamp();
-                tickTimestamps = new java.util.ArrayList<>(100);
-
-                // Initialize trade history
-                tradeHistory = new java.util.ArrayList<>(MAX_TRADE_HISTORY);
-            }
-
-            // ========== UPDATE OHLC ==========
-            close = tick.getLastRate();
-            high = Math.max(high, tick.getLastRate());
-            low = Math.min(low, tick.getLastRate());
-
-            // ========== PHASE 1.1: VOLUME DELTA CALCULATION ==========
-            long currentTotalQty = tick.getTotalQuantity();
-            long deltaVol = 0;
-
-            // Detect volume reset (new day or feed restart)
-            if (currentTotalQty < previousTotalQty && previousTotalQty > 0) {
-                // Reset detected - use LastQty as delta
-                deltaVol = tick.getLastQuantity();
-                log.info("[VOLUME-RESET] {} | TotalQty reset: {} -> {} | Using LastQty: {}",
-                    tick.getScripCode(), previousTotalQty, currentTotalQty, deltaVol);
-            }
-            // Normal case: calculate delta
-            else if (previousTotalQty > 0) {
-                deltaVol = currentTotalQty - previousTotalQty;
-
-                // Sanity check: delta should not exceed LastQty by much
-                if (deltaVol > tick.getLastQuantity() * 10 && tick.getLastQuantity() > 0) {
-                    log.warn("[VOLUME-ANOMALY] {} | Delta {} >> LastQty {} | Using LastQty",
-                        tick.getScripCode(), deltaVol, tick.getLastQuantity());
-                    deltaVol = tick.getLastQuantity();
-                }
-            }
-            // First tick in window
-            else {
-                deltaVol = tick.getLastQuantity();
-            }
-
-            // Fallback: if delta is still 0, use LastQty
-            if (deltaVol == 0 && tick.getLastQuantity() > 0) {
-                deltaVol = tick.getLastQuantity();
-            }
-
-            // Update previous for next iteration
-            previousTotalQty = currentTotalQty;
-
-            // Update volume and value
-            volume += deltaVol;
-            totalValue += deltaVol * tick.getLastRate();
-
-            // ========== PHASE 1.2: TRADE CLASSIFICATION ==========
-            String classification = classifyTrade(tick, deltaVol);
-
-            // ========== PHASE 2: TEMPORAL TRACKING ==========
-            lastTickTimestamp = kafkaTimestamp;
-            lastTickEventTime = tick.getTimestamp();
-
-            // Store timestamp
-            tickTimestamps.add(kafkaTimestamp);
-            if (tickTimestamps.size() > 100) {
-                tickTimestamps.remove(0);
-            }
-
-            // Calculate gap from previous tick
-            if (previousTickTimestamp > 0) {
-                long gap = kafkaTimestamp - previousTickTimestamp;
-                minTickGap = Math.min(minTickGap, gap);
-                maxTickGap = Math.max(maxTickGap, gap);
-            }
-            previousTickTimestamp = kafkaTimestamp;
-
-            // ========== PHASE 4: STORE TRADE INFO ==========
-            if (deltaVol > 0) {
-                TradeInfo trade = new TradeInfo(
-                    kafkaTimestamp,
-                    tick.getTimestamp(),
-                    tick.getLastRate(),
-                    deltaVol,
-                    classification,
-                    tick.getBidRate(),
-                    tick.getOfferRate()
-                );
-
-                tradeHistory.add(trade);
-
-                // Keep only last 100 trades
-                if (tradeHistory.size() > MAX_TRADE_HISTORY) {
-                    tradeHistory.remove(0);
-                }
-
-                // Update size tracking
-                maxTradeSize = Math.max(maxTradeSize, deltaVol);
-                minTradeSize = Math.min(minTradeSize, deltaVol);
-            }
-
-            tickCount++;
-            vwap = volume > 0 ? totalValue / volume : close;
-
-            return this;
-        }
-
-        /**
-         * PHASE 1.2: Classify trade using TickData BBO (Lee-Ready algorithm)
-         *
-         * Classification Rules:
-         * 1. If trade >= ask: Aggressive BUY
-         * 2. If trade <= bid: Aggressive SELL
-         * 3. If bid < trade < ask: MIDPOINT → use tick rule
-         * 4. Tick Rule: Compare with previous trade price
-         *
-         * @return classification string
-         */
-        private String classifyTrade(TickData tick, long deltaVol) {
-            if (deltaVol <= 0) return null;
-
-            double tradePrice = tick.getLastRate();
-            double bidPrice = tick.getBidRate();
-            double askPrice = tick.getOfferRate();
-
-            // Check if BBO is valid
-            boolean bboValid = bidPrice > 0 && askPrice > 0 && askPrice > bidPrice;
-
-            if (!bboValid) {
-                // No valid BBO - use previous classification if available
-                if (previousTradeClassification != null) {
-                    applyClassification(previousTradeClassification, deltaVol);
-                    unclassifiedTradeCount++;
-                    return previousTradeClassification;
-                } else {
-                    // Truly unknown - split 50/50
-                    buyVolume += deltaVol / 2;
-                    sellVolume += deltaVol / 2;
-                    if (deltaVol % 2 == 1) buyVolume += 1;
-                    unclassifiedTradeCount++;
-                    return "UNKNOWN";
-                }
-            }
-
-            // ========== Lee-Ready Classification ==========
-            String classification;
-
-            // Rule 1: Trade at/above ask = Aggressive BUY
-            if (tradePrice >= askPrice) {
-                classification = "AGGRESSIVE_BUY";
-            }
-            // Rule 2: Trade at/below bid = Aggressive SELL
-            else if (tradePrice <= bidPrice) {
-                classification = "AGGRESSIVE_SELL";
-            }
-            // Rule 3: Midpoint trade - use tick rule
-            else {
-                classification = applyTickRule(tradePrice, deltaVol);
-            }
-
-            applyClassification(classification, deltaVol);
-            previousTradeClassification = classification;
-            previousTradePrice = tradePrice;
-            classifiedTradeCount++;
-
-            if (log.isDebugEnabled()) {
-                log.debug("[TRADE-CLASSIFY] {} | {} | price={} bid={} ask={} | vol={}",
-                    tick.getScripCode(), classification, tradePrice, bidPrice, askPrice, deltaVol);
-            }
-
-            return classification;
-        }
-
-        /**
-         * Apply tick rule for midpoint trades
-         */
-        private String applyTickRule(double currentPrice, long deltaVol) {
-            // #region agent log
-            try {
-                java.io.FileWriter fw = new java.io.FileWriter("logs/debug.log", true);
-                String json = String.format("{\"sessionId\":\"debug-session\",\"runId\":\"run1\",\"hypothesisId\":\"A\",\"location\":\"UnifiedInstrumentCandleProcessor.java:1415\",\"message\":\"applyTickRule entry\",\"data\":{\"currentPrice\":%.2f,\"deltaVol\":%d,\"previousTradePrice\":%.2f,\"midpointVolumeBefore\":%d},\"timestamp\":%d}\n",
-                    currentPrice, deltaVol, previousTradePrice, midpointVolume, System.currentTimeMillis());
-                fw.write(json);
-                fw.close();
-            } catch (Exception e) {}
-            // #endregion
-            
-            if (previousTradePrice <= 0) {
-                // First trade - cannot use tick rule
-                // BUG FIX: Don't add to midpointVolume here - applyClassification() will handle it
-                // midpointVolume += deltaVol;  // REMOVED - causes double counting
-                return "MIDPOINT";
-            }
-
-            // Compare with previous trade price
-            if (currentPrice > previousTradePrice) {
-                return "AGGRESSIVE_BUY";  // Uptick
-            } else if (currentPrice < previousTradePrice) {
-                return "AGGRESSIVE_SELL";  // Downtick
-            } else {
-                // Zero tick: use previous classification
-                if (previousTradeClassification != null &&
-                    !previousTradeClassification.equals("MIDPOINT")) {
-                    return previousTradeClassification;
-                } else {
-                    // BUG FIX: Don't add to midpointVolume here - applyClassification() will handle it
-                    // midpointVolume += deltaVol;  // REMOVED - causes double counting
-                    return "MIDPOINT";
-                }
-            }
-        }
-
-        /**
-         * Apply classification to volumes
-         */
-        private void applyClassification(String classification, long deltaVol) {
-            // #region agent log
-            try {
-                java.io.FileWriter fw = new java.io.FileWriter("logs/debug.log", true);
-                String json = String.format("{\"sessionId\":\"debug-session\",\"runId\":\"run1\",\"hypothesisId\":\"A\",\"location\":\"UnifiedInstrumentCandleProcessor.java:1442\",\"message\":\"applyClassification entry\",\"data\":{\"classification\":\"%s\",\"deltaVol\":%d,\"midpointVolumeBefore\":%d,\"aggressiveBuyVolumeBefore\":%d,\"aggressiveSellVolumeBefore\":%d},\"timestamp\":%d}\n",
-                    classification, deltaVol, midpointVolume, aggressiveBuyVolume, aggressiveSellVolume, System.currentTimeMillis());
-                fw.write(json);
-                fw.close();
-            } catch (Exception e) {}
-            // #endregion
-            
-            switch (classification) {
-                case "AGGRESSIVE_BUY":
-                    aggressiveBuyVolume += deltaVol;
-                    buyVolume += deltaVol;
-                    break;
-                case "AGGRESSIVE_SELL":
-                    aggressiveSellVolume += deltaVol;
-                    sellVolume += deltaVol;
-                    break;
-                case "MIDPOINT":
-                case "UNKNOWN":
-                default:
-                    // Split 50/50 for midpoint/unknown trades
-                    buyVolume += deltaVol / 2;
-                    sellVolume += deltaVol / 2;
-                    if (deltaVol % 2 == 1) buyVolume += 1;
-                    midpointVolume += deltaVol;
-                    break;
-            }
-            
-            // #region agent log
-            try {
-                java.io.FileWriter fw = new java.io.FileWriter("logs/debug.log", true);
-                String json = String.format("{\"sessionId\":\"debug-session\",\"runId\":\"run1\",\"hypothesisId\":\"A\",\"location\":\"UnifiedInstrumentCandleProcessor.java:1462\",\"message\":\"applyClassification exit\",\"data\":{\"classification\":\"%s\",\"midpointVolumeAfter\":%d,\"aggressiveBuyVolumeAfter\":%d,\"aggressiveSellVolumeAfter\":%d},\"timestamp\":%d}\n",
-                    classification, midpointVolume, aggressiveBuyVolume, aggressiveSellVolume, System.currentTimeMillis());
-                fw.write(json);
-                fw.close();
-            } catch (Exception e) {}
-            // #endregion
-        }
-
-        /**
-         * PHASE 2: Calculate temporal metrics (call at end of window)
-         */
-        public void calculateTemporalMetrics() {
-            // Calculate average tick gap
-            if (tickTimestamps != null && tickTimestamps.size() >= 2) {
-                long totalGaps = 0;
-                for (int i = 1; i < tickTimestamps.size(); i++) {
-                    totalGaps += tickTimestamps.get(i) - tickTimestamps.get(i - 1);
-                }
-                avgTickGap = (double) totalGaps / (tickTimestamps.size() - 1);
-            }
-
-            // Calculate ticks per second
-            long windowDuration = lastTickTimestamp - firstTickTimestamp;
-            if (windowDuration > 0) {
-                ticksPerSecond = (int) ((long) tickCount * 1000 / windowDuration);
-            }
-
-            // Calculate tick acceleration
-            if (previousTicksPerSecond > 0) {
-                tickAcceleration = ticksPerSecond - previousTicksPerSecond;
-            }
-            previousTicksPerSecond = ticksPerSecond;
-        }
-
-        /**
-         * PHASE 4: Calculate trade size distribution (call at end of window)
-         */
-        public void calculateTradeSizeDistribution() {
-            if (tradeHistory == null || tradeHistory.isEmpty()) return;
-
-            // Calculate average trade size
-            long totalVolume = tradeHistory.stream()
-                .mapToLong(t -> t.quantity)
-                .sum();
-            avgTradeSize = (double) totalVolume / tradeHistory.size();
-
-            // Calculate median trade size
-            java.util.List<Long> sizes = tradeHistory.stream()
-                .map(t -> t.quantity)
-                .sorted()
-                .collect(java.util.stream.Collectors.toList());
-
-            int mid = sizes.size() / 2;
-            if (sizes.size() % 2 == 0) {
-                medianTradeSize = (sizes.get(mid - 1) + sizes.get(mid)) / 2.0;
-            } else {
-                medianTradeSize = sizes.get(mid);
-            }
-
-            // Count large trades (> 10x average)
-            largeTradeCount = (int) tradeHistory.stream()
-                .filter(t -> t.quantity > avgTradeSize * 10)
-                .count();
-
-            // Calculate price impact per unit volume
-            if (totalVolume > 0) {
-                double priceChange = close - open;
-                priceImpactPerUnit = priceChange / totalVolume * 1000000;  // Per million units
-            }
-        }
-
-        // ========== GETTERS ==========
-
-        public double getClassificationReliability() {
-            int total = classifiedTradeCount + unclassifiedTradeCount;
-            return total > 0 ? (double) classifiedTradeCount / total : 0.0;
-        }
-
-        public long getAggressiveBuyVolume() { return aggressiveBuyVolume; }
-        public long getAggressiveSellVolume() { return aggressiveSellVolume; }
-        public long getMidpointVolume() { return midpointVolume; }
-
-        public long getFirstTickTimestamp() { return firstTickTimestamp; }
-        public long getLastTickTimestamp() { return lastTickTimestamp; }
-        public long getFirstTickEventTime() { return firstTickEventTime; }
-        public long getLastTickEventTime() { return lastTickEventTime; }
-        public long getMinTickGap() { return minTickGap == Long.MAX_VALUE ? 0 : minTickGap; }
-        public long getMaxTickGap() { return maxTickGap; }
-        public double getAvgTickGap() { return avgTickGap; }
-        public int getTicksPerSecond() { return ticksPerSecond; }
-        public double getTickAcceleration() { return tickAcceleration; }
-
-        public long getMaxTradeSize() { return maxTradeSize; }
-        public long getMinTradeSize() { return minTradeSize == Long.MAX_VALUE ? 0 : minTradeSize; }
-        public double getAvgTradeSize() { return avgTradeSize; }
-        public double getMedianTradeSize() { return medianTradeSize; }
-        public int getLargeTradeCount() { return largeTradeCount; }
-        public double getPriceImpactPerUnit() { return priceImpactPerUnit; }
-        public java.util.List<TradeInfo> getTradeHistory() {
-            return tradeHistory != null ? new java.util.ArrayList<>(tradeHistory) : new java.util.ArrayList<>();
-        }
-
-        /**
-         * Trade information holder (Phase 4)
-         */
-        @lombok.Data
-        @lombok.NoArgsConstructor
-        @lombok.AllArgsConstructor
-        public static class TradeInfo {
-            public long kafkaTimestamp;
-            public long eventTimestamp;
-            public double price;
-            public long quantity;
-            public String classification;
-            public double bidPrice;
-            public double askPrice;
-        }
-
-        public static org.apache.kafka.common.serialization.Serde<TickAggregate> serde() {
-            return new org.springframework.kafka.support.serializer.JsonSerde<>(TickAggregate.class);
-        }
-    }
+    // ========== HELPER CLASSES ==========
+    // NOTE: TickAggregate extracted to infrastructure/kafka/aggregate/TickAggregate.java
 
     /**
      * Wrapper to carry TickData with its Kafka timestamp

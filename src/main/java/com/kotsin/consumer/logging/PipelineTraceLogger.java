@@ -277,4 +277,44 @@ public class PipelineTraceLogger {
     public static void setTraceEnabled(boolean enabled) {
         // TODO: Implement via config service
     }
+
+    /**
+     * Log imbalance bar metrics (VIB, DIB, TRB, VRB)
+     */
+    public void logImbalanceBars(String scripCode, long timestamp,
+                                 long volumeImbalance, double dollarImbalance,
+                                 int tickRuns, long volumeRuns,
+                                 boolean vibTriggered, boolean dibTriggered,
+                                 boolean trbTriggered, boolean vrbTriggered) {
+        if (!TRACE_ENABLED) return;
+        
+        java.util.List<String> triggered = new java.util.ArrayList<>();
+        if (vibTriggered) triggered.add("VIB");
+        if (dibTriggered) triggered.add("DIB");
+        if (trbTriggered) triggered.add("TRB");
+        if (vrbTriggered) triggered.add("VRB");
+        
+        String time = formatTime(timestamp);
+        log.info("├─[IMBALANCE] {} | {} | VIB={} DIB={} TRB={} VRB={} | triggered={}",
+            time, scripCode,
+            volumeImbalance, String.format("%.0f", dollarImbalance),
+            tickRuns, volumeRuns,
+            triggered.isEmpty() ? "NONE" : String.join(",", triggered));
+    }
+
+    /**
+     * Log OI change metrics
+     */
+    public void logOIChange(String scripCode, long timestamp,
+                           Long previousOI, Long currentOI,
+                           Long oiChange, Double oiChangePercent) {
+        if (!TRACE_ENABLED) return;
+        String time = formatTime(timestamp);
+        log.info("├─[OI-CHANGE] {} | {} | prev={} curr={} Δ={} ({}%)",
+            time, scripCode,
+            previousOI != null ? previousOI : "N/A",
+            currentOI != null ? currentOI : "N/A",
+            oiChange != null ? (oiChange >= 0 ? "+" : "") + oiChange : "N/A",
+            oiChangePercent != null ? String.format("%.2f", oiChangePercent) : "N/A");
+    }
 }
