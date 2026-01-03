@@ -302,8 +302,14 @@ public class FamilyCandleProcessor {
         
         // If mapping found, return equity scripCode
         if (equityScripCode != null && !equityScripCode.equals(scripCode)) {
-            log.debug("[FAMILY-ID] scripCode: {} (type: {}) -> familyId: {} (mapping found)", 
-                scripCode, type, equityScripCode);
+            // Enhanced logging for options
+            if (type == InstrumentType.OPTION_CE || type == InstrumentType.OPTION_PE) {
+                log.info("[FAMILY-ID] Option mapped | scripCode: {} | type: {} | familyId: {} | window: [{}, {}]", 
+                    scripCode, type, equityScripCode, candle.getWindowStartMillis(), candle.getWindowEndMillis());
+            } else {
+                log.debug("[FAMILY-ID] scripCode: {} (type: {}) -> familyId: {} (mapping found)", 
+                    scripCode, type, equityScripCode);
+            }
             return equityScripCode;
         }
         
@@ -316,11 +322,31 @@ public class FamilyCandleProcessor {
             return scripCode;
         }
         
-        // Step 3: For derivatives without mapping - log warning
-        log.warn("[FAMILY-ID] No equity mapping found for derivative scripCode: {} (type: {}). " +
-                 "MongoDB query returned null. Using scripCode as familyId. " +
-                 "This may indicate missing data in ScripGroup collection.",
-                 scripCode, type);
+        // Step 3: Mapping failed? Try to find Equity by SYMBOL Name
+        // (Solves the issue where "SUPREMEIND 27 JAN" exists but isn't mapped to ID 50081)
+        String symbolRoot = extractSymbolRoot(candle.getCompanyName());
+        if (symbolRoot != null) {
+            String symbolBasedId = familyDataProvider.findEquityBySymbol(symbolRoot);
+            
+            if (symbolBasedId != null) {
+                log.info("[FAMILY-ID] Smart Recovery: Mapped {} ({}) -> {} via Symbol '{}'", 
+                    scripCode, type, symbolBasedId, symbolRoot);
+                return symbolBasedId;
+            }
+        }
+        
+        // Step 4: For derivatives without mapping - log warning
+        if (type == InstrumentType.OPTION_CE || type == InstrumentType.OPTION_PE) {
+            log.warn("[FAMILY-ID] Option mapping FAILED | scripCode: {} | type: {} | window: [{}, {}] | " +
+                     "MongoDB query returned null. Using scripCode as familyId. " +
+                     "This may indicate missing data in ScripGroup collection.",
+                     scripCode, type, candle.getWindowStartMillis(), candle.getWindowEndMillis());
+        } else {
+            log.warn("[FAMILY-ID] No equity mapping found for derivative scripCode: {} (type: {}). " +
+                     "MongoDB query returned null. Using scripCode as familyId. " +
+                     "This may indicate missing data in ScripGroup collection.",
+                     scripCode, type);
+        }
         
         return scripCode; // Fallback
     }
@@ -586,10 +612,75 @@ public class FamilyCandleProcessor {
         }
 
         // Set options (now deduplicated!)
-        List<OptionCandle> options = collector.getOptions().stream()
-            .map(OptionCandle::fromInstrumentCandle)
-            .filter(Objects::nonNull)
-            .collect(Collectors.toList());
+        // DEBUG: Log collector state before conversion
+        List<InstrumentCandle> rawOptions = collector.getOptions();
+        long windowStart = windowedKey.window().start();
+        long windowEnd = windowedKey.window().end();
+        
+        log.info("[OPTIONS-DEBUG] FamilyId: {} | Window: [{}, {}] | Raw options in collector: {} | OptionsByScripCode size: {}", 
+            familyId, 
+            windowStart, 
+            windowEnd,
+            rawOptions.size(),
+            collector.getOptionsByScripCode().size());
+        
+        // Log window timing comparison with equity/future
+        if (equity != null) {
+            log.info("[OPTIONS-DEBUG] FamilyId: {} | Equity window: [{}, {}] | Collector window: [{}, {}] | Match: {}", 
+                familyId,
+                equity.getWindowStartMillis(), equity.getWindowEndMillis(),
+                windowStart, windowEnd,
+                equity.getWindowStartMillis() == windowStart && equity.getWindowEndMillis() == windowEnd);
+        }
+        if (future != null) {
+            log.info("[OPTIONS-DEBUG] FamilyId: {} | Future window: [{}, {}] | Collector window: [{}, {}] | Match: {}", 
+                familyId,
+                future.getWindowStartMillis(), future.getWindowEndMillis(),
+                windowStart, windowEnd,
+                future.getWindowStartMillis() == windowStart && future.getWindowEndMillis() == windowEnd);
+        }
+        
+        // Log each option scripCode in collector with window timing
+        if (!rawOptions.isEmpty()) {
+            for (InstrumentCandle opt : rawOptions) {
+                boolean windowMatch = opt.getWindowStartMillis() == windowStart && opt.getWindowEndMillis() == windowEnd;
+                log.info("[OPTIONS-DEBUG] FamilyId: {} | Option in collector | scripCode: {} | type: {} | option window: [{}, {}] | collector window: [{}, {}] | match: {}", 
+                    familyId,
+                    opt.getScripCode(),
+                    opt.getInstrumentType() != null ? opt.getInstrumentType().name() : "NULL",
+                    opt.getWindowStartMillis(), opt.getWindowEndMillis(),
+                    windowStart, windowEnd,
+                    windowMatch);
+            }
+        } else {
+            log.warn("[OPTIONS-DEBUG] FamilyId: {} | NO OPTIONS in collector | Window: [{}, {}] | Equity: {} | Future: {}", 
+                familyId, windowStart, windowEnd,
+                equity != null ? equity.getScripCode() : "null",
+                future != null ? future.getScripCode() : "null");
+        }
+        
+        // Convert to OptionCandle and log each conversion
+        List<OptionCandle> options = new ArrayList<>();
+        for (InstrumentCandle rawOption : rawOptions) {
+            OptionCandle converted = OptionCandle.fromInstrumentCandle(rawOption);
+            if (converted == null) {
+                log.warn("[OPTIONS-DEBUG] FamilyId: {} | Option conversion FAILED for scripCode: {} | InstrumentType: {} | Reason: fromInstrumentCandle returned null", 
+                    familyId, 
+                    rawOption.getScripCode(),
+                    rawOption.getInstrumentType() != null ? rawOption.getInstrumentType().name() : "NULL");
+            } else {
+                options.add(converted);
+                log.debug("[OPTIONS-DEBUG] FamilyId: {} | Option conversion SUCCESS for scripCode: {} | Strike: {} | Type: {}", 
+                    familyId, 
+                    converted.getScripCode(),
+                    converted.getStrikePrice(),
+                    converted.getOptionType());
+            }
+        }
+        
+        log.info("[OPTIONS-DEBUG] FamilyId: {} | Final options count: {} | hasOptions: {}", 
+            familyId, options.size(), !options.isEmpty());
+        
         builder.options(options);
         builder.hasOptions(!options.isEmpty());
         builder.optionCount(options.size());
@@ -927,20 +1018,36 @@ public class FamilyCandleProcessor {
                         InstrumentCandle existing = optionsByScripCode.get(scripCode);
                         if (existing == null) {
                             optionsByScripCode.put(scripCode, candle);
+                            // Enhanced logging for options
+                            log.info("[OPTIONS-DEBUG] Option ADDED to collector | scripCode: {} | type: {} | companyName: {} | windowStart: {} | windowEnd: {} | optionsCountAfter: {}", 
+                                scripCode, 
+                                type.name(),
+                                candle.getCompanyName() != null ? candle.getCompanyName() : "null",
+                                candle.getWindowStartMillis(),
+                                candle.getWindowEndMillis(),
+                                optionsByScripCode.size());
                             // #region agent log
                             try {
                                 java.io.FileWriter fw = new java.io.FileWriter("logs/debug.log", true);
                                 String companyName = candle.getCompanyName() != null ? candle.getCompanyName() : "null";
-                                String json = String.format("{\"sessionId\":\"debug-session\",\"runId\":\"run1\",\"hypothesisId\":\"OPTION-ADD\",\"location\":\"FamilyCandleCollector.add:OPTION\",\"message\":\"Option added to collector\",\"data\":{\"scripCode\":\"%s\",\"instrumentType\":\"%s\",\"companyName\":\"%s\",\"optionsCountAfter\":%d},\"timestamp\":%d}\n",
-                                    scripCode, type.name(), companyName, optionsByScripCode.size(), System.currentTimeMillis());
+                                String json = String.format("{\"sessionId\":\"debug-session\",\"runId\":\"run1\",\"hypothesisId\":\"OPTION-ADD\",\"location\":\"FamilyCandleCollector.add:OPTION\",\"message\":\"Option added to collector\",\"data\":{\"scripCode\":\"%s\",\"instrumentType\":\"%s\",\"companyName\":\"%s\",\"windowStart\":%d,\"windowEnd\":%d,\"optionsCountAfter\":%d},\"timestamp\":%d}\n",
+                                    scripCode, type.name(), companyName, candle.getWindowStartMillis(), candle.getWindowEndMillis(), optionsByScripCode.size(), System.currentTimeMillis());
                                 fw.write(json);
                                 fw.close();
                             } catch (Exception e) {}
                             // #endregion
                         } else {
                             // Merge OHLCV for same option
+                            log.debug("[OPTIONS-DEBUG] Option MERGED in collector | scripCode: {} | existing window: [{}, {}] | incoming window: [{}, {}]", 
+                                scripCode,
+                                existing.getWindowStartMillis(), existing.getWindowEndMillis(),
+                                candle.getWindowStartMillis(), candle.getWindowEndMillis());
                             mergeInstrumentCandle(existing, candle);
                         }
+                    } else {
+                        log.warn("[OPTIONS-DEBUG] Option REJECTED - null scripCode | type: {} | companyName: {}", 
+                            type.name(), 
+                            candle.getCompanyName() != null ? candle.getCompanyName() : "null");
                     }
                     break;
             }
