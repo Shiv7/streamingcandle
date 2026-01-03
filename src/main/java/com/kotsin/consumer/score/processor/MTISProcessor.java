@@ -57,8 +57,8 @@ public class MTISProcessor {
     @Autowired
     private MultiTimeframeLevelCalculator levelCalculator;
 
-    @Autowired(required = false)  // Optional - may not be configured
-    private com.kotsin.consumer.curated.service.FuturesOptionsService futuresOptionsService;
+    @Autowired(required = false)  // Optional - calculates from FamilyCandle data
+    private com.kotsin.consumer.curated.service.FamilyCandleFOAlignmentCalculator foAlignmentCalculator;
 
     @Autowired
     private KafkaTemplate<String, FamilyScore> familyScoreProducer;
@@ -167,18 +167,13 @@ public class MTISProcessor {
         FUDKIIOutput fudkii = fudkiiCache.get(familyId);
         double vcpScore = getVCPScore(familyId);
 
-        // 3B. Calculate F&O alignment (inline - not cached from Kafka)
-        // FIX: Was always null because no Kafka listener populated it
-        // Now calculated on-demand with timeout protection
+        // 3B. Calculate F&O alignment from FamilyCandle data (no external API needed)
+        // FIX: Use FamilyCandle data directly instead of calling non-existent API
         FuturesOptionsAlignment foAlignment = null;
-        if (futuresOptionsService != null && familyCandle.getSpotPrice() > 0) {
+        if (foAlignmentCalculator != null) {
             try {
-                CompletableFuture<FuturesOptionsAlignment> foFuture = CompletableFuture.supplyAsync(
-                        () -> futuresOptionsService.calculateAlignment(familyId, familyCandle.getSpotPrice()),
-                        asyncProcessorPool
-                );
-                // Wait max 2 seconds for F&O alignment (non-blocking)
-                foAlignment = foFuture.get(2, TimeUnit.SECONDS);
+                // Calculate directly from FamilyCandle - fast, no API call
+                foAlignment = foAlignmentCalculator.calculateAlignment(familyCandle);
 
                 // Cache result for subsequent use
                 if (foAlignment != null && foAlignment.isUsable()) {
@@ -187,7 +182,7 @@ public class MTISProcessor {
                             familyId, foAlignment.getBias(), foAlignment.getAlignmentScore());
                 }
             } catch (Exception e) {
-                log.debug("Could not calculate F&O alignment for {} (timeout or error): {}",
+                log.debug("Could not calculate F&O alignment for {}: {}",
                         familyId, e.getMessage());
                 // Try cache as fallback
                 foAlignment = foAlignmentCache.get(familyId);

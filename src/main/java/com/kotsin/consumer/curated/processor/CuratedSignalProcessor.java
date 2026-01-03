@@ -65,8 +65,8 @@ public class CuratedSignalProcessor {
     @Autowired
     private MultiModuleScorer scorer;
 
-    @Autowired
-    private FuturesOptionsService futuresOptionsService;
+    @Autowired(required = false)  // Optional - calculates from FamilyCandle data
+    private com.kotsin.consumer.curated.service.FamilyCandleFOAlignmentCalculator foAlignmentCalculator;
 
     @Autowired
     private MultiTimeframeLevelCalculator levelCalculator;
@@ -536,12 +536,14 @@ public class CuratedSignalProcessor {
         IPUOutput ipu = ipuCache.get(scripCode);
         FinalMagnitude fma = fmaCache.get(scripCode);
 
-        // Fetch F&O alignment data
+        // Calculate F&O alignment from FamilyCandle data (no external API needed)
         FuturesOptionsAlignment foAlignment = null;
-        try {
-            foAlignment = futuresOptionsService.calculateAlignment(scripCode, entry.getEntryPrice());
-        } catch (Exception e) {
-            log.debug("F&O data unavailable for {}: {}", scripCode, e.getMessage());
+        if (foAlignmentCalculator != null && familyCandle != null) {
+            try {
+                foAlignment = foAlignmentCalculator.calculateAlignment(familyCandle);
+            } catch (Exception e) {
+                log.debug("F&O alignment calculation failed for {}: {}", scripCode, e.getMessage());
+            }
         }
 
         // Calculate multi-timeframe levels
