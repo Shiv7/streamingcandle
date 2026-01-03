@@ -1033,8 +1033,8 @@ public class OrderbookAggregate {
      * PHASE 3: Depth information for a single level
      */
     @Data
-    @NoArgsConstructor
-    @AllArgsConstructor
+    @lombok.NoArgsConstructor
+    @lombok.AllArgsConstructor
     public static class DepthLevelInfo {
         public int level;
         public double price;

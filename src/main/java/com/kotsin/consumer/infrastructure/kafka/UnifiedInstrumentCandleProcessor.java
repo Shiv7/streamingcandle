@@ -783,8 +783,7 @@ public class UnifiedInstrumentCandleProcessor {
             // Example: OI increasing with price up = Long buildup (bullish signal)
             double currentPrice = tick.getClose();
             Long currentVolume = tick.getVolume();
-            Double currentSpread = orderbook != null && orderbook.getBidAskSpread() != null ? 
-                orderbook.getBidAskSpread() : null;
+            Double currentSpread = orderbook != null ? orderbook.getBidAskSpread() : null;
             
             // Update market context (price/volume/spread at join time)
             // Note: lastUpdateTimestamp is already set in updateWithOI() from the OI stream's receivedTimestamp
@@ -1323,7 +1322,7 @@ public class UnifiedInstrumentCandleProcessor {
                     deltaVol,
                     classification,
                     tick.getBidRate(),
-                    tick.getOffRate()
+                    tick.getOfferRate()
                 );
 
                 tradeHistory.add(trade);
@@ -1360,7 +1359,7 @@ public class UnifiedInstrumentCandleProcessor {
 
             double tradePrice = tick.getLastRate();
             double bidPrice = tick.getBidRate();
-            double askPrice = tick.getOffRate();
+            double askPrice = tick.getOfferRate();
 
             // Check if BBO is valid
             boolean bboValid = bidPrice > 0 && askPrice > 0 && askPrice > bidPrice;
