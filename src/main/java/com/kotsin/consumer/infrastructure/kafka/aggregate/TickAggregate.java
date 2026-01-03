@@ -175,10 +175,12 @@ public class TickAggregate {
         }
 
         // P2: Track ticks per second
-        if (tickCountPerSecond != null) {
-            long secondBucket = kafkaTimestamp / 1000;
-            tickCountPerSecond.merge(secondBucket, 1, Integer::sum);
+        // FIX: Lazy init after deserialization
+        if (tickCountPerSecond == null) {
+            tickCountPerSecond = new HashMap<>();
         }
+        long secondBucket = kafkaTimestamp / 1000;
+        tickCountPerSecond.merge(secondBucket, 1, Integer::sum);
 
         // ========== UPDATE OHLC ==========
         close = tick.getLastRate();
@@ -201,6 +203,10 @@ public class TickAggregate {
         lastTickTimestamp = kafkaTimestamp;
         lastTickEventTime = tick.getTimestamp();
         
+        // FIX: Lazy init transient lists after deserialization
+        if (tickTimestamps == null) {
+            tickTimestamps = new ArrayList<>(100);
+        }
         tickTimestamps.add(kafkaTimestamp);
         if (tickTimestamps.size() > 100) {
             tickTimestamps.remove(0);
@@ -219,6 +225,10 @@ public class TickAggregate {
                 kafkaTimestamp, tick.getTimestamp(), tick.getLastRate(),
                 deltaVol, classification, tick.getBidRate(), tick.getOfferRate()
             );
+            // FIX: Lazy init after deserialization
+            if (tradeHistory == null) {
+                tradeHistory = new ArrayList<>(MAX_TRADE_HISTORY);
+            }
             tradeHistory.add(trade);
             if (tradeHistory.size() > MAX_TRADE_HISTORY) {
                 tradeHistory.remove(0);
