@@ -108,6 +108,8 @@ public class InstrumentCandle {
 
     // ==================== ORDERBOOK METRICS (Optional - not for INDEX) ====================
     private boolean orderbookPresent;
+    private Long orderbookDataTimestamp;      // Timestamp when orderbook data was actually captured (may differ from windowEndMillis if fallback used)
+    private Boolean isOrderbookFallback;      // true if orderbook came from latest store (fallback), false if from windowed join
     private Double ofi;              // Order Flow Imbalance
     private Double kyleLambda;       // Price impact coefficient
     private Double microprice;       // Fair value
@@ -140,8 +142,14 @@ public class InstrumentCandle {
     private Double spreadChangeRate;
     private Double orderbookMomentum;
 
+    // ==================== MARKET DEPTH SLOPE (Phase 8) ====================
+    private Double bidDepthSlope;           // Liquidity curve slope for bid side (qty per price unit)
+    private Double askDepthSlope;           // Liquidity curve slope for ask side (qty per price unit)
+
     // ==================== OI METRICS (Optional - only for derivatives) ====================
     private boolean oiPresent;
+    private Long oiDataTimestamp;            // Timestamp when OI data was actually captured (may differ from windowEndMillis)
+    private Boolean isOIFallback;            // true if OI came from latest store (always true currently, as OI uses latest store lookup)
     private Long openInterest;
     private Long oiOpen;
     private Long oiHigh;
@@ -161,6 +169,16 @@ public class InstrumentCandle {
     private Double strikePrice;      // Strike price for options
     private String optionType;       // "CE" or "PE"
     private String expiry;           // Expiry date string
+    private Integer daysToExpiry;    // Days until expiration
+    private Double hoursToExpiry;    // Hours until expiration (more precise)
+    private Boolean isNearExpiry;    // True if expiring within 7 days
+    
+    // PHASE 9: Option Greeks (Black-Scholes)
+    private Double delta;            // Price sensitivity to underlying (0-1 for calls, -1-0 for puts)
+    private Double gamma;            // Rate of change of delta (always positive)
+    private Double vega;             // Sensitivity to volatility (always positive)
+    private Double theta;            // Time decay (usually negative)
+    private Double impliedVolatility; // Estimated IV from option price (if available)
 
     // ==================== DATA QUALITY ====================
     private DataQuality quality;
@@ -200,6 +218,19 @@ public class InstrumentCandle {
     // ==================== P1: VWAP VALIDATION ====================
     private Double exchangeVwap;              // From TickData.averageRate
     private Double vwapDrift;                 // (calculated - exchange) / exchange * 100
+
+    // ==================== TICK-LEVEL SPREAD METRICS (Execution Cost Analysis) ====================
+    private Double averageTickSpread;         // Average bid-ask spread across all ticks
+    private Double minTickSpread;             // Minimum spread observed
+    private Double maxTickSpread;             // Maximum spread observed
+    private Double spreadVolatilityTick;      // Spread volatility (std dev)
+    private Double tightSpreadPercent;        // % of time spread <= 1 tick (liquidity indicator)
+
+    // ==================== VWAP BANDS (Trading Signals) ====================
+    private Double vwapUpperBand;             // VWAP + 2σ (overbought threshold)
+    private Double vwapLowerBand;             // VWAP - 2σ (oversold threshold)
+    private Double vwapStdDev;                // Standard deviation of price around VWAP
+    private String vwapSignal;                // "OVERBOUGHT" / "OVERSOLD" / "NEUTRAL"
 
     // ==================== P1: OI VELOCITY ====================
     private Double oiVelocity;                // OI change per minute

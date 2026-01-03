@@ -114,6 +114,10 @@ public class OrderbookAggregate {
     private int updateCount = 0;
     private static final int MIN_OBSERVATIONS = 20;
     @JsonIgnore private OrderBookSnapshot previousOrderbook;
+    
+    // PERF-001: Reusable maps to reduce GC pressure (clear and reuse instead of creating new)
+    @JsonIgnore private final Map<Double, Integer> reusableBidDepthMap = new HashMap<>();
+    @JsonIgnore private final Map<Double, Integer> reusableAskDepthMap = new HashMap<>();
 
     // ==================== PHASE 3: DEPTH FRAGMENTATION TRACKING ====================
     // Per-level tracking (5 levels deep)
@@ -145,6 +149,13 @@ public class OrderbookAggregate {
     private long firstUpdateTimestamp = 0;
     private long lastUpdateTimestamp = 0;
     private double previousTotalDepth = 0.0;
+
+    // PHASE 8: Market Depth Slope (Liquidity Curve)
+    private double bidDepthSlope = 0.0;   // qty/price (higher = more liquid)
+    private double askDepthSlope = 0.0;
+    private double bidDepthSlopeSum = 0.0;
+    private double askDepthSlopeSum = 0.0;
+    private long depthSlopeCount = 0L;
 
     // ========== Configurable Parameters ==========
     @JsonIgnore private double instrumentTickSize = 0.0; // per-instance tick size
@@ -310,10 +321,27 @@ public class OrderbookAggregate {
             previousTotalDepth = totalDepth;
         }
 
+        // ========== PHASE 8: CALCULATE MARKET DEPTH SLOPE ==========
+        if (orderbook.getAllBids() != null && orderbook.getAllBids().size() >= 2) {
+            double slope = calculateDepthSlope(orderbook.getAllBids(), true);
+            bidDepthSlopeSum += slope;
+            depthSlopeCount++;
+        }
+        if (orderbook.getAllAsks() != null && orderbook.getAllAsks().size() >= 2) {
+            double slope = calculateDepthSlope(orderbook.getAllAsks(), false);
+            askDepthSlopeSum += slope;
+            // Don't increment depthSlopeCount again (already incremented for bid)
+        }
+
         // ========== Calculate OFI (Full Depth) ==========
         // BUG-FIX: Store current depth at class level for emission, not just local variables
-        Map<Double, Integer> newBidDepth = buildDepthMap(orderbook.getAllBids());
-        Map<Double, Integer> newAskDepth = buildDepthMap(orderbook.getAllAsks());
+        // PERF-001: Reuse maps to reduce GC pressure
+        buildDepthMap(orderbook.getAllBids(), reusableBidDepthMap);
+        buildDepthMap(orderbook.getAllAsks(), reusableAskDepthMap);
+        
+        // Create new maps for storage (currentBidDepth/currentAskDepth are serialized)
+        Map<Double, Integer> newBidDepth = new HashMap<>(reusableBidDepthMap);
+        Map<Double, Integer> newAskDepth = new HashMap<>(reusableAskDepthMap);
         
         // Always store current depth for VCP validation downstream
         this.currentBidDepth = newBidDepth;
@@ -417,6 +445,11 @@ public class OrderbookAggregate {
         this.sumDP2 += other.sumDP2;
         this.sumOFIDP += other.sumOFIDP;
 
+        // PHASE 8: Merge depth slope accumulators
+        this.bidDepthSlopeSum += other.bidDepthSlopeSum;
+        this.askDepthSlopeSum += other.askDepthSlopeSum;
+        this.depthSlopeCount += other.depthSlopeCount;
+
         // Latest market snapshot style fields
         this.midPrice = other.midPrice;
         this.microprice = other.microprice;
@@ -435,17 +468,28 @@ public class OrderbookAggregate {
 
     /**
      * Build depth map from orderbook levels
+     * PERF-001: Overloaded version that reuses existing map to reduce GC pressure
      */
-    private Map<Double, Integer> buildDepthMap(List<OrderBookSnapshot.OrderBookLevel> levels) {
-        Map<Double, Integer> depthMap = new HashMap<>();
+    private void buildDepthMap(List<OrderBookSnapshot.OrderBookLevel> levels, Map<Double, Integer> targetMap) {
+        targetMap.clear();  // Reuse existing map
         if (levels != null) {
             for (OrderBookSnapshot.OrderBookLevel level : levels) {
                 if (level.getPrice() > 0 && level.getQuantity() > 0) {
                     double qPrice = quantize(level.getPrice(), getEffectiveTickSize());
-                    depthMap.merge(qPrice, level.getQuantity(), Integer::sum);
+                    targetMap.merge(qPrice, level.getQuantity(), Integer::sum);
                 }
             }
         }
+    }
+    
+    /**
+     * Build depth map from orderbook levels (legacy method for backward compatibility)
+     * @deprecated Use buildDepthMap(levels, targetMap) for better performance
+     */
+    @Deprecated
+    private Map<Double, Integer> buildDepthMap(List<OrderBookSnapshot.OrderBookLevel> levels) {
+        Map<Double, Integer> depthMap = new HashMap<>();
+        buildDepthMap(levels, depthMap);
         return depthMap;
     }
 
@@ -458,6 +502,10 @@ public class OrderbookAggregate {
 
     /**
      * Calculate full-depth OFI per Cont-Kukanov-Stoikov 2014
+     *
+     * FIX: Corrected bid/ask band logic to match CKS 2014 paper
+     * - Bid band = MAX(prev, curr) → only count levels ≥ worst best bid
+     * - Ask band = MIN(prev, curr) → only count levels ≤ best best ask
      */
     private double calculateFullDepthOFI(
         Map<Double, Integer> prevBid, Map<Double, Integer> currBid, double prevBestBid, double currBestBid,
@@ -465,9 +513,14 @@ public class OrderbookAggregate {
     ) {
         double deltaBid = 0.0;
         double deltaAsk = 0.0;
-        
-        double bidBand = Math.min(prevBestBid, currBestBid);
-        double askBand = Math.max(prevBestAsk, currBestAsk);
+
+        // FIX: Use MAX for bid band (only levels ≥ worst best bid)
+        // When best bid improves (moves up), exclude levels below current best bid
+        double bidBand = Math.max(prevBestBid, currBestBid);
+
+        // FIX: Use MIN for ask band (only levels ≤ best best ask)
+        // When best ask improves (moves down), exclude levels above current best ask
+        double askBand = Math.min(prevBestAsk, currBestAsk);
 
         for (Map.Entry<Double, Integer> entry : currBid.entrySet()) {
             if (entry.getKey() >= bidBand) {
@@ -592,6 +645,64 @@ public class OrderbookAggregate {
                 recentAskQuantities.removeFirst();  // O(1) vs O(n)
             }
         }
+    }
+
+    /**
+     * PHASE 8: Calculate market depth slope (liquidity curve)
+     * Uses linear regression: cumQty = slope * priceDistance + intercept
+     * slope = (n*ΣXY - ΣX*ΣY) / (n*ΣX² - (ΣX)²)
+     *
+     * Higher slope = more liquidity at deeper levels
+     *
+     * @param levels Orderbook levels (up to 10 levels)
+     * @param isBid true for bid side, false for ask side
+     * @return Slope coefficient (qty per unit price distance)
+     */
+    private double calculateDepthSlope(List<OrderBookSnapshot.OrderBookLevel> levels, boolean isBid) {
+        if (levels == null || levels.size() < 2) return 0.0;
+
+        int n = Math.min(10, levels.size());
+        if (n < 2) return 0.0;
+
+        double bestPrice = levels.get(0).getPrice();
+        if (bestPrice <= 0) return 0.0;
+
+        // Accumulate for linear regression
+        double sumX = 0.0;      // Sum of price distances
+        double sumY = 0.0;      // Sum of cumulative quantities
+        double sumXY = 0.0;     // Sum of (price distance * cum qty)
+        double sumX2 = 0.0;     // Sum of (price distance)²
+
+        long cumulativeQty = 0;
+
+        for (int i = 0; i < n; i++) {
+            OrderBookSnapshot.OrderBookLevel level = levels.get(i);
+            double price = level.getPrice();
+            long qty = level.getQuantity();
+
+            if (price <= 0 || qty <= 0) continue;
+
+            // Price distance from best (absolute value)
+            double priceDistance = Math.abs(price - bestPrice);
+
+            // Cumulative quantity
+            cumulativeQty += qty;
+
+            // Regression variables
+            sumX += priceDistance;
+            sumY += cumulativeQty;
+            sumXY += priceDistance * cumulativeQty;
+            sumX2 += priceDistance * priceDistance;
+        }
+
+        // Calculate slope using least squares
+        // slope = (n*ΣXY - ΣX*ΣY) / (n*ΣX² - (ΣX)²)
+        double denominator = n * sumX2 - sumX * sumX;
+        if (Math.abs(denominator) < 1e-10) return 0.0;
+
+        double slope = (n * sumXY - sumX * sumY) / denominator;
+
+        return slope;
     }
 
     /**
@@ -1028,6 +1139,14 @@ public class OrderbookAggregate {
     public int getOrderbookUpdateCount() { return orderbookUpdateCount; }
     public double getSpreadChangeRate() { return spreadChangeRate; }
     public double getOrderbookMomentum() { return orderbookMomentum; }
+
+    public double getBidDepthSlope() {
+        return depthSlopeCount > 0 ? bidDepthSlopeSum / depthSlopeCount : 0.0;
+    }
+
+    public double getAskDepthSlope() {
+        return depthSlopeCount > 0 ? askDepthSlopeSum / depthSlopeCount : 0.0;
+    }
 
     /**
      * PHASE 3: Depth information for a single level

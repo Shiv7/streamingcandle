@@ -6,6 +6,8 @@ import org.apache.kafka.streams.processor.TimestampExtractor;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
+import java.util.concurrent.atomic.AtomicLong;
+
 /**
  * 🛡️ CRITICAL FIX: Event-Time Processing for OrderBookSnapshot
  *
@@ -33,8 +35,8 @@ public class OrderBookSnapshotTimestampExtractor implements TimestampExtractor {
     // Maximum allowed timestamp drift (1 hour = 3600000 ms)
     private static final long MAX_FUTURE_DRIFT_MS = 3600000L;
 
-    // Track stream time
-    private long lastObservedTimestamp = -1L;
+    // FIX: Thread-safe track stream time using AtomicLong for concurrent access
+    private final AtomicLong lastObservedTimestamp = new AtomicLong(-1L);
 
     @Override
     public long extract(ConsumerRecord<Object, Object> record, long partitionTime) {
@@ -51,13 +53,15 @@ public class OrderBookSnapshotTimestampExtractor implements TimestampExtractor {
                 return record.timestamp() > 0 ? record.timestamp() : partitionTime;
             }
 
-            // Initialize stream time tracking
-            if (lastObservedTimestamp < 0) {
-                lastObservedTimestamp = eventTime;
+            // Initialize stream time tracking (thread-safe)
+            long currentObserved = lastObservedTimestamp.get();
+            if (currentObserved < 0) {
+                lastObservedTimestamp.compareAndSet(-1L, eventTime);
+                currentObserved = lastObservedTimestamp.get();
             }
 
             // Check if timestamp is too far in the future
-            long currentStreamTime = Math.max(lastObservedTimestamp, partitionTime);
+            long currentStreamTime = Math.max(currentObserved, partitionTime);
             long drift = eventTime - currentStreamTime;
 
             if (drift > MAX_FUTURE_DRIFT_MS) {
@@ -70,12 +74,13 @@ public class OrderBookSnapshotTimestampExtractor implements TimestampExtractor {
                     eventTime, drift, currentStreamTime, clampedTimestamp,
                     record.topic(), record.partition(), record.offset(), snapshot.getToken());
 
-                lastObservedTimestamp = clampedTimestamp;
+                lastObservedTimestamp.set(clampedTimestamp);
                 return clampedTimestamp;
             }
 
-            // Timestamp is acceptable - use as-is
-            lastObservedTimestamp = Math.max(lastObservedTimestamp, eventTime);
+            // Timestamp is acceptable - use as-is (thread-safe update to max)
+            long newMax = Math.max(currentObserved, eventTime);
+            lastObservedTimestamp.set(newMax);
             return eventTime;
         }
 

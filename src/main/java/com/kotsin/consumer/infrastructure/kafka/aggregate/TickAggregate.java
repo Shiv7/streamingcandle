@@ -51,6 +51,30 @@ public class TickAggregate {
     private int tickCount;
     private double totalValue;
 
+    // ==================== VWAP TRACKING (Never Reset) ====================
+    // FIX: Separate cumulative counters for VWAP that NEVER reset (even on TotalQty reset)
+    // This ensures VWAP matches exchange VWAP exactly
+    private long cumulativeVWAPVolume = 0;       // Cumulative volume for VWAP (never reset)
+    private double cumulativeVWAPValue = 0.0;    // Cumulative value for VWAP (never reset)
+
+    // ==================== VOLUME PROFILE (Volume-at-Price Histogram) ====================
+    // Track volume distribution across price levels (for POC, VAH, VAL calculation)
+    private Map<Double, Long> volumeAtPrice = new HashMap<>();
+    private double tickSizeForProfile = 0.05;  // Default tick size for rounding prices
+
+    // ==================== TICK-LEVEL SPREAD METRICS ====================
+    // Track spread (execution cost) across all ticks in the window
+    private double sumSpread = 0.0;
+    private int spreadCount = 0;
+    private double minSpread = Double.MAX_VALUE;
+    private double maxSpread = 0.0;
+    @JsonIgnore private transient List<Double> spreadHistory;  // For volatility calculation
+    private int tightSpreadCount = 0;  // Count of spreads <= 1 tick
+
+    // ==================== VWAP BANDS (Trading Signals) ====================
+    // Track price history for VWAP standard deviation calculation
+    @JsonIgnore private transient List<Double> priceHistory;  // For std dev around VWAP
+
     // ==================== VOLUME DELTA TRACKING (Phase 1.1) ====================
     private long previousTotalQty = 0;
 
@@ -196,13 +220,60 @@ public class TickAggregate {
         volume += deltaVol;
         totalValue += deltaVol * tick.getLastRate();
 
+        // FIX: Update cumulative VWAP counters (NEVER reset, even on TotalQty reset)
+        // This ensures VWAP matches exchange VWAP exactly
+        cumulativeVWAPVolume += deltaVol;
+        cumulativeVWAPValue += deltaVol * tick.getLastRate();
+
+        // ========== VOLUME PROFILE TRACKING ==========
+        // Track volume distribution across price levels (rounded to tick size)
+        if (deltaVol > 0) {
+            double priceLevel = roundToTickSize(tick.getLastRate(), tickSizeForProfile);
+            volumeAtPrice.merge(priceLevel, deltaVol, Long::sum);
+        }
+
+        // ========== TICK-LEVEL SPREAD TRACKING ==========
+        // Track spread (bid-ask spread = execution cost) from tick BBO
+        if (tick.getBidRate() > 0 && tick.getOfferRate() > 0) {
+            double spread = tick.getOfferRate() - tick.getBidRate();
+            sumSpread += spread;
+            spreadCount++;
+            minSpread = Math.min(minSpread, spread);
+            maxSpread = Math.max(maxSpread, spread);
+
+            // Lazy init spread history
+            if (spreadHistory == null) {
+                spreadHistory = new ArrayList<>(100);
+            }
+            spreadHistory.add(spread);
+            if (spreadHistory.size() > 100) {
+                spreadHistory.remove(0);
+            }
+
+            // Count tight spreads (<=1 tick)
+            if (spread <= tickSizeForProfile) {
+                tightSpreadCount++;
+            }
+        }
+
+        // ========== VWAP BANDS: TRACK PRICE HISTORY ==========
+        // Track all prices for VWAP standard deviation calculation
+        if (priceHistory == null) {
+            priceHistory = new ArrayList<>(500);
+        }
+        priceHistory.add(tick.getLastRate());
+        // Keep last 500 prices (sufficient for 1-minute window)
+        if (priceHistory.size() > 500) {
+            priceHistory.remove(0);
+        }
+
         // ========== TRADE CLASSIFICATION ==========
         String classification = classifyTrade(tick, deltaVol);
 
         // ========== TEMPORAL TRACKING ==========
         lastTickTimestamp = kafkaTimestamp;
         lastTickEventTime = tick.getTimestamp();
-        
+
         // FIX: Lazy init transient lists after deserialization
         if (tickTimestamps == null) {
             tickTimestamps = new ArrayList<>(100);
@@ -243,7 +314,10 @@ public class TickAggregate {
         }
 
         tickCount++;
-        vwap = volume > 0 ? totalValue / volume : close;
+
+        // FIX: Use cumulative counters for VWAP calculation (never affected by TotalQty resets)
+        // This matches exchange VWAP calculation exactly
+        vwap = cumulativeVWAPVolume > 0 ? cumulativeVWAPValue / cumulativeVWAPVolume : close;
 
         return this;
     }
@@ -535,6 +609,124 @@ public class TickAggregate {
     }
     public boolean isAlgoActivityDetected() {
         return getTickBurstRatio() > 3.0;
+    }
+
+    // ==================== VOLUME PROFILE HELPERS ====================
+
+    /**
+     * Set tick size for volume profile price rounding
+     */
+    public void setTickSizeForProfile(double tickSize) {
+        this.tickSizeForProfile = tickSize > 0 ? tickSize : 0.05;
+    }
+
+    /**
+     * Round price to tick size for volume profile histogram
+     */
+    private double roundToTickSize(double price, double tickSize) {
+        if (tickSize <= 0) return price;
+        return Math.round(price / tickSize) * tickSize;
+    }
+
+    /**
+     * Get volume-at-price histogram (for POC/VAH/VAL calculation)
+     */
+    public Map<Double, Long> getVolumeAtPrice() {
+        return new HashMap<>(volumeAtPrice);  // Return copy to prevent external modification
+    }
+
+    // ==================== SPREAD METRICS GETTERS ====================
+
+    /**
+     * Get average tick-level spread (execution cost)
+     */
+    public double getAverageTickSpread() {
+        return spreadCount > 0 ? sumSpread / spreadCount : 0.0;
+    }
+
+    /**
+     * Get minimum spread observed in window
+     */
+    public double getMinTickSpread() {
+        return minSpread == Double.MAX_VALUE ? 0.0 : minSpread;
+    }
+
+    /**
+     * Get maximum spread observed in window
+     */
+    public double getMaxTickSpread() {
+        return maxSpread;
+    }
+
+    /**
+     * Calculate spread volatility (standard deviation)
+     */
+    public double getSpreadVolatility() {
+        if (spreadHistory == null || spreadHistory.size() < 2) return 0.0;
+
+        double mean = getAverageTickSpread();
+        double variance = spreadHistory.stream()
+            .mapToDouble(s -> Math.pow(s - mean, 2))
+            .average()
+            .orElse(0.0);
+
+        return Math.sqrt(variance);
+    }
+
+    /**
+     * Get percentage of time spread was tight (<= 1 tick)
+     * High % = liquid market with competitive quotes
+     */
+    public double getTightSpreadPercent() {
+        return spreadCount > 0 ? (double) tightSpreadCount / spreadCount * 100.0 : 0.0;
+    }
+
+    // ==================== VWAP BANDS CALCULATION ====================
+
+    /**
+     * Calculate VWAP standard deviation (price volatility around VWAP)
+     */
+    public double getVWAPStdDev() {
+        if (priceHistory == null || priceHistory.size() < 2) return 0.0;
+
+        double mean = vwap;  // Use VWAP as the mean
+        double variance = priceHistory.stream()
+            .mapToDouble(p -> Math.pow(p - mean, 2))
+            .average()
+            .orElse(0.0);
+
+        return Math.sqrt(variance);
+    }
+
+    /**
+     * Get VWAP upper band (VWAP + 2σ)
+     * Price > Upper Band = Overbought → Potential sell signal
+     */
+    public double getVWAPUpperBand() {
+        return vwap + 2 * getVWAPStdDev();
+    }
+
+    /**
+     * Get VWAP lower band (VWAP - 2σ)
+     * Price < Lower Band = Oversold → Potential buy signal
+     */
+    public double getVWAPLowerBand() {
+        return vwap - 2 * getVWAPStdDev();
+    }
+
+    /**
+     * Get VWAP signal based on close price vs bands
+     * @return "OVERBOUGHT" if close > upper band, "OVERSOLD" if close < lower band, "NEUTRAL" otherwise
+     */
+    public String getVWAPSignal() {
+        if (priceHistory == null || priceHistory.size() < 2) return "NEUTRAL";
+
+        double upper = getVWAPUpperBand();
+        double lower = getVWAPLowerBand();
+
+        if (close > upper) return "OVERBOUGHT";
+        if (close < lower) return "OVERSOLD";
+        return "NEUTRAL";
     }
 
     /**

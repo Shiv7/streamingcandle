@@ -14,6 +14,7 @@ import com.kotsin.consumer.model.TickData;
 import com.kotsin.consumer.infrastructure.kafka.aggregate.TickAggregate;
 import com.kotsin.consumer.service.InstrumentMetadataService;
 import com.kotsin.consumer.util.MarketTimeAligner;
+import com.kotsin.consumer.util.BlackScholesGreeks;
 import jakarta.annotation.PostConstruct;
 import jakarta.annotation.PreDestroy;
 import lombok.extern.slf4j.Slf4j;
@@ -34,6 +35,7 @@ import java.time.*;
 import java.util.*;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.TimeUnit;
+import java.util.stream.Collectors;
 
 /**
  * UnifiedInstrumentCandleProcessor - Joins tick, orderbook, and OI data.
@@ -382,6 +384,28 @@ public class UnifiedInstrumentCandleProcessor {
                     .withRetention(Duration.ofDays(14))  // 2 weeks retention for replay scenarios
             );
 
+        // ========== 5.5. CREATE NON-WINDOWED ORDERBOOK LATEST STORE (FALLBACK) ==========
+        // This store keeps the latest orderbook aggregate for each instrument
+        // Used as fallback when windowed join fails (e.g., during replay when windows expire)
+        // Similar pattern to OI latest store below
+        KTable<String, OrderbookAggregate> obLatestTable = orderbooksRepartitioned
+            .groupByKey(Grouped.with(Serdes.String(), OrderBookSnapshot.serde()))
+            .aggregate(
+                OrderbookAggregate::new,
+                (key, ob, agg) -> {
+                    if (log.isDebugEnabled() && ob != null) {
+                        log.debug("[OB-LATEST-AGG] key={} token={} exch={} exchType={} updateCount={}",
+                            key, ob.getToken(), ob.getExchange(), ob.getExchangeType(),
+                            agg.getOrderbookUpdateCount());
+                    }
+                    agg.updateWithSnapshot(ob);
+                    return agg;
+                },
+                Materialized.<String, OrderbookAggregate, KeyValueStore<Bytes, byte[]>>as("orderbook-latest-store")
+                    .withKeySerde(Serdes.String())
+                    .withValueSerde(OrderbookAggregate.serde())
+            );
+
         // ========== 6. AGGREGATE OI (NON-WINDOWED KTABLE) ==========
         // Repartition OI to 20 partitions for co-partitioning with tick stream
         // This ensures OI data lands on the same partition as its corresponding tick data
@@ -432,12 +456,14 @@ public class UnifiedInstrumentCandleProcessor {
                 () -> new org.apache.kafka.streams.kstream.ValueTransformerWithKey<Windowed<String>, TickWithOrderbook, InstrumentCandleData>() {
                     private org.apache.kafka.streams.processor.ProcessorContext context;
                     private org.apache.kafka.streams.state.ReadOnlyKeyValueStore<String, ?> oiStore;
-                    
+                    private org.apache.kafka.streams.state.ReadOnlyKeyValueStore<String, ?> obLatestStore;
+
                     @Override
                     public void init(org.apache.kafka.streams.processor.ProcessorContext context) {
                         this.context = context;
-                        // Get state store - handle both ValueAndTimestamp<V> and direct V
+                        // Get state stores - handle both ValueAndTimestamp<V> and direct V
                         this.oiStore = (org.apache.kafka.streams.state.ReadOnlyKeyValueStore<String, ?>) context.getStateStore("oi-latest-store");
+                        this.obLatestStore = (org.apache.kafka.streams.state.ReadOnlyKeyValueStore<String, ?>) context.getStateStore("orderbook-latest-store");
                     }
                     
                     @Override
@@ -512,8 +538,73 @@ public class UnifiedInstrumentCandleProcessor {
                                 }
                             }
                         }
-                        
-                        return new InstrumentCandleData(tickOb.tick, tickOb.orderbook, oi);
+
+                        // ========== ORDERBOOK FALLBACK LOGIC ==========
+                        // If orderbook is null from windowed join, try fallback to latest store
+                        // This helps during replay when orderbook arrives late and window already expired
+                        OrderbookAggregate orderbook = tickOb.orderbook;
+                        boolean isOrderbookFallback = false;
+
+                        if (orderbook == null && tickOb != null && tickOb.tick != null && obLatestStore != null) {
+                            // Use the windowed key directly (format: "exchange:exchangeType:token")
+                            // This is the same key used for orderbook aggregation
+                            String obKey = windowedKey.key();
+
+                            // Lookup orderbook from latest state store
+                            try {
+                                Object storeValue = obLatestStore.get(obKey);
+                                if (storeValue == null) {
+                                    if (log.isDebugEnabled()) {
+                                        log.debug("[OB-FALLBACK-NULL] {} | No orderbook found in latest store (key: {})",
+                                            tickOb.tick.getScripCode(), obKey);
+                                    }
+                                } else {
+                                    if (storeValue instanceof ValueAndTimestamp) {
+                                        // Unwrap ValueAndTimestamp
+                                        @SuppressWarnings("unchecked")
+                                        ValueAndTimestamp<OrderbookAggregate> valueAndTimestamp = (ValueAndTimestamp<OrderbookAggregate>) storeValue;
+                                        orderbook = valueAndTimestamp.value();
+                                        isOrderbookFallback = true;
+                                        if (log.isDebugEnabled() && orderbook != null) {
+                                            log.debug("[OB-FALLBACK-SUCCESS] {} | Using latest orderbook (fallback) | window=[{} - {}] | obTimestamp={}",
+                                                tickOb.tick.getScripCode(),
+                                                new java.util.Date(windowedKey.window().start()),
+                                                new java.util.Date(windowedKey.window().end()),
+                                                orderbook.getLastUpdateTimestamp() > 0 ?
+                                                    new java.util.Date(orderbook.getLastUpdateTimestamp()) : "N/A");
+                                        }
+                                    } else if (storeValue instanceof OrderbookAggregate) {
+                                        // Direct value
+                                        orderbook = (OrderbookAggregate) storeValue;
+                                        isOrderbookFallback = true;
+                                        if (log.isDebugEnabled()) {
+                                            log.debug("[OB-FALLBACK-SUCCESS] {} | Using latest orderbook (fallback, direct) | window=[{} - {}]",
+                                                tickOb.tick.getScripCode(),
+                                                new java.util.Date(windowedKey.window().start()),
+                                                new java.util.Date(windowedKey.window().end()));
+                                        }
+                                    } else {
+                                        log.warn("[OB-FALLBACK-TYPE] {} | Unexpected store value type: {} | value={}",
+                                            obKey, storeValue.getClass().getName(), storeValue);
+                                    }
+                                }
+                            } catch (Exception e) {
+                                // Log error but continue without orderbook fallback
+                                log.warn("[OB-FALLBACK-ERROR] {} | Exception getting orderbook from latest store: {} | {}",
+                                    obKey, e.getClass().getSimpleName(), e.getMessage());
+                                orderbook = null;
+                            }
+                        }
+
+                        // OI always comes from latest store (fallback), so isOIFallback = true when OI is present
+                        // Orderbook may come from windowed join (isOrderbookFallback=false) or latest store (isOrderbookFallback=true)
+                        return new InstrumentCandleData(
+                            tickOb.tick,
+                            orderbook,  // Use fallback orderbook if windowed join failed
+                            oi,
+                            isOrderbookFallback,  // true if orderbook came from latest store (fallback)
+                            oi != null  // isOIFallback - always true since OI uses latest store
+                        );
                     }
                     
                     @Override
@@ -521,8 +612,9 @@ public class UnifiedInstrumentCandleProcessor {
                         // No cleanup needed
                     }
                 },
-                Named.as("oi-lookup-transformer"), // Name the transformer
-                "oi-latest-store"  // State store name for OI lookup
+                Named.as("oi-ob-lookup-transformer"), // Name the transformer (handles both OI and OB fallback)
+                "oi-latest-store",  // State store name for OI lookup
+                "orderbook-latest-store"  // State store name for orderbook fallback lookup
             );
         
         // ========== 9. EMIT ON WINDOW CLOSE ==========
@@ -629,6 +721,94 @@ public class UnifiedInstrumentCandleProcessor {
     }
 
     /**
+     * Calculate Volume Profile (POC, VAH, VAL) from volume-at-price histogram
+     *
+     * POC = Point of Control (price with maximum volume)
+     * VAH/VAL = Value Area High/Low (boundaries containing 70% of volume)
+     */
+    private VolumeProfile calculateVolumeProfile(Map<Double, Long> volumeAtPrice) {
+        if (volumeAtPrice == null || volumeAtPrice.isEmpty()) {
+            return new VolumeProfile(null, null, null);
+        }
+
+        // 1. Find POC (price with max volume)
+        Map.Entry<Double, Long> pocEntry = volumeAtPrice.entrySet().stream()
+            .max(Comparator.comparingLong(Map.Entry::getValue))
+            .orElse(null);
+
+        if (pocEntry == null) {
+            return new VolumeProfile(null, null, null);
+        }
+
+        double poc = pocEntry.getKey();
+        long totalVolume = volumeAtPrice.values().stream().mapToLong(Long::longValue).sum();
+        long valueAreaVolume = (long) (totalVolume * 0.70);  // 70% value area
+
+        // 2. Find VAH/VAL by expanding from POC
+        List<Map.Entry<Double, Long>> sortedByPrice = volumeAtPrice.entrySet().stream()
+            .sorted(Comparator.comparingDouble(Map.Entry::getKey))
+            .collect(Collectors.toList());
+
+        // Find POC index in sorted list
+        int pocIndex = -1;
+        for (int i = 0; i < sortedByPrice.size(); i++) {
+            if (Math.abs(sortedByPrice.get(i).getKey() - poc) < 0.001) {
+                pocIndex = i;
+                break;
+            }
+        }
+
+        if (pocIndex == -1) {
+            return new VolumeProfile(poc, null, null);
+        }
+
+        // Expand from POC up and down until we cover 70% of volume
+        long accumulatedVolume = sortedByPrice.get(pocIndex).getValue();
+        int lowIndex = pocIndex;
+        int highIndex = pocIndex;
+
+        while (accumulatedVolume < valueAreaVolume &&
+               (lowIndex > 0 || highIndex < sortedByPrice.size() - 1)) {
+
+            // Check which direction has more volume
+            long volBelow = (lowIndex > 0) ? sortedByPrice.get(lowIndex - 1).getValue() : 0;
+            long volAbove = (highIndex < sortedByPrice.size() - 1) ? sortedByPrice.get(highIndex + 1).getValue() : 0;
+
+            if (volBelow >= volAbove && lowIndex > 0) {
+                // Expand downward
+                lowIndex--;
+                accumulatedVolume += sortedByPrice.get(lowIndex).getValue();
+            } else if (highIndex < sortedByPrice.size() - 1) {
+                // Expand upward
+                highIndex++;
+                accumulatedVolume += sortedByPrice.get(highIndex).getValue();
+            } else {
+                break;  // Can't expand anymore
+            }
+        }
+
+        double val = sortedByPrice.get(lowIndex).getKey();
+        double vah = sortedByPrice.get(highIndex).getKey();
+
+        return new VolumeProfile(poc, vah, val);
+    }
+
+    /**
+     * Volume Profile result holder
+     */
+    private static class VolumeProfile {
+        final Double poc;
+        final Double vah;
+        final Double val;
+
+        VolumeProfile(Double poc, Double vah, Double val) {
+            this.poc = poc;
+            this.vah = vah;
+            this.val = val;
+        }
+    }
+
+    /**
      * Build InstrumentCandle from aggregated data
      */
     private InstrumentCandle buildInstrumentCandle(Windowed<String> windowedKey, InstrumentCandleData data) {
@@ -673,6 +853,26 @@ public class UnifiedInstrumentCandleProcessor {
             .sellVolume(tick.getSellVolume())
             .vwap(tick.getVwap())
             .tickCount(tick.getTickCount());
+
+        // ========== VOLUME PROFILE (POC, VAH, VAL) ==========
+        // Calculate Point of Control (POC) and Value Area High/Low (VAH/VAL)
+        // from volume-at-price histogram
+        Map<Double, Long> volumeAtPrice = tick.getVolumeAtPrice();
+        VolumeProfile volumeProfile = calculateVolumeProfile(volumeAtPrice);
+
+        builder.volumeAtPrice(volumeAtPrice)
+            .poc(volumeProfile.poc)
+            .vah(volumeProfile.vah)
+            .val(volumeProfile.val);
+
+        if (log.isDebugEnabled() && volumeProfile.poc != null) {
+            log.debug("[VOLUME-PROFILE] {} | POC={} VAH={} VAL={} | {} price levels",
+                tick.getScripCode(),
+                String.format("%.2f", volumeProfile.poc),
+                volumeProfile.vah != null ? String.format("%.2f", volumeProfile.vah) : "null",
+                volumeProfile.val != null ? String.format("%.2f", volumeProfile.val) : "null",
+                volumeAtPrice != null ? volumeAtPrice.size() : 0);
+        }
 
         // Calculate adaptive VPIN with market open reset
         double avgDailyVolume = instrumentMetadataService.getAverageDailyVolume(
@@ -724,6 +924,13 @@ public class UnifiedInstrumentCandleProcessor {
         // Add orderbook metrics if available
         builder.orderbookPresent(orderbook != null);
         if (orderbook != null) {
+            // Set orderbook metadata: timestamp and fallback flag
+            // Use lastUpdateTimestamp if available, otherwise windowEndMillis
+            Long obTimestamp = orderbook.getLastUpdateTimestamp() > 0 
+                ? orderbook.getLastUpdateTimestamp() 
+                : orderbook.getWindowEndMillis();
+            builder.orderbookDataTimestamp(obTimestamp);
+            builder.isOrderbookFallback(data.isOrderbookFallback != null ? data.isOrderbookFallback : false);
             // Orderbook metrics are already calculated during updateWithSnapshot
             builder.ofi(orderbook.getOfi());
             builder.kyleLambda(orderbook.getKyleLambda());
@@ -783,6 +990,15 @@ public class UnifiedInstrumentCandleProcessor {
 
         // Add OI metrics if available
         builder.oiPresent(oi != null);
+        if (oi != null) {
+            // Set OI metadata: timestamp and fallback flag
+            // Use lastUpdateTimestamp if available, otherwise windowEndMillis
+            Long oiTimestamp = oi.getLastUpdateTimestamp() > 0 
+                ? oi.getLastUpdateTimestamp() 
+                : oi.getWindowEndMillis();
+            builder.oiDataTimestamp(oiTimestamp);
+            builder.isOIFallback(data.isOIFallback != null ? data.isOIFallback : true);  // OI always uses latest store
+        }
         // #region agent log
         try {
             java.io.FileWriter fw = new java.io.FileWriter("logs/debug.log", true);
@@ -824,26 +1040,34 @@ public class UnifiedInstrumentCandleProcessor {
             builder.oiClose(oi.getOiClose());
             
             // Calculate OI change from PREVIOUS window (not within current window)
+            // FIX: Always use cross-window change for meaningful OI analysis
             String oiKey = buildOIKeyFromCandle(tick, windowedKey.key());
             Long previousOIClose = previousOICloseCache.getIfPresent(oiKey);
-            
+
             if (previousOIClose != null && previousOIClose > 0 && oi.getOiClose() != null) {
                 // Calculate change from previous window's close to current window's close
                 Long oiChange = oi.getOiClose() - previousOIClose;
                 Double oiChangePercent = (double) oiChange / previousOIClose * 100.0;
-                
+
                 builder.oiChange(oiChange);
                 builder.oiChangePercent(oiChangePercent);
-                
+
                 if (log.isDebugEnabled()) {
-                    log.debug("[OI-CHANGE] {} | prevOI={} currOI={} change={} changePct={}%", 
-                        oiKey, previousOIClose, oi.getOiClose(), oiChange, 
+                    log.debug("[OI-CHANGE] {} | prevOI={} currOI={} change={} changePct={}%",
+                        oiKey, previousOIClose, oi.getOiClose(), oiChange,
                         String.format("%.2f", oiChangePercent));
                 }
             } else {
-                // First window or no previous OI - use within-window change
-                builder.oiChange(oi.getOiChange());
-                builder.oiChangePercent(oi.getOiChangePercent());
+                // FIX: First window or no previous OI - set to null (not enough data for cross-window change)
+                // Within-window OI change (oiClose - oiOpen in same window) is meaningless for sparse OI updates
+                // Traders need cross-window change to see actual OI buildups/reductions
+                builder.oiChange(null);
+                builder.oiChangePercent(null);
+
+                if (log.isDebugEnabled() && oi.getOiClose() != null) {
+                    log.debug("[OI-CHANGE-INIT] {} | currOI={} | No previous OI - change set to null (first window)",
+                        oiKey, oi.getOiClose());
+                }
             }
             
             // Update cache with current OI close for next window
@@ -897,11 +1121,22 @@ public class UnifiedInstrumentCandleProcessor {
             builder.bidFragmentation(bidFrag);
             builder.askFragmentation(askFrag);
             builder.institutionalBias(bidFrag > 0 ? askFrag / bidFrag : 0.0);
+
+            // PHASE 8: Market Depth Slope (Liquidity Curve)
+            builder.bidDepthSlope(orderbook.getBidDepthSlope());
+            builder.askDepthSlope(orderbook.getAskDepthSlope());
         }
 
-        // Add option-specific fields
+        // Add option-specific fields (including days to expiry and greeks)
         if (type.isOption()) {
             parseOptionDetails(builder, tick.getCompanyName());
+            // PHASE 9: Calculate option greeks (Delta, Gamma, Vega, Theta)
+            // Note: We need to build a temporary candle to access parsed fields, then recalculate
+            InstrumentCandle tempCandle = builder.build();
+            calculateOptionGreeks(builder, tick, 
+                tempCandle.getStrikePrice(), 
+                tempCandle.getOptionType(),
+                tempCandle.getHoursToExpiry());
         }
 
         // ========== PHASE 1-4: CALCULATE AND POPULATE ENHANCED METRICS ==========
@@ -1029,11 +1264,54 @@ public class UnifiedInstrumentCandleProcessor {
         builder.exchangeVwap(tick.getExchangeVwap());
         double vwapDrift = tick.getVwapDrift();
         builder.vwapDrift(vwapDrift);
-        
+
         // Warn if VWAP drifts > 1% from exchange
         if (Math.abs(vwapDrift) > 1.0 && tick.getExchangeVwap() > 0) {
             log.warn("[VWAP-DRIFT] {} | calculated={:.2f} exchange={:.2f} drift={:.2f}%",
                 tick.getScripCode(), tick.getVwap(), tick.getExchangeVwap(), vwapDrift);
+        }
+
+        // ========== TICK-LEVEL SPREAD METRICS (Execution Cost) ==========
+        builder.averageTickSpread(tick.getAverageTickSpread());
+        builder.minTickSpread(tick.getMinTickSpread());
+        builder.maxTickSpread(tick.getMaxTickSpread());
+        builder.spreadVolatilityTick(tick.getSpreadVolatility());
+        builder.tightSpreadPercent(tick.getTightSpreadPercent());
+
+        if (log.isDebugEnabled() && tick.getAverageTickSpread() > 0) {
+            log.debug("[SPREAD-METRICS] {} | avg={:.4f} min={:.4f} max={:.4f} vol={:.4f} tight={:.1f}%",
+                tick.getScripCode(),
+                tick.getAverageTickSpread(),
+                tick.getMinTickSpread(),
+                tick.getMaxTickSpread(),
+                tick.getSpreadVolatility(),
+                tick.getTightSpreadPercent());
+        }
+
+        // ========== VWAP BANDS (Trading Signals) ==========
+        builder.vwapStdDev(tick.getVWAPStdDev());
+        builder.vwapUpperBand(tick.getVWAPUpperBand());
+        builder.vwapLowerBand(tick.getVWAPLowerBand());
+        String vwapSignal = tick.getVWAPSignal();
+        builder.vwapSignal(vwapSignal);
+
+        if (log.isDebugEnabled() && tick.getVWAPStdDev() > 0) {
+            log.debug("[VWAP-BANDS] {} | VWAP={:.2f} Upper={:.2f} Lower={:.2f} σ={:.4f} Signal={}",
+                tick.getScripCode(),
+                tick.getVwap(),
+                tick.getVWAPUpperBand(),
+                tick.getVWAPLowerBand(),
+                tick.getVWAPStdDev(),
+                vwapSignal);
+        }
+
+        // Warn on overbought/oversold signals
+        if ("OVERBOUGHT".equals(vwapSignal) || "OVERSOLD".equals(vwapSignal)) {
+            log.info("[VWAP-SIGNAL] {} | {} at price={:.2f} (VWAP={:.2f})",
+                tick.getScripCode(),
+                vwapSignal,
+                tick.getClose(),
+                tick.getVwap());
         }
 
         // ========== P2: TICK INTENSITY ZONES ==========
@@ -1330,9 +1608,144 @@ public class UnifiedInstrumentCandleProcessor {
 
             // Extract expiry (3 parts: DD MON YYYY)
             if (parts.length >= 4) {
-                builder.expiry(parts[1] + " " + parts[2] + " " + parts[3]);
+                String expiryStr = parts[1] + " " + parts[2] + " " + parts[3];
+                builder.expiry(expiryStr);
+
+                // PHASE 8: Calculate days to expiry
+                calculateDaysToExpiry(builder, expiryStr);
             }
         }
+    }
+
+    /**
+     * PHASE 8: Calculate days to expiry for options
+     * Expiry format: "DD MON YYYY" (e.g., "27 FEB 2025")
+     */
+    private void calculateDaysToExpiry(InstrumentCandle.InstrumentCandleBuilder builder, String expiryStr) {
+        if (expiryStr == null || expiryStr.isEmpty()) return;
+
+        try {
+            // Parse expiry date: "DD MON YYYY"
+            java.time.format.DateTimeFormatter formatter = java.time.format.DateTimeFormatter.ofPattern("dd MMM yyyy", java.util.Locale.ENGLISH);
+            LocalDate expiryDate = LocalDate.parse(expiryStr, formatter);
+
+            // Get current date in IST
+            ZonedDateTime now = ZonedDateTime.now(ZoneId.of("Asia/Kolkata"));
+            LocalDate today = now.toLocalDate();
+
+            // Calculate days to expiry
+            long daysToExpiry = java.time.temporal.ChronoUnit.DAYS.between(today, expiryDate);
+
+            // Calculate hours to expiry (more precise)
+            // Assume expiry happens at 15:30 IST (NSE F&O expiry time)
+            ZonedDateTime expiryDateTime = expiryDate.atTime(15, 30).atZone(ZoneId.of("Asia/Kolkata"));
+            long hoursToExpiry = java.time.temporal.ChronoUnit.HOURS.between(now, expiryDateTime);
+
+            // Set fields
+            builder.daysToExpiry((int) daysToExpiry);
+            builder.hoursToExpiry((double) hoursToExpiry);
+            builder.isNearExpiry(daysToExpiry <= 7 && daysToExpiry >= 0);
+
+            // Log near expiry options
+            if (daysToExpiry <= 2 && daysToExpiry >= 0) {
+                log.info("[NEAR-EXPIRY] Option expiring in {} days ({} hours)",
+                    daysToExpiry, hoursToExpiry);
+            }
+
+        } catch (Exception e) {
+            // Failed to parse expiry - not critical, just skip
+            log.warn("[EXPIRY-PARSE-FAIL] Could not parse expiry: {}", expiryStr);
+        }
+    }
+
+    /**
+     * PHASE 9: Calculate option greeks (Delta, Gamma, Vega, Theta)
+     * Uses Black-Scholes model with estimated volatility
+     */
+    private void calculateOptionGreeks(InstrumentCandle.InstrumentCandleBuilder builder, TickAggregate tick,
+                                       Double strikePrice, String optionType, Double hoursToExpiry) {
+        try {
+            // Get required inputs
+            Double underlyingPrice = tick.getClose(); // Use candle close as underlying price
+            
+            // Validate inputs
+            if (strikePrice == null || strikePrice <= 0) {
+                return; // Strike not available
+            }
+            if (optionType == null || (!optionType.equals("CE") && !optionType.equals("PE"))) {
+                return; // Invalid option type
+            }
+            if (hoursToExpiry == null || hoursToExpiry <= 0) {
+                return; // Expiry not calculated
+            }
+            if (underlyingPrice <= 0) {
+                return; // No underlying price
+            }
+            
+            // Convert hours to years
+            double timeToExpiryYears = hoursToExpiry / (365.0 * 24.0);
+            
+            // Estimate volatility (simplified approach)
+            // Option 1: Use default 30% (common for Indian markets)
+            // Option 2: Estimate from price range (high-low) in current candle
+            double volatility = estimateVolatility(tick, underlyingPrice);
+            
+            // Calculate greeks
+            boolean isCall = optionType.equals("CE");
+            BlackScholesGreeks.GreeksResult greeks = BlackScholesGreeks.calculateGreeks(
+                underlyingPrice,
+                strikePrice,
+                timeToExpiryYears,
+                volatility,
+                isCall
+            );
+            
+            // Set greeks in builder
+            builder.delta(greeks.delta);
+            builder.gamma(greeks.gamma);
+            builder.vega(greeks.vega);
+            builder.theta(greeks.theta);
+            builder.impliedVolatility(volatility);
+            
+            // Log for near-expiry options (high gamma risk)
+            if (hoursToExpiry != null && hoursToExpiry <= 24 && Math.abs(greeks.gamma) > 0.01) {
+                log.info("[HIGH-GAMMA] Option {} | Strike: {} | Gamma: {:.4f} | Hours to expiry: {}",
+                    tick.getCompanyName(), strikePrice, greeks.gamma, hoursToExpiry);
+            }
+            
+        } catch (Exception e) {
+            // Failed to calculate greeks - not critical, just skip
+            log.warn("[GREEKS-CALC-FAIL] Could not calculate greeks for {}: {}", 
+                tick.getCompanyName(), e.getMessage());
+        }
+    }
+    
+    /**
+     * Estimate volatility from price data
+     * Simple approach: Use high-low range as volatility proxy
+     * More sophisticated: Use historical returns standard deviation
+     */
+    private double estimateVolatility(TickAggregate tick, double underlyingPrice) {
+        // Default volatility for Indian markets
+        double defaultVol = 0.30; // 30% annualized
+        
+        if (tick.getHigh() > 0 && tick.getLow() > 0 && underlyingPrice > 0) {
+            // Estimate from intraday range
+            double range = tick.getHigh() - tick.getLow();
+            double rangePercent = range / underlyingPrice;
+            
+            // Annualize: assume 1-minute window represents 1/390 of trading day (6.5 hours = 390 minutes)
+            // Then scale to 252 trading days
+            double intradayVol = rangePercent * Math.sqrt(390 * 252);
+            
+            // Clamp to reasonable range (10% to 100%)
+            double estimatedVol = Math.max(0.10, Math.min(1.0, intradayVol));
+            
+            // Use average of default and estimated (more stable)
+            return (defaultVol + estimatedVol) / 2.0;
+        }
+        
+        return defaultVol;
     }
 
     /**
@@ -1483,5 +1896,7 @@ public class UnifiedInstrumentCandleProcessor {
         public final TickAggregate tick;
         public final OrderbookAggregate orderbook;
         public final OIAggregate oi;
+        public final Boolean isOrderbookFallback;  // true if orderbook came from latest store (fallback)
+        public final Boolean isOIFallback;         // true if OI came from latest store (always true currently)
     }
 }
