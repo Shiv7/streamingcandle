@@ -132,13 +132,38 @@ public class FamilyCacheAdapter implements IFamilyDataProvider {
                 }
             }
             
-            log.info("✅ Family preload from MongoDB complete: {} equities, {} futures, {} options, {} symbols mapped",
-                    equityCount, futureCount, optionCount, symbolToEquityMap.size());
+            int totalMappings = equityCount + futureCount + optionCount;
+            log.info("✅ Family preload from MongoDB complete: {} equities, {} futures, {} options, {} symbols mapped, {} total reverse mappings",
+                    equityCount, futureCount, optionCount, symbolToEquityMap.size(), totalMappings);
+            
+            // Log cache statistics after preload
+            log.info("📊 Reverse mapping cache initialized with {} entries", reverseMapping.size());
+            
+            // Schedule periodic cache statistics logging (every 5 minutes)
+            scheduler.scheduleAtFixedRate(() -> {
+                try {
+                    logCacheStatistics();
+                } catch (Exception e) {
+                    log.warn("Error logging cache statistics: {}", e.getMessage());
+                }
+            }, 5, 5, TimeUnit.MINUTES);
                     
         } catch (Exception e) {
             log.error("❌ Failed to preload from MongoDB, falling back to API: {}", e.getMessage());
             preloadFromApi();
         }
+    }
+    
+    /**
+     * Log cache statistics for monitoring
+     */
+    private void logCacheStatistics() {
+        java.util.Map<String, Object> stats = getCacheStats();
+        log.info("📊 FamilyCacheAdapter Statistics: cacheHits={}, cacheMisses={}, cacheHitRate={}, " +
+                 "mongoDbQueries={}, mongoDbHits={}, mongoDbMisses={}, mongoDbHitRate={}, cacheSize={}",
+            stats.get("cacheHits"), stats.get("cacheMisses"), stats.get("cacheHitRate"),
+            stats.get("mongoDbQueries"), stats.get("mongoDbHits"), stats.get("mongoDbMisses"),
+            stats.get("mongoDbHitRate"), stats.get("reverseMappingSize"));
     }
 
     /**
@@ -237,16 +262,84 @@ public class FamilyCacheAdapter implements IFamilyDataProvider {
         return cached;  // Return stale data if refresh disabled
     }
 
+    // Metrics for tracking cache performance
+    private long cacheHits = 0;
+    private long cacheMisses = 0;
+    private long mongoDbQueries = 0;
+    private long mongoDbHits = 0;
+    private long mongoDbMisses = 0;
+
     /**
      * Get equity scrip code for any instrument in the family
      *
      * @param scripCode Any scrip code (equity, future, or option)
-     * @return Equity scrip code or the original scripCode if not found
+     * @return Equity scrip code or null if not found
      */
     @Override
     public String getEquityScripCode(String scripCode) {
         if (scripCode == null) return null;
-        return reverseMapping.getOrDefault(scripCode, scripCode);
+        
+        // Fast path: Check cache first
+        String cached = reverseMapping.get(scripCode);
+        if (cached != null) {
+            cacheHits++;
+            if (log.isTraceEnabled()) {
+                log.trace("[CACHE-HIT] scripCode: {} -> equity: {}", scripCode, cached);
+            }
+            return cached;
+        }
+        
+        // Cache miss - need to query MongoDB
+        cacheMisses++;
+        log.debug("[CACHE-MISS] scripCode: {} not in cache, querying MongoDB...", scripCode);
+        
+        // Slow path: Query MongoDB ScripGroup collection directly
+        try {
+            mongoDbQueries++;
+            long startTime = System.currentTimeMillis();
+            java.util.Optional<com.kotsin.consumer.entity.ScripGroup> group = scripGroupRepository.findByScripCode(scripCode);
+            long queryTime = System.currentTimeMillis() - startTime;
+            
+            if (group.isPresent()) {
+                mongoDbHits++;
+                String equityScripCode = group.get().getId(); // _id is equity scripCode
+                // Cache for future lookups
+                reverseMapping.put(scripCode, equityScripCode);
+                log.info("[MONGODB-HIT] scripCode: {} -> equity: {} (queryTime: {}ms, cacheSize: {})", 
+                    scripCode, equityScripCode, queryTime, reverseMapping.size());
+                return equityScripCode;
+            } else {
+                mongoDbMisses++;
+                log.warn("[MONGODB-MISS] scripCode: {} not found in ScripGroup collection (queryTime: {}ms)", 
+                    scripCode, queryTime);
+            }
+        } catch (Exception e) {
+            mongoDbMisses++;
+            log.error("[MONGODB-ERROR] Failed to query ScripGroup for scripCode: {} - {}", 
+                scripCode, e.getMessage(), e);
+        }
+        
+        return null; // Not found
+    }
+    
+    /**
+     * Get cache statistics for monitoring
+     */
+    public java.util.Map<String, Object> getCacheStats() {
+        long totalRequests = cacheHits + cacheMisses;
+        double cacheHitRate = totalRequests > 0 ? (double) cacheHits / totalRequests * 100 : 0.0;
+        double mongoDbHitRate = mongoDbQueries > 0 ? (double) mongoDbHits / mongoDbQueries * 100 : 0.0;
+        
+        java.util.Map<String, Object> stats = new java.util.HashMap<>();
+        stats.put("cacheHits", cacheHits);
+        stats.put("cacheMisses", cacheMisses);
+        stats.put("cacheHitRate", String.format("%.2f%%", cacheHitRate));
+        stats.put("mongoDbQueries", mongoDbQueries);
+        stats.put("mongoDbHits", mongoDbHits);
+        stats.put("mongoDbMisses", mongoDbMisses);
+        stats.put("mongoDbHitRate", String.format("%.2f%%", mongoDbHitRate));
+        stats.put("reverseMappingSize", reverseMapping.size());
+        return stats;
     }
 
     /**

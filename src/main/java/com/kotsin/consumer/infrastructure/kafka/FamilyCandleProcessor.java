@@ -288,17 +288,6 @@ public class FamilyCandleProcessor {
      */
     private String getFamilyId(InstrumentCandle candle) {
         String scripCode = candle.getScripCode();
-
-        // Use IFamilyDataProvider for reverse mapping (DIP compliance)
-        String equityScripCode = familyDataProvider.getEquityScripCode(scripCode);
-
-        // FIX: Check for null before comparing (BUG-001)
-        // If mapping found and different from input, we have the equity
-        if (equityScripCode != null && !equityScripCode.equals(scripCode)) {
-            return equityScripCode;
-        }
-        
-        // No mapping found - need to determine type and handle accordingly
         InstrumentType type = candle.getInstrumentType();
         if (type == null) {
             type = InstrumentType.detect(
@@ -307,85 +296,35 @@ public class FamilyCandleProcessor {
                 candle.getCompanyName()
             );
         }
-
-        // If equity or index, prefetch family data for future lookups
+        
+        // Step 1: Get equity scripCode (queries MongoDB if not cached)
+        String equityScripCode = familyDataProvider.getEquityScripCode(scripCode);
+        
+        // If mapping found, return equity scripCode
+        if (equityScripCode != null && !equityScripCode.equals(scripCode)) {
+            log.debug("[FAMILY-ID] scripCode: {} (type: {}) -> familyId: {} (mapping found)", 
+                scripCode, type, equityScripCode);
+            return equityScripCode;
+        }
+        
+        // Step 2: If equity/index, it's already the family ID
         if (type == InstrumentType.EQUITY || type == InstrumentType.INDEX) {
-            // Cache the symbol -> scripCode mapping for derivative lookups
-            String symbol = candle.getCompanyName();
-            if (symbol != null && !symbol.isEmpty()) {
-                symbolToScripCodeCache.put(symbol.toUpperCase(), scripCode);
-            }
-            // Trigger family fetch if not cached (IFamilyDataProvider handles this)
+            log.debug("[FAMILY-ID] scripCode: {} (type: {}) -> familyId: {} (equity/index - self)", 
+                scripCode, type, scripCode);
+            // Trigger family fetch to build reverse mappings for derivatives
             familyDataProvider.getFamily(scripCode, candle.getClose());
             return scripCode;
         }
-
-        // For derivatives (futures/options) without mapping, try symbol extraction
-        String symbolRoot = extractSymbolRoot(candle.getCompanyName());
-        if (symbolRoot != null && !symbolRoot.isEmpty()) {
-            // Try to find equity scripCode by looking up symbol in cached families
-            String mappedEquity = findEquityBySymbol(symbolRoot);
-            if (mappedEquity != null) {
-                return mappedEquity;
-            }
-            // Log this so we can track unmapped options
-            log.debug("No equity mapping found for {} (symbol: {}), using scripCode as familyId", 
-                candle.getCompanyName(), symbolRoot);
-        }
         
-        // Fallback to scripCode - option will be grouped alone
-        return scripCode;
+        // Step 3: For derivatives without mapping - log warning
+        log.warn("[FAMILY-ID] No equity mapping found for derivative scripCode: {} (type: {}). " +
+                 "MongoDB query returned null. Using scripCode as familyId. " +
+                 "This may indicate missing data in ScripGroup collection.",
+                 scripCode, type);
+        
+        return scripCode; // Fallback
     }
     
-    /**
-     * 🛡️ CRITICAL FIX: Symbol Mapping Gap Prevention
-     *
-     * BEFORE (BROKEN):
-     * - Cache only populated when equity flows through
-     * - If option arrives before equity, cache is empty → mapping fails
-     * - Option gets grouped alone, not with its equity family
-     * - Example: "RELIANCE 30 DEC 2025 CE 2500" arrives before "N:C:738" (RELIANCE equity)
-     *
-     * AFTER (FIXED):
-     * - Try cache first (fast path)
-     * - If cache miss, query familyDataProvider for equity lookup
-     * - Populate cache with result for future lookups
-     * - Ensures options always find their equity family
-     */
-    private String findEquityBySymbol(String symbol) {
-        if (symbol == null || symbol.isEmpty()) {
-            return null;
-        }
-
-        String symbolUpper = symbol.toUpperCase();
-
-        // Fast path: Check cache first
-        String cachedScripCode = symbolToScripCodeCache.get(symbolUpper);
-        if (cachedScripCode != null) {
-            return cachedScripCode;
-        }
-
-        // Slow path: Query familyDataProvider for equity lookup by symbol
-        try {
-            String equityScripCode = familyDataProvider.findEquityBySymbol(symbolUpper);
-            if (equityScripCode != null && !equityScripCode.isEmpty()) {
-                // Cache the result for future lookups
-                symbolToScripCodeCache.put(symbolUpper, equityScripCode);
-                log.debug("Symbol mapping cached: {} -> {}", symbolUpper, equityScripCode);
-                return equityScripCode;
-            }
-        } catch (Exception e) {
-            log.warn("Failed to lookup equity for symbol: {}, error: {}", symbolUpper, e.getMessage());
-        }
-
-        // No mapping found - log for monitoring
-        log.debug("No equity scripCode found for symbol: {}", symbolUpper);
-        return null;
-    }
-    
-    // Cache for symbol -> equity scripCode mapping (built when equities are processed)
-    private final java.util.concurrent.ConcurrentHashMap<String, String> symbolToScripCodeCache = 
-        new java.util.concurrent.ConcurrentHashMap<>();
 
     /**
      * Extract symbol root from company name
