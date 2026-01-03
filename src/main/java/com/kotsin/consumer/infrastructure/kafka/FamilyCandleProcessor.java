@@ -289,33 +289,45 @@ public class FamilyCandleProcessor {
     private String getFamilyId(InstrumentCandle candle) {
         String scripCode = candle.getScripCode();
         InstrumentType type = candle.getInstrumentType();
+        String companyName = candle.getCompanyName();
+        String exchange = candle.getExchange();
+        String exchangeType = candle.getExchangeType();
+        
+        log.debug("[FAMILY-ID-START] scripCode: {} | type: {} | companyName: '{}' | exchange: {} | exchangeType: {}",
+            scripCode, type != null ? type.name() : "null", 
+            companyName != null ? companyName : "null", exchange, exchangeType);
+        
         if (type == null) {
-            type = InstrumentType.detect(
-                candle.getExchange(),
-                candle.getExchangeType(),
-                candle.getCompanyName()
-            );
+            type = InstrumentType.detect(exchange, exchangeType, companyName);
+            log.debug("[FAMILY-ID-TYPE-DETECTED] scripCode: {} | Detected type: {} (was null, detected from exchange/exchangeType/companyName)",
+                scripCode, type != null ? type.name() : "null");
         }
         
         // Step 1: Get equity scripCode (queries MongoDB if not cached)
+        log.debug("[FAMILY-ID-STEP1] scripCode: {} | Querying getEquityScripCode...", scripCode);
+        long step1Start = System.currentTimeMillis();
         String equityScripCode = familyDataProvider.getEquityScripCode(scripCode);
+        long step1Time = System.currentTimeMillis() - step1Start;
+        
+        log.debug("[FAMILY-ID-STEP1-RESULT] scripCode: {} | getEquityScripCode returned: '{}' | queryTime: {}ms",
+            scripCode, equityScripCode != null ? equityScripCode : "null", step1Time);
         
         // If mapping found, return equity scripCode
         if (equityScripCode != null && !equityScripCode.equals(scripCode)) {
             // Enhanced logging for options
             if (type == InstrumentType.OPTION_CE || type == InstrumentType.OPTION_PE) {
-                log.info("[FAMILY-ID] Option mapped | scripCode: {} | type: {} | familyId: {} | window: [{}, {}]", 
-                    scripCode, type, equityScripCode, candle.getWindowStartMillis(), candle.getWindowEndMillis());
+                log.info("[FAMILY-ID-STEP1-SUCCESS] Option mapped | scripCode: {} | type: {} | familyId: {} | window: [{}, {}] | queryTime: {}ms", 
+                    scripCode, type, equityScripCode, candle.getWindowStartMillis(), candle.getWindowEndMillis(), step1Time);
             } else {
-                log.debug("[FAMILY-ID] scripCode: {} (type: {}) -> familyId: {} (mapping found)", 
-                    scripCode, type, equityScripCode);
+                log.info("[FAMILY-ID-STEP1-SUCCESS] Direct mapping found | scripCode: {} | type: {} | familyId: {} | queryTime: {}ms", 
+                    scripCode, type, equityScripCode, step1Time);
             }
             return equityScripCode;
         }
         
         // Step 2: If equity/index, it's already the family ID
         if (type == InstrumentType.EQUITY || type == InstrumentType.INDEX) {
-            log.debug("[FAMILY-ID] scripCode: {} (type: {}) -> familyId: {} (equity/index - self)", 
+            log.info("[FAMILY-ID-STEP2-SUCCESS] Equity/Index - self | scripCode: {} | type: {} | familyId: {} (triggering family fetch for reverse mappings)",
                 scripCode, type, scripCode);
             // Trigger family fetch to build reverse mappings for derivatives
             familyDataProvider.getFamily(scripCode, candle.getClose());
@@ -324,36 +336,63 @@ public class FamilyCandleProcessor {
         
         // Step 3: Mapping failed? Try to find Equity by SYMBOL Name
         // (Solves the issue where "SUPREMEIND 27 JAN" exists but isn't mapped to ID 50081)
-        String companyName = candle.getCompanyName();
-        String symbolRoot = extractSymbolRoot(companyName);
+        log.info("[FAMILY-ID-STEP3-START] Symbol-based lookup | scripCode: {} | type: {} | companyName: '{}'",
+            scripCode, type, companyName != null ? companyName : "null");
+        
+        String symbolRoot = null;
+        if (companyName != null && !companyName.isEmpty()) {
+            long symbolExtractStart = System.currentTimeMillis();
+            symbolRoot = extractSymbolRoot(companyName);
+            long symbolExtractTime = System.currentTimeMillis() - symbolExtractStart;
+            
+            log.info("[FAMILY-ID-STEP3-SYMBOL-EXTRACT] scripCode: {} | companyName: '{}' | extracted symbol: '{}' | extractTime: {}ms",
+                scripCode, companyName, symbolRoot != null ? symbolRoot : "null", symbolExtractTime);
+        } else {
+            log.warn("[FAMILY-ID-STEP3-SKIP] scripCode: {} | companyName is null/empty - cannot extract symbol",
+                scripCode);
+        }
         
         if (symbolRoot != null) {
+            log.info("[FAMILY-ID-STEP3-SYMBOL-LOOKUP] scripCode: {} | Querying findEquityBySymbol for symbol: '{}'...",
+                scripCode, symbolRoot);
+            
+            long symbolLookupStart = System.currentTimeMillis();
             String symbolBasedId = familyDataProvider.findEquityBySymbol(symbolRoot);
+            long symbolLookupTime = System.currentTimeMillis() - symbolLookupStart;
+            
+            log.info("[FAMILY-ID-STEP3-SYMBOL-LOOKUP-RESULT] scripCode: {} | symbol: '{}' | findEquityBySymbol returned: '{}' | lookupTime: {}ms",
+                scripCode, symbolRoot, symbolBasedId != null ? symbolBasedId : "null", symbolLookupTime);
             
             if (symbolBasedId != null) {
-                log.info("[FAMILY-ID] Smart Recovery: Mapped {} ({}) -> {} via Symbol '{}' (from companyName: '{}')", 
-                    scripCode, type, symbolBasedId, symbolRoot, companyName);
+                log.info("[FAMILY-ID-STEP3-SUCCESS] Smart Recovery | scripCode: {} | type: {} | familyId: {} | symbol: '{}' | companyName: '{}' | totalTime: {}ms", 
+                    scripCode, type, symbolBasedId, symbolRoot, companyName, symbolLookupTime);
                 return symbolBasedId;
             } else {
-                log.debug("[FAMILY-ID] Symbol lookup failed | scripCode: {} | type: {} | symbol: '{}' | companyName: '{}' | findEquityBySymbol returned null", 
+                log.warn("[FAMILY-ID-STEP3-FAILED] Symbol lookup returned null | scripCode: {} | type: {} | symbol: '{}' | companyName: '{}' | findEquityBySymbol found no equity",
                     scripCode, type, symbolRoot, companyName);
             }
         } else {
-            log.debug("[FAMILY-ID] Symbol extraction failed | scripCode: {} | type: {} | companyName: '{}' | extractSymbolRoot returned null", 
-                scripCode, type, companyName);
+            log.warn("[FAMILY-ID-STEP3-FAILED] Symbol extraction returned null | scripCode: {} | type: {} | companyName: '{}' | extractSymbolRoot failed",
+                scripCode, type, companyName != null ? companyName : "null");
         }
         
         // Step 4: For derivatives without mapping - log warning
+        log.error("[FAMILY-ID-STEP4-FAILED] All mapping attempts failed | scripCode: {} | type: {} | " +
+                 "companyName: '{}' | symbol: '{}' | " +
+                 "Step1 (getEquityScripCode): '{}' | Step3 (findEquityBySymbol): '{}' | " +
+                 "Using scripCode as familyId (FALLBACK). This may indicate missing data in ScripGroup/Scrip collections.",
+                 scripCode, type, companyName != null ? companyName : "null", symbolRoot != null ? symbolRoot : "null",
+                 equityScripCode != null ? equityScripCode : "null", "N/A");
+        
         if (type == InstrumentType.OPTION_CE || type == InstrumentType.OPTION_PE) {
-            log.warn("[FAMILY-ID] Option mapping FAILED | scripCode: {} | type: {} | window: [{}, {}] | " +
-                     "companyName: '{}' | symbol: '{}' | MongoDB query returned null. Using scripCode as familyId. " +
-                     "This may indicate missing data in ScripGroup collection.",
-                     scripCode, type, candle.getWindowStartMillis(), candle.getWindowEndMillis(), companyName, symbolRoot);
+            log.warn("[FAMILY-ID-FINAL] Option mapping FAILED | scripCode: {} | type: {} | window: [{}, {}] | " +
+                     "companyName: '{}' | symbol: '{}' | Using scripCode as familyId",
+                     scripCode, type, candle.getWindowStartMillis(), candle.getWindowEndMillis(), 
+                     companyName != null ? companyName : "null", symbolRoot != null ? symbolRoot : "null");
         } else {
-            log.warn("[FAMILY-ID] No equity mapping found for derivative scripCode: {} (type: {}). " +
-                     "companyName: '{}' | symbol: '{}' | MongoDB query returned null. Using scripCode as familyId. " +
-                     "This may indicate missing data in ScripGroup collection.",
-                     scripCode, type, companyName, symbolRoot);
+            log.warn("[FAMILY-ID-FINAL] Derivative mapping FAILED | scripCode: {} | type: {} | " +
+                     "companyName: '{}' | symbol: '{}' | Using scripCode as familyId",
+                     scripCode, type, companyName != null ? companyName : "null", symbolRoot != null ? symbolRoot : "null");
         }
         
         return scripCode; // Fallback

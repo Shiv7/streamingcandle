@@ -15,6 +15,8 @@ import com.kotsin.consumer.infrastructure.kafka.aggregate.TickAggregate;
 import com.kotsin.consumer.service.InstrumentMetadataService;
 import com.kotsin.consumer.util.MarketTimeAligner;
 import com.kotsin.consumer.util.BlackScholesGreeks;
+import com.kotsin.consumer.repository.ScripRepository;
+import com.kotsin.consumer.entity.Scrip;
 import jakarta.annotation.PostConstruct;
 import jakarta.annotation.PreDestroy;
 import lombok.extern.slf4j.Slf4j;
@@ -61,6 +63,9 @@ public class UnifiedInstrumentCandleProcessor {
 
     @Autowired
     private InstrumentMetadataService instrumentMetadataService;
+
+    @Autowired
+    private ScripRepository scripRepository;
 
     @Autowired(required = false)
     private com.kotsin.consumer.logging.PipelineTraceLogger traceLogger;
@@ -816,27 +821,121 @@ public class UnifiedInstrumentCandleProcessor {
         OrderbookAggregate orderbook = data.orderbook;
         OIAggregate oi = data.oi;
 
-        // Determine instrument type
+        // FIX: Multi-level fallback for companyName with comprehensive logging
+        // 1. Try tick.getCompanyName()
+        // 2. Fallback to orderbook.getCompanyName()
+        // 3. Final fallback: Query ScripRepository using scripCode, exch, exchType
+        String scripCode = tick.getScripCode();
+        String tickCompanyName = tick.getCompanyName();
+        String orderbookCompanyName = orderbook != null ? orderbook.getCompanyName() : null;
+        
+        log.debug("[COMPANY-NAME-START] scripCode: {} | tick.companyName: '{}' | orderbook.companyName: '{}' | orderbookNotNull: {}",
+            scripCode, tickCompanyName != null ? tickCompanyName : "null", 
+            orderbookCompanyName != null ? orderbookCompanyName : "null", orderbook != null);
+        
+        String companyName = tickCompanyName;
+        String companyNameSource = "tick";
+        
+        // Level 2: Fallback to orderbook
+        if ((companyName == null || companyName.isEmpty()) && orderbook != null) {
+            companyName = orderbookCompanyName;
+            companyNameSource = "orderbook";
+            if (companyName != null && !companyName.isEmpty()) {
+                log.info("[COMPANY-NAME-FALLBACK-ORDERBOOK] scripCode: {} | Using orderbook companyName: '{}' (tick was null/empty)",
+                    scripCode, companyName);
+            } else {
+                log.debug("[COMPANY-NAME-FALLBACK-ORDERBOOK] scripCode: {} | Orderbook companyName also null/empty",
+                    scripCode);
+            }
+        }
+        
+        // Level 3: Final fallback - Query ScripRepository from MongoDB
+        if ((companyName == null || companyName.isEmpty()) && scripRepository != null) {
+            try {
+                String exch = tick.getExchange();
+                String exchType = tick.getExchangeType();
+                
+                log.info("[COMPANY-NAME-DB-LOOKUP-START] scripCode: {} | exch: {} | exchType: {} | Querying ScripRepository...",
+                    scripCode, exch, exchType);
+                
+                if (scripCode != null && exch != null && exchType != null) {
+                    long dbStartTime = System.currentTimeMillis();
+                    Optional<Scrip> scrip = scripRepository.findFirstByExchAndExchTypeAndScripCode(exch, exchType, scripCode);
+                    long dbQueryTime = System.currentTimeMillis() - dbStartTime;
+                    
+                    if (scrip.isPresent()) {
+                        Scrip s = scrip.get();
+                        String dbName = s.getName();
+                        String dbFullName = s.getFullName();
+                        
+                        log.info("[COMPANY-NAME-DB-LOOKUP-FOUND] scripCode: {} | Found in DB | Name: '{}' | FullName: '{}' | queryTime: {}ms",
+                            scripCode, dbName != null ? dbName : "null", 
+                            dbFullName != null ? dbFullName : "null", dbQueryTime);
+                        
+                        // Prefer Name field, fallback to FullName
+                        companyName = dbName;
+                        if ((companyName == null || companyName.isEmpty()) && dbFullName != null) {
+                            companyName = dbFullName;
+                            log.debug("[COMPANY-NAME-DB-LOOKUP] scripCode: {} | Using FullName (Name was null/empty): '{}'",
+                                scripCode, companyName);
+                        }
+                        
+                        if (companyName != null && !companyName.isEmpty()) {
+                            companyNameSource = "scripRepository";
+                            log.info("[COMPANY-NAME-DB-LOOKUP-SUCCESS] scripCode: {} | Final companyName: '{}' | source: {} | queryTime: {}ms",
+                                scripCode, companyName, companyNameSource, dbQueryTime);
+                        } else {
+                            log.warn("[COMPANY-NAME-DB-LOOKUP-EMPTY] scripCode: {} | Scrip found but both Name and FullName are null/empty",
+                                scripCode);
+                        }
+                    } else {
+                        log.warn("[COMPANY-NAME-DB-LOOKUP-NOT-FOUND] scripCode: {} | exch: {} | exchType: {} | Not found in ScripRepository | queryTime: {}ms",
+                            scripCode, exch, exchType, dbQueryTime);
+                    }
+                } else {
+                    log.warn("[COMPANY-NAME-DB-LOOKUP-SKIP] scripCode: {} | exch: {} | exchType: {} | Skipping DB lookup (missing required fields)",
+                        scripCode, exch, exchType);
+                }
+            } catch (Exception e) {
+                log.error("[COMPANY-NAME-DB-LOOKUP-ERROR] scripCode: {} | Failed to query ScripRepository: {} | Exception: {}",
+                    scripCode, e.getMessage(), e.getClass().getSimpleName(), e);
+            }
+        }
+        
+        // Final summary log
+        if (companyName == null || companyName.isEmpty()) {
+            log.warn("[COMPANY-NAME-FINAL-NULL] scripCode: {} | Final companyName is NULL/EMPTY after all fallbacks | tick: '{}' | orderbook: '{}'",
+                scripCode, tickCompanyName != null ? tickCompanyName : "null",
+                orderbookCompanyName != null ? orderbookCompanyName : "null");
+        } else {
+            log.debug("[COMPANY-NAME-FINAL] scripCode: {} | Final companyName: '{}' | source: {}",
+                scripCode, companyName, companyNameSource);
+        }
+
+        // Determine instrument type (use fallback companyName for better type detection)
         InstrumentType type = InstrumentType.detect(
             tick.getExchange(), 
             tick.getExchangeType(), 
-            tick.getCompanyName()
+            companyName
         );
         // #region agent log
         try {
             java.io.FileWriter fw = new java.io.FileWriter("logs/debug.log", true);
             String json = String.format("{\"sessionId\":\"debug-session\",\"runId\":\"run1\",\"hypothesisId\":\"TYPE-DETECT\",\"location\":\"UnifiedInstrumentCandleProcessor.java:621\",\"message\":\"Instrument type detection\",\"data\":{\"scripCode\":\"%s\",\"exchange\":\"%s\",\"exchangeType\":\"%s\",\"companyName\":\"%s\",\"detectedType\":\"%s\",\"hasOI\":%s},\"timestamp\":%d}\n",
-                tick.getScripCode(), tick.getExchange() != null ? tick.getExchange() : "null", tick.getExchangeType() != null ? tick.getExchangeType() : "null", tick.getCompanyName() != null ? tick.getCompanyName() : "null", type != null ? type.name() : "null", oi != null, System.currentTimeMillis());
+                tick.getScripCode(), tick.getExchange() != null ? tick.getExchange() : "null", tick.getExchangeType() != null ? tick.getExchangeType() : "null", companyName != null ? companyName : "null", type != null ? type.name() : "null", oi != null, System.currentTimeMillis());
             fw.write(json);
             fw.close();
         } catch (Exception e) {}
         // #endregion
 
         // Build base candle
+        log.debug("[INSTRUMENT-CANDLE-BUILD] scripCode: {} | Building InstrumentCandle with companyName: '{}' | source: {}",
+            tick.getScripCode(), companyName != null ? companyName : "null", companyNameSource);
+        
         InstrumentCandle.InstrumentCandleBuilder builder = InstrumentCandle.builder()
             .scripCode(tick.getScripCode())
             .symbol(tick.getScripCode())  // Use scripCode as symbol
-            .companyName(tick.getCompanyName())
+            .companyName(companyName)
             .exchange(tick.getExchange())
             .exchangeType(tick.getExchangeType())
             .instrumentType(type)
