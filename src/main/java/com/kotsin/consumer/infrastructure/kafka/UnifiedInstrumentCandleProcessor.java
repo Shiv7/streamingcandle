@@ -1287,7 +1287,8 @@ public class UnifiedInstrumentCandleProcessor {
                 candle.getVpin(),
                 candle.getVpinBucketCount(),
                 isReplay,
-                candle.getQuality() != null ? candle.getQuality().name() : "UNKNOWN"
+                candle.getQuality() != null ? candle.getQuality().name() : "UNKNOWN",
+                System.currentTimeMillis()
             );
             fw.write(json);
             fw.close();
