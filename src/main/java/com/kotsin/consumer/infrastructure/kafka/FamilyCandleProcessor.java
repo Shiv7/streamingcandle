@@ -324,28 +324,36 @@ public class FamilyCandleProcessor {
         
         // Step 3: Mapping failed? Try to find Equity by SYMBOL Name
         // (Solves the issue where "SUPREMEIND 27 JAN" exists but isn't mapped to ID 50081)
-        String symbolRoot = extractSymbolRoot(candle.getCompanyName());
+        String companyName = candle.getCompanyName();
+        String symbolRoot = extractSymbolRoot(companyName);
+        
         if (symbolRoot != null) {
             String symbolBasedId = familyDataProvider.findEquityBySymbol(symbolRoot);
             
             if (symbolBasedId != null) {
-                log.info("[FAMILY-ID] Smart Recovery: Mapped {} ({}) -> {} via Symbol '{}'", 
-                    scripCode, type, symbolBasedId, symbolRoot);
+                log.info("[FAMILY-ID] Smart Recovery: Mapped {} ({}) -> {} via Symbol '{}' (from companyName: '{}')", 
+                    scripCode, type, symbolBasedId, symbolRoot, companyName);
                 return symbolBasedId;
+            } else {
+                log.debug("[FAMILY-ID] Symbol lookup failed | scripCode: {} | type: {} | symbol: '{}' | companyName: '{}' | findEquityBySymbol returned null", 
+                    scripCode, type, symbolRoot, companyName);
             }
+        } else {
+            log.debug("[FAMILY-ID] Symbol extraction failed | scripCode: {} | type: {} | companyName: '{}' | extractSymbolRoot returned null", 
+                scripCode, type, companyName);
         }
         
         // Step 4: For derivatives without mapping - log warning
         if (type == InstrumentType.OPTION_CE || type == InstrumentType.OPTION_PE) {
             log.warn("[FAMILY-ID] Option mapping FAILED | scripCode: {} | type: {} | window: [{}, {}] | " +
-                     "MongoDB query returned null. Using scripCode as familyId. " +
+                     "companyName: '{}' | symbol: '{}' | MongoDB query returned null. Using scripCode as familyId. " +
                      "This may indicate missing data in ScripGroup collection.",
-                     scripCode, type, candle.getWindowStartMillis(), candle.getWindowEndMillis());
+                     scripCode, type, candle.getWindowStartMillis(), candle.getWindowEndMillis(), companyName, symbolRoot);
         } else {
             log.warn("[FAMILY-ID] No equity mapping found for derivative scripCode: {} (type: {}). " +
-                     "MongoDB query returned null. Using scripCode as familyId. " +
+                     "companyName: '{}' | symbol: '{}' | MongoDB query returned null. Using scripCode as familyId. " +
                      "This may indicate missing data in ScripGroup collection.",
-                     scripCode, type);
+                     scripCode, type, companyName, symbolRoot);
         }
         
         return scripCode; // Fallback
@@ -535,8 +543,9 @@ public class FamilyCandleProcessor {
             // #endregion
             log.debug("Commodity family {} using future as primary: {}", familyId, future.getCompanyName());
         } else if (future != null) {
-            // NSE stock with only future (no equity) - set future in equity slot for now
-            // but mark as incomplete so downstream knows equity is missing
+            // NSE stock with only future (no equity) - this indicates GROUPING FAILURE
+            // The equity and future likely have different familyIds due to missing mapping
+            // Set future in equity slot as fallback, but this is NOT ideal
             builder.equity(future);  // Use future as fallback, NOT ideal
             String symbol = extractSymbolRoot(future.getCompanyName());
             if (symbol == null || symbol.isEmpty()) {
@@ -544,7 +553,10 @@ public class FamilyCandleProcessor {
                 log.warn("Family {}: companyName is null, using scripCode as symbol fallback", familyId);
             }
             builder.symbol(symbol);
-            log.warn("Family {} has future but NO equity - using future as fallback (incomplete family)", familyId);
+            log.warn("[FAMILY-GROUPING-FAILURE] Family {} has future (scripCode: {}) but NO equity - " +
+                     "This indicates equity and future have different familyIds. " +
+                     "Check if symbol-based fallback is working. Using future as fallback (incomplete family).",
+                     familyId, future.getScripCode());
         }
 
         // Set future candle (already retrieved above)
