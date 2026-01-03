@@ -810,7 +810,7 @@ public class UnifiedInstrumentCandleProcessor {
             builder.openInterest(oi.getOiClose());
             // #region agent log
             try {
-                java.io.FileWriter fw = new java.io.FileWriter(".cursor/debug.log", true);
+                java.io.FileWriter fw = new java.io.FileWriter("logs/debug.log", true);
                 String json = String.format("{\"sessionId\":\"debug-session\",\"runId\":\"run1\",\"hypothesisId\":\"OI-B\",\"location\":\"UnifiedInstrumentCandleProcessor.java:695\",\"message\":\"OI data set on InstrumentCandle\",\"data\":{\"scripCode\":\"%s\",\"openInterest\":%s,\"oiPresent\":true},\"timestamp\":%d}\n",
                     tick.getScripCode(), oi.getOiClose() != null ? oi.getOiClose() : "null", System.currentTimeMillis());
                 fw.write(json);
@@ -1125,18 +1125,18 @@ public class UnifiedInstrumentCandleProcessor {
                 candle.getClassificationReliability() != null ? candle.getClassificationReliability() : 0.0,
                 candle.getBuyPressure() != null ? candle.getBuyPressure() : 0.0,
                 candle.getSellPressure() != null ? candle.getSellPressure() : 0.0,
-                candle.getBuyVolume() != null ? candle.getBuyVolume().longValue() : 0L,
-                candle.getSellVolume() != null ? candle.getSellVolume().longValue() : 0L,
-                candle.getVolume() != null ? candle.getVolume().longValue() : 0L,
+                candle.getBuyVolume(),
+                candle.getSellVolume(),
+                candle.getVolume(),
                 // Phase 2 values
                 candle.getFirstTickTimestamp() != null ? candle.getFirstTickTimestamp().longValue() : 0L,
                 candle.getLastTickTimestamp() != null ? candle.getLastTickTimestamp().longValue() : 0L,
-                candle.getMinTickGap() != null ? candle.getMinTickGap() : 0L,
-                candle.getMaxTickGap() != null ? candle.getMaxTickGap() : 0L,
+                candle.getMinTickGap() != null ? candle.getMinTickGap().longValue() : 0L,
+                candle.getMaxTickGap() != null ? candle.getMaxTickGap().longValue() : 0L,
                 candle.getAvgTickGap() != null ? candle.getAvgTickGap() : 0.0,
                 candle.getTicksPerSecond() != null ? candle.getTicksPerSecond().intValue() : 0,
                 candle.getTickAcceleration() != null ? candle.getTickAcceleration() : 0.0,
-                candle.getTickCount() != null ? candle.getTickCount().intValue() : 0,
+                candle.getTickCount(),
                 // Phase 3 values
                 candle.getTotalBidOrders() != null ? candle.getTotalBidOrders() : 0,
                 candle.getTotalAskOrders() != null ? candle.getTotalAskOrders() : 0,
@@ -1180,11 +1180,11 @@ public class UnifiedInstrumentCandleProcessor {
                 candle.getOrderbookMomentum() != null ? String.valueOf(candle.getOrderbookMomentum()) : "null",
                 // Metadata
                 candle.getScripCode() != null ? candle.getScripCode() : "unknown",
-                candle.getWindowStartMillis() != null ? candle.getWindowStartMillis() : 0L,
-                candle.getWindowEndMillis() != null ? candle.getWindowEndMillis() : 0L,
+                candle.getWindowStartMillis(),
+                candle.getWindowEndMillis(),
                 candle.hasOrderbook(),
                 candle.hasOI(),
-                candle.getVpin() != null ? candle.getVpin() : 0.0,
+                candle.getVpin(),
                 candle.getVpinBucketCount() != null ? candle.getVpinBucketCount().intValue() : 0,
                 isReplay,
                 candle.getQuality() != null ? candle.getQuality().name() : "UNKNOWN"

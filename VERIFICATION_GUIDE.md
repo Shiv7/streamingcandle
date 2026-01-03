@@ -68,17 +68,17 @@ Wait for at least one `InstrumentCandle` to be emitted (check your output topic 
 
 ```bash
 # View all verification logs
-cat .cursor/debug.log | grep "ALL-PHASES-VERIFY" | jq .
+cat logs/debug.log | grep "ALL-PHASES-VERIFY" | jq .
 
 # Or for a specific scripCode
-cat .cursor/debug.log | grep "ALL-PHASES-VERIFY" | jq 'select(.data.metadata.scripCode == "97104")'
+cat logs/debug.log | grep "ALL-PHASES-VERIFY" | jq 'select(.data.metadata.scripCode == "97104")'
 ```
 
 ### Step 4: Verify Each Phase
 
 #### ✅ Phase 1: Trade Classification
 ```bash
-cat .cursor/debug.log | grep "ALL-PHASES-VERIFY" | jq '.data.phase1_tradeClassification'
+cat logs/debug.log | grep "ALL-PHASES-VERIFY" | jq '.data.phase1_tradeClassification'
 ```
 
 **Expected:**
