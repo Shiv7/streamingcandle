@@ -71,6 +71,20 @@ public class TickAggregate {
     @JsonIgnore private transient List<Double> spreadHistory;  // For volatility calculation
     private int tightSpreadCount = 0;  // Count of spreads <= 1 tick
 
+    // ==================== EFFECTIVE SPREAD (ACTUAL EXECUTION COST) ====================
+    // Effective spread = 2 * |trade_price - midpoint|
+    // This measures ACTUAL execution cost, not just quoted spread
+    // Key insight: Quoted spread is what MM offers, effective spread is what trader pays
+    private double sumEffectiveSpread = 0.0;
+    private int effectiveSpreadCount = 0;
+    private double minEffectiveSpread = Double.MAX_VALUE;
+    private double maxEffectiveSpread = 0.0;
+
+    // ==================== TRADE-TO-ORDER RATIO (Market Stress Indicator) ====================
+    // High ratio = aggressive execution, Low ratio = market makers providing liquidity
+    private long totalTradesExecuted = 0;        // Count of actual trades
+    private long totalOrdersObserved = 0;        // Sum of numberOfOrders from orderbook (if available)
+
     // ==================== VWAP BANDS (Trading Signals) ====================
     // Track price history for VWAP standard deviation calculation
     @JsonIgnore private transient List<Double> priceHistory;  // For std dev around VWAP

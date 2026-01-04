@@ -115,6 +115,118 @@ public class UnifiedCandle {
     private Boolean isGapUp;           // gap > 0.5%
     private Boolean isGapDown;         // gap < -0.5%
 
+    // ========== TEMPORAL METRICS (Critical for Algo Detection) ==========
+    private Long firstTickTimestamp;        // First tick in window
+    private Long lastTickTimestamp;         // Last tick in window
+    private Long minTickGap;                // Min gap between ticks (ms)
+    private Long maxTickGap;                // Max gap between ticks (ms)
+    private Double avgTickGap;              // Avg gap between ticks (ms)
+    private Integer ticksPerSecond;         // Event frequency
+    private Double tickAcceleration;        // Change in tick frequency
+
+    // ========== TRADE SIZE DISTRIBUTION (Institutional Detection) ==========
+    private Long maxTradeSize;              // Largest trade in window
+    private Long minTradeSize;              // Smallest trade in window
+    private Double avgTradeSize;            // Average trade size
+    private Double medianTradeSize;         // Median trade size
+    private Integer largeTradeCount;        // Trades > 10x average
+    private Double priceImpactPerUnit;      // Price change per unit volume
+
+    // ========== DEPTH FRAGMENTATION (Smart Money Detection) ==========
+    private Integer totalBidOrders;         // Total orders on bid side
+    private Integer totalAskOrders;         // Total orders on ask side
+    private Integer ordersAtBestBid;        // Orders at best bid
+    private Integer ordersAtBestAsk;        // Orders at best ask
+    private Double avgBidOrderSize;         // Avg size per bid order
+    private Double avgAskOrderSize;         // Avg size per ask order
+    private Double depthConcentration;      // % volume in top 3 levels
+    private Integer maxDepthLevels;         // Max levels observed
+
+    // ========== ICEBERG & SPOOFING DETECTION ==========
+    private Boolean icebergBidDetected;     // Iceberg order on bid side
+    private Boolean icebergAskDetected;     // Iceberg order on ask side
+    private Boolean icebergAtBestBid;       // Iceberg specifically at best bid
+    private Boolean icebergAtBestAsk;       // Iceberg specifically at best ask
+    private Integer spoofingCount;          // Detected spoofing events
+
+    // ========== SPREAD DYNAMICS ==========
+    private Double spreadVolatility;        // Spread volatility in window
+    private Double maxSpread;               // Maximum spread observed
+    private Double minSpread;               // Minimum spread observed
+    private Double spreadChangeRate;        // Rate of spread change
+    private Double orderbookMomentum;       // Depth change momentum
+    private Integer orderbookUpdateCount;   // OB updates in window
+
+    // ========== DEPTH SLOPE (Liquidity Curve) ==========
+    private Double bidDepthSlope;           // Qty per price unit (bid side)
+    private Double askDepthSlope;           // Qty per price unit (ask side)
+
+    // ========== ALGO/HFT DETECTION ==========
+    private Integer maxTicksInAnySecond;    // Peak tick rate
+    private Integer secondsWithTicks;       // Active seconds in window
+    private Double tickBurstRatio;          // Peak / avg tick rate
+    private Boolean algoActivityDetected;   // Algo activity flag (burst > 3x)
+
+    // ========== OPTIONS GREEKS ==========
+    private Double delta;                   // Price sensitivity
+    private Double gamma;                   // Delta sensitivity
+    private Double vega;                    // Volatility sensitivity
+    private Double theta;                   // Time decay
+    private Double impliedVolatility;       // Estimated IV
+
+    // ========== VWAP BANDS (Mean Reversion Signals) ==========
+    private Double vwapUpperBand;           // VWAP + 2σ
+    private Double vwapLowerBand;           // VWAP - 2σ
+    private Double vwapStdDev;              // Std dev around VWAP
+    private String vwapSignal;              // OVERBOUGHT/OVERSOLD/NEUTRAL
+    private Double exchangeVwap;            // Exchange-provided VWAP
+    private Double vwapDrift;               // Our VWAP vs exchange VWAP
+
+    // ========== OI VELOCITY & DYNAMICS ==========
+    private Double oiVelocity;              // OI change per minute
+    private Double oiAcceleration;          // Velocity change
+    private Integer oiUpdateCount;          // OI updates in window
+    private Long oiUpdateLatency;           // Time since last OI update
+
+    // ========== TICK-LEVEL BID/ASK IMBALANCE ==========
+    private Long sumTotalBidQty;            // Sum of TBidQ from all ticks
+    private Long sumTotalOffQty;            // Sum of TOffQ from all ticks
+    private Double tickBidAskImbalance;     // (TBidQ - TOffQ) / total
+
+    // ========== TRADE CLASSIFICATION QUALITY ==========
+    private Long midpointVolume;            // Volume at midpoint
+    private Double classificationReliability; // % trades with valid BBO
+    private Double buyPressure;             // Aggressive buy / total
+    private Double sellPressure;            // Aggressive sell / total
+
+    // ========== TICK SPREAD METRICS (Execution Cost) ==========
+    private Double averageTickSpread;       // Avg spread across ticks
+    private Double minTickSpread;           // Min spread observed
+    private Double maxTickSpread;           // Max spread observed
+    private Double spreadVolatilityTick;    // Spread std dev
+    private Double tightSpreadPercent;      // % time spread <= 1 tick
+
+    // ========== LEVEL-WEIGHTED METRICS (Institutional Bias) ==========
+    private Double levelWeightedBidDepth;   // Bid depth weighted by 1/(level+1)
+    private Double levelWeightedAskDepth;   // Ask depth weighted by 1/(level+1)
+    private Double levelWeightedImbalance;  // Weighted imbalance
+    private Double bidFragmentation;        // Bid qty / bid orders
+    private Double askFragmentation;        // Ask qty / ask orders
+    private Double institutionalBias;       // askFrag / bidFrag
+
+    // ========== CROSS-STREAM LATENCY ==========
+    private Long tickToOrderbookLatency;    // ms between tick and OB
+    private Long tickToOILatency;           // ms between tick and OI
+    private Boolean tickStale;              // Tick > 5 sec old
+    private Boolean orderbookStale;         // OB > 5 sec old
+    private Boolean oiStale;                // OI > 5 min old
+    private Long maxDataAge;                // Oldest data point age
+    private String stalenessReason;         // Why data is stale
+
+    // ========== DATA QUALITY ==========
+    private String dataQuality;             // GOOD/ACCEPTABLE/POOR/STALE
+    private String qualityReason;           // Explanation
+
     // ========== Derived Convenience Fields ==========
     private double volumeDeltaPercent;  // (buyVolume - sellVolume) / volume
     private double range;  // high - low
@@ -341,13 +453,14 @@ public class UnifiedCandle {
      * Create UnifiedCandle from InstrumentCandle (for MTF sub-candle tracking)
      * PHASE 2: Used by FamilyCandleProcessor to track sub-candles in aggregation window
      *
-     * CRITICAL FIX: Now copies volumeAtPrice, POC, VAH, VAL from InstrumentCandle!
-     * This was causing VCP to use fallback "fake" volume profiles instead of real tick data.
+     * COMPLETE IMPLEMENTATION: Now copies ALL microstructure data from InstrumentCandle!
+     * This ensures VCP, IPU, and signal generation have access to full calculated data.
      */
     public static UnifiedCandle from(com.kotsin.consumer.domain.model.InstrumentCandle ic) {
         if (ic == null) return null;
 
-        return UnifiedCandle.builder()
+        UnifiedCandleBuilder builder = UnifiedCandle.builder()
+                // ========== METADATA ==========
                 .scripCode(ic.getScripCode())
                 .companyName(ic.getCompanyName())
                 .exchange(ic.getExchange())
@@ -355,7 +468,8 @@ public class UnifiedCandle {
                 .timeframe(ic.getTimeframe())
                 .windowStartMillis(ic.getWindowStartMillis())
                 .windowEndMillis(ic.getWindowEndMillis())
-                // OHLCV
+
+                // ========== OHLCV ==========
                 .open(ic.getOpen())
                 .high(ic.getHigh())
                 .low(ic.getLow())
@@ -365,28 +479,171 @@ public class UnifiedCandle {
                 .sellVolume(ic.getSellVolume())
                 .vwap(ic.getVwap())
                 .tickCount(ic.getTickCount())
-                // VOLUME PROFILE - CRITICAL: Was missing, causing fake volume profiles!
+
+                // ========== VOLUME PROFILE ==========
                 .volumeAtPrice(ic.getVolumeAtPrice() != null ?
                         new java.util.HashMap<>(ic.getVolumeAtPrice()) : new java.util.HashMap<>())
                 .poc(ic.getPoc())
                 .valueAreaHigh(ic.getVah())
                 .valueAreaLow(ic.getVal())
-                // VPIN
+
+                // ========== VPIN ==========
                 .vpin(ic.getVpin())
-                // Trade Classification
+
+                // ========== TRADE CLASSIFICATION ==========
                 .aggressiveBuyVolume(ic.getAggressiveBuyVolume())
                 .aggressiveSellVolume(ic.getAggressiveSellVolume())
-                // Imbalance Bars
+                .midpointVolume(ic.getMidpointVolume())
+                .classificationReliability(ic.getClassificationReliability())
+                .buyPressure(ic.getBuyPressure())
+                .sellPressure(ic.getSellPressure())
+
+                // ========== IMBALANCE BARS ==========
                 .volumeImbalance(ic.getVolumeImbalance())
                 .dollarImbalance(ic.getDollarImbalance())
-                // Orderbook metrics (if present)
-                .ofi(ic.getOfi())
-                .kyleLambda(ic.getKyleLambda())
-                .depthImbalance(ic.getDepthImbalance())
-                .microprice(ic.getMicroprice())
-                .bidAskSpread(ic.getBidAskSpread())
+                .vibTriggered(ic.isVibTriggered())
+                .dibTriggered(ic.isDibTriggered())
+                .trbTriggered(ic.isTrbTriggered())
+                .vrbTriggered(ic.isVrbTriggered())
+
+                // ========== TICK-LEVEL BID/ASK IMBALANCE ==========
+                .sumTotalBidQty(ic.getSumTotalBidQty())
+                .sumTotalOffQty(ic.getSumTotalOffQty())
+                .tickBidAskImbalance(ic.getTickBidAskImbalance())
+
+                // ========== GAP ANALYSIS ==========
+                .previousClose(ic.getPreviousClose())
+                .overnightGap(ic.getOvernightGap())
+                .isGapUp(ic.getIsGapUp())
+                .isGapDown(ic.getIsGapDown())
+
+                // ========== ORDERBOOK METRICS ==========
+                .ofi(ic.getOfi() != null ? ic.getOfi() : 0.0)
+                .kyleLambda(ic.getKyleLambda() != null ? ic.getKyleLambda() : 0.0)
+                .depthImbalance(ic.getDepthImbalance() != null ? ic.getDepthImbalance() : 0.0)
+                .weightedDepthImbalance(ic.getWeightedDepthImbalance() != null ? ic.getWeightedDepthImbalance() : 0.0)
+                .microprice(ic.getMicroprice() != null ? ic.getMicroprice() : 0.0)
+                .bidAskSpread(ic.getBidAskSpread() != null ? ic.getBidAskSpread() : 0.0)
                 .totalBidDepth(ic.getAverageBidDepth() != null ? ic.getAverageBidDepth().longValue() : 0L)
                 .totalAskDepth(ic.getAverageAskDepth() != null ? ic.getAverageAskDepth().longValue() : 0L)
-                .build();
+
+                // ========== DEPTH FRAGMENTATION ==========
+                .totalBidOrders(ic.getTotalBidOrders())
+                .totalAskOrders(ic.getTotalAskOrders())
+                .ordersAtBestBid(ic.getOrdersAtBestBid())
+                .ordersAtBestAsk(ic.getOrdersAtBestAsk())
+                .avgBidOrderSize(ic.getAvgBidOrderSize())
+                .avgAskOrderSize(ic.getAvgAskOrderSize())
+                .depthConcentration(ic.getDepthConcentration())
+                .maxDepthLevels(ic.getMaxDepthLevels())
+
+                // ========== ICEBERG & SPOOFING ==========
+                .icebergBidDetected(ic.getIcebergBidDetected())
+                .icebergAskDetected(ic.getIcebergAskDetected())
+                .icebergAtBestBid(ic.getIcebergAtBestBid())
+                .icebergAtBestAsk(ic.getIcebergAtBestAsk())
+                .spoofingCount(ic.getSpoofingCount())
+
+                // ========== SPREAD DYNAMICS ==========
+                .spreadVolatility(ic.getSpreadVolatility())
+                .maxSpread(ic.getMaxSpread())
+                .minSpread(ic.getMinSpread())
+                .spreadChangeRate(ic.getSpreadChangeRate())
+                .orderbookMomentum(ic.getOrderbookMomentum())
+                .orderbookUpdateCount(ic.getOrderbookUpdateCount())
+
+                // ========== DEPTH SLOPE (LIQUIDITY CURVE) ==========
+                .bidDepthSlope(ic.getBidDepthSlope())
+                .askDepthSlope(ic.getAskDepthSlope())
+
+                // ========== TEMPORAL METRICS ==========
+                .firstTickTimestamp(ic.getFirstTickTimestamp())
+                .lastTickTimestamp(ic.getLastTickTimestamp())
+                .minTickGap(ic.getMinTickGap())
+                .maxTickGap(ic.getMaxTickGap())
+                .avgTickGap(ic.getAvgTickGap())
+                .ticksPerSecond(ic.getTicksPerSecond())
+                .tickAcceleration(ic.getTickAcceleration())
+
+                // ========== TRADE SIZE DISTRIBUTION ==========
+                .maxTradeSize(ic.getMaxTradeSize())
+                .minTradeSize(ic.getMinTradeSize())
+                .avgTradeSize(ic.getAvgTradeSize())
+                .medianTradeSize(ic.getMedianTradeSize())
+                .largeTradeCount(ic.getLargeTradeCount())
+                .priceImpactPerUnit(ic.getPriceImpactPerUnit())
+
+                // ========== ALGO/HFT DETECTION ==========
+                .maxTicksInAnySecond(ic.getMaxTicksInAnySecond())
+                .secondsWithTicks(ic.getSecondsWithTicks())
+                .tickBurstRatio(ic.getTickBurstRatio())
+                .algoActivityDetected(ic.getAlgoActivityDetected())
+
+                // ========== TICK SPREAD METRICS ==========
+                .averageTickSpread(ic.getAverageTickSpread())
+                .minTickSpread(ic.getMinTickSpread())
+                .maxTickSpread(ic.getMaxTickSpread())
+                .spreadVolatilityTick(ic.getSpreadVolatilityTick())
+                .tightSpreadPercent(ic.getTightSpreadPercent())
+
+                // ========== VWAP BANDS ==========
+                .vwapUpperBand(ic.getVwapUpperBand())
+                .vwapLowerBand(ic.getVwapLowerBand())
+                .vwapStdDev(ic.getVwapStdDev())
+                .vwapSignal(ic.getVwapSignal())
+                .exchangeVwap(ic.getExchangeVwap())
+                .vwapDrift(ic.getVwapDrift())
+
+                // ========== LEVEL-WEIGHTED METRICS ==========
+                .levelWeightedBidDepth(ic.getLevelWeightedBidDepth())
+                .levelWeightedAskDepth(ic.getLevelWeightedAskDepth())
+                .levelWeightedImbalance(ic.getLevelWeightedImbalance())
+                .bidFragmentation(ic.getBidFragmentation())
+                .askFragmentation(ic.getAskFragmentation())
+                .institutionalBias(ic.getInstitutionalBias())
+
+                // ========== OI METRICS ==========
+                .oiOpen(ic.getOiOpen())
+                .oiHigh(ic.getOiHigh())
+                .oiLow(ic.getOiLow())
+                .oiClose(ic.getOiClose())
+                .oiChange(ic.getOiChange())
+                .oiChangePercent(ic.getOiChangePercent())
+                .oiVelocity(ic.getOiVelocity())
+                .oiAcceleration(ic.getOiAcceleration())
+                .oiUpdateCount(ic.getOiUpdateCount())
+                .oiUpdateLatency(ic.getOiUpdateLatency())
+
+                // ========== OPTIONS GREEKS ==========
+                .delta(ic.getDelta())
+                .gamma(ic.getGamma())
+                .vega(ic.getVega())
+                .theta(ic.getTheta())
+                .impliedVolatility(ic.getImpliedVolatility())
+
+                // ========== CROSS-STREAM LATENCY ==========
+                .tickToOrderbookLatency(ic.getTickToOrderbookLatency())
+                .tickToOILatency(ic.getTickToOILatency())
+                .tickStale(ic.getTickStale())
+                .orderbookStale(ic.getOrderbookStale())
+                .oiStale(ic.getOiStale())
+                .maxDataAge(ic.getMaxDataAge())
+                .stalenessReason(ic.getStalenessReason())
+
+                // ========== DATA QUALITY ==========
+                .dataQuality(ic.getQuality() != null ? ic.getQuality().name() : null)
+                .qualityReason(ic.getQualityReason());
+
+        // ========== DERIVED FIELDS ==========
+        if (ic.getVolume() > 0) {
+            builder.volumeDeltaPercent(
+                    (double) (ic.getBuyVolume() - ic.getSellVolume()) / ic.getVolume() * 100.0);
+        }
+        builder.range(ic.getHigh() - ic.getLow());
+        builder.isBullish(ic.getClose() > ic.getOpen());
+
+        UnifiedCandle result = builder.build();
+        result.updateHumanReadableTimestamps();
+        return result;
     }
 }
