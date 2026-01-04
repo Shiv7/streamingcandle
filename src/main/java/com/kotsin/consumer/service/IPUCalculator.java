@@ -94,8 +94,11 @@ public class IPUCalculator {
         // PHASE 1 ENHANCEMENT: Use aggressive volume (lifted offers vs hit bids) for TRUE intent
         // Aggressive volume = market orders that removed liquidity (strong directional conviction)
         // Regular volume = limit orders that added liquidity (passive, weak conviction)
-        long aggressiveBuyVol = current.getAggressiveBuyVolume();
-        long aggressiveSellVol = current.getAggressiveSellVolume();
+        // FIX: Add null-safety checks - family-candle topics don't have aggressive volume
+        long aggressiveBuyVol = current.getAggressiveBuyVolume() != null 
+                ? current.getAggressiveBuyVolume() : 0L;
+        long aggressiveSellVol = current.getAggressiveSellVolume() != null 
+                ? current.getAggressiveSellVolume() : 0L;
         long totalAggressive = aggressiveBuyVol + aggressiveSellVol;
         
         double volumeDeltaPct;

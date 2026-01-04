@@ -1,1 +1,0 @@
-{"sessionId":"debug-session","runId":"run1","hypothesisId":"TYPE-DETECT","location":"UnifiedInstrumentCandleProcessor.java:621","message":"Instrument type detection","data":{"scripCode":"486243","exchange":"M","exchangeType":"D","companyName":"MCXBULLDEX 27 JAN 2026","detectedType":"FUTURE","hasOI":false},"timestamp":1767556196205}
