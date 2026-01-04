@@ -157,6 +157,27 @@ public class OrderbookAggregate {
     private double askDepthSlopeSum = 0.0;
     private long depthSlopeCount = 0L;
 
+    // ==================== CANCEL RATE (Market Stress Indicator) ====================
+    // High cancel rate = HFT activity / market stress / potential manipulation
+    // Sudden spike = something is about to happen
+    // Reference: Hasbrouck (2018), SEC Market Structure Reports
+    private long totalOrdersCancelled = 0;        // Orders that disappeared between snapshots
+    private long totalOrdersObserved = 0;         // Total orders across all snapshots
+    private long previousTotalOrders = 0;         // For tracking changes
+    private double cancelRateSum = 0.0;           // Sum for averaging
+    private int cancelRateCount = 0;              // Count for averaging
+
+    // ==================== OFI MOMENTUM (Rate of Change) ====================
+    // OFI cumulative = total order flow imbalance
+    // OFI momentum = how fast is OFI changing? (first derivative)
+    // Positive momentum = buying pressure accelerating
+    // Negative momentum = selling pressure accelerating
+    private double previousOFI = 0.0;
+    private double ofiMomentum = 0.0;             // dOFI/dt
+    private double ofiMomentumSum = 0.0;          // For averaging
+    private int ofiMomentumCount = 0;             // For averaging
+    private long previousOFITimestamp = 0;
+
     // ========== Configurable Parameters ==========
     @JsonIgnore private double instrumentTickSize = 0.0; // per-instance tick size
     @JsonIgnore private Double instrumentSpoofSizeRatio = null;

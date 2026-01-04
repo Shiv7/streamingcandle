@@ -268,6 +268,28 @@ public class TickAggregate {
             if (spread <= tickSizeForProfile) {
                 tightSpreadCount++;
             }
+
+            // ========== EFFECTIVE SPREAD CALCULATION ==========
+            // Effective spread = 2 * |trade_price - midpoint|
+            // This measures ACTUAL execution cost vs theoretical midpoint
+            //
+            // Key insight from Kyle (1985) and Glosten-Harris (1988):
+            // - Quoted spread = what market maker offers
+            // - Effective spread = what trader actually pays (often better due to price improvement)
+            // - If effective > quoted: trades hitting far side of book (unusual)
+            // - If effective < quoted: price improvement (common in competitive markets)
+            double midpoint = (tick.getBidRate() + tick.getOfferRate()) / 2.0;
+            double effectiveSpread = 2.0 * Math.abs(tick.getLastRate() - midpoint);
+
+            sumEffectiveSpread += effectiveSpread;
+            effectiveSpreadCount++;
+            minEffectiveSpread = Math.min(minEffectiveSpread, effectiveSpread);
+            maxEffectiveSpread = Math.max(maxEffectiveSpread, effectiveSpread);
+        }
+
+        // ========== TRADE COUNT TRACKING ==========
+        if (deltaVol > 0) {
+            totalTradesExecuted++;
         }
 
         // ========== VWAP BANDS: TRACK PRICE HISTORY ==========
@@ -693,6 +715,55 @@ public class TickAggregate {
      */
     public double getTightSpreadPercent() {
         return spreadCount > 0 ? (double) tightSpreadCount / spreadCount * 100.0 : 0.0;
+    }
+
+    // ==================== EFFECTIVE SPREAD GETTERS ====================
+
+    /**
+     * Get average effective spread = 2 * |trade_price - midpoint|
+     *
+     * This measures ACTUAL execution cost vs theoretical midpoint.
+     *
+     * Key insight:
+     * - If effective < quoted: Traders getting price improvement
+     * - If effective = quoted: Trades at BBO as expected
+     * - If effective > quoted: Trades walking the book (unusual)
+     *
+     * Reference: Glosten & Harris (1988), Huang & Stoll (1996)
+     */
+    public double getAverageEffectiveSpread() {
+        return effectiveSpreadCount > 0 ? sumEffectiveSpread / effectiveSpreadCount : 0.0;
+    }
+
+    public double getMinEffectiveSpread() {
+        return minEffectiveSpread == Double.MAX_VALUE ? 0.0 : minEffectiveSpread;
+    }
+
+    public double getMaxEffectiveSpread() {
+        return maxEffectiveSpread;
+    }
+
+    /**
+     * Get price improvement ratio = (quoted - effective) / quoted
+     *
+     * Positive = traders are getting price improvement
+     * Negative = traders are paying MORE than quoted (bad)
+     * Zero = executing at quoted spread
+     */
+    public double getPriceImprovementRatio() {
+        double quotedSpread = getAverageTickSpread();
+        double effectiveSpread = getAverageEffectiveSpread();
+
+        if (quotedSpread <= 0) return 0.0;
+
+        return (quotedSpread - effectiveSpread) / quotedSpread;
+    }
+
+    /**
+     * Get total trades executed in window
+     */
+    public long getTotalTradesExecuted() {
+        return totalTradesExecuted;
     }
 
     // ==================== VWAP BANDS CALCULATION ====================
