@@ -69,6 +69,15 @@ public class MTISProcessor {
     @Value("${mtis.processor.output.topic:family-score}")
     private String outputTopic;
 
+    @Value("${mtis.levels.timeout.seconds:3}")
+    private int levelsTimeoutSeconds;
+
+    @Value("${mtis.async.retry.max.attempts:3}")
+    private int maxRetryAttempts;
+
+    @Value("${mtis.async.retry.backoff.ms:100}")
+    private int retryBackoffMs;
+
     // ==================== STATE CACHES ====================
     // Thread-safe caches following CuratedSignalProcessor pattern
 
@@ -128,19 +137,56 @@ public class MTISProcessor {
             return;
         }
 
-        // Process asynchronously - don't block Kafka consumer thread
+        // Process asynchronously with retry logic - don't block Kafka consumer thread
         CompletableFuture.runAsync(() -> {
-            try {
-                processCandleAsync(familyCandle);
-            } catch (Exception e) {
-                log.error("❌ Error in async processing for {}: {}", 
-                        familyCandle.getFamilyId(), e.getMessage(), e);
-            }
+            processCandleWithRetry(familyCandle);
         }, asyncProcessorPool).exceptionally(ex -> {
-            log.error("❌ Async processing failed for {}: {}", 
+            log.error("❌ [CRITICAL] Async processing failed after all retries for {} | Error: {} | " +
+                    "This indicates data loss - manual intervention may be required",
                     familyCandle.getFamilyId(), ex.getMessage());
             return null;
         });
+    }
+
+    /**
+     * Process candle with retry logic and exponential backoff
+     */
+    private void processCandleWithRetry(FamilyCandle familyCandle) {
+        int attempt = 0;
+        Exception lastException = null;
+
+        while (attempt < maxRetryAttempts) {
+            try {
+                processCandleAsync(familyCandle);
+                // Success - exit retry loop
+                if (attempt > 0) {
+                    log.info("✅ Retry successful for {} after {} attempts",
+                            familyCandle.getFamilyId(), attempt + 1);
+                }
+                return;
+            } catch (Exception e) {
+                lastException = e;
+                attempt++;
+
+                if (attempt < maxRetryAttempts) {
+                    long backoffTime = retryBackoffMs * (long) Math.pow(2, attempt - 1);  // Exponential backoff
+                    log.warn("⚠️ Retry {}/{} for {} failed: {} | Retrying in {}ms",
+                            attempt, maxRetryAttempts, familyCandle.getFamilyId(),
+                            e.getMessage(), backoffTime);
+                    try {
+                        Thread.sleep(backoffTime);
+                    } catch (InterruptedException ie) {
+                        Thread.currentThread().interrupt();
+                        throw new RuntimeException("Retry interrupted", ie);
+                    }
+                } else {
+                    log.error("❌ [CRITICAL] All {} retry attempts exhausted for {} | Last error: {} | " +
+                            "Data processing failed - signal lost",
+                            maxRetryAttempts, familyCandle.getFamilyId(), e.getMessage(), e);
+                    throw new RuntimeException("Max retries exceeded for " + familyCandle.getFamilyId(), lastException);
+                }
+            }
+        }
     }
 
     /**
@@ -197,9 +243,9 @@ public class MTISProcessor {
                     () -> levelCalculator.calculateLevels(familyId, familyCandle.getSpotPrice()),
                     asyncProcessorPool
             );
-            
-            // Wait max 3 seconds for levels (non-blocking for consumer thread)
-            levels = levelsFuture.get(3, TimeUnit.SECONDS);
+
+            // Wait for levels with configurable timeout (non-blocking for consumer thread)
+            levels = levelsFuture.get(levelsTimeoutSeconds, TimeUnit.SECONDS);
         } catch (Exception e) {
             log.debug("Could not calculate levels for {} (timeout or error): {}", 
                     familyId, e.getMessage());
@@ -247,19 +293,6 @@ public class MTISProcessor {
             }
             
             // Log actionable signals at INFO, all others at DEBUG
-            // #region agent log
-            try {
-                boolean futureNotNull = familyCandle.getFuture() != null;
-                boolean futureHasOI = futureNotNull && familyCandle.getFuture().hasOI();
-                Long futureOI = futureNotNull ? familyCandle.getFuture().getOpenInterest() : null;
-                Double pcr = familyCandle.getPcr();
-                java.io.FileWriter fw = new java.io.FileWriter("logs/debug.log", true);
-                String json = String.format("{\"sessionId\":\"debug-session\",\"runId\":\"run1\",\"hypothesisId\":\"OI-D\",\"location\":\"MTISProcessor.java:260\",\"message\":\"MTIS OI/PCR check\",\"data\":{\"familyId\":\"%s\",\"futureNotNull\":%s,\"futureHasOI\":%s,\"futureOpenInterest\":%s,\"pcr\":%s,\"pcrNotNull\":%s},\"timestamp\":%d}\n",
-                    familyId, futureNotNull, futureHasOI, futureOI != null ? futureOI : "null", pcr != null ? pcr : "null", pcr != null, System.currentTimeMillis());
-                fw.write(json);
-                fw.close();
-            } catch (Exception e) {}
-            // #endregion
             if (score.isActionable()) {
                 log.info("🎯 [MTIS-SCORE] {} | {} | price={} | OI={} PCR={}",
                         symbol,

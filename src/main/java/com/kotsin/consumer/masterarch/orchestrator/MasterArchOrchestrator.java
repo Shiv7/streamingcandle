@@ -1,5 +1,6 @@
 package com.kotsin.consumer.masterarch.orchestrator;
 
+
 import com.kotsin.consumer.domain.model.FamilyCandle;
 import com.kotsin.consumer.domain.model.InstrumentCandle;
 import com.kotsin.consumer.masterarch.calculator.*;

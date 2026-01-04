@@ -113,10 +113,12 @@ public class IndexRegimeCalculator {
 
         // Step 9: Session confidence modifier
         // FIX: Use event time from candle instead of wall clock for historical replay
-        // For now, use wall clock but TODO: pass event time from processor
-        ZonedDateTime now = ZonedDateTime.now(ZoneId.of("Asia/Kolkata"));
-        // TODO: Extract timestamp from candles30m.get(candles30m.size()-1) and use that
-        SessionPhase sessionPhase = SessionPhase.fromTime(now.getHour(), now.getMinute());
+        long eventTimestamp = getEventTimestamp(candles30m, candles5m, candles2H, candles1D);
+        ZonedDateTime eventTime = ZonedDateTime.ofInstant(
+                Instant.ofEpochMilli(eventTimestamp),
+                ZoneId.of("Asia/Kolkata")
+        );
+        SessionPhase sessionPhase = SessionPhase.fromTime(eventTime.getHour(), eventTime.getMinute());
         double sessionModifier = sessionPhase.getConfidenceMultiplier();
 
         // MASTER ARCHITECTURE - Calculate Index_Context_Score
@@ -129,7 +131,7 @@ public class IndexRegimeCalculator {
         IndexRegime result = IndexRegime.builder()
                 .indexName(indexName)
                 .scripCode(scripCode)
-                .timestamp(System.currentTimeMillis())
+                .timestamp(eventTimestamp)  // Use event time instead of System.currentTimeMillis()
                 .tf1D(tf1D)
                 .tf2H(tf2H)
                 .tf30m(tf30m)
@@ -598,5 +600,51 @@ public class IndexRegimeCalculator {
         if (tf1D != null && tf1D.getVolState() == VolatilityState.COMPRESSED) return VolatilityState.COMPRESSED;
         if (tf2H != null && tf2H.getVolState() == VolatilityState.COMPRESSED) return VolatilityState.COMPRESSED;
         return VolatilityState.NORMAL;
+    }
+
+    /**
+     * Extract event timestamp from the most recent candle
+     * Prioritizes higher frequency timeframes (5m -> 30m -> 2H -> 1D)
+     * Falls back to System.currentTimeMillis() if no candles available
+     */
+    private long getEventTimestamp(List<InstrumentCandle> candles30m,
+                                   List<InstrumentCandle> candles5m,
+                                   List<InstrumentCandle> candles2H,
+                                   List<InstrumentCandle> candles1D) {
+        // Try 5m first (most recent)
+        if (candles5m != null && !candles5m.isEmpty()) {
+            InstrumentCandle latest = candles5m.get(candles5m.size() - 1);
+            if (latest.getWindowEndMillis() > 0) {
+                return latest.getWindowEndMillis();
+            }
+        }
+
+        // Try 30m
+        if (candles30m != null && !candles30m.isEmpty()) {
+            InstrumentCandle latest = candles30m.get(candles30m.size() - 1);
+            if (latest.getWindowEndMillis() > 0) {
+                return latest.getWindowEndMillis();
+            }
+        }
+
+        // Try 2H
+        if (candles2H != null && !candles2H.isEmpty()) {
+            InstrumentCandle latest = candles2H.get(candles2H.size() - 1);
+            if (latest.getWindowEndMillis() > 0) {
+                return latest.getWindowEndMillis();
+            }
+        }
+
+        // Try 1D
+        if (candles1D != null && !candles1D.isEmpty()) {
+            InstrumentCandle latest = candles1D.get(candles1D.size() - 1);
+            if (latest.getWindowEndMillis() > 0) {
+                return latest.getWindowEndMillis();
+            }
+        }
+
+        // Fallback to system time (should rarely happen in production)
+        log.warn("No candles with valid timestamps found, falling back to System.currentTimeMillis()");
+        return System.currentTimeMillis();
     }
 }

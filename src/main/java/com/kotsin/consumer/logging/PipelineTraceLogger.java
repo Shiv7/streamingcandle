@@ -1,6 +1,7 @@
 package com.kotsin.consumer.logging;
 
 import lombok.extern.slf4j.Slf4j;
+import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Component;
 
 import java.time.Instant;
@@ -22,14 +23,19 @@ import java.util.Map;
 public class PipelineTraceLogger {
 
     private static final DateTimeFormatter TIME_FMT = DateTimeFormatter.ofPattern("HH:mm:ss");
-    private static final boolean TRACE_ENABLED = true; // Enable via config later
+
+    @Value("${pipeline.trace.enabled:true}")
+    private boolean traceEnabled;
+
+    @Value("${pipeline.trace.verbose:false}")
+    private boolean verboseLoggingEnabled;
 
     /**
      * Stage 1: Input data received
      */
     public void logInputReceived(String type, String scripCode, String companyName,
                                  long timestamp, String keyMetrics) {
-        if (!TRACE_ENABLED) return;
+        if (!traceEnabled) return;
         String time = formatTime(timestamp);
         log.info("┌─[INPUT-{}] {} | {} | {} | {}",
             type, time, scripCode, companyName, keyMetrics);
@@ -42,7 +48,7 @@ public class PipelineTraceLogger {
                                    long windowStart, long windowEnd,
                                    double open, double high, double low, double close,
                                    long volume, boolean hasOB, boolean hasOI) {
-        if (!TRACE_ENABLED) return;
+        if (!traceEnabled) return;
         String time = formatTime(windowStart);
         log.info("├─[CANDLE] {} | {} | {} | OHLC={}/{}/{}/{} vol={} OB={} OI={}",
             time, scripCode, companyName,
@@ -59,7 +65,7 @@ public class PipelineTraceLogger {
                                       boolean hasEquity, boolean hasFuture, int optionCount,
                                       double close, long volume,
                                       String oiSignal, String directionalBias) {
-        if (!TRACE_ENABLED) return;
+        if (!traceEnabled) return;
         String time = formatTime(windowStart);
         log.info("├─[FAMILY] {} | {} | {} | EQ={} FUT={} OPT={} | close={} vol={} | OI={} bias={}",
             time, familyId, symbol,
@@ -75,7 +81,7 @@ public class PipelineTraceLogger {
                                    String label, double score,
                                    String emaAlignment, String atrState,
                                    boolean alignedWithIndex, double indexMultiplier) {
-        if (!TRACE_ENABLED) return;
+        if (!traceEnabled) return;
         String time = formatTime(timestamp);
         log.info("├─[REGIME-{}] {} | {} | label={} score={} | EMA={} ATR={} | IndexAlign={} mult={}",
             regimeType, time, scripCode,
@@ -89,7 +95,7 @@ public class PipelineTraceLogger {
     public void logSignalGenerated(String signalType, String scripCode,
                                   long timestamp,
                                   double score, String state, String details) {
-        if (!TRACE_ENABLED) return;
+        if (!traceEnabled) return;
         String time = formatTime(timestamp);
         log.info("├─[SIGNAL-{}] {} | {} | score={} state={} | {}",
             signalType, time, scripCode, String.format("%.2f", score), state, details);
@@ -101,7 +107,7 @@ public class PipelineTraceLogger {
     public void logOutputEmitted(String outputType, String scripCode,
                                 long timestamp,
                                 String destination, String summary) {
-        if (!TRACE_ENABLED) return;
+        if (!traceEnabled) return;
         String time = formatTime(timestamp);
         log.info("└─[OUTPUT-{}] {} | {} | → {} | {}",
             outputType, time, scripCode, destination, summary);
@@ -114,7 +120,7 @@ public class PipelineTraceLogger {
                                   long timestamp,
                                   String reason,
                                   Map<String, Object> indicators) {
-        if (!TRACE_ENABLED) return;
+        if (!traceEnabled) return;
         String time = formatTime(timestamp);
         String indicatorStr = formatIndicators(indicators);
         log.info("✅ [ACCEPT-{}] {} | {} | {} | {}",
@@ -128,7 +134,7 @@ public class PipelineTraceLogger {
                                   long timestamp,
                                   String reason,
                                   Map<String, Object> indicators) {
-        if (!TRACE_ENABLED) return;
+        if (!traceEnabled) return;
         String time = formatTime(timestamp);
         String indicatorStr = formatIndicators(indicators);
         log.warn("❌ [REJECT-{}] {} | {} | {} | {}",
@@ -162,7 +168,7 @@ public class PipelineTraceLogger {
      * Error/Warning in pipeline
      */
     public void logPipelineWarning(String stage, String scripCode, String warning) {
-        if (!TRACE_ENABLED) return;
+        if (!traceEnabled) return;
         log.warn("⚠️ [{}] {} | {}", stage, scripCode, warning);
     }
 
@@ -198,7 +204,7 @@ public class PipelineTraceLogger {
                                         long timestamp,
                                         String label, double strength,
                                         int flowAgreement, String flowState) {
-        if (!TRACE_ENABLED) return;
+        if (!traceEnabled) return;
         String time = formatTime(timestamp);
         log.info("├─[REGIME-IDX] {} | {} ({}) | label={} strength={} | flow={} state={}",
             time, indexCode, indexName, label, String.format("%.2f", strength), flowAgreement, flowState);
@@ -209,7 +215,7 @@ public class PipelineTraceLogger {
      */
     public void logACLCalculated(String scripCode, long timestamp,
                                 String action, String reason, double multiplier) {
-        if (!TRACE_ENABLED) return;
+        if (!traceEnabled) return;
         String time = formatTime(timestamp);
         log.info("├─[REGIME-ACL] {} | {} | action={} mult={} | {}",
             time, scripCode, action, String.format("%.2f", multiplier), reason);
@@ -221,7 +227,7 @@ public class PipelineTraceLogger {
     public void logTradeClassified(String scripCode, long timestamp,
                                    String tradeType, String direction,
                                    double confidence, String details) {
-        if (!TRACE_ENABLED) return;
+        if (!traceEnabled) return;
         String time = formatTime(timestamp);
         log.info("├─[TRADE-CLASS] {} | {} | type={} dir={} conf={} | {}",
             time, scripCode, tradeType, direction, String.format("%.2f", confidence), details);
@@ -234,7 +240,7 @@ public class PipelineTraceLogger {
                                  double mtisScore, double priceScore,
                                  double foScore, double ipuScore,
                                  double regimeScore, String timeframe) {
-        if (!TRACE_ENABLED) return;
+        if (!traceEnabled) return;
         String time = formatTime(timestamp);
         log.info("├─[MTIS] {} | {} | score={} TF={} | price={} fo={} ipu={} regime={}",
             time, scripCode, String.format("%.2f", mtisScore), timeframe,
@@ -250,7 +256,7 @@ public class PipelineTraceLogger {
                                  double baseSignal, double aclMult, double cssScore,
                                  double somPenalty, double vtdPenalty,
                                  int rank) {
-        if (!TRACE_ENABLED) return;
+        if (!traceEnabled) return;
         String time = formatTime(timestamp);
         log.info("├─[FINAL-MAG] {} | {} | MAGNITUDE={} rank={} dir={} | base={} acl={} css={} som={} vtd={}",
             time, scripCode, String.format("%.3f", finalMagnitude), rank, direction,
@@ -265,7 +271,7 @@ public class PipelineTraceLogger {
     public void logFinalOutput(String scripCode, long timestamp,
                               String outputType, String destination,
                               String summary) {
-        if (!TRACE_ENABLED) return;
+        if (!traceEnabled) return;
         String time = formatTime(timestamp);
         log.info("└─[FINAL-OUT-{}] {} | {} | → {} | {}",
             outputType, time, scripCode, destination, summary);
@@ -273,9 +279,27 @@ public class PipelineTraceLogger {
 
     /**
      * Enable/disable tracing at runtime
+     * Note: Tracing is now configured via property: pipeline.trace.enabled
      */
-    public static void setTraceEnabled(boolean enabled) {
-        // TODO: Implement via config service
+    public void setTraceEnabled(boolean enabled) {
+        this.traceEnabled = enabled;
+        log.info("Pipeline trace logging {}",  enabled ? "ENABLED" : "DISABLED");
+    }
+
+    /**
+     * Check if verbose logging is enabled
+     * Configure via property: pipeline.trace.verbose
+     */
+    public boolean isVerboseLoggingEnabled() {
+        return verboseLoggingEnabled;
+    }
+
+    /**
+     * Enable/disable verbose logging at runtime
+     */
+    public void setVerboseLoggingEnabled(boolean enabled) {
+        this.verboseLoggingEnabled = enabled;
+        log.info("Pipeline verbose logging {}", enabled ? "ENABLED" : "DISABLED");
     }
 
     /**
@@ -286,7 +310,7 @@ public class PipelineTraceLogger {
                                  int tickRuns, long volumeRuns,
                                  boolean vibTriggered, boolean dibTriggered,
                                  boolean trbTriggered, boolean vrbTriggered) {
-        if (!TRACE_ENABLED) return;
+        if (!traceEnabled) return;
         
         java.util.List<String> triggered = new java.util.ArrayList<>();
         if (vibTriggered) triggered.add("VIB");
@@ -308,7 +332,7 @@ public class PipelineTraceLogger {
     public void logOIChange(String scripCode, long timestamp,
                            Long previousOI, Long currentOI,
                            Long oiChange, Double oiChangePercent) {
-        if (!TRACE_ENABLED) return;
+        if (!traceEnabled) return;
         String time = formatTime(timestamp);
         log.info("├─[OI-CHANGE] {} | {} | prev={} curr={} Δ={} ({}%)",
             time, scripCode,

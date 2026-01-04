@@ -29,9 +29,12 @@ import org.springframework.kafka.annotation.KafkaListener;
 import org.springframework.kafka.core.KafkaTemplate;
 import org.springframework.stereotype.Component;
 
+import com.github.benmanes.caffeine.cache.Cache;
+import com.github.benmanes.caffeine.cache.Caffeine;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.TimeUnit;
 
 /**
  * CuratedSignalProcessor - Main orchestrator for the Curated Signal System
@@ -97,19 +100,32 @@ public class CuratedSignalProcessor {
     @Value("${gate.chain.enabled:true}")
     private boolean gateChainEnabled;
 
-    // Cache for latest FamilyCandle (for gate evaluation)
-    private final Map<String, FamilyCandle> familyCandleCache = new ConcurrentHashMap<>();
+    // 🛡️ MEMORY LEAK FIX: Replaced unbounded ConcurrentHashMaps with Caffeine caches
+    // All caches now have size limits and TTL to prevent OOM
 
-    // FIX: Cache for active breakouts with TTL expiry
-    // Breakouts that don't get retested within 30 minutes should expire
-    private static final long BREAKOUT_EXPIRY_MS = 30 * 60 * 1000L;  // 30 minutes
-    private final Map<String, MultiTFBreakout> activeBreakouts = new ConcurrentHashMap<>();
-    private final Map<String, Long> breakoutTimestamps = new ConcurrentHashMap<>();  // Track when breakout was detected
+    // Cache for latest FamilyCandle (for gate evaluation)
+    private final Cache<String, FamilyCandle> familyCandleCache = Caffeine.newBuilder()
+            .maximumSize(5_000)  // Max active securities
+            .expireAfterWrite(1, TimeUnit.HOURS)  // Clear after 1 hour
+            .build();
+
+    // Cache for active breakouts with TTL expiry (30 minutes)
+    private final Cache<String, MultiTFBreakout> activeBreakouts = Caffeine.newBuilder()
+            .maximumSize(1_000)  // Max concurrent breakouts
+            .expireAfterWrite(30, TimeUnit.MINUTES)  // Auto-expire breakouts
+            .build();
 
     // Cache for latest module outputs
-    private final Map<String, IndexRegime> indexRegimeCache = new ConcurrentHashMap<>();
-    private final Map<String, SecurityRegime> securityRegimeCache = new ConcurrentHashMap<>();
-    
+    private final Cache<String, IndexRegime> indexRegimeCache = Caffeine.newBuilder()
+            .maximumSize(100)  // ~50 indices (NIFTY, BANKNIFTY, etc.)
+            .expireAfterWrite(1, TimeUnit.HOURS)
+            .build();
+
+    private final Cache<String, SecurityRegime> securityRegimeCache = Caffeine.newBuilder()
+            .maximumSize(5_000)  // Max securities
+            .expireAfterWrite(1, TimeUnit.HOURS)
+            .build();
+
     // FIX: Map scripCode to relevant index (not always NIFTY50)
     // This should be loaded from configuration or sector mapping service
     private static final Map<String, String> SCRIP_TO_INDEX_MAP = new ConcurrentHashMap<>();
@@ -133,7 +149,7 @@ public class CuratedSignalProcessor {
         }
         
         // Try to infer from security regime (using parentIndexCode)
-        SecurityRegime secRegime = securityRegimeCache.get(scripCode);
+        SecurityRegime secRegime = securityRegimeCache.getIfPresent(scripCode);
         if (secRegime != null && secRegime.getParentIndexCode() != null) {
             return secRegime.getParentIndexCode();
         }
@@ -141,11 +157,30 @@ public class CuratedSignalProcessor {
         // Default fallback
         return DEFAULT_INDEX;
     }
-    private final Map<String, ACLOutput> aclCache = new ConcurrentHashMap<>();
-    private final Map<String, MTVCPOutput> vcpCache = new ConcurrentHashMap<>();
-    private final Map<String, CSSOutput> cssCache = new ConcurrentHashMap<>();
-    private final Map<String, IPUOutput> ipuCache = new ConcurrentHashMap<>();
-    private final Map<String, FinalMagnitude> fmaCache = new ConcurrentHashMap<>();
+    private final Cache<String, ACLOutput> aclCache = Caffeine.newBuilder()
+            .maximumSize(5_000)
+            .expireAfterWrite(2, TimeUnit.HOURS)
+            .build();
+
+    private final Cache<String, MTVCPOutput> vcpCache = Caffeine.newBuilder()
+            .maximumSize(5_000)
+            .expireAfterWrite(2, TimeUnit.HOURS)
+            .build();
+
+    private final Cache<String, CSSOutput> cssCache = Caffeine.newBuilder()
+            .maximumSize(5_000)
+            .expireAfterWrite(2, TimeUnit.HOURS)
+            .build();
+
+    private final Cache<String, IPUOutput> ipuCache = Caffeine.newBuilder()
+            .maximumSize(5_000)
+            .expireAfterWrite(2, TimeUnit.HOURS)
+            .build();
+
+    private final Cache<String, FinalMagnitude> fmaCache = Caffeine.newBuilder()
+            .maximumSize(5_000)
+            .expireAfterWrite(2, TimeUnit.HOURS)
+            .build();
 
     /**
      * Listen to family candle streams (1m, 2m, 3m)
@@ -185,13 +220,9 @@ public class CuratedSignalProcessor {
             // 1.5 Check for BB+SuperTrend confluence (runs on all timeframes)
             bbSuperTrendDetector.processCandle(candle);
 
-            // FIX: Periodically cleanup expired breakouts (every ~100 candles)
-            if (System.currentTimeMillis() % 100 == 0) {
-                cleanupExpiredBreakouts();
-            }
-
             // 2. Check if we have an active breakout for this scrip
-            MultiTFBreakout activeBreakout = activeBreakouts.get(scripCode);
+            // Note: Caffeine cache automatically expires breakouts after 30 minutes
+            MultiTFBreakout activeBreakout = activeBreakouts.getIfPresent(scripCode);
 
             if (activeBreakout != null) {
                 // We're waiting for retest - check if this candle is retesting
@@ -338,17 +369,17 @@ public class CuratedSignalProcessor {
 
         // Fetch all module outputs
         String relevantIndex = getRelevantIndex(scripCode);
-        IndexRegime indexRegime = indexRegimeCache.get(relevantIndex);
+        IndexRegime indexRegime = indexRegimeCache.getIfPresent(relevantIndex);
         if (indexRegime == null) {
-            indexRegime = indexRegimeCache.get(DEFAULT_INDEX);
+            indexRegime = indexRegimeCache.getIfPresent(DEFAULT_INDEX);
         }
-        SecurityRegime securityRegime = securityRegimeCache.get(scripCode);
-        FamilyCandle familyCandle = familyCandleCache.get(scripCode);
-        ACLOutput acl = aclCache.get(scripCode);
-        MTVCPOutput vcp = vcpCache.get(scripCode);
-        CSSOutput css = cssCache.get(scripCode);
-        IPUOutput ipu = ipuCache.get(scripCode);
-        FinalMagnitude fma = fmaCache.get(scripCode);
+        SecurityRegime securityRegime = securityRegimeCache.getIfPresent(scripCode);
+        FamilyCandle familyCandle = familyCandleCache.getIfPresent(scripCode);
+        ACLOutput acl = aclCache.getIfPresent(scripCode);
+        MTVCPOutput vcp = vcpCache.getIfPresent(scripCode);
+        CSSOutput css = cssCache.getIfPresent(scripCode);
+        IPUOutput ipu = ipuCache.getIfPresent(scripCode);
+        FinalMagnitude fma = fmaCache.getIfPresent(scripCode);
 
         // Calculate entry/stop/target based on breakout direction
         double entryPrice = breakout.getPrimaryBreakout().getBreakoutPrice();
@@ -451,42 +482,8 @@ public class CuratedSignalProcessor {
         log.info("   Reason: {}", reason);
     }
 
-    /**
-     * Clean up expired breakouts that never got retested
-     * Called periodically to prevent memory leaks
-     * 
-     * BUG-FIX: Uses latest candle timestamp for comparison instead of System.currentTimeMillis()
-     * This ensures correct expiry during replay of historical data.
-     */
-    private synchronized void cleanupExpiredBreakouts() {
-        // BUG-FIX: Use the latest FamilyCandle timestamp as reference, not system time
-        // This ensures correct expiry calculation during replay
-        long latestCandleTime = familyCandleCache.values().stream()
-                .mapToLong(fc -> fc.getTimestamp())
-                .max()
-                .orElse(System.currentTimeMillis());
-        
-        List<String> expired = new java.util.ArrayList<>();
-        java.util.Map<String, Long> expiredAges = new java.util.HashMap<>();
-        
-        breakoutTimestamps.forEach((scripCode, timestamp) -> {
-            long age = latestCandleTime - timestamp;
-            if (age > BREAKOUT_EXPIRY_MS) {
-                expired.add(scripCode);
-                expiredAges.put(scripCode, age);
-            }
-        });
-        
-        for (String scripCode : expired) {
-            MultiTFBreakout removed = activeBreakouts.remove(scripCode);
-            breakoutTimestamps.remove(scripCode);
-            if (removed != null) {
-                long ageMinutes = expiredAges.getOrDefault(scripCode, 0L) / 60000;
-                log.info("🗑️ BREAKOUT EXPIRED | scrip={} | age={}min | reason=No_retest_within_window",
-                    scripCode, ageMinutes);
-            }
-        }
-    }
+    // Note: Manual cleanup method removed - Caffeine cache automatically expires
+    // breakouts after 30 minutes using expireAfterWrite()
 
     /**
      * Check if price is retesting the breakout pivot
@@ -508,8 +505,8 @@ public class CuratedSignalProcessor {
             // RETEST CONFIRMED - Generate curated signal
             generateCuratedSignal(breakout, entry);
 
-            // Remove from active breakouts
-            activeBreakouts.remove(scripCode);
+            // Remove from active breakouts (Caffeine cache uses invalidate instead of remove)
+            activeBreakouts.invalidate(scripCode);
         }
     }
 
@@ -524,17 +521,17 @@ public class CuratedSignalProcessor {
 
         // Fetch all module outputs
         String relevantIndex = getRelevantIndex(scripCode);
-        IndexRegime indexRegime = indexRegimeCache.get(relevantIndex);
+        IndexRegime indexRegime = indexRegimeCache.getIfPresent(relevantIndex);
         if (indexRegime == null) {
-            indexRegime = indexRegimeCache.get(DEFAULT_INDEX);
+            indexRegime = indexRegimeCache.getIfPresent(DEFAULT_INDEX);
         }
-        SecurityRegime securityRegime = securityRegimeCache.get(scripCode);
-        FamilyCandle familyCandle = familyCandleCache.get(scripCode);
-        ACLOutput acl = aclCache.get(scripCode);
-        MTVCPOutput vcp = vcpCache.get(scripCode);
-        CSSOutput css = cssCache.get(scripCode);
-        IPUOutput ipu = ipuCache.get(scripCode);
-        FinalMagnitude fma = fmaCache.get(scripCode);
+        SecurityRegime securityRegime = securityRegimeCache.getIfPresent(scripCode);
+        FamilyCandle familyCandle = familyCandleCache.getIfPresent(scripCode);
+        ACLOutput acl = aclCache.getIfPresent(scripCode);
+        MTVCPOutput vcp = vcpCache.getIfPresent(scripCode);
+        CSSOutput css = cssCache.getIfPresent(scripCode);
+        IPUOutput ipu = ipuCache.getIfPresent(scripCode);
+        FinalMagnitude fma = fmaCache.getIfPresent(scripCode);
 
         // Calculate F&O alignment from FamilyCandle data (no external API needed)
         FuturesOptionsAlignment foAlignment = null;
@@ -703,10 +700,10 @@ public class CuratedSignalProcessor {
         String relevantIndex = getRelevantIndex(scripCode);
         
         // Gate 1: Index regime must be tradeable
-        IndexRegime indexRegime = indexRegimeCache.get(relevantIndex);
+        IndexRegime indexRegime = indexRegimeCache.getIfPresent(relevantIndex);
         if (indexRegime == null) {
             // FIX: Fallback to NIFTY50 if specific index not available
-            indexRegime = indexRegimeCache.get(DEFAULT_INDEX);
+            indexRegime = indexRegimeCache.getIfPresent(DEFAULT_INDEX);
             if (indexRegime == null) {
                 log.info("🚫 GATE_1_FAILED | scrip={} | gate=INDEX_REGIME | reason=Index_regime_null | tried={},{}",
                     scripCode, relevantIndex, DEFAULT_INDEX);
@@ -732,7 +729,7 @@ public class CuratedSignalProcessor {
         }
 
         // Gate 3: Security regime must be aligned with index
-        SecurityRegime securityRegime = securityRegimeCache.get(scripCode);
+        SecurityRegime securityRegime = securityRegimeCache.getIfPresent(scripCode);
         if (securityRegime == null) {
             log.info("🚫 GATE_3_FAILED | scrip={} | gate=SECURITY_REGIME | reason=Security_regime_null", scripCode);
             return false;
@@ -746,7 +743,7 @@ public class CuratedSignalProcessor {
         }
 
         // Gate 4: ACL must allow entry
-        ACLOutput acl = aclCache.get(scripCode);
+        ACLOutput acl = aclCache.getIfPresent(scripCode);
         if (acl == null) {
             log.info("🚫 GATE_4_FAILED | scrip={} | gate=ACL | reason=ACL_null", scripCode);
             return false;
@@ -771,7 +768,7 @@ public class CuratedSignalProcessor {
      * Get ATR for stop loss calculation
      */
     private double getATR(String scripCode) {
-        SecurityRegime securityRegime = securityRegimeCache.get(scripCode);
+        SecurityRegime securityRegime = securityRegimeCache.getIfPresent(scripCode);
         if (securityRegime != null && securityRegime.getAtr14() > 0) {
             return securityRegime.getAtr14();
         }

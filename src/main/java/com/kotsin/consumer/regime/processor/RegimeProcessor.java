@@ -280,9 +280,9 @@ public class RegimeProcessor {
 
         // Process with state store
         KStream<String, SecurityRegime> regimeStream = equityStream.process(
-                () -> new SecurityRegimeHistoryProcessor(historyStore, historyLookback, 
+                () -> new SecurityRegimeHistoryProcessor(historyStore, historyLookback,
                         securityRegimeCalculator, cachedIndexRegimes,
-                        correlationService, volumeCanonicalCalculator),
+                        correlationService, volumeCanonicalCalculator, candleCache),
                 historyStore
         );
 
@@ -369,20 +369,23 @@ public class RegimeProcessor {
         private final Map<String, IndexRegime> indexRegimes;
         private final com.kotsin.consumer.infrastructure.redis.RedisCorrelationService correlationService;
         private final com.kotsin.consumer.masterarch.calculator.VolumeCanonicalCalculator volumeCanonicalCalculator;
+        private final ConcurrentHashMap<String, CandleCache> candleCache;
         private ProcessorContext<String, SecurityRegime> context;
         private KeyValueStore<String, VCPProcessor.CandleHistory> historyStore;
 
-        SecurityRegimeHistoryProcessor(String storeName, int lookback, 
+        SecurityRegimeHistoryProcessor(String storeName, int lookback,
                                        SecurityRegimeCalculator calculator,
                                        Map<String, IndexRegime> indexRegimes,
                                        com.kotsin.consumer.infrastructure.redis.RedisCorrelationService correlationService,
-                                       com.kotsin.consumer.masterarch.calculator.VolumeCanonicalCalculator volumeCanonicalCalculator) {
+                                       com.kotsin.consumer.masterarch.calculator.VolumeCanonicalCalculator volumeCanonicalCalculator,
+                                       ConcurrentHashMap<String, CandleCache> candleCache) {
             this.storeName = storeName;
             this.lookback = lookback;
             this.calculator = calculator;
             this.indexRegimes = indexRegimes;
             this.correlationService = correlationService;
             this.volumeCanonicalCalculator = volumeCanonicalCalculator;
+            this.candleCache = candleCache;
         }
 
         @Override
@@ -421,8 +424,16 @@ public class RegimeProcessor {
             // Get parent index regime (use NIFTY50 as default)
             IndexRegime parentRegime = indexRegimes.get(IndexRegimeCalculator.NIFTY50_CODE);
 
-            // Get candles1D (TODO: populate from 1D state store when available)
+            // Get candles1D from cache
+            // FIX: Retrieve from candleCache instead of using empty list
             List<UnifiedCandle> candles1D = new ArrayList<>();
+            CandleCache cache = candleCache.get(candle.getScripCode());
+            if (cache != null && !cache.candles1D.isEmpty()) {
+                // Convert InstrumentCandles to UnifiedCandles
+                for (InstrumentCandle ic : cache.candles1D) {
+                    candles1D.add(FamilyCandleConverter.toUnifiedCandle(ic));
+                }
+            }
 
             // Get volume certainty (default to 0.5 if not available)
             double volumeCertainty = 0.5;

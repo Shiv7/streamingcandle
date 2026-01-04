@@ -98,6 +98,12 @@ public class UnifiedInstrumentCandleProcessor {
     @Value("${unified.processor.fetch.max.wait.ms:50}")
     private int fetchMaxWaitMs;  // Max wait time for fetch.min.bytes
 
+    @Value("${unified.flashcrash.tick.acceleration.threshold:100}")
+    private int flashCrashThreshold;  // Tick acceleration threshold for flash crash detection
+
+    @Value("${unified.volumeprofile.value.area.percent:0.70}")
+    private double valueAreaPercent;  // Value area percentage (70% of total volume)
+
     private KafkaStreams streams;
 
     /**
@@ -219,17 +225,9 @@ public class UnifiedInstrumentCandleProcessor {
             }
             return valid;
         })
-        .filter((key, tick) -> {
-            boolean withinHours = withinTradingHours(tick);
-            if (!withinHours && traceLogger != null) {
-                java.util.Map<String, Object> indicators = new java.util.HashMap<>();
-                indicators.put("timestamp", tick.getTimestamp());
-                indicators.put("exchange", tick.getExchange());
-                traceLogger.logSignalRejected("TICK", tick.getScripCode(),
-                    tick.getTimestamp(), "Outside trading hours", indicators);
-            }
-            return withinHours;
-        })
+        // REMOVED: Trading hours filter that rejected ticks with timestamp=0
+        // TickDataTimestampExtractor already handles invalid timestamps by using Kafka record timestamp
+        // This allows MCX and NSE data with timestamp=0 to be processed correctly
         .peek((key, tick) -> {
             if (traceLogger != null) {
                 traceLogger.logInputReceived("TICK", tick.getScripCode(), tick.getCompanyName(),
@@ -510,8 +508,9 @@ public class UnifiedInstrumentCandleProcessor {
                                                 oiKey, oi.getOiClose());
                                         }
                                     } else {
-                                        log.warn("[OI-LOOKUP-TYPE] {} | Unexpected store value type: {} | value={}", 
-                                            oiKey, storeValue.getClass().getName(), storeValue);
+                                        log.error("[OI-LOOKUP-TYPE] {} | Unexpected store value type: {}, expected OIAggregate or ValueAndTimestamp. Setting oi to null.",
+                                            oiKey, storeValue.getClass().getName());
+                                        oi = null;  // Explicit null assignment for clarity
                                     }
                                 }
                             } catch (Exception e) {
@@ -747,7 +746,7 @@ public class UnifiedInstrumentCandleProcessor {
 
         double poc = pocEntry.getKey();
         long totalVolume = volumeAtPrice.values().stream().mapToLong(Long::longValue).sum();
-        long valueAreaVolume = (long) (totalVolume * 0.70);  // 70% value area
+        long valueAreaVolume = (long) (totalVolume * valueAreaPercent);  // Configurable value area
 
         // 2. Find VAH/VAL by expanding from POC
         List<Map.Entry<Double, Long>> sortedByPrice = volumeAtPrice.entrySet().stream()
@@ -1277,11 +1276,12 @@ public class UnifiedInstrumentCandleProcessor {
         builder.ticksPerSecond(tick.getTicksPerSecond());
         builder.tickAcceleration(tick.getTickAcceleration());
 
-        // Flash crash detection
-        if (tick.getTickAcceleration() > 100) {
-            log.warn("[FLASH-CRASH-RISK] {} | Tick acceleration: {} | tps: {} → {}",
+        // Flash crash detection (configurable threshold)
+        if (tick.getTickAcceleration() > flashCrashThreshold) {
+            log.warn("[FLASH-CRASH-RISK] {} | Tick acceleration: {} (threshold: {}) | tps: {} → {}",
                 tick.getScripCode(),
                 tick.getTickAcceleration(),
+                flashCrashThreshold,
                 tick.getTicksPerSecond() - (int)tick.getTickAcceleration(),
                 tick.getTicksPerSecond());
         }

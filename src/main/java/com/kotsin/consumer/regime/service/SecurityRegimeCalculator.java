@@ -389,28 +389,45 @@ public class SecurityRegimeCalculator {
     /**
      * Calculate relative strength vs index
      * Relative_Strength = (Sec_ROC20 - Idx_ROC20) / max(|Idx_ROC20|, 0.001)
+     *
+     * FIX: Now uses actual index regime data instead of hardcoded 0.0
      */
     private double calculateRelativeStrength(List<UnifiedCandle> candles30m, IndexRegime index) {
         if (candles30m == null || candles30m.size() < 21 || index == null) {
             return 0.0;
         }
-        
+
         UnifiedCandle current = candles30m.get(candles30m.size() - 1);
         UnifiedCandle lag20 = candles30m.get(candles30m.size() - 21);
-        
+
         // Security ROC20
         double securityROC20 = (current.getClose() - lag20.getClose()) / lag20.getClose();
-        
-        // Index ROC20 - need to get from index regime (we'll use a simple approximation)
-        // For now, assume index has similar structure - this would ideally come from index candles
-        // Since we don't have index candles here, we'll use a simplified approach
-        // TODO: Ideally pass index candles or calculate from index regime data
-        double indexROC20 = 0.0; // Placeholder - would need index candles for accurate calculation
-        
+
+        // Index ROC20 - use index regime's directionalBias as a proxy
+        // DirectionalBias is already a normalized measure of index strength [-1, 1]
+        // We can use it to approximate the index's momentum
+        // Alternatively, use indexTrendStrength * indexTrendDir from the 30m timeframe
+        double indexROC20 = 0.0;
+
+        if (index.getTf30m() != null) {
+            // Use index trend direction and strength from 30m timeframe
+            // This gives us a directional measure of index performance
+            int indexTrendDir = index.getTf30m().getIndexTrendDir();  // +1, -1, or 0
+            double indexTrendStrength = index.getTf30m().getIndexTrendStrength();  // [0, 1]
+
+            // Combine direction and strength to get index momentum proxy
+            indexROC20 = indexTrendDir * indexTrendStrength * 0.1;  // Scale to approximate ROC range
+        } else {
+            // Fallback to overall directionalBias
+            indexROC20 = index.getDirectionalBias() * 0.05;  // Scale to approximate ROC range
+        }
+
         // Calculate relative strength
+        // If index is moving (indexROC20 != 0), compare security vs index
+        // If index is flat, relative strength is just the security's own momentum
         double denominator = Math.max(Math.abs(indexROC20), 0.001);
         double relativeStrength = (securityROC20 - indexROC20) / denominator;
-        
+
         // Clamp to [-1, 1]
         return Math.max(-1.0, Math.min(1.0, relativeStrength));
     }

@@ -183,29 +183,23 @@ public class TimeframeAggregator {
     }
     
     /**
-     * Validate aggregated candle and log issues
+     * Validate aggregated candle data using centralized OHLCValidator
      */
     private void validateAggregatedCandle(FamilyCandle candle, String timeframe) {
         if (candle.getEquity() != null) {
             com.kotsin.consumer.domain.model.InstrumentCandle eq = candle.getEquity();
-            double range = eq.getHigh() - eq.getLow();
-            
+
+            // OHLC sanity check using centralized validator
+            com.kotsin.consumer.domain.validator.OHLCValidator.validate(
+                eq, timeframe, candle.getFamilyId()
+            );
+
             // Log if range seems too small for larger timeframes
             if (timeframe.contains("h") || timeframe.equals("1d")) {
                 // For hourly+ candles, range < 0.1% is suspicious
-                double rangePercent = (range / eq.getClose()) * 100;
-                if (rangePercent < 0.1 && eq.getClose() > 0) {
-                    log.warn("⚠️ {} candle {} has tiny range: {}% | OHLC={}/{}/{}/{}", 
-                        timeframe, candle.getFamilyId(), 
-                        String.format("%.3f", rangePercent),
-                        eq.getOpen(), eq.getHigh(), eq.getLow(), eq.getClose());
-                }
-            }
-            
-            // OHLC sanity check
-            if (eq.getHigh() < eq.getLow()) {
-                log.error("🚨 {} OHLC INVALID | {} | high={} < low={}", 
-                    timeframe, candle.getFamilyId(), eq.getHigh(), eq.getLow());
+                com.kotsin.consumer.domain.validator.OHLCValidator.checkRangeForTimeframe(
+                    eq, timeframe, candle.getFamilyId(), 0.1
+                );
             }
         }
     }
