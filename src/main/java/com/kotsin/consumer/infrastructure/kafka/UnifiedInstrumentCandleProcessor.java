@@ -974,15 +974,7 @@ public class UnifiedInstrumentCandleProcessor {
             tick.getExchangeType(), 
             companyName
         );
-        // #region agent log
-        try {
-            java.io.FileWriter fw = new java.io.FileWriter("logs/debug.log", true);
-            String json = String.format("{\"sessionId\":\"debug-session\",\"runId\":\"run1\",\"hypothesisId\":\"TYPE-DETECT\",\"location\":\"UnifiedInstrumentCandleProcessor.java:621\",\"message\":\"Instrument type detection\",\"data\":{\"scripCode\":\"%s\",\"exchange\":\"%s\",\"exchangeType\":\"%s\",\"companyName\":\"%s\",\"detectedType\":\"%s\",\"hasOI\":%s},\"timestamp\":%d}\n",
-                tick.getScripCode(), tick.getExchange() != null ? tick.getExchange() : "null", tick.getExchangeType() != null ? tick.getExchangeType() : "null", companyName != null ? companyName : "null", type != null ? type.name() : "null", oi != null, System.currentTimeMillis());
-            fw.write(json);
-            fw.close();
-        } catch (Exception e) {}
-        // #endregion
+
 
         // Build base candle
         log.debug("[INSTRUMENT-CANDLE-BUILD] scripCode: {} | Building InstrumentCandle with companyName: '{}' | source: {}",
@@ -1066,15 +1058,7 @@ public class UnifiedInstrumentCandleProcessor {
         builder.vpinBucketSize(vpinCalc.getBucketSize());
         builder.vpinBucketCount(vpinCalc.getBucketCount());
         
-        // #region agent log
-        try {
-            java.io.FileWriter fw = new java.io.FileWriter("logs/debug.log", true);
-            String json = String.format("{\"sessionId\":\"debug-session\",\"runId\":\"run1\",\"hypothesisId\":\"VPIN-CALC\",\"location\":\"UnifiedInstrumentCandleProcessor.java:700\",\"message\":\"VPIN calculation\",\"data\":{\"scripCode\":\"%s\",\"buyVolume\":%d,\"sellVolume\":%d,\"vpinBefore\":%.6f,\"vpinAfter\":%.6f,\"vpinChange\":%.6f,\"bucketSize\":%.0f,\"bucketCount\":%d},\"timestamp\":%d}\n",
-                tick.getScripCode(), buyVol, sellVol, vpinBefore, vpinAfter, vpinAfter - vpinBefore, vpinCalc.getBucketSize(), vpinCalc.getBucketCount(), System.currentTimeMillis());
-            fw.write(json);
-            fw.close();
-        } catch (Exception e) {}
-        // #endregion
+
 
         // Add orderbook metrics if available
         builder.orderbookPresent(orderbook != null);
@@ -1154,14 +1138,7 @@ public class UnifiedInstrumentCandleProcessor {
             builder.oiDataTimestamp(oiTimestamp);
             builder.isOIFallback(data.isOIFallback != null ? data.isOIFallback : true);  // OI always uses latest store
         }
-        // #region agent log
-        try {
-            java.io.FileWriter fw = new java.io.FileWriter("logs/debug.log", true);
-            String json = String.format("{\"sessionId\":\"debug-session\",\"runId\":\"run1\",\"hypothesisId\":\"OI-A\",\"location\":\"UnifiedInstrumentCandleProcessor.java:692\",\"message\":\"OI join result\",\"data\":{\"scripCode\":\"%s\",\"oiNotNull\":%s,\"oiClose\":%s,\"oiPresentSet\":%s},\"timestamp\":%d}\n",
-                tick.getScripCode(), oi != null, oi != null ? oi.getOiClose() : "null", oi != null, System.currentTimeMillis());
-            fw.write(json);
-            fw.close();
-        } catch (Exception e) {}
+
         // #endregion
         if (oi != null) {
             oi.calculateDerivedMetrics();
@@ -1180,14 +1157,7 @@ public class UnifiedInstrumentCandleProcessor {
             oi.updateMarketContext(currentPrice, currentVolume, currentSpread);
 
             builder.openInterest(oi.getOiClose());
-            // #region agent log
-            try {
-                java.io.FileWriter fw = new java.io.FileWriter("logs/debug.log", true);
-                String json = String.format("{\"sessionId\":\"debug-session\",\"runId\":\"run1\",\"hypothesisId\":\"OI-B\",\"location\":\"UnifiedInstrumentCandleProcessor.java:695\",\"message\":\"OI data set on InstrumentCandle\",\"data\":{\"scripCode\":\"%s\",\"openInterest\":%s,\"oiPresent\":true},\"timestamp\":%d}\n",
-                    tick.getScripCode(), oi.getOiClose() != null ? oi.getOiClose() : "null", System.currentTimeMillis());
-                fw.write(json);
-                fw.close();
-            } catch (Exception e) {}
+
             // #endregion
             builder.oiOpen(oi.getOiOpen());
             builder.oiHigh(oi.getOiHigh());
@@ -1302,16 +1272,6 @@ public class UnifiedInstrumentCandleProcessor {
         // PHASE 4: Calculate trade size distribution
         tick.calculateTradeSizeDistribution();
 
-        // PHASE 1.2: Trade Classification
-        // #region agent log
-        try {
-            java.io.FileWriter fw = new java.io.FileWriter("logs/debug.log", true);
-            String json = String.format("{\"sessionId\":\"debug-session\",\"runId\":\"run1\",\"hypothesisId\":\"VOLUME-CLASSIFICATION\",\"location\":\"UnifiedInstrumentCandleProcessor.java:870\",\"message\":\"Volume classification summary\",\"data\":{\"scripCode\":\"%s\",\"volume\":%d,\"aggressiveBuyVolume\":%d,\"aggressiveSellVolume\":%d,\"midpointVolume\":%d,\"buyVolume\":%d,\"sellVolume\":%d,\"classificationReliability\":%.2f},\"timestamp\":%d}\n",
-                tick.getScripCode(), tick.getVolume(), tick.getAggressiveBuyVolume(), tick.getAggressiveSellVolume(), tick.getMidpointVolume(), tick.getBuyVolume(), tick.getSellVolume(), tick.getClassificationReliability(), System.currentTimeMillis());
-            fw.write(json);
-            fw.close();
-        } catch (Exception e) {}
-        // #endregion
         
         builder.aggressiveBuyVolume(tick.getAggressiveBuyVolume());
         builder.aggressiveSellVolume(tick.getAggressiveSellVolume());
@@ -1492,15 +1452,7 @@ public class UnifiedInstrumentCandleProcessor {
             windowEndTime - tick.getLastTickTimestamp() : 0;
         long maxAge = tickAge;
 
-        // #region agent log
-        try {
-            java.io.FileWriter fw = new java.io.FileWriter("logs/debug.log", true);
-            String json = String.format("{\"sessionId\":\"debug-session\",\"runId\":\"run1\",\"hypothesisId\":\"STALE-TIMESTAMP\",\"location\":\"UnifiedInstrumentCandleProcessor.java:925\",\"message\":\"Staleness calculation\",\"data\":{\"scripCode\":\"%s\",\"currentTime\":%d,\"windowEndTime\":%d,\"tickLastTimestamp\":%d,\"tickAge\":%d,\"tickAgeFromWindow\":%d,\"isReplay\":%s},\"timestamp\":%d}\n",
-                tick.getScripCode(), currentTime, windowEndTime, tick.getLastTickTimestamp(), tickAge, tickAgeFromWindow, (currentTime - windowEndTime > 60000), System.currentTimeMillis());
-            fw.write(json);
-            fw.close();
-        } catch (Exception e) {}
-        // #endregion
+
 
         // FIX: Use window-relative age for staleness check (handles replay correctly)
         // If processing historical data (window end is far in past), use window-relative age
@@ -1581,16 +1533,6 @@ public class UnifiedInstrumentCandleProcessor {
                 stalenessReason.toString(),
                 maxAge);
         }
-        
-        // #region agent log
-        try {
-            java.io.FileWriter fw = new java.io.FileWriter("logs/debug.log", true);
-            String json = String.format("{\"sessionId\":\"debug-session\",\"runId\":\"run1\",\"hypothesisId\":\"STALE-RESULT\",\"location\":\"UnifiedInstrumentCandleProcessor.java:967\",\"message\":\"Final staleness flags\",\"data\":{\"scripCode\":\"%s\",\"tickStale\":%s,\"orderbookStale\":%s,\"oiStale\":%s,\"maxDataAge\":%d,\"isReplay\":%s,\"stalenessReason\":\"%s\"},\"timestamp\":%d}\n",
-                tick.getScripCode(), effectiveTickAge > 5000, orderbook != null && effectiveObAge > 5000, oi != null && effectiveOiAge > 300000, maxAge, isReplay, stalenessReason.toString().replace("\"", "\\\""), System.currentTimeMillis());
-            fw.write(json);
-            fw.close();
-        } catch (Exception e) {}
-        // #endregion
 
         if (stalenessReason.length() > 0) {
             builder.stalenessReason(stalenessReason.toString());
@@ -1610,127 +1552,6 @@ public class UnifiedInstrumentCandleProcessor {
         } else {
             candle.setQuality(DataQuality.VALID);
         }
-
-        // ========== COMPREHENSIVE VERIFICATION LOG - ALL 7 PHASES ==========
-        // #region agent log
-        try {
-            java.io.FileWriter fw = new java.io.FileWriter("logs/debug.log", true);
-            String json = String.format("{\"sessionId\":\"debug-session\",\"runId\":\"run1\",\"hypothesisId\":\"ALL-PHASES-VERIFY\",\"location\":\"UnifiedInstrumentCandleProcessor.java:994\",\"message\":\"COMPREHENSIVE VERIFICATION - ALL 7 PHASES\",\"data\":{" +
-                // Phase 1: Trade Classification
-                "\"phase1_tradeClassification\":{" +
-                "\"aggressiveBuyVolume\":%d,\"aggressiveSellVolume\":%d,\"midpointVolume\":%d," +
-                "\"classificationReliability\":%.4f,\"buyPressure\":%.4f,\"sellPressure\":%.4f," +
-                "\"buyVolume\":%d,\"sellVolume\":%d,\"volume\":%d}," +
-                // Phase 2: Temporal Tracking
-                "\"phase2_temporalTracking\":{" +
-                "\"firstTickTimestamp\":%d,\"lastTickTimestamp\":%d,\"minTickGap\":%d,\"maxTickGap\":%d," +
-                "\"avgTickGap\":%.2f,\"ticksPerSecond\":%d,\"tickAcceleration\":%.2f,\"tickCount\":%d}," +
-                // Phase 3: Orderbook Depth Fragmentation
-                "\"phase3_orderbookDepth\":{" +
-                "\"totalBidOrders\":%d,\"totalAskOrders\":%d,\"ordersAtBestBid\":%d,\"ordersAtBestAsk\":%d," +
-                "\"avgBidOrderSize\":%.2f,\"avgAskOrderSize\":%.2f,\"depthConcentration\":%.4f," +
-                "\"maxDepthLevels\":%d,\"icebergAtBestBid\":%s,\"icebergAtBestAsk\":%s}," +
-                // Phase 4: Trade Size Distribution
-                "\"phase4_tradeSize\":{" +
-                "\"maxTradeSize\":%d,\"minTradeSize\":%d,\"avgTradeSize\":%.2f,\"medianTradeSize\":%.2f," +
-                "\"largeTradeCount\":%d,\"priceImpactPerUnit\":%.6f}," +
-                // Phase 5: OI Correlation
-                "\"phase5_oiCorrelation\":{" +
-                "\"priceAtOIUpdate\":%s,\"volumeAtOIUpdate\":%s,\"spreadAtOIUpdate\":%s," +
-                "\"oiUpdateLatency\":%d,\"oiUpdateCount\":%d,\"oiChange\":%s,\"oiChangePercent\":%s}," +
-                // Phase 6: Cross-Stream Latency
-                "\"phase6_crossStreamLatency\":{" +
-                "\"tickStale\":%s,\"orderbookStale\":%s,\"oiStale\":%s,\"maxDataAge\":%d," +
-                "\"tickToOrderbookLatency\":%s,\"tickToOILatency\":%s,\"stalenessReason\":\"%s\"}," +
-                // Phase 7: Orderbook Update Dynamics
-                "\"phase7_orderbookDynamics\":{" +
-                "\"spreadVolatility\":%s,\"maxSpread\":%s,\"minSpread\":%s,\"orderbookUpdateCount\":%d," +
-                "\"spreadChangeRate\":%s,\"orderbookMomentum\":%s}," +
-                // Metadata
-                "\"metadata\":{" +
-                "\"scripCode\":\"%s\",\"windowStartMillis\":%d,\"windowEndMillis\":%d," +
-                "\"hasOrderbook\":%s,\"hasOI\":%s,\"vpin\":%.6f,\"vpinBucketCount\":%d," +
-                "\"isReplay\":%s,\"quality\":\"%s\"}" +
-                "},\"timestamp\":%d}\n",
-                // Phase 1 values
-                candle.getAggressiveBuyVolume() != null ? candle.getAggressiveBuyVolume() : 0,
-                candle.getAggressiveSellVolume() != null ? candle.getAggressiveSellVolume() : 0,
-                candle.getMidpointVolume() != null ? candle.getMidpointVolume() : 0,
-                candle.getClassificationReliability() != null ? candle.getClassificationReliability() : 0.0,
-                candle.getBuyPressure() != null ? candle.getBuyPressure() : 0.0,
-                candle.getSellPressure() != null ? candle.getSellPressure() : 0.0,
-                candle.getBuyVolume(),
-                candle.getSellVolume(),
-                candle.getVolume(),
-                // Phase 2 values
-                candle.getFirstTickTimestamp() != null ? candle.getFirstTickTimestamp().longValue() : 0L,
-                candle.getLastTickTimestamp() != null ? candle.getLastTickTimestamp().longValue() : 0L,
-                candle.getMinTickGap() != null ? candle.getMinTickGap().longValue() : 0L,
-                candle.getMaxTickGap() != null ? candle.getMaxTickGap().longValue() : 0L,
-                candle.getAvgTickGap() != null ? candle.getAvgTickGap() : 0.0,
-                candle.getTicksPerSecond() != null ? candle.getTicksPerSecond().intValue() : 0,
-                candle.getTickAcceleration() != null ? candle.getTickAcceleration() : 0.0,
-                candle.getTickCount(),
-                // Phase 3 values
-                candle.getTotalBidOrders() != null ? candle.getTotalBidOrders() : 0,
-                candle.getTotalAskOrders() != null ? candle.getTotalAskOrders() : 0,
-                candle.getOrdersAtBestBid() != null ? candle.getOrdersAtBestBid() : 0,
-                candle.getOrdersAtBestAsk() != null ? candle.getOrdersAtBestAsk() : 0,
-                candle.getAvgBidOrderSize() != null ? candle.getAvgBidOrderSize() : 0.0,
-                candle.getAvgAskOrderSize() != null ? candle.getAvgAskOrderSize() : 0.0,
-                candle.getDepthConcentration() != null ? candle.getDepthConcentration() : 0.0,
-                candle.getMaxDepthLevels() != null ? candle.getMaxDepthLevels() : 0,
-                candle.getIcebergAtBestBid() != null ? candle.getIcebergAtBestBid() : false,
-                candle.getIcebergAtBestAsk() != null ? candle.getIcebergAtBestAsk() : false,
-                // Phase 4 values
-                candle.getMaxTradeSize() != null ? candle.getMaxTradeSize() : 0,
-                candle.getMinTradeSize() != null ? candle.getMinTradeSize() : 0,
-                candle.getAvgTradeSize() != null ? candle.getAvgTradeSize() : 0.0,
-                candle.getMedianTradeSize() != null ? candle.getMedianTradeSize() : 0.0,
-                candle.getLargeTradeCount() != null ? candle.getLargeTradeCount() : 0,
-                candle.getPriceImpactPerUnit() != null ? candle.getPriceImpactPerUnit() : 0.0,
-                // Phase 5 values
-                candle.getPriceAtOIUpdate() != null ? String.valueOf(candle.getPriceAtOIUpdate()) : "null",
-                candle.getVolumeAtOIUpdate() != null ? String.valueOf(candle.getVolumeAtOIUpdate()) : "null",
-                candle.getSpreadAtOIUpdate() != null ? String.valueOf(candle.getSpreadAtOIUpdate()) : "null",
-                candle.getOiUpdateLatency() != null ? candle.getOiUpdateLatency() : 0,
-                candle.getOiUpdateCount() != null ? candle.getOiUpdateCount() : 0,
-                candle.getOiChange() != null ? String.valueOf(candle.getOiChange()) : "null",
-                candle.getOiChangePercent() != null ? String.valueOf(candle.getOiChangePercent()) : "null",
-                // Phase 6 values
-                candle.getTickStale() != null ? candle.getTickStale() : false,
-                candle.getOrderbookStale() != null ? candle.getOrderbookStale() : false,
-                candle.getOiStale() != null ? candle.getOiStale() : false,
-                candle.getMaxDataAge() != null ? candle.getMaxDataAge() : 0,
-                candle.getTickToOrderbookLatency() != null ? String.valueOf(candle.getTickToOrderbookLatency()) : "null",
-                candle.getTickToOILatency() != null ? String.valueOf(candle.getTickToOILatency()) : "null",
-                candle.getStalenessReason() != null ? candle.getStalenessReason().replace("\"", "\\\"") : "",
-                // Phase 7 values
-                candle.getSpreadVolatility() != null ? String.valueOf(candle.getSpreadVolatility()) : "null",
-                candle.getMaxSpread() != null ? String.valueOf(candle.getMaxSpread()) : "null",
-                candle.getMinSpread() != null ? String.valueOf(candle.getMinSpread()) : "null",
-                candle.getOrderbookUpdateCount() != null ? candle.getOrderbookUpdateCount() : 0,
-                candle.getSpreadChangeRate() != null ? String.valueOf(candle.getSpreadChangeRate()) : "null",
-                candle.getOrderbookMomentum() != null ? String.valueOf(candle.getOrderbookMomentum()) : "null",
-                // Metadata
-                candle.getScripCode() != null ? candle.getScripCode() : "unknown",
-                candle.getWindowStartMillis(),
-                candle.getWindowEndMillis(),
-                candle.hasOrderbook(),
-                candle.hasOI(),
-                candle.getVpin(),
-                candle.getVpinBucketCount(),
-                isReplay,
-                candle.getQuality() != null ? candle.getQuality().name() : "UNKNOWN",
-                System.currentTimeMillis()
-            );
-            fw.write(json);
-            fw.close();
-        } catch (Exception e) {
-            log.error("Failed to write comprehensive verification log", e);
-        }
-        // #endregion
-
         return candle;
     }
 

@@ -433,7 +433,50 @@ public class OrderbookAggregate {
         if (previousOrderbook != null) {
             detectSpoofing(previousOrderbook, orderbook);
         }
-        
+
+        // ========== CANCEL RATE CALCULATION ==========
+        // Track how many orders disappeared between snapshots
+        // High cancel rate = HFT activity or market stress
+        int currentTotalOrders = countTotalOrders(orderbook);
+        totalOrdersObserved += currentTotalOrders;
+
+        if (previousTotalOrders > 0 && currentTotalOrders > 0) {
+            // Orders cancelled = orders that were there before but aren't now
+            // This is an approximation - we can't track individual orders
+            // But changes in total order count give insight into cancel activity
+            int orderDelta = previousTotalOrders - currentTotalOrders;
+            if (orderDelta > 0) {
+                // More orders before than now = cancellations
+                totalOrdersCancelled += orderDelta;
+            }
+
+            // Calculate instantaneous cancel rate
+            double instantCancelRate = previousTotalOrders > 0 ?
+                    (double) Math.max(0, orderDelta) / previousTotalOrders : 0.0;
+            cancelRateSum += instantCancelRate;
+            cancelRateCount++;
+        }
+        previousTotalOrders = currentTotalOrders;
+
+        // ========== OFI MOMENTUM CALCULATION ==========
+        // OFI momentum = dOFI/dt (how fast is order flow imbalance changing?)
+        // Positive momentum = buying pressure accelerating
+        // Negative momentum = selling pressure accelerating
+        long currentTimestamp = orderbook.getReceivedTimestamp();
+        if (previousOFITimestamp > 0 && currentTimestamp > previousOFITimestamp) {
+            long timeDeltaMs = currentTimestamp - previousOFITimestamp;
+            if (timeDeltaMs > 0) {
+                double ofiDelta = ofi - previousOFI;
+                // Normalize to per-second rate
+                double momentumPerSecond = ofiDelta / timeDeltaMs * 1000.0;
+                ofiMomentum = momentumPerSecond;
+                ofiMomentumSum += momentumPerSecond;
+                ofiMomentumCount++;
+            }
+        }
+        previousOFI = ofi;
+        previousOFITimestamp = currentTimestamp;
+
         previousOrderbook = orderbook;
         updateCount++;
 
@@ -905,6 +948,83 @@ public class OrderbookAggregate {
      * Minimum 30 observations required for calculation.
      */
     public int getKyleLambdaObservations() { return (int) lambdaObsCount; }
+
+    // ==================== CANCEL RATE GETTERS ====================
+
+    /**
+     * Count total orders in orderbook (bid + ask sides)
+     */
+    private int countTotalOrders(OrderBookSnapshot orderbook) {
+        int total = 0;
+        if (orderbook.getAllBids() != null) {
+            for (OrderBookSnapshot.OrderBookLevel level : orderbook.getAllBids()) {
+                total += level.getNumberOfOrders();
+            }
+        }
+        if (orderbook.getAllAsks() != null) {
+            for (OrderBookSnapshot.OrderBookLevel level : orderbook.getAllAsks()) {
+                total += level.getNumberOfOrders();
+            }
+        }
+        return total;
+    }
+
+    /**
+     * Get average cancel rate (orders cancelled / orders observed)
+     *
+     * High cancel rate indicates:
+     * - HFT activity (rapid order add/cancel cycles)
+     * - Market stress (participants pulling orders)
+     * - Potential manipulation (spoofing patterns)
+     *
+     * Typical values:
+     * - < 0.1: Normal market
+     * - 0.1 - 0.3: Elevated HFT activity
+     * - > 0.3: High stress / unusual activity
+     *
+     * Reference: SEC Market Structure Reports, Hasbrouck (2018)
+     */
+    public double getAverageCancelRate() {
+        return cancelRateCount > 0 ? cancelRateSum / cancelRateCount : 0.0;
+    }
+
+    /**
+     * Get total orders cancelled in window
+     */
+    public long getTotalOrdersCancelled() {
+        return totalOrdersCancelled;
+    }
+
+    /**
+     * Get total orders observed in window
+     */
+    public long getTotalOrdersObserved() {
+        return totalOrdersObserved;
+    }
+
+    // ==================== OFI MOMENTUM GETTERS ====================
+
+    /**
+     * Get current OFI momentum (dOFI/dt, per second)
+     *
+     * Positive momentum = buying pressure accelerating
+     * Negative momentum = selling pressure accelerating
+     *
+     * Trading insight:
+     * - High positive momentum + positive OFI = strong bullish signal
+     * - Momentum slowing while OFI still positive = potential reversal
+     * - Divergence (price up, OFI momentum down) = weakness
+     */
+    public double getOFIMomentum() {
+        return ofiMomentum;
+    }
+
+    /**
+     * Get average OFI momentum over window
+     */
+    public double getAverageOFIMomentum() {
+        return ofiMomentumCount > 0 ? ofiMomentumSum / ofiMomentumCount : 0.0;
+    }
 
     /**
      * Check if complete (enough observations)

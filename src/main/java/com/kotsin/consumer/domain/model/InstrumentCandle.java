@@ -142,6 +142,15 @@ public class InstrumentCandle {
     private Double spreadChangeRate;
     private Double orderbookMomentum;
 
+    // ==================== ORDER CANCELLATION RATE (Quant Fix P1) ====================
+    private Double cancelRate;              // Orders cancelled / total orders observed
+    private Long totalOrdersCancelled;      // Total disappeared orders
+    private Long totalOrdersObserved;       // Total orders seen
+
+    // ==================== OFI MOMENTUM (Quant Fix P1) ====================
+    private Double ofiMomentum;             // dOFI/dt - rate of change of order flow
+    private Double averageOfiMomentum;      // Mean OFI momentum over window
+
     // ==================== MARKET DEPTH SLOPE (Phase 8) ====================
     private Double bidDepthSlope;           // Liquidity curve slope for bid side (qty per price unit)
     private Double askDepthSlope;           // Liquidity curve slope for ask side (qty per price unit)
@@ -225,6 +234,12 @@ public class InstrumentCandle {
     private Double maxTickSpread;             // Maximum spread observed
     private Double spreadVolatilityTick;      // Spread volatility (std dev)
     private Double tightSpreadPercent;        // % of time spread <= 1 tick (liquidity indicator)
+
+    // ==================== EFFECTIVE SPREAD (Quant Fix P0) ====================
+    private Double averageEffectiveSpread;    // 2 * |trade_price - midpoint| - actual execution cost
+    private Double minEffectiveSpread;        // Best execution observed
+    private Double maxEffectiveSpread;        // Worst execution observed
+    private Double priceImprovementRatio;     // % of trades with price better than quoted spread
 
     // ==================== VWAP BANDS (Trading Signals) ====================
     private Double vwapUpperBand;             // VWAP + 2σ (overbought threshold)
