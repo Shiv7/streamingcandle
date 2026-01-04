@@ -444,7 +444,7 @@ public class OrderbookAggregate {
             // Orders cancelled = orders that were there before but aren't now
             // This is an approximation - we can't track individual orders
             // But changes in total order count give insight into cancel activity
-            int orderDelta = previousTotalOrders - currentTotalOrders;
+            long orderDelta = previousTotalOrders - currentTotalOrders;
             if (orderDelta > 0) {
                 // More orders before than now = cancellations
                 totalOrdersCancelled += orderDelta;

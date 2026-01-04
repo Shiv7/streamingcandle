@@ -1394,6 +1394,14 @@ public class UnifiedInstrumentCandleProcessor {
         builder.spreadVolatilityTick(tick.getSpreadVolatility());
         builder.tightSpreadPercent(tick.getTightSpreadPercent());
 
+        // ========== QUANT FIX P0: EFFECTIVE SPREAD (Actual Execution Cost) ==========
+        // Effective spread = 2 * |trade_price - midpoint| measures ACTUAL slippage
+        // Unlike quoted spread (bid-ask), this captures real execution quality
+        builder.averageEffectiveSpread(tick.getAverageEffectiveSpread());
+        builder.minEffectiveSpread(tick.getMinEffectiveSpread());
+        builder.maxEffectiveSpread(tick.getMaxEffectiveSpread());
+        builder.priceImprovementRatio(tick.getPriceImprovementRatio());
+
         if (log.isDebugEnabled() && tick.getAverageTickSpread() > 0) {
             log.debug("[SPREAD-METRICS] {} | avg={:.4f} min={:.4f} max={:.4f} vol={:.4f} tight={:.1f}%",
                 tick.getScripCode(),

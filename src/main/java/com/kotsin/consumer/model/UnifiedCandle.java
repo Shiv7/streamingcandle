@@ -206,6 +206,21 @@ public class UnifiedCandle {
     private Double spreadVolatilityTick;    // Spread std dev
     private Double tightSpreadPercent;      // % time spread <= 1 tick
 
+    // ========== EFFECTIVE SPREAD (Quant Fix P0 - Actual Execution Cost) ==========
+    private Double averageEffectiveSpread;  // 2 * |trade_price - midpoint| - real slippage
+    private Double minEffectiveSpread;      // Best execution observed
+    private Double maxEffectiveSpread;      // Worst execution observed
+    private Double priceImprovementRatio;   // % trades with price better than quoted
+
+    // ========== ORDER CANCELLATION RATE (Quant Fix P1 - HFT/Stress) ==========
+    private Double cancelRate;              // Orders cancelled / total orders
+    private Long totalOrdersCancelled;      // Total disappeared orders
+    private Long totalOrdersObserved;       // Total orders seen
+
+    // ========== OFI MOMENTUM (Quant Fix P1 - Order Flow Acceleration) ==========
+    private Double ofiMomentum;             // dOFI/dt - rate of change
+    private Double averageOfiMomentum;      // Mean OFI momentum over window
+
     // ========== LEVEL-WEIGHTED METRICS (Institutional Bias) ==========
     private Double levelWeightedBidDepth;   // Bid depth weighted by 1/(level+1)
     private Double levelWeightedAskDepth;   // Ask depth weighted by 1/(level+1)
@@ -585,6 +600,21 @@ public class UnifiedCandle {
                 .maxTickSpread(ic.getMaxTickSpread())
                 .spreadVolatilityTick(ic.getSpreadVolatilityTick())
                 .tightSpreadPercent(ic.getTightSpreadPercent())
+
+                // ========== EFFECTIVE SPREAD (Quant Fix P0) ==========
+                .averageEffectiveSpread(ic.getAverageEffectiveSpread())
+                .minEffectiveSpread(ic.getMinEffectiveSpread())
+                .maxEffectiveSpread(ic.getMaxEffectiveSpread())
+                .priceImprovementRatio(ic.getPriceImprovementRatio())
+
+                // ========== CANCEL RATE (Quant Fix P1) ==========
+                .cancelRate(ic.getCancelRate())
+                .totalOrdersCancelled(ic.getTotalOrdersCancelled())
+                .totalOrdersObserved(ic.getTotalOrdersObserved())
+
+                // ========== OFI MOMENTUM (Quant Fix P1) ==========
+                .ofiMomentum(ic.getOfiMomentum())
+                .averageOfiMomentum(ic.getAverageOfiMomentum())
 
                 // ========== VWAP BANDS ==========
                 .vwapUpperBand(ic.getVwapUpperBand())
