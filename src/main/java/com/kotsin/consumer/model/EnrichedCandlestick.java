@@ -68,6 +68,11 @@ public class EnrichedCandlestick {
     // ========== Buy/Sell Volume Separation ==========
     private long buyVolume;
     private long sellVolume;
+    
+    // PHASE 1: Aggressive volume classification (market orders = TRUE intent)
+    private long aggressiveBuyVolume;   // Lifted offers (strong buy)
+    private long aggressiveSellVolume;  // Hit bids (strong sell)
+    
     private double priceVolumeSum;  // For VWAP calculation
     private double vwap;  // Volume-Weighted Average Price (cached)
     private int tickCount;
@@ -87,6 +92,13 @@ public class EnrichedCandlestick {
 
     // ========== Volume Profile State ==========
     private Map<Double, Long> volumeAtPrice = new HashMap<>();
+    
+    // PHASE 1 Enhancement: Gap Analysis
+    private Double previousClose;      // Previous candle's close price
+    private Double overnightGap;       // (open - previousClose) / previousClose * 100
+    private Boolean isGapUp;           // gap > 0.5%
+    private Boolean isGapDown;         // gap < -0.5%
+
     private Double lowestPrice;
     private Double highestPrice;
     private static volatile double DEFAULT_TICK_SIZE = 0.05;
@@ -295,6 +307,41 @@ public class EnrichedCandlestick {
                 buyVolume += dv;
             } else {
                 sellVolume += dv;
+            }
+            
+            // PHASE 1 ENHANCEMENT: Aggressive Volume Classification
+            // Regular classification uses quote+tick rule (moderate accuracy)
+            // Aggressive classification uses proximity to bid/ask (high accuracy)
+            double bidPrice = tick.getBidRate();
+            double askPrice = tick.getOfferRate();
+            
+            if (bidPrice > 0 && askPrice > 0) {
+                double spread = askPrice - bidPrice;
+                double epsilon = spread * 0.1;  // Within 10% of spread
+                
+                if (px >= askPrice - epsilon) {
+                    // Trade at/near ask = LIFTED OFFER = Aggressive BUY
+                    aggressiveBuyVolume += dv;
+                } else if (px <= bidPrice + epsilon) {
+                    // Trade at/near bid = HIT BID = Aggressive SELL
+                    aggressiveSellVolume += dv;
+                } else {
+                    // Trade in middle = Passive, split based on regular classification
+                    if (isBuy) {
+                        aggressiveBuyVolume += dv * 0.5;
+                        aggressiveSellVolume += dv * 0.5;
+                    } else {
+                        aggressiveSellVolume += dv * 0.5;
+                        aggressiveBuyVolume += dv * 0.5;
+                    }
+                }
+            } else {
+                // No bid/ask available, fallback to regular classification
+                if (isBuy) {
+                    aggressiveBuyVolume += dv;
+                } else {
+                    aggressiveSellVolume += dv;
+                }
             }
 
             // ========== Imbalance Bars Update ==========
@@ -675,6 +722,10 @@ public class EnrichedCandlestick {
         this.lastDibTriggerTime = Math.max(this.lastDibTriggerTime, other.lastDibTriggerTime);
         this.lastTrbTriggerTime = Math.max(this.lastTrbTriggerTime, other.lastTrbTriggerTime);
         this.lastVrbTriggerTime = Math.max(this.lastVrbTriggerTime, other.lastVrbTriggerTime);
+        
+        // PHASE 1: Propagate aggressive volume
+        this.aggressiveBuyVolume += other.aggressiveBuyVolume;
+        this.aggressiveSellVolume += other.aggressiveSellVolume;
 
         // Merge VPIN buckets: append and truncate to last 50; recalc VPIN
         if (other.vpinBuckets != null && !other.vpinBuckets.isEmpty()) {

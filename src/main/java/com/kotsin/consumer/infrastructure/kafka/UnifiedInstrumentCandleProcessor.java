@@ -69,6 +69,13 @@ public class UnifiedInstrumentCandleProcessor {
 
     @Autowired(required = false)
     private com.kotsin.consumer.logging.PipelineTraceLogger traceLogger;
+    
+    // PHASE 2: Gap Analysis Services
+    @Autowired
+    private com.kotsin.consumer.service.PreviousCloseStore previousCloseStore;
+    
+    @Autowired
+    private com.kotsin.consumer.service.GapFieldPopulator gapFieldPopulator;
 
     @Value("${unified.input.topic.ticks:forwardtesting-data}")
     private String tickTopic;
@@ -194,6 +201,10 @@ public class UnifiedInstrumentCandleProcessor {
      * Build the stream topology
      */
     private void buildTopology(StreamsBuilder builder) {
+        // PHASE 2: Gap Analysis - Add RocksDB state store for previous day close prices
+        previousCloseStore.addToTopology(builder);
+        log.info("💾 Gap Analysis: PreviousCloseStore added to topology");
+        
         // 🛡️ CRITICAL FIX: Event-Time Processing for Replay & Live Consistency
         //
         // BEFORE (BROKEN):
@@ -675,6 +686,52 @@ public class UnifiedInstrumentCandleProcessor {
                         candle.getWindowStartMillis(), reason, indicators);
                 }
             })
+            // PHASE 2: Gap Analysis - Populate gap fields from previous day close
+            .transform(() -> new org.apache.kafka.streams.kstream.Transformer<String, InstrumentCandle, org.apache.kafka.streams.KeyValue<String, InstrumentCandle>>() {
+                private com.kotsin.consumer.service.PreviousCloseStore.StoreAccessor store;
+                
+                @Override
+                public void init(org.apache.kafka.streams.processor.ProcessorContext context) {
+                    store = new com.kotsin.consumer.service.PreviousCloseStore.StoreAccessor(context);
+                }
+                
+                @Override
+                public org.apache.kafka.streams.KeyValue<String, InstrumentCandle> transform(String key, InstrumentCandle candle) {
+                    if (candle == null) return org.apache.kafka.streams.KeyValue.pair(key, candle);
+                    
+                    if (gapFieldPopulator.isFirstCandleOfDay(candle.getWindowStartMillis(), candle.getExchange())) {
+                        // Load previous day close
+                        Double prevClose = store.getPreviousClose(candle.getScripCode());
+                        
+                        if (prevClose != null && prevClose > 0 && candle.getOpen() > 0) {
+                            // Calculate gap
+                            double gapPercent = ((candle.getOpen() - prevClose) / prevClose) * 100;
+                            
+                            // Set gap fields
+                            candle.setPreviousClose(prevClose);
+                            candle.setOvernightGap(gapPercent);
+                            candle.setIsGapUp(gapPercent > 0.3);
+                            candle.setIsGapDown(gapPercent < -0.3);
+                            
+                            // Log significant gaps
+                            if (Math.abs(gapPercent) > 0.3) {
+                                log.info("📊 GAP {} for {}: {:.2f}%",
+                                         gapPercent > 0 ? "UP" : "DOWN", candle.getScripCode(), gapPercent);
+                            }
+                        }
+                    }
+                    
+                    // Save current close for next day
+                    if (candle.getClose() > 0) {
+                        store.savePreviousClose(candle.getScripCode(), candle.getClose());
+                    }
+                    
+                    return org.apache.kafka.streams.KeyValue.pair(key, candle);
+                }
+                
+                @Override
+                public void close() {}
+            }, com.kotsin.consumer.service.PreviousCloseStore.STORE_NAME)
             .to(outputTopic, Produced.with(Serdes.String(), InstrumentCandle.serde()));
 
         log.info("Topology built: {} + {} + {} -> {}", tickTopic, orderbookTopic, oiTopic, outputTopic);

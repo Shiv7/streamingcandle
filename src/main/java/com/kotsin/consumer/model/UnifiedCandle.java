@@ -64,6 +64,16 @@ public class UnifiedCandle {
     private Double poc;  // Point of Control
     private Double valueAreaHigh;
     private Double valueAreaLow;
+    
+    // ========== PHASE 1: Aggressive Volume Classification ==========
+    private Long aggressiveBuyVolume;   // Market orders that lifted offers (TRUE buy intent)
+    private Long aggressiveSellVolume;  // Market orders that hit bids (TRUE sell intent)
+    
+    // ========== PHASE 1: Imbalance Bar Triggers ==========
+    private Boolean vibTriggered;  // Volume Imbalance Bar triggered
+    private Boolean dibTriggered;  // Dollar Imbalance Bar triggered  
+    private Boolean trbTriggered;  // Tick Run Bar triggered
+    private Boolean vrbTriggered;  // Volume Run Bar triggered
 
     // ========== Imbalance Metrics (from EnrichedCandlestick) ==========
     private long volumeImbalance;
@@ -98,6 +108,12 @@ public class UnifiedCandle {
     private Double oiChangePercent;
     // REMOVED: putOI, callOI, putCallRatio - meaningless at instrument level
     // Put/Call ratio should be calculated at underlying/family level, not per instrument
+
+    // ========== GAP ANALYSIS (PHASE 1 Enhancement) ==========
+    private Double previousClose;      // Previous session close price
+    private Double overnightGap;       // (open - previousClose) / previousClose * 100
+    private Boolean isGapUp;           // gap > 0.5%
+    private Boolean isGapDown;         // gap < -0.5%
 
     // ========== Derived Convenience Fields ==========
     private double volumeDeltaPercent;  // (buyVolume - sellVolume) / volume
@@ -157,6 +173,20 @@ public class UnifiedCandle {
             }
             builder.range(candle.getHigh() - candle.getLow());
             builder.isBullish(candle.getClose() > candle.getOpen());
+            
+            // PHASE 1 Enhancement: Gap analysis fields from EnrichedCandlestick
+            builder.previousClose(candle.getPreviousClose())
+                   .overnightGap(candle.getOvernightGap())
+                   .isGapUp(candle.getIsGapUp())
+                   .isGapDown(candle.getIsGapDown());
+            
+            // PHASE 1 Enhancement: Aggressive volume and imbalance triggers
+            builder.aggressiveBuyVolume(candle.getAggressiveBuyVolume())
+                   .aggressiveSellVolume(candle.getAggressiveSellVolume())
+                   .vibTriggered(candle.isVibTriggered())
+                   .dibTriggered(candle.isDibTriggered())
+                   .trbTriggered(candle.isTrbTriggered())
+                   .vrbTriggered(candle.isVrbTriggered());
         }
 
         // Populate from OrderbookAggregate
@@ -303,5 +333,34 @@ public class UnifiedCandle {
                 throw new RuntimeException("Deserialization failed for UnifiedCandle", e);
             }
         }
+    }
+    
+    // ========== FACTORY METHODS ==========
+    
+    /**
+     * Create UnifiedCandle from InstrumentCandle (for MTF sub-candle tracking)
+     * PHASE 2: Used by FamilyCandleProcessor to track sub-candles in aggregation window
+     */
+    public static UnifiedCandle from(com.kotsin.consumer.domain.model.InstrumentCandle ic) {
+        if (ic == null) return null;
+        
+        return UnifiedCandle.builder()
+                .scripCode(ic.getScripCode())
+                .companyName(ic.getCompanyName())
+                .exchange(ic.getExchange())
+                .exchangeType(ic.getExchangeType())
+                .timeframe(ic.getTimeframe())
+                .windowStartMillis(ic.getWindowStartMillis())
+                .windowEndMillis(ic.getWindowEndMillis())
+                // OHLCV
+                 .open(ic.getOpen())
+                .high(ic.getHigh())
+                .low(ic.getLow())
+                .close(ic.getClose())
+                .volume(ic.getVolume())
+                .buyVolume(ic.getBuyVolume())
+                .sellVolume(ic.getSellVolume())
+                .vwap(ic.getVwap())
+                .build();
     }
 }

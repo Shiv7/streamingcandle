@@ -31,6 +31,8 @@ import java.util.List;
 public class IPUCalculator {
 
     private final IPUConfig cfg;
+    private final GapAnalyzer gapAnalyzer;  // PHASE 1: Gap context awareness
+    private final LiquidityQualityAnalyzer liquidityAnalyzer;  // PHASE 1: Liquidity filtering
 
     /**
      * Calculate IPU for a single timeframe from candle history.
@@ -89,9 +91,32 @@ public class IPUCalculator {
             return emptyOutput(timeframe);
         }
         
-        double totalVolume = current.getBuyVolume() + current.getSellVolume() + cfg.getEpsilon();
-        double volumeDeltaPct = (current.getBuyVolume() - current.getSellVolume()) / totalVolume;
-        double volumeDeltaAbs = Math.abs(volumeDeltaPct);
+        // PHASE 1 ENHANCEMENT: Use aggressive volume (lifted offers vs hit bids) for TRUE intent
+        // Aggressive volume = market orders that removed liquidity (strong directional conviction)
+        // Regular volume = limit orders that added liquidity (passive, weak conviction)
+        long aggressiveBuyVol = current.getAggressiveBuyVolume();
+        long aggressiveSellVol = current.getAggressiveSellVolume();
+        long totalAggressive = aggressiveBuyVol + aggressiveSellVol;
+        
+        double volumeDeltaPct;
+        double volumeDeltaAbs;
+        boolean usingAggressiveVolume = false;
+        
+        if (totalAggressive >= 100) {
+            // Use AGGRESSIVE volume (real intent) - lifted offers vs hit bids
+            volumeDeltaPct = (aggressiveBuyVol - aggressiveSellVol) / (double) (totalAggressive + cfg.getEpsilon());
+            volumeDeltaAbs = Math.abs(volumeDeltaPct);
+            usingAggressiveVolume = true;
+            log.debug("{}: Using AGGRESSIVE volume delta: {:.2f}% (buy={} sell={})",
+                     current.getScripCode(), volumeDeltaPct * 100, aggressiveBuyVol, aggressiveSellVol);
+        } else {
+            // Fallback to REGULAR volume (but flag as lower confidence)
+            double totalVolume = current.getBuyVolume() + current.getSellVolume() + cfg.getEpsilon();
+            volumeDeltaPct = (current.getBuyVolume() - current.getSellVolume()) / totalVolume;
+            volumeDeltaAbs = Math.abs(volumeDeltaPct);
+            log.debug("{}: Fallback to regular volume (aggressive too small: {})",
+                     current.getScripCode(), totalAggressive);
+        }
 
         // FIX: Add minimum depth threshold to prevent OFI normalization explosion
         double totalDepth = current.getTotalBidDepth() + current.getTotalAskDepth();
@@ -104,33 +129,69 @@ public class IPUCalculator {
         double ofiPressure = Math.min(ofiAbs * cfg.getOfiScaleFactor(), 1.0);
 
         double depthImbalanceAbs = Math.abs(current.getTotalBidDepth() - current.getTotalAskDepth()) / totalDepth;
+        
+        // PHASE 1 ENHANCEMENT: Add VPIN (Volume-Synchronized Probability of Informed Trading)
+        // VPIN detects toxic flow = informed traders/insiders BEFORE price moves
+        // High VPIN (> 0.5) = someone knows something (insider, HFT with edge, institution with info)
+        double vpinRaw = current.getVpin();
+        double vpinSignal = Math.min(vpinRaw / 0.5, 1.0);  // Normalize: 0.5 = threshold, 1.0 = max
+        if (vpinRaw > 0.5) {
+            log.info("⚠️ HIGH VPIN for {}: {:.3f} - TOXIC FLOW DETECTED (informed trading)",
+                     current.getScripCode(), vpinRaw);
+        }
 
-        // Agreement check
+        // Agreement check (now includes VPIN direction)
         double agreementFactor = Math.signum(volumeDeltaPct) * Math.signum(ofiNormalized) 
                                * Math.signum(current.getDepthImbalance());
 
         // FIX: Handle zeros explicitly in geometric mean
+        // NOW 4 COMPONENTS: volume delta + OFI + depth imbalance + VPIN
         double ofQuality;
         if (agreementFactor > 0) {
             // All signals agree - geometric mean with bonus
             // FIX: Use arithmetic mean if any component is zero (geometric mean = 0)
-            if (volumeDeltaAbs <= 0 || ofiPressure <= 0 || depthImbalanceAbs <= 0) {
-                ofQuality = (volumeDeltaAbs + ofiPressure + depthImbalanceAbs) / 3.0;
+            if (volumeDeltaAbs <= 0 || ofiPressure <= 0 || depthImbalanceAbs <= 0 || vpinSignal <= 0) {
+                ofQuality = (volumeDeltaAbs + ofiPressure + depthImbalanceAbs + vpinSignal) / 4.0;
             } else {
-                ofQuality = Math.pow(volumeDeltaAbs * ofiPressure * depthImbalanceAbs, 1.0/3.0);
+                // 4th root for 4 components
+                ofQuality = Math.pow(volumeDeltaAbs * ofiPressure * depthImbalanceAbs * vpinSignal, 1.0/4.0);
             }
             ofQuality = ofQuality * cfg.getFlowAgreementBonus();
         } else {
             // Signals disagree - arithmetic mean
-            ofQuality = (volumeDeltaAbs + ofiPressure + depthImbalanceAbs) / 3.0;
+            ofQuality = (volumeDeltaAbs + ofiPressure + depthImbalanceAbs + vpinSignal) / 4.0;
         }
         ofQuality = Math.min(ofQuality, 1.0);
+        
+        // PHASE 1 ENHANCEMENT: Reduce confidence if using passive volume instead of aggressive
+        if (!usingAggressiveVolume && ofQuality > 0) {
+            ofQuality *= 0.7;  // 30% confidence penalty for passive flow
+            log.debug("{}: Applied passive volume penalty, adjusted ofQuality: {:.3f}",
+                     current.getScripCode(), ofQuality);
+        }
 
         // ========== STEP 4: Institutional Proxy Score ==========
         double instCore = priceEfficiency * ofQuality;
         double volumeAmplifier = 0.5 + (0.5 * volExpansionScore);
         double lambdaBoost = 1 + Math.min(current.getKyleLambda() * cfg.getLambdaScale(), cfg.getLambdaBoostMax());
-        double instProxy = Math.min(instCore * volumeAmplifier * lambdaBoost, 1.0);
+        
+        // PHASE 1 ENHANCEMENT: Imbalance Bar Triggers = Institutional Footprints!
+        // These are pre-calculated by the data pipeline, we just need to USE them
+        double imbalanceBarBoost = 1.0;
+        if (Boolean.TRUE.equals(current.getDibTriggered())) {
+            imbalanceBarBoost += 0.25;  // Dollar Imbalance Bar = institutional $ flow
+            log.info("🔥 DIB TRIGGERED for {} - Institutional $ detected!", current.getScripCode());
+        }
+        if (Boolean.TRUE.equals(current.getVibTriggered())) {
+            imbalanceBarBoost += 0.15;  // Volume Imbalance Bar = size imbalance
+            log.info("📊 VIB TRIGGERED for {} - Volume imbalance detected", current.getScripCode());
+        }
+        if (Boolean.TRUE.equals(current.getTrbTriggered()) || Boolean.TRUE.equals(current.getVrbTriggered())) {
+            imbalanceBarBoost += 0.10;  // Run bars = momentum/absorption
+            log.debug("⚡ RUN BAR TRIGGERED for {} - Momentum detected", current.getScripCode());
+        }
+        
+        double instProxy = Math.min(instCore * volumeAmplifier * lambdaBoost * imbalanceBarBoost, 1.0);
 
         // ========== STEP 5: Momentum Context ==========
         // 5A: Momentum Slope
@@ -300,6 +361,30 @@ public class IPUCalculator {
             direction = IPUOutput.Direction.NEUTRAL;
             directionalConviction = 0;
         }
+        
+        // PHASE 1 ENHANCEMENT: Adjust for gap context
+        GapAnalyzer.GapContext gapContext = gapAnalyzer.analyzeGap(current);
+        if (gapContext != GapAnalyzer.GapContext.NO_GAP) {
+            double gapAdjustment = gapAnalyzer.calculateDirectionalAdjustment(gapContext, directionalConviction);
+            double originalConviction = directionalConviction;
+            directionalConviction *= gapAdjustment;
+            
+            log.debug("{}: Gap adjustment | {} | conviction: {:.3f} -> {:.3f} ({}x)",
+                     current.getScripCode(),
+                     gapContext.name(),
+                     originalConviction,
+                     directionalConviction,
+                     gapAdjustment);
+            
+            // Gap fill = reversal signal! Flip direction if gap filled
+            if (gapContext == GapAnalyzer.GapContext.GAP_UP_FILLED_BEARISH && direction == IPUOutput.Direction.BULLISH) {
+                direction = IPUOutput.Direction.BEARISH;
+                log.info("🔴 GAP FILL REVERSAL for {} - Flipped BULLISH -> BEARISH", current.getScripCode());
+            } else if (gapContext == GapAnalyzer.GapContext.GAP_DOWN_FILLED_BULLISH && direction == IPUOutput.Direction.BEARISH) {
+                direction = IPUOutput.Direction.BULLISH;
+                log.info("🟢 GAP FILL REVERSAL for {} - Flipped BEARISH -> BULLISH", current.getScripCode());
+            }
+        }
 
         // ========== STEP 9: Momentum Exhaustion Detection ==========
         double prevMomentumContext = computePrevMomentumContext(history, cfg, prevAtr);
@@ -365,25 +450,52 @@ public class IPUCalculator {
         boolean xfactorFlag = xfactorScore >= 0.65;
 
         // ========== STEP 11: Final IPU Score ==========
-        // FIX: Use additive modifiers instead of multiplicative to prevent explosion
-        double baseScore = instProxy;
+        // PHASE 1 ENHANCEMENT: Apply liquidity quality filter
+        // Poor liquidity = reduce scores (can't execute properly anyway!)
+        double liquidityScore = liquidityAnalyzer.calculateLiquidityScore(current);
+        LiquidityQualityAnalyzer.LiquidityTier liquidityTier = liquidityAnalyzer.getLiquidityTier(liquidityScore);
         
-        // Convert modifiers to additive adjustments (scale by baseScore magnitude)
-        double momentumAdjustment = cfg.getMomentumModifierStrength() * validatedMomentum * baseScore;
-        double urgencyAdjustment = cfg.getUrgencyModifierStrength() * urgencyScore * baseScore;
-        double xfactorAdjustment = cfg.getXfactorModifierStrength() * xfactorScore * baseScore;
-        double exhaustionAdjustment = -cfg.getExhaustionPenaltyStrength() * exhaustionScore * baseScore;
+        if (liquidityScore < 0.2) {
+            // VERY POOR liquidity = DON'T TRADE AT ALL!
+            log.warn("🚫 {} has VERY POOR liquidity ({:.2f}) - returning EMPTY IPU (avoid trading!)",
+                     current.getScripCode(), liquidityScore);
+            return emptyOutput(timeframe);
+        }
         
-        double finalIpuScore = baseScore + momentumAdjustment + urgencyAdjustment + xfactorAdjustment + exhaustionAdjustment;
-        finalIpuScore = Math.max(0, Math.min(finalIpuScore, 1.0)); // Clamp to [0, 1]
-
-        // FIX: Improve certainty formula - use validated momentum and directional conviction
+        // FIX: Calculate certainty FIRST before using it
         // Certainty should reflect how confident we are in the direction
         double certainty = directionAgreement * 0.4  // How many factors agree
                          + Math.min(volExpansionScore, 1.0) * 0.2  // Volume confirmation
                          + flowMomentumAgreement * 0.2  // Flow-momentum alignment
                          + Math.min(validatedMomentum, 1.0) * 0.2;  // Momentum strength
         certainty = Math.min(certainty, 1.0);
+        
+        // FIX: Improved formula with certainty normalization
+        double baseIpu = (priceEfficiency + ofQuality + instProxy + momentumContext + urgencyScore) / 5.0;
+        double finalIpuScore = baseIpu * certainty;
+        
+        // Scale down for poor/moderate liquidity
+        if (liquidityScore < 0.7) {
+            double originalScore = finalIpuScore;
+            finalIpuScore *= liquidityScore;
+            log.debug("{}: Liquidity adjustment | tier={} | score: {:.3f} -> {:.3f} ({}x)",
+                     current.getScripCode(),
+                     liquidityTier.name(),
+                     originalScore,
+                     finalIpuScore,
+                     liquidityScore);
+        }
+        
+        // Convert modifiers to additive adjustments (scale by finalIpuScore magnitude)
+        double momentumAdjustment = cfg.getMomentumModifierStrength() * validatedMomentum * finalIpuScore;
+        double urgencyAdjustment = cfg.getUrgencyModifierStrength() * urgencyScore * finalIpuScore;
+        double xfactorAdjustment = cfg.getXfactorModifierStrength() * xfactorScore * finalIpuScore;
+        double exhaustionAdjustment = -cfg.getExhaustionPenaltyStrength() * exhaustionScore * finalIpuScore;
+        
+        // Apply modifiers
+        finalIpuScore += momentumAdjustment + urgencyAdjustment + xfactorAdjustment + exhaustionAdjustment;
+        finalIpuScore = Math.max(0, Math.min(finalIpuScore, 1.0)); // Clamp to [0, 1]
+
 
         // Build output
         return IPUOutput.builder()

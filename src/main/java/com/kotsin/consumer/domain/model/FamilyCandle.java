@@ -2,6 +2,7 @@ package com.kotsin.consumer.domain.model;
 
 import com.fasterxml.jackson.annotation.JsonIgnoreProperties;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.kotsin.consumer.model.MTFDistribution;
 import lombok.AllArgsConstructor;
 import lombok.Builder;
 import lombok.Data;
@@ -97,6 +98,14 @@ public class FamilyCandle {
     // ==================== DATA QUALITY ====================
     private DataQuality quality;
     private String qualityReason;
+    
+    // ========== PHASE 2: MTF Distribution ==========
+    /**
+     * Multi-timeframe distribution metrics
+     * Tracks sub-candle patterns (e.g., 5x 1m candles for 5m aggregate)
+     * Null if not calculated or insufficient sub-candles
+     */
+    private MTFDistribution mtfDistribution;
 
     // ==================== HELPER METHODS ====================
 

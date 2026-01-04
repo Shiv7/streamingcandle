@@ -52,13 +52,16 @@ public class VCPCalculator {
         }
 
         // Step 1: Build volume profile
-        Map<Double, Long> volumeProfile = buildVolumeProfile(history);
+        // PHASE 2: Track data quality (estimated vs real)
+        DataQualityMetrics quality = new DataQualityMetrics();
+        Map<Double, Long> volumeProfile = buildVolumeProfile(history, quality);
         if (volumeProfile.isEmpty()) {
             return VCPResult.empty();
         }
 
-        // Step 2: Identify clusters
-        List<VCPCluster> clusters = identifyClusters(volumeProfile, currentPrice);
+        // Identify clusters from volume profile
+        // PHASE 2: Now passing current candle for POC/VA access
+        List<VCPCluster> clusters = identifyClusters(volumeProfile, currentPrice, current);
         if (clusters.isEmpty()) {
             return VCPResult.empty();
         }
@@ -108,6 +111,7 @@ public class VCPCalculator {
                 .runwayScore(runwayScore)
                 .clusters(clusters)
                 .atr(atr)
+                .quality(quality)  // PHASE 2: Pass quality through result
                 .build();
     }
 
@@ -124,6 +128,10 @@ public class VCPCalculator {
      */
     public MTVCPOutput buildCombinedOutput(VCPResult result5m, VCPResult result15m, VCPResult result30m,
                                            UnifiedCandle current) {
+        // Use quality from 5m result (most granular)
+        DataQualityMetrics quality = result5m.getQuality() != null ? 
+            result5m.getQuality() : new DataQualityMetrics();
+        
         // FIX: Validate weights sum to approximately 1.0
         double weightSum = config.getWeight5m() + config.getWeight15m() + config.getWeight30m();
         if (Math.abs(weightSum - 1.0) > 0.01) {
@@ -196,58 +204,67 @@ public class VCPCalculator {
                 .microprice(current != null ? current.getMicroprice() : 0)
                 .atr(result5m.getAtr())
                 .clusters(topClusters)
+                // PHASE 2: Data quality metrics
+                .estimatedDataRatio(quality.getEstimatedRatio())
+                .isHighConfidence(quality.isHighConfidence())
+                .dataQualityWarning(quality.getWarningMessage())
                 .build();
+    }
+    
+    /**
+     * PHASE 2: Data quality tracking
+     */
+    private static class DataQualityMetrics {
+        private int totalCandles = 0;
+        private int estimatedCandles = 0;
+        
+        public void recordCandle(boolean wasEstimated) {
+            totalCandles++;
+            if (wasEstimated) estimatedCandles++;
+        }
+        
+        public double getEstimatedRatio() {
+            return totalCandles > 0 ? (double) estimatedCandles / totalCandles : 0.0;
+        }
+        
+        public boolean isHighConfidence() {
+            return getEstimatedRatio() < 0.30;  // < 30% estimated = high confidence
+        }
+        
+        public String getWarningMessage() {
+            double ratio = getEstimatedRatio();
+            if (ratio >= 0.50) {
+                return String.format("⚠️ ESTIMATED_DATA: %.0f%% fallback - use with caution!", ratio * 100);
+            } else if (ratio >= 0.30) {
+                return String.format("ESTIMATED_DATA: %.0f%% fallback", ratio * 100);
+            }
+            return null;  // No warning for < 30%
+        }
     }
 
     // ========== Step 1: Build Volume Profile ==========
 
-    // FIX: Track how much of the profile is estimated vs actual
-    private double estimatedDataRatio = 0.0;
-
-    private Map<Double, Long> buildVolumeProfile(List<UnifiedCandle> history) {
+    /**
+     * Build aggregate volume profile from history.
+     * PHASE 2: Now tracks data quality (real vs estimated)
+     */
+    private Map<Double, Long> buildVolumeProfile(List<UnifiedCandle> history, DataQualityMetrics quality) {
         Map<Double, Long> profile = new HashMap<>();
-        int estimatedCount = 0;
-        int totalCount = 0;
 
         for (UnifiedCandle candle : history) {
-            if (candle.getVolumeAtPrice() != null && !candle.getVolumeAtPrice().isEmpty()) {
-                // Use actual volumeAtPrice (Option A in spec)
-                candle.getVolumeAtPrice().forEach((price, vol) -> 
-                    profile.merge(price, vol, Long::sum));
-                totalCount++;
-            } else if (candle.getVolume() > 0) {
-                // Fallback: VWAP-weighted distribution (Option B in spec)
-                // FIX: Track this as estimated data
-                boolean wasEstimated = distributeVolumeVWAPWeighted(candle, profile);
-                if (wasEstimated) {
-                    estimatedCount++;
-                }
-                totalCount++;
-            }
-        }
-
-        // FIX: Store ratio for downstream quality assessment
-        this.estimatedDataRatio = totalCount > 0 ? (double) estimatedCount / totalCount : 0.0;
-        
-        // 🔍 ENHANCED LOGGING: Investigate why volumeAtPrice is missing
-        if (estimatedDataRatio > 0.5) {
-            log.warn("VCP volume profile is {}% estimated data - clusters may be unreliable", 
-                    String.format("%.0f", estimatedDataRatio * 100));
+            // Try to use real volumeAtPrice data
+            Map<Double, Long> volumeAtPrice = candle.getVolumeAtPrice();
+            boolean hasRealData = volumeAtPrice != null && !volumeAtPrice.isEmpty();
             
-            // Debug: Log sample of candles to understand why volumeAtPrice is missing
-            if (log.isDebugEnabled() && !history.isEmpty()) {
-                int sampleSize = Math.min(5, history.size());
-                log.debug("[VCP-DEBUG] Sample of {} candles (showing why volumeAtPrice is missing):", sampleSize);
-                for (int i = Math.max(0, history.size() - sampleSize); i < history.size(); i++) {
-                    UnifiedCandle candle = history.get(i);
-                    boolean hasVolumeAtPrice = candle.getVolumeAtPrice() != null && !candle.getVolumeAtPrice().isEmpty();
-                    log.debug("[VCP-DEBUG] Candle {}: hasVolumeAtPrice={} volume={} vwap={} | source={}",
-                        i,
-                        hasVolumeAtPrice,
-                        candle.getVolume(),
-                        candle.getVwap(),
-                        candle.getClass().getSimpleName());
-                }
+            if (hasRealData) {
+                // Real volume profile data - HIGH quality!
+                volumeAtPrice.forEach((price, vol) -> 
+                    profile.merge(price, vol, Long::sum));
+                quality.recordCandle(false);  // Not estimated
+            } else {
+                // Fallback to estimated distribution - LOWER quality
+                boolean wasEstimated = distributeVolumeVWAPWeighted(candle, profile);
+                quality.recordCandle(wasEstimated);  // Track estimated
             }
         }
 
@@ -325,12 +342,90 @@ public class VCPCalculator {
 
     // ========== Step 2: Identify Clusters ==========
 
-    private List<VCPCluster> identifyClusters(Map<Double, Long> volumeProfile, double currentPrice) {
+    /**
+     * Identify volume cluster points (VCP) from volume profile.
+     * PHASE 2 ENHANCEMENT: Prioritizes POC and Value Area as primary clusters
+     * 
+     * @param volumeProfile Map of price -> volume
+     * @param currentPrice Current price for cluster type classification
+     * @param current Current UnifiedCandle for POC/VA access
+     * @return List of VCP clusters
+     */
+    private List<VCPCluster> identifyClusters(Map<Double, Long> volumeProfile, double currentPrice, UnifiedCandle current) {
         List<VCPCluster> clusters = new ArrayList<>();
 
         if (volumeProfile.isEmpty()) return clusters;
+        
+        // PHASE 2 ENHANCEMENT: Force POC and Value Area as PRIMARY clusters
+        // POC = Point of Control (highest volume level) is THE MOST important support/resistance
+        // Value Area = 70% of volume concentration
+        // These are MORE important than any statistical peak!
+        
+        // Get POC and Value Area from current candle (already calculated)
+        Double pocPrice = current != null ? current.getPoc() : null;
+        Double vahPrice = current != null ? current.getValueAreaHigh() : null;
+        Double valPrice = current != null ? current.getValueAreaLow() : null;
+        
+        long maxVolume = volumeProfile.values().stream().mapToLong(Long::longValue).max().orElse(1);
+        
+        // STEP 0: Add POC as PRIMARY cluster (strength = 1.0 = maximum)
+        if (pocPrice != null && pocPrice > 0) {
+            long pocVolume = volumeProfile.getOrDefault(pocPrice, 0L);
+            VCPCluster.ClusterType pocType = pocPrice < currentPrice ? 
+                    VCPCluster.ClusterType.SUPPORT : VCPCluster.ClusterType.RESISTANCE;
+            
+            VCPCluster pocCluster = VCPCluster.builder()
+                    .price(pocPrice)
+                    .strength(1.0)  // MAXIMUM strength - POC is THE most important level
+                    .totalVolume(pocVolume)
+                    .type(pocType)
+                    .distancePercent(Math.abs(pocPrice - currentPrice) / currentPrice * 100)
+                    .obValidation(1.0)
+                    .oiAdjustment(1.0)
+                    .ofiBias(0.0)
+                    .build();
+            
+            clusters.add(pocCluster);
+            log.debug("VCP: Added POC cluster at {} (type={}, volume={})", pocPrice, pocType, pocVolume);
+        }
+        
+        // STEP 0.5: Add Value Area High as resistance cluster (strength = 0.9)
+        if (vahPrice != null && vahPrice > 0) {
+            long vahVolume = volumeProfile.getOrDefault(vahPrice, 0L);
+            VCPCluster vahCluster = VCPCluster.builder()
+                    .price(vahPrice)
+                    .strength(0.9)  // Very strong - marks top of value area
+                    .totalVolume(vahVolume)
+                    .type(VCPCluster.ClusterType.RESISTANCE)
+                    .distancePercent(Math.abs(vahPrice - currentPrice) / currentPrice * 100)
+                    .obValidation(1.0)
+                    .oiAdjustment(1.0)
+                    .ofiBias(0.0)
+                    .build();
+            
+            clusters.add(vahCluster);
+            log.debug("VCP: Added VA High cluster at {} (volume={})", vahPrice, vahVolume);
+        }
+        
+        // STEP 0.6: Add Value Area Low as support cluster (strength = 0.9)
+        if (valPrice != null && valPrice > 0) {
+            long valVolume = volumeProfile.getOrDefault(valPrice, 0L);
+            VCPCluster valCluster = VCPCluster.builder()
+                    .price(valPrice)
+                    .strength(0.9)  // Very strong - marks bottom of value area
+                    .totalVolume(valVolume)
+                    .type(VCPCluster.ClusterType.SUPPORT)
+                    .distancePercent(Math.abs(valPrice - currentPrice) / currentPrice * 100)
+                    .obValidation(1.0)
+                    .oiAdjustment(1.0)
+                    .ofiBias(0.0)
+                    .build();
+            
+            clusters.add(valCluster);
+            log.debug("VCP: Added VA Low cluster at {} (volume={})", valPrice, valVolume);
+        }
 
-        // Calculate statistics
+        // Calculate statistics for ADDITIONAL peak detection (beyond POC/VA)
         List<Long> volumes = new ArrayList<>(volumeProfile.values());
         double mean = volumes.stream().mapToLong(Long::longValue).average().orElse(0);
         double variance = volumes.stream()
@@ -345,9 +440,9 @@ public class VCPCalculator {
         List<Double> sortedPrices = new ArrayList<>(volumeProfile.keySet());
         Collections.sort(sortedPrices);
 
-        // Find peaks
-        long maxVolume = volumes.stream().mapToLong(Long::longValue).max().orElse(1);
-
+        // STEP 1: Find ADDITIONAL statistical peaks (beyond POC/VA already added)
+        // These are SECONDARY to POC/Value Area
+        
         for (int i = 1; i < sortedPrices.size() - 1; i++) {
             double price = sortedPrices.get(i);
             long vol = volumeProfile.get(price);
@@ -673,6 +768,7 @@ public class VCPCalculator {
         private double runwayScore;
         private double atr;
         private List<VCPCluster> clusters;
+        private DataQualityMetrics quality;  // PHASE 2
 
         public static VCPResult empty() {
             // FIX: Empty runway = unknown, not "clean"

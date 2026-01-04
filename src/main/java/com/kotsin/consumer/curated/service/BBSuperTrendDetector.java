@@ -103,13 +103,26 @@ public class BBSuperTrendDetector {
         // Calculate volume Z-score
         double volumeZScore = calculateVolumeZScore(historyList);
 
-        // Check for confluence
-        boolean bullishConfluence = bbBreakoutUp && superTrendBullish;
-        boolean bearishConfluence = bbBreakoutDown && !superTrendBullish;
+        // ENHANCED CONFLUENCE LOGIC (User requirement):
+        // Only signal when BOTH conditions met:
+        // 1. BB breakout occurs (price breaks band)
+        // 2. SuperTrend FLIPS direction on SAME candle (momentum reversal)
+        // 
+        // BULLISH: Previous ST was bearish → NOW flips bullish + BB breakout up
+        // BEARISH: Previous ST was bullish → NOW flips bearish + BB breakout down
+        
+        boolean bullishConfluence = bbBreakoutUp && superTrendBullish && superTrendFlipped && (prevBullish != null && !prevBullish);
+        boolean bearishConfluence = bbBreakoutDown && !superTrendBullish && superTrendFlipped && (prevBullish != null && prevBullish);
 
         if (!bullishConfluence && !bearishConfluence) {
-            return null;  // No confluence
+            return null;  // No confluence (requires BOTH flip + breakout)
         }
+        
+        log.debug("🔥 MOMENTUM REVERSAL DETECTED | {} {} | BB breakout {} | ST flip {} → {}",
+                candle.getScripCode(), candle.getTimeframe(),
+                bullishConfluence ? "UP" : "DOWN",
+                prevBullish ? "BULL" : "BEAR",
+                superTrendBullish ? "BULL" : "BEAR");
 
         String direction = bullishConfluence ? "BULLISH" : "BEARISH";
         
@@ -330,18 +343,19 @@ public class BBSuperTrendDetector {
     private String buildConfluenceReason(String direction, double bbPercentB,
                                          boolean superTrendFlipped, double volumeZScore) {
         StringBuilder sb = new StringBuilder();
-        sb.append(direction).append(" confluence: ");
+        sb.append(direction).append(" REVERSAL: ");
         
         if ("BULLISH".equals(direction)) {
-            sb.append("BB breakout above upper band (B%=").append(String.format("%.2f", bbPercentB)).append(") ");
-            sb.append("+ SuperTrend bullish");
+            sb.append("BB breakout above upper (B%=").append(String.format("%.2f", bbPercentB)).append(") ");
+            sb.append("+ ST FLIP bearish→bullish");
         } else {
-            sb.append("BB breakdown below lower band (B%=").append(String.format("%.2f", bbPercentB)).append(") ");
-            sb.append("+ SuperTrend bearish");
+            sb.append("BB breakdown below lower (B%=").append(String.format("%.2f", bbPercentB)).append(") ");
+            sb.append("+ ST FLIP bullish→bearish");
         }
         
-        if (superTrendFlipped) {
-            sb.append(" + ST flip");
+        // SuperTrend flip is now REQUIRED, not optional
+        if (!superTrendFlipped) {
+            sb.append(" [WARNING: Should not happen - flip required]");
         }
         
         if (volumeZScore > 1.5) {

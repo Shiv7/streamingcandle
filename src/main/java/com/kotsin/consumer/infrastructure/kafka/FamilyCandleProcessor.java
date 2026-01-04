@@ -59,6 +59,10 @@ public class FamilyCandleProcessor {
     
     @Autowired
     private com.kotsin.consumer.monitoring.DataQualityMetrics dataQualityMetrics;
+    
+    // PHASE 2: MTF Distribution Calculator
+    @Autowired
+    private com.kotsin.consumer.service.MTFDistributionCalculator mtfDistributionCalculator;
 
     @Value("${family.candle.window.grace.seconds:5}")
     private int graceSeconds;
@@ -651,7 +655,27 @@ public class FamilyCandleProcessor {
                 equity != null ? equity.getQuality() : "N/A",
                 future != null ? future.getQuality() : "N/A",
                 collector.getOptions().size(),
-                familyQuality);
+                 familyQuality);
+        }
+        
+        // PHASE 2: MTF Distribution Analysis
+        // Calculate intra-window sub-candle patterns for directional consistency
+        List<com.kotsin.consumer.model.UnifiedCandle> subCandles = collector.getEquitySubCandles();
+        if (subCandles != null && !subCandles.isEmpty() && subCandles.size() > 1) {
+            try {
+                com.kotsin.consumer.model.MTFDistribution dist = mtfDistributionCalculator.calculate(subCandles);
+                builder.mtfDistribution(dist);
+                
+                log.info("📊 MTF Distribution for {}: {} sub-candles, consistency={:.2f}, interpretation={}",
+                         familyId, dist.getTotalSubCandles(), 
+                         dist.getDirectionalConsistency(),
+                         dist.getInterpretation());
+            } catch (Exception e) {
+                log.warn("⚠️ MTF Distribution calculation failed for {}: {}", familyId, e.getMessage());
+            }
+        } else {
+            log.debug("⚠️ MTF Distribution skipped for {} - insufficient sub-candles (count={})",
+                      familyId, subCandles != null ? subCandles.size() : 0);
         }
 
         FamilyCandle familyCandle = builder
@@ -827,6 +851,9 @@ public class FamilyCandleProcessor {
         // Track merge counts for debugging
         private int equityMergeCount = 0;
         private int futureMergeCount = 0;
+        
+        // PHASE 2: MTF Distribution - track sub-candles during aggregation
+        private List<com.kotsin.consumer.model.UnifiedCandle> equitySubCandles = new ArrayList<>();
 
         public FamilyCandleCollector add(InstrumentCandle candle) {
             if (candle == null) return this;
@@ -851,6 +878,8 @@ public class FamilyCandleProcessor {
                         mergeInstrumentCandle(this.equity, candle);
                         equityMergeCount++;
                     }
+                    // PHASE 2: Track sub-candle for MTF distribution
+                    equitySubCandles.add(com.kotsin.consumer.model.UnifiedCandle.from(candle));
                     break;
                 case FUTURE:
                     if (this.future == null) {
@@ -953,6 +982,11 @@ public class FamilyCandleProcessor {
         
         public int getFutureMergeCount() {
             return futureMergeCount;
+        }
+        
+        // PHASE 2: Getter for MTF sub-candles
+        public List<com.kotsin.consumer.model.UnifiedCandle> getEquitySubCandles() {
+            return equitySubCandles;
         }
 
         public static org.apache.kafka.common.serialization.Serde<FamilyCandleCollector> serde() {

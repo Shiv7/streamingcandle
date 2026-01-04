@@ -133,6 +133,32 @@ public class MTVCPOutput {
      */
     @Builder.Default
     private List<VCPCluster> clusters = new ArrayList<>();
+    
+    // ========== PHASE 2: Data Quality Metrics ==========
+    /**
+     * Ratio of estimated vs real data (0 to 1)
+     * 0.0 = All real volumeAtPrice data
+     * 1.0 = All estimated/fallback data
+     * 
+     * Interpretation:
+     * < 0.30: High confidence - mostly real data
+     * 0.30-0.50: Medium confidence - mixed data
+     * > 0.50: Low confidence - mostly estimated (⚠️ use with caution!)
+     */
+    private double estimatedDataRatio;
+    
+    /**
+     * True if data quality is high (< 30% estimated)
+     * Use this to filter out low-quality VCP signals
+     */
+    private boolean isHighConfidence;
+    
+    /**
+     * Human-readable warning about data quality
+     * null if no issues
+     * "ESTIMATED_DATA: XX% fallback" if low quality
+     */
+    private String dataQualityWarning;
 
     // ========== Convenience Getters ==========
 
