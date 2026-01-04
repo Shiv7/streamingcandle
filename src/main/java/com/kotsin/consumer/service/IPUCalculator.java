@@ -462,17 +462,37 @@ public class IPUCalculator {
             return emptyOutput(timeframe);
         }
         
-        // FIX: Calculate certainty FIRST before using it
-        // Certainty should reflect how confident we are in the direction
-        double certainty = directionAgreement * 0.4  // How many factors agree
-                         + Math.min(volExpansionScore, 1.0) * 0.2  // Volume confirmation
-                         + flowMomentumAgreement * 0.2  // Flow-momentum alignment
-                         + Math.min(validatedMomentum, 1.0) * 0.2;  // Momentum strength
-        certainty = Math.min(certainty, 1.0);
+        // ========== TIER 1 ENHANCEMENT: Spread Quality Filter ==========
+        // Bid-ask spread indicates execution cost - wide spread reduces confidence
+        double spreadPct = current.getBidAskSpread() / current.getClose();
+        double spreadQuality = 1.0;
         
-        // FIX: Improved formula with certainty normalization
+        if (spreadPct > 0.01) {
+            spreadQuality = 0.50;  // Spread > 1% = very poor execution
+            log.warn("⚠️ WIDE SPREAD {}: {:.2f}% - reducing IPU", 
+                     current.getScripCode(), spreadPct * 100);
+        } else if (spreadPct > 0.005) {
+            spreadQuality = 0.75;  // Moderate spread
+        } else if (spreadPct > 0.002) {
+            spreadQuality = 0.90;  // Acceptable
+        }
+        
+        // ========== STEP 11: Final IPU Score ==========
+        // Momentum-weighted institutional score with spread quality
+        double momentumWeight = 0.5 + (0.5 * momentumContext);
+        double finalIpuScore = instProxy * directionalConviction * momentumWeight * xfactorScore * spreadQuality;
+        finalIpuScore = Math.max(0, Math.min(finalIpuScore, 1.0));
+
+        // ========== STEP 12: Certainty Calculation ==========
+        double certainty = 0.4 * ofQuality 
+                         + 0.3 * priceEfficiency 
+                         + 0.2 * directionAgreement 
+                         + 0.1 * (exhaustionWarning ? 0 : 1);
+        certainty = Math.max(0, Math.min(certainty, 1.0));
+
+        // Build output      // FIX: Improved formula with certainty normalization
         double baseIpu = (priceEfficiency + ofQuality + instProxy + momentumContext + urgencyScore) / 5.0;
-        double finalIpuScore = baseIpu * certainty;
+        finalIpuScore = baseIpu * certainty;
         
         // Scale down for poor/moderate liquidity
         if (liquidityScore < 0.7) {

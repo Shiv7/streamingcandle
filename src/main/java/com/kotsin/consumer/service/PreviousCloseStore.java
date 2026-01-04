@@ -11,6 +11,8 @@ import org.springframework.stereotype.Service;
 
 import jakarta.annotation.PostConstruct;
 
+import java.util.Map;
+
 /**
  * PreviousCloseStore - RocksDB-backed persistent storage for previous day closing prices
  * 
@@ -34,18 +36,29 @@ public class PreviousCloseStore {
     
     public static final String STORE_NAME = "previous-close-store";
     
-    private final StoreBuilder<KeyValueStore<String, Double>> storeBuilder;
+    private StoreBuilder<KeyValueStore<String, Double>> storeBuilder;
     
     public PreviousCloseStore() {
-        // Create RocksDB-backed persistent key-value store
-        this.storeBuilder = Stores.keyValueStoreBuilder(
-            Stores.persistentKeyValueStore(STORE_NAME),
-            Serdes.String(),
-            Serdes.Double()
-        ).withCachingEnabled()  // Enable caching for performance
-         .withLoggingEnabled(null);  // Enable changelog for recovery
-        
-        log.info("✅ PreviousCloseStore initialized with persistent RocksDB backend");
+        // Don't build state store in constructor - Kafka Streams config not ready yet!
+        // Will build lazily when getStateStore() is called
+        log.info("PreviousCloseStore created - state store will be built lazily");
+    }
+    
+    /**
+     * Get state store builder (lazy initialization)
+     */
+    public StoreBuilder<KeyValueStore<String, Double>> getStateStore() {
+        if (storeBuilder == null) {
+            // Build state store on first access
+            storeBuilder = Stores.keyValueStoreBuilder(
+                    Stores.persistentKeyValueStore(STORE_NAME),
+                    Serdes.String(),
+                    Serdes.Double()
+            ).withLoggingEnabled(Map.of()); // Empty config map instead of null
+            
+            log.info("✅ PreviousCloseStore state store created");
+        }
+        return storeBuilder;
     }
     
     /**
@@ -53,7 +66,7 @@ public class PreviousCloseStore {
      * Must be called during topology building
      */
     public void addToTopology(StreamsBuilder builder) {
-        builder.addStateStore(storeBuilder);
+        builder.addStateStore(getStateStore());  // Call getStateStore() for lazy init
         log.info("📦 Added {} to Kafka Streams topology", STORE_NAME);
     }
     
@@ -61,7 +74,7 @@ public class PreviousCloseStore {
      * Get the store builder for use in transformers
      */
     public StoreBuilder<KeyValueStore<String, Double>> getStoreBuilder() {
-        return storeBuilder;
+        return getStateStore();  // Use lazy getter
     }
     
     /**
