@@ -340,10 +340,13 @@ public class UnifiedCandle {
     /**
      * Create UnifiedCandle from InstrumentCandle (for MTF sub-candle tracking)
      * PHASE 2: Used by FamilyCandleProcessor to track sub-candles in aggregation window
+     *
+     * CRITICAL FIX: Now copies volumeAtPrice, POC, VAH, VAL from InstrumentCandle!
+     * This was causing VCP to use fallback "fake" volume profiles instead of real tick data.
      */
     public static UnifiedCandle from(com.kotsin.consumer.domain.model.InstrumentCandle ic) {
         if (ic == null) return null;
-        
+
         return UnifiedCandle.builder()
                 .scripCode(ic.getScripCode())
                 .companyName(ic.getCompanyName())
@@ -353,7 +356,7 @@ public class UnifiedCandle {
                 .windowStartMillis(ic.getWindowStartMillis())
                 .windowEndMillis(ic.getWindowEndMillis())
                 // OHLCV
-                 .open(ic.getOpen())
+                .open(ic.getOpen())
                 .high(ic.getHigh())
                 .low(ic.getLow())
                 .close(ic.getClose())
@@ -361,6 +364,29 @@ public class UnifiedCandle {
                 .buyVolume(ic.getBuyVolume())
                 .sellVolume(ic.getSellVolume())
                 .vwap(ic.getVwap())
+                .tickCount(ic.getTickCount())
+                // VOLUME PROFILE - CRITICAL: Was missing, causing fake volume profiles!
+                .volumeAtPrice(ic.getVolumeAtPrice() != null ?
+                        new java.util.HashMap<>(ic.getVolumeAtPrice()) : new java.util.HashMap<>())
+                .poc(ic.getPoc())
+                .valueAreaHigh(ic.getVah())
+                .valueAreaLow(ic.getVal())
+                // VPIN
+                .vpin(ic.getVpin())
+                // Trade Classification
+                .aggressiveBuyVolume(ic.getAggressiveBuyVolume())
+                .aggressiveSellVolume(ic.getAggressiveSellVolume())
+                // Imbalance Bars
+                .volumeImbalance(ic.getVolumeImbalance())
+                .dollarImbalance(ic.getDollarImbalance())
+                // Orderbook metrics (if present)
+                .ofi(ic.getOfi())
+                .kyleLambda(ic.getKyleLambda())
+                .depthImbalance(ic.getDepthImbalance())
+                .microprice(ic.getMicroprice())
+                .bidAskSpread(ic.getBidAskSpread())
+                .totalBidDepth(ic.getAverageBidDepth() != null ? ic.getAverageBidDepth().longValue() : 0L)
+                .totalAskDepth(ic.getAverageAskDepth() != null ? ic.getAverageAskDepth().longValue() : 0L)
                 .build();
     }
 }

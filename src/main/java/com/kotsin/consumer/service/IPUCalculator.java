@@ -136,34 +136,55 @@ public class IPUCalculator {
         // PHASE 1 ENHANCEMENT: Add VPIN (Volume-Synchronized Probability of Informed Trading)
         // VPIN detects toxic flow = informed traders/insiders BEFORE price moves
         // High VPIN (> 0.5) = someone knows something (insider, HFT with edge, institution with info)
+        //
+        // CRITICAL FIX: High VPIN should REDUCE confidence, not increase it!
+        // When informed traders are active, YOU are trading against someone with better info.
+        // This is TOXIC flow - proceed with extreme caution!
         double vpinRaw = current.getVpin();
-        double vpinSignal = Math.min(vpinRaw / 0.5, 1.0);  // Normalize: 0.5 = threshold, 1.0 = max
-        if (vpinRaw > 0.5) {
-            log.info("⚠️ HIGH VPIN for {}: {:.3f} - TOXIC FLOW DETECTED (informed trading)",
-                     current.getScripCode(), vpinRaw);
+
+        // vpinConfidence: 1.0 when VPIN is LOW (normal market), LOWER when VPIN is HIGH (toxic)
+        // At VPIN = 0.0: confidence = 1.0 (no informed trading detected)
+        // At VPIN = 0.5: confidence = 0.75 (25% reduction - caution)
+        // At VPIN = 0.8: confidence = 0.50 (50% reduction - high risk)
+        // At VPIN = 1.0: confidence = 0.40 (60% reduction - extreme caution)
+        double vpinConfidence;
+        if (vpinRaw <= 0.3) {
+            vpinConfidence = 1.0;  // Normal market conditions
+        } else if (vpinRaw <= 0.5) {
+            vpinConfidence = 1.0 - (vpinRaw - 0.3) * 1.25;  // Linear decay from 1.0 to 0.75
+        } else {
+            vpinConfidence = 0.75 - (vpinRaw - 0.5) * 0.7;  // Steeper decay above 0.5
+            vpinConfidence = Math.max(vpinConfidence, 0.4);  // Floor at 40%
         }
 
-        // Agreement check (now includes VPIN direction)
-        double agreementFactor = Math.signum(volumeDeltaPct) * Math.signum(ofiNormalized) 
+        if (vpinRaw > 0.5) {
+            log.warn("⚠️ HIGH VPIN for {}: {:.3f} - TOXIC FLOW DETECTED! Confidence reduced to {:.1f}%",
+                     current.getScripCode(), vpinRaw, vpinConfidence * 100);
+        }
+
+        // Agreement check (3 core signals - VPIN is applied separately as confidence)
+        double agreementFactor = Math.signum(volumeDeltaPct) * Math.signum(ofiNormalized)
                                * Math.signum(current.getDepthImbalance());
 
-        // FIX: Handle zeros explicitly in geometric mean
-        // NOW 4 COMPONENTS: volume delta + OFI + depth imbalance + VPIN
+        // ORDER FLOW QUALITY: 3 components (volume delta + OFI + depth imbalance)
+        // VPIN is applied as a CONFIDENCE MULTIPLIER, not as a fourth signal
         double ofQuality;
         if (agreementFactor > 0) {
-            // All signals agree - geometric mean with bonus
-            // FIX: Use arithmetic mean if any component is zero (geometric mean = 0)
-            if (volumeDeltaAbs <= 0 || ofiPressure <= 0 || depthImbalanceAbs <= 0 || vpinSignal <= 0) {
-                ofQuality = (volumeDeltaAbs + ofiPressure + depthImbalanceAbs + vpinSignal) / 4.0;
+            // All core signals agree - geometric mean with bonus
+            if (volumeDeltaAbs <= 0 || ofiPressure <= 0 || depthImbalanceAbs <= 0) {
+                ofQuality = (volumeDeltaAbs + ofiPressure + depthImbalanceAbs) / 3.0;
             } else {
-                // 4th root for 4 components
-                ofQuality = Math.pow(volumeDeltaAbs * ofiPressure * depthImbalanceAbs * vpinSignal, 1.0/4.0);
+                // Cube root for 3 components
+                ofQuality = Math.pow(volumeDeltaAbs * ofiPressure * depthImbalanceAbs, 1.0/3.0);
             }
             ofQuality = ofQuality * cfg.getFlowAgreementBonus();
         } else {
             // Signals disagree - arithmetic mean
-            ofQuality = (volumeDeltaAbs + ofiPressure + depthImbalanceAbs + vpinSignal) / 4.0;
+            ofQuality = (volumeDeltaAbs + ofiPressure + depthImbalanceAbs) / 3.0;
         }
+
+        // Apply VPIN confidence as a PENALTY when high (toxic flow reduces quality)
+        ofQuality = ofQuality * vpinConfidence;
         ofQuality = Math.min(ofQuality, 1.0);
         
         // PHASE 1 ENHANCEMENT: Reduce confidence if using passive volume instead of aggressive
@@ -242,14 +263,15 @@ public class IPUCalculator {
         double momentumContextAligned = momentumContext * momentumAlignment;
 
         // 5E: Momentum State Classification
+        // FIXED: Use configurable thresholds instead of magic numbers
         IPUOutput.MomentumState momentumState;
-        if (mmsAcceleration > 0.1 && slopeMagnitude > 0.4) {
+        if (mmsAcceleration > cfg.getMomentumStateAccelThreshold() && slopeMagnitude > cfg.getMomentumStateSlopeStrong()) {
             momentumState = IPUOutput.MomentumState.ACCELERATING;
-        } else if (mmsAcceleration < -0.1 && slopeMagnitude > 0.4) {
+        } else if (mmsAcceleration < -cfg.getMomentumStateAccelThreshold() && slopeMagnitude > cfg.getMomentumStateSlopeStrong()) {
             momentumState = IPUOutput.MomentumState.DECELERATING;
-        } else if (slopeMagnitude > 0.5) {
+        } else if (slopeMagnitude > cfg.getMomentumStateTrendingThreshold()) {
             momentumState = IPUOutput.MomentumState.TRENDING;
-        } else if (slopeMagnitude > 0.25) {
+        } else if (slopeMagnitude > cfg.getMomentumStateDriftingThreshold()) {
             momentumState = IPUOutput.MomentumState.DRIFTING;
         } else {
             momentumState = IPUOutput.MomentumState.FLAT;
@@ -457,46 +479,45 @@ public class IPUCalculator {
         // Poor liquidity = reduce scores (can't execute properly anyway!)
         double liquidityScore = liquidityAnalyzer.calculateLiquidityScore(current);
         LiquidityQualityAnalyzer.LiquidityTier liquidityTier = liquidityAnalyzer.getLiquidityTier(liquidityScore);
-        
+
         if (liquidityScore < 0.2) {
             // VERY POOR liquidity = DON'T TRADE AT ALL!
             log.warn("🚫 {} has VERY POOR liquidity ({:.2f}) - returning EMPTY IPU (avoid trading!)",
                      current.getScripCode(), liquidityScore);
             return emptyOutput(timeframe);
         }
-        
+
         // ========== TIER 1 ENHANCEMENT: Spread Quality Filter ==========
         // Bid-ask spread indicates execution cost - wide spread reduces confidence
-        double spreadPct = current.getBidAskSpread() / current.getClose();
+        double spreadPct = current.getClose() > 0 ? current.getBidAskSpread() / current.getClose() : 0;
         double spreadQuality = 1.0;
-        
+
         if (spreadPct > 0.01) {
             spreadQuality = 0.50;  // Spread > 1% = very poor execution
-            log.warn("⚠️ WIDE SPREAD {}: {:.2f}% - reducing IPU", 
+            log.warn("⚠️ WIDE SPREAD {}: {:.2f}% - reducing IPU",
                      current.getScripCode(), spreadPct * 100);
         } else if (spreadPct > 0.005) {
             spreadQuality = 0.75;  // Moderate spread
         } else if (spreadPct > 0.002) {
             spreadQuality = 0.90;  // Acceptable
         }
-        
-        // ========== STEP 11: Final IPU Score ==========
-        // Momentum-weighted institutional score with spread quality
-        double momentumWeight = 0.5 + (0.5 * momentumContext);
-        double finalIpuScore = instProxy * directionalConviction * momentumWeight * xfactorScore * spreadQuality;
-        finalIpuScore = Math.max(0, Math.min(finalIpuScore, 1.0));
 
         // ========== STEP 12: Certainty Calculation ==========
-        double certainty = 0.4 * ofQuality 
-                         + 0.3 * priceEfficiency 
-                         + 0.2 * directionAgreement 
+        // Certainty reflects how confident we are in the signal quality
+        double certainty = 0.4 * ofQuality
+                         + 0.3 * priceEfficiency
+                         + 0.2 * directionAgreement
                          + 0.1 * (exhaustionWarning ? 0 : 1);
         certainty = Math.max(0, Math.min(certainty, 1.0));
 
-        // Build output      // FIX: Improved formula with certainty normalization
+        // ========== STEP 13: Final IPU Score ==========
+        // FIXED: Single formula - base components weighted by certainty and liquidity
+        // Base = average of 5 core metrics
         double baseIpu = (priceEfficiency + ofQuality + instProxy + momentumContext + urgencyScore) / 5.0;
-        finalIpuScore = baseIpu * certainty;
-        
+
+        // Apply certainty, spread quality, and VPIN confidence
+        double finalIpuScore = baseIpu * certainty * spreadQuality * vpinConfidence;
+
         // Scale down for poor/moderate liquidity
         if (liquidityScore < 0.7) {
             double originalScore = finalIpuScore;

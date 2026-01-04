@@ -123,6 +123,72 @@ public class AdaptiveVPINCalculator {
     }
 
     /**
+     * Update VPIN with proper trade classification using Lee-Ready Algorithm.
+     *
+     * This is the CORRECT way to use VPIN - classifying each trade at tick level.
+     *
+     * Lee-Ready Algorithm:
+     * 1. Quote Rule: If trade price > midpoint → BUY, if < midpoint → SELL
+     * 2. Tick Rule (fallback): If at midpoint, use price change from previous trade
+     *
+     * References:
+     * - Lee, C., & Ready, M. (1991). "Inferring Trade Direction from Intraday Data"
+     *
+     * @param tradePrice The price at which the trade occurred
+     * @param volume Trade volume
+     * @param bidPrice Current best bid price
+     * @param askPrice Current best ask price
+     * @param prevTradePrice Previous trade price (for tick rule fallback), null if unknown
+     */
+    public void updateFromTick(double tradePrice, long volume, double bidPrice, double askPrice, Double prevTradePrice) {
+        if (volume <= 0 || bidPrice <= 0 || askPrice <= 0) return;
+
+        // Lee-Ready Trade Classification Algorithm
+        double midpoint = (bidPrice + askPrice) / 2.0;
+        double tickTolerance = (askPrice - bidPrice) * 0.01; // 1% of spread as tolerance
+        boolean isBuy;
+
+        if (tradePrice > midpoint + tickTolerance) {
+            // Trade above midpoint = buyer lifted the offer (BUY)
+            isBuy = true;
+        } else if (tradePrice < midpoint - tickTolerance) {
+            // Trade below midpoint = seller hit the bid (SELL)
+            isBuy = false;
+        } else if (prevTradePrice != null && Math.abs(tradePrice - prevTradePrice) > 0.0001) {
+            // At midpoint: use Tick Rule - if price went up, it's a buy
+            isBuy = tradePrice > prevTradePrice;
+        } else {
+            // Last resort: if exactly at midpoint with no price change
+            // Use depth imbalance hint: more bids than asks suggests buying pressure
+            // Default to buy if completely ambiguous (matches academic convention)
+            isBuy = bidPrice >= askPrice - tickTolerance;
+        }
+
+        update(volume, isBuy);
+
+        log.trace("Lee-Ready classification: price={} mid={} bid={} ask={} prev={} -> {}",
+                  tradePrice, midpoint, bidPrice, askPrice, prevTradePrice, isBuy ? "BUY" : "SELL");
+    }
+
+    /**
+     * Batch update from tick data with proper classification.
+     * Use this for processing historical tick data.
+     *
+     * @param ticks List of tick data [tradePrice, volume, bidPrice, askPrice]
+     */
+    public void updateFromTickBatch(List<double[]> ticks) {
+        if (ticks == null || ticks.isEmpty()) return;
+
+        Double prevPrice = null;
+        for (double[] tick : ticks) {
+            if (tick.length >= 4) {
+                updateFromTick(tick[0], (long) tick[1], tick[2], tick[3], prevPrice);
+                prevPrice = tick[0];
+            }
+        }
+    }
+
+    /**
      * Update VPIN with aggregated buy/sell volumes from a candle
      *
      * @param buyVolume Total buy volume

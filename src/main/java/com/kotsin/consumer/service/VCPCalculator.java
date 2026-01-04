@@ -360,11 +360,74 @@ public class VCPCalculator {
         // POC = Point of Control (highest volume level) is THE MOST important support/resistance
         // Value Area = 70% of volume concentration
         // These are MORE important than any statistical peak!
-        
+
         // Get POC and Value Area from current candle (already calculated)
         Double pocPrice = current != null ? current.getPoc() : null;
         Double vahPrice = current != null ? current.getValueAreaHigh() : null;
         Double valPrice = current != null ? current.getValueAreaLow() : null;
+
+        // FALLBACK: If real POC is null, calculate from the volume profile we just built
+        // This ensures we always have a POC even when real tick-level data isn't available
+        if (pocPrice == null && !volumeProfile.isEmpty()) {
+            Map.Entry<Double, Long> maxEntry = volumeProfile.entrySet().stream()
+                    .max(Comparator.comparingLong(Map.Entry::getValue))
+                    .orElse(null);
+            if (maxEntry != null) {
+                pocPrice = maxEntry.getKey();
+                log.debug("VCP: POC calculated from profile (fallback): {} (vol={})",
+                        pocPrice, maxEntry.getValue());
+            }
+        }
+
+        // FALLBACK: Calculate VAH/VAL from volume profile if not available
+        if ((vahPrice == null || valPrice == null) && !volumeProfile.isEmpty() && pocPrice != null) {
+            // Find value area (70% of volume around POC)
+            long totalVolume = volumeProfile.values().stream().mapToLong(Long::longValue).sum();
+            long targetVolume = (long) (totalVolume * 0.70);
+
+            List<Map.Entry<Double, Long>> sortedByPrice = volumeProfile.entrySet().stream()
+                    .sorted(Comparator.comparingDouble(Map.Entry::getKey))
+                    .collect(Collectors.toList());
+
+            int pocIndex = -1;
+            for (int i = 0; i < sortedByPrice.size(); i++) {
+                if (Math.abs(sortedByPrice.get(i).getKey() - pocPrice) < 0.001) {
+                    pocIndex = i;
+                    break;
+                }
+            }
+
+            if (pocIndex >= 0) {
+                int lowIndex = pocIndex;
+                int highIndex = pocIndex;
+                long accumulatedVolume = sortedByPrice.get(pocIndex).getValue();
+
+                while (accumulatedVolume < targetVolume &&
+                        (lowIndex > 0 || highIndex < sortedByPrice.size() - 1)) {
+                    long lowVol = lowIndex > 0 ? sortedByPrice.get(lowIndex - 1).getValue() : 0;
+                    long highVol = highIndex < sortedByPrice.size() - 1 ?
+                            sortedByPrice.get(highIndex + 1).getValue() : 0;
+
+                    if (lowVol >= highVol && lowIndex > 0) {
+                        lowIndex--;
+                        accumulatedVolume += lowVol;
+                    } else if (highIndex < sortedByPrice.size() - 1) {
+                        highIndex++;
+                        accumulatedVolume += highVol;
+                    } else if (lowIndex > 0) {
+                        lowIndex--;
+                        accumulatedVolume += lowVol;
+                    } else {
+                        break;
+                    }
+                }
+
+                valPrice = sortedByPrice.get(lowIndex).getKey();
+                vahPrice = sortedByPrice.get(highIndex).getKey();
+                log.debug("VCP: Value Area calculated from profile (fallback): VAL={} VAH={}",
+                        valPrice, vahPrice);
+            }
+        }
         
         long maxVolume = volumeProfile.values().stream().mapToLong(Long::longValue).max().orElse(1);
         
@@ -694,11 +757,25 @@ public class VCPCalculator {
     }
 
     private double calculateRunwayScore(List<VCPCluster> clusters) {
+        // CRITICAL FIX: Empty clusters = NO DATA, not "clear runway"!
+        // Previously returned 1.0 for empty clusters which falsely indicated clear path
+        if (clusters == null || clusters.isEmpty()) {
+            log.debug("VCP: Empty clusters - returning 0 runway (unknown, not clear)");
+            return 0.0;  // Unknown = 0, NOT clear runway = 1.0
+        }
+
         double totalDifficulty = clusters.stream()
                 .mapToDouble(VCPCluster::getBreakoutDifficulty)
                 .sum();
-        
-        // BUG-FIX: Ensure score is bounded [0, 1]
+
+        // If we have clusters but no difficulty data, that's also unknown
+        if (totalDifficulty <= 0 && clusters.size() > 0) {
+            // We have clusters but no difficulty info - return moderate score
+            log.debug("VCP: Clusters exist but no difficulty data - returning 0.5 (neutral)");
+            return 0.5;  // Neutral when we have structure but no resistance data
+        }
+
+        // Normal case: difficulty data exists
         double score = 1.0 / (1.0 + totalDifficulty);
         return Math.max(0.0, Math.min(1.0, score));
     }

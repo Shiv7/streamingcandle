@@ -72,36 +72,64 @@ public class IPUConfig {
     private double lambdaScale = 0.5;
 
     // ========== Momentum Parameters ==========
-    
+
     /**
      * Bars for momentum slope calculation
      */
     private int momentumLookback = 3;
-    
+
     /**
      * Threshold for normalizing acceleration
      */
     private double accelerationThreshold = 0.25;
-    
+
     /**
      * Maximum slope magnitude (clamp)
      */
     private double slopeClamp = 1.0;
-    
+
     /**
      * Momentum decline threshold for exhaustion
      */
     private double exhaustionDeclineThreshold = 0.8;
-    
+
     /**
      * Volume decline threshold for exhaustion
      */
     private double exhaustionVolumeDecline = 0.7;
-    
+
     /**
      * Wick ratio threshold for exhaustion
      */
     private double exhaustionWickThreshold = 0.4;
+
+    // ========== Momentum State Classification Thresholds ==========
+    // These determine when momentum is classified as ACCELERATING, TRENDING, etc.
+    // Previously hardcoded magic numbers - now configurable
+
+    /**
+     * Minimum acceleration to classify as ACCELERATING/DECELERATING
+     * (previously hardcoded as 0.1)
+     */
+    private double momentumStateAccelThreshold = 0.1;
+
+    /**
+     * Minimum slope magnitude to consider momentum "strong" for ACCELERATING/DECELERATING
+     * (previously hardcoded as 0.4)
+     */
+    private double momentumStateSlopeStrong = 0.4;
+
+    /**
+     * Minimum slope magnitude for TRENDING state
+     * (previously hardcoded as 0.5)
+     */
+    private double momentumStateTrendingThreshold = 0.5;
+
+    /**
+     * Minimum slope magnitude for DRIFTING state (between FLAT and TRENDING)
+     * (previously hardcoded as 0.25)
+     */
+    private double momentumStateDriftingThreshold = 0.25;
 
     // ========== Urgency Parameters ==========
     
