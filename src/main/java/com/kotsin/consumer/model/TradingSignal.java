@@ -81,6 +81,16 @@ public class TradingSignal {
     private double riskRewardRatio;      // Calculated R:R
     private double riskPercentage;       // Risk as % of entry
 
+    // ========== Signal Flags (CRITICAL: Required by TradeExecution) ==========
+    private boolean longSignal;          // True if actionable LONG signal
+    private boolean shortSignal;         // True if actionable SHORT signal
+    private boolean warningSignal;       // True if warning (reduce exposure)
+    private double trailingStopDistance; // ATR-based trailing stop distance
+
+    // ========== Exchange Info (for scripCode format N:D:49812) ==========
+    private String exchange;             // N (NSE), B (BSE), M (MCX)
+    private String exchangeType;         // C (Cash), D (Derivatives)
+
     // ========== Enums ==========
 
     public enum SignalType {
@@ -108,10 +118,13 @@ public class TradingSignal {
         TradingSignalBuilder builder = TradingSignal.builder()
                 .timestamp(System.currentTimeMillis());
 
+        // Get raw scripCode and current price from either source
+        String rawScripCode = vcp != null ? vcp.getScripCode() : (ipu != null ? ipu.getScripCode() : null);
+        double price = 0.0;
+
         // Populate from VCP
         if (vcp != null) {
-            builder.scripCode(vcp.getScripCode())
-                   .companyName(vcp.getCompanyName())
+            builder.companyName(vcp.getCompanyName())
                    .vcpCombinedScore(vcp.getVcpCombinedScore())
                    .supportScore(vcp.getSupportScore())
                    .resistanceScore(vcp.getResistanceScore())
@@ -121,13 +134,13 @@ public class TradingSignal {
                    .currentPrice(vcp.getCurrentPrice())
                    .atr(vcp.getAtr())
                    .microprice(vcp.getMicroprice());
+            price = vcp.getCurrentPrice();
         }
 
         // Populate from IPU
         if (ipu != null) {
             if (vcp == null) {
-                builder.scripCode(ipu.getScripCode())
-                       .companyName(ipu.getCompanyName());
+                builder.companyName(ipu.getCompanyName());
             }
             builder.ipuFinalScore(ipu.getFinalIpuScore())
                    .instProxy(ipu.getInstProxy())
@@ -146,12 +159,82 @@ public class TradingSignal {
             // Position sizing
             builder.positionSizeMultiplier(ipu.getMomentumMultiplier() * ipu.getAgreementMultiplier());
             builder.trailAtrMultiplier(ipu.getTrailAtrMultiplier());
+
+            // FIX: Get currentPrice from IPU if VCP didn't provide it
+            if (price <= 0 && ipu.getCurrentPrice() > 0) {
+                price = ipu.getCurrentPrice();
+                builder.currentPrice(price);
+            }
+
+            // FIX: Get ATR from IPU if not available from VCP
+            if (ipu.getAtr() > 0) {
+                // If VCP didn't set ATR or it's 0, use IPU's ATR
+                builder.atr(ipu.getAtr());
+            }
+        }
+
+        // FIX: Format scripCode as Exchange:Type:Code for trade execution
+        // Heuristic: scripCodes >= 100000 are typically derivatives (options/futures)
+        String formattedScripCode = formatScripCode(rawScripCode);
+        builder.scripCode(formattedScripCode);
+
+        // FIX: Parse exchange info from formatted scripCode
+        String[] parts = formattedScripCode.split(":");
+        if (parts.length == 3) {
+            builder.exchange(parts[0])
+                   .exchangeType(parts[1]);
         }
 
         TradingSignal signal = builder.build();
         signal.classifySignal(vcp, ipu);
         signal.calculateTradeParams(vcp, ipu);  // Calculate entry/stop/targets
+
+        // FIX: Set signal flags AFTER classification
+        signal.setLongSignal(signal.isLongSignal());
+        signal.setShortSignal(signal.isShortSignal());
+        signal.setWarningSignal(signal.isWarningSignal());
+
+        // FIX: Calculate trailing stop distance
+        if (signal.getAtr() > 0 && signal.getTrailAtrMultiplier() > 0) {
+            signal.setTrailingStopDistance(signal.getAtr() * signal.getTrailAtrMultiplier());
+        }
+
         return signal;
+    }
+
+    /**
+     * Format scripCode as Exchange:Type:Code
+     * Required by trade execution module for order routing
+     *
+     * Heuristic:
+     * - scripCodes >= 100000 are typically NSE derivatives (options/futures)
+     * - scripCodes < 100000 are typically NSE cash equities
+     * - If already formatted (contains :), return as-is
+     */
+    private static String formatScripCode(String rawScripCode) {
+        if (rawScripCode == null || rawScripCode.isBlank()) {
+            return "N:C:0";  // Default fallback
+        }
+
+        // If already formatted, return as-is
+        if (rawScripCode.contains(":")) {
+            return rawScripCode;
+        }
+
+        // Parse numeric scripCode
+        try {
+            long code = Long.parseLong(rawScripCode.trim());
+            // Heuristic: high codes are derivatives (options/futures)
+            // NSE derivatives typically have scripCodes in 4xxxxx, 5xxxxx range
+            if (code >= 100000) {
+                return "N:D:" + rawScripCode;  // NSE Derivatives
+            } else {
+                return "N:C:" + rawScripCode;  // NSE Cash (equity)
+            }
+        } catch (NumberFormatException e) {
+            // If not numeric, assume it's already in some format
+            return "N:C:" + rawScripCode;
+        }
     }
 
     /**

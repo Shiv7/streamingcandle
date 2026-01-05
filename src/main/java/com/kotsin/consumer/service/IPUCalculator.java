@@ -570,6 +570,9 @@ public class IPUCalculator {
                 .xfactorScore(xfactorScore)
                 .xfactorFlag(xfactorFlag)
                 .certainty(certainty)
+                // FIX: Include price context for signal generation
+                .currentPrice(current.getClose())
+                .atr(atr)
                 .raw(new IPUOutput.RawInputs(
                         volRatio,
                         volumeDeltaPct,
@@ -674,6 +677,9 @@ public class IPUCalculator {
                 .xfactorScore(ipu5m.getXfactorScore())
                 .xfactorFlag(ipu5m.isXfactorFlag())
                 .certainty(ipu5m.getCertainty())
+                // FIX: Include price context from 5m for signal generation
+                .currentPrice(ipu5m.getCurrentPrice())
+                .atr(ipu5m.getAtr())
                 .raw(ipu5m.getRaw())
                 .build();
     }

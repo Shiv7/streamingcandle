@@ -86,6 +86,10 @@ public class IPUOutput {
     // ========== Confidence ==========
     private double certainty;              // Overall confidence
 
+    // ========== Market Context (for signal generation) ==========
+    private double currentPrice;           // Close price of the candle
+    private double atr;                    // Average True Range for position sizing
+
     // ========== Raw Inputs (for debugging) ==========
     @Builder.Default
     private RawInputs raw = new RawInputs();
