@@ -64,7 +64,11 @@ public class FamilyCandleProcessor {
     @Autowired
     private com.kotsin.consumer.service.MTFDistributionCalculator mtfDistributionCalculator;
 
-    @Value("${family.candle.window.grace.seconds:5}")
+    // FIX: Increased default grace period from 5 to 30 seconds
+    // BEFORE: 5 seconds - options arriving late would miss family window
+    // AFTER: 30 seconds - allows more time for all family members to arrive
+    // This is especially important during market open when data bursts arrive
+    @Value("${family.candle.window.grace.seconds:30}")
     private int graceSeconds;
 
     @Value("${family.candle.processor.enabled:true}")
@@ -171,9 +175,12 @@ public class FamilyCandleProcessor {
         );
 
         // Key by family ID (equity scripCode)
+        // FIX: Added filter after selectKey to drop records where getFamilyId() returns null
+        // This happens when option mapping fails completely (not in ScripGroup, Scrip, or symbolMap)
         KStream<String, InstrumentCandle> keyedByFamily = instruments
             .filter((key, candle) -> candle != null && candle.getScripCode() != null)
-            .selectKey((key, candle) -> getFamilyId(candle));
+            .selectKey((key, candle) -> getFamilyId(candle))
+            .filter((familyId, candle) -> familyId != null);  // FIX: Drop null familyIds (unmapped options)
 
         // Window and aggregate
         TimeWindows windows = TimeWindows.ofSizeAndGrace(
@@ -350,24 +357,28 @@ public class FamilyCandleProcessor {
             }
         }
 
+        // FIX: Return null for unmapped OPTIONS - they will be filtered out
+        // BEFORE: Returned scripCode which created orphan families
+        // AFTER: Return null for options (filtered by keyedByFamily filter)
+        //        Return scripCode for futures (can still emit as commodity families)
         if (type == InstrumentType.OPTION_CE || type == InstrumentType.OPTION_PE) {
             log.warn("[FAMILY-ID-FINAL] Option mapping FAILED | scripCode: {} | type: {} | window: [{}, {}] | " +
-                     "companyName: '{}' | symbol: '{}' | Using scripCode as familyId. " +
-                     "This will prevent family formation and break PCR/OI analysis.",
+                     "companyName: '{}' | symbol: '{}' | Returning NULL (option will be dropped). " +
+                     "Fix the symbol mapping in MongoDB to include this option.",
                      scripCode, type, candle.getWindowStartMillis(), candle.getWindowEndMillis(),
                      companyName != null ? companyName : "null", symbolRoot != null ? symbolRoot : "null");
+            return null;  // FIX: Return null so option is filtered out, not orphaned
         } else if (type == InstrumentType.FUTURE) {
             log.warn("[FAMILY-ID-FINAL] Future mapping FAILED | scripCode: {} | type: {} | " +
-                     "companyName: '{}' | symbol: '{}' | Using scripCode as familyId. " +
-                     "This will prevent spot-future premium calculation.",
+                     "companyName: '{}' | symbol: '{}' | Using scripCode as familyId (may be MCX commodity).",
                      scripCode, type, companyName != null ? companyName : "null", symbolRoot != null ? symbolRoot : "null");
+            return scripCode;  // Futures can still form valid families (MCX commodities)
         } else {
             log.warn("[FAMILY-ID-FINAL] Derivative mapping FAILED | scripCode: {} | type: {} | " +
                      "companyName: '{}' | symbol: '{}' | Using scripCode as familyId",
                      scripCode, type, companyName != null ? companyName : "null", symbolRoot != null ? symbolRoot : "null");
+            return scripCode;  // Other derivatives fallback to scripCode
         }
-        
-        return scripCode; // Fallback
     }
     
 

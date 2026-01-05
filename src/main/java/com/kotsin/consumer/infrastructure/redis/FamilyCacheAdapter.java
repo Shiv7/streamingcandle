@@ -305,21 +305,71 @@ public class FamilyCacheAdapter implements IFamilyDataProvider {
                 String equityScripCode = group.get().getId(); // _id is equity scripCode
                 // Cache for future lookups
                 reverseMapping.put(scripCode, equityScripCode);
-                log.info("[MONGODB-HIT] scripCode: {} -> equity: {} (queryTime: {}ms, cacheSize: {})", 
+                log.info("[MONGODB-HIT] scripCode: {} -> equity: {} (queryTime: {}ms, cacheSize: {})",
                     scripCode, equityScripCode, queryTime, reverseMapping.size());
                 return equityScripCode;
             } else {
                 mongoDbMisses++;
-                log.warn("[MONGODB-MISS] scripCode: {} not found in ScripGroup collection (queryTime: {}ms)", 
-                    scripCode, queryTime);
+                log.debug("[MONGODB-MISS] scripCode: {} not found in ScripGroup, trying Scrip collection fallback...",
+                    scripCode);
             }
         } catch (Exception e) {
             mongoDbMisses++;
-            log.error("[MONGODB-ERROR] Failed to query ScripGroup for scripCode: {} - {}", 
+            log.error("[MONGODB-ERROR] Failed to query ScripGroup for scripCode: {} - {}",
                 scripCode, e.getMessage(), e);
         }
-        
-        return null; // Not found
+
+        // ═══════════════════════════════════════════════════════════════════════════════
+        // FIX: FALLBACK - Query Scrip collection directly when ScripGroup lookup fails
+        // ═══════════════════════════════════════════════════════════════════════════════
+        // Problem: ScripGroup.options[] may be incomplete (new strikes, new expiries)
+        // Solution: Query Scrip collection directly, extract symbolRoot, find equity
+        // ═══════════════════════════════════════════════════════════════════════════════
+        try {
+            java.util.Optional<Scrip> scripOpt = scripRepository.findByScripCode(scripCode);
+            if (scripOpt.isPresent()) {
+                Scrip scrip = scripOpt.get();
+                String symbolRoot = scrip.getSymbolRoot();
+
+                if (symbolRoot != null && !symbolRoot.isEmpty()) {
+                    // Use symbolRoot to find equity scripCode
+                    String equityScripCode = findEquityBySymbol(symbolRoot);
+                    if (equityScripCode != null) {
+                        // Cache for future lookups
+                        reverseMapping.put(scripCode, equityScripCode);
+                        log.info("[SCRIP-FALLBACK-SUCCESS] scripCode: {} -> symbolRoot: {} -> equity: {} (cached)",
+                            scripCode, symbolRoot, equityScripCode);
+                        return equityScripCode;
+                    } else {
+                        log.warn("[SCRIP-FALLBACK-PARTIAL] scripCode: {} found with symbolRoot: {} but no equity mapping",
+                            scripCode, symbolRoot);
+                    }
+                } else {
+                    // Try to extract symbol from fullName/name as last resort
+                    // Scrip entity has 'name' (short) and 'fullName' (detailed)
+                    String name = scrip.getFullName() != null ? scrip.getFullName() : scrip.getName();
+                    if (name != null && !name.isEmpty()) {
+                        String extractedSymbol = extractSymbolFromCompanyName(name);
+                        if (extractedSymbol != null) {
+                            String equityScripCode = findEquityBySymbol(extractedSymbol);
+                            if (equityScripCode != null) {
+                                reverseMapping.put(scripCode, equityScripCode);
+                                log.info("[SCRIP-FALLBACK-NAME] scripCode: {} -> name: {} -> symbol: {} -> equity: {}",
+                                    scripCode, name, extractedSymbol, equityScripCode);
+                                return equityScripCode;
+                            }
+                        }
+                    }
+                    log.warn("[SCRIP-FALLBACK-FAILED] scripCode: {} found but no symbolRoot or valid name", scripCode);
+                }
+            } else {
+                log.debug("[SCRIP-FALLBACK-NOTFOUND] scripCode: {} not found in Scrip collection either", scripCode);
+            }
+        } catch (Exception e) {
+            log.error("[SCRIP-FALLBACK-ERROR] Failed to query Scrip for scripCode: {} - {}", scripCode, e.getMessage());
+        }
+
+        return null; // Not found in any collection
     }
     
     /**
@@ -568,6 +618,51 @@ public class FamilyCacheAdapter implements IFamilyDataProvider {
         }
 
         log.debug("No equity scripCode found for symbol: {}", symbolUpper);
+        return null;
+    }
+
+    /**
+     * Extract symbol from option/future company name
+     * Handles formats like:
+     * - "ADANIENT 30 DEC 2025 CE 2260.00" -> "ADANIENT"
+     * - "BANKNIFTY 31 JAN 2026 CE 51500" -> "BANKNIFTY"
+     * - "RELIANCE JAN FUT" -> "RELIANCE"
+     */
+    private String extractSymbolFromCompanyName(String companyName) {
+        if (companyName == null || companyName.isEmpty()) {
+            return null;
+        }
+
+        String trimmed = companyName.trim().toUpperCase();
+
+        // Handle special multi-word symbols
+        if (trimmed.startsWith("BANK NIFTY") || trimmed.startsWith("BANKNIFTY")) {
+            return "BANKNIFTY";
+        }
+        if (trimmed.startsWith("NIFTY BANK")) {
+            return "BANKNIFTY";
+        }
+        if (trimmed.startsWith("FIN NIFTY") || trimmed.startsWith("FINNIFTY")) {
+            return "FINNIFTY";
+        }
+        if (trimmed.startsWith("MIDCP NIFTY") || trimmed.startsWith("MIDCPNIFTY")) {
+            return "MIDCPNIFTY";
+        }
+
+        // Split by whitespace and take first part
+        String[] parts = trimmed.split("\\s+");
+        if (parts.length == 0) {
+            return null;
+        }
+
+        // First part is usually the symbol
+        String firstPart = parts[0];
+
+        // Validate: symbol should be alphabetic (possibly with & for M&M, L&T etc)
+        if (firstPart.matches("[A-Z&]+")) {
+            return firstPart;
+        }
+
         return null;
     }
 

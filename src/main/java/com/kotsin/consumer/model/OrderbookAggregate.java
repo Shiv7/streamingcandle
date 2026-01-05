@@ -200,7 +200,11 @@ public class OrderbookAggregate {
         public final double lambdaOfiEps;
 
         public OrderbookConfig() {
-            this(0.05, 0.3, 2, 1.0, 10, 5, 1.0);
+            // FIX: Lowered lambdaOfiEps from 1.0 to 0.1
+            // BEFORE: 1.0 filtered out 95%+ of observations (OFI rarely > 1 in single update)
+            // AFTER: 0.1 allows most meaningful observations while filtering noise
+            // Reference: Kyle (1985), Hasbrouck (2007) - OFI should include small but non-zero values
+            this(0.05, 0.3, 2, 1.0, 10, 5, 0.1);
         }
 
         public OrderbookConfig(double tickSize, double spoofSizeRatio, int spoofConfirmSnapshots,

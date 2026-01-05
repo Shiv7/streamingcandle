@@ -373,7 +373,11 @@ public class UnifiedInstrumentCandleProcessor {
                     .withKeySerde(Serdes.String())
                     .withValueSerde(TickAggregate.serde())
                     .withRetention(Duration.ofDays(14))  // 2 weeks retention for replay scenarios
-            );
+            )
+            // FIX: Suppress intermediate emissions - emit only when window closes
+            // BEFORE: Emitted on EVERY tick update during grace period (duplicate candles)
+            // AFTER: Emit exactly ONCE per window at close (correct behavior)
+            .suppress(Suppressed.untilWindowCloses(Suppressed.BufferConfig.unbounded()));
 
         // ========== 5. AGGREGATE ORDERBOOK INTO OFI/LAMBDA ==========
         // Repartition orderbooks to 20 partitions for co-partitioning
@@ -396,7 +400,10 @@ public class UnifiedInstrumentCandleProcessor {
                     .withKeySerde(Serdes.String())
                     .withValueSerde(OrderbookAggregate.serde())
                     .withRetention(Duration.ofDays(14))  // 2 weeks retention for replay scenarios
-            );
+            )
+            // FIX: Suppress intermediate emissions - emit only when window closes
+            // Matches tickCandles suppress for consistent join behavior
+            .suppress(Suppressed.untilWindowCloses(Suppressed.BufferConfig.unbounded()));
 
         // ========== 5.5. CREATE NON-WINDOWED ORDERBOOK LATEST STORE (FALLBACK) ==========
         // This store keeps the latest orderbook aggregate for each instrument
@@ -486,8 +493,11 @@ public class UnifiedInstrumentCandleProcessor {
                         
                         if (tickOb != null && tickOb.tick != null && oiStore != null) {
                             // Build OI key from tick data
+                            // FIX: Default exchType to "D" (derivative) to match buildOIKey() storage
+                            // BEFORE: "C" (cash/equity) - caused key mismatch for derivatives with null exchType
+                            // AFTER: "D" (derivative) - matches how OI is stored
                             String tickExch = tickOb.tick.getExchange() != null ? tickOb.tick.getExchange() : "N";
-                            String tickExchType = tickOb.tick.getExchangeType() != null ? tickOb.tick.getExchangeType() : "C";
+                            String tickExchType = tickOb.tick.getExchangeType() != null ? tickOb.tick.getExchangeType() : "D";
                             String scripCode = tickOb.tick.getScripCode();
                             String oiKey = tickExch + ":" + tickExchType + ":" + scripCode;
                             
@@ -1026,15 +1036,23 @@ public class UnifiedInstrumentCandleProcessor {
             tick.getExchange(), tick.getExchangeType(), tick.getScripCode()
         );
         String vpinKey = tick.getScripCode();
-        
+
         // Detect trading day from window start time
         LocalDate currentTradingDay = ZonedDateTime.ofInstant(
             Instant.ofEpochMilli(windowedKey.window().start()),
             ZoneId.of("Asia/Kolkata")
         ).toLocalDate();
-        
-        // Get or create VPIN calculator
-        AdaptiveVPINCalculator vpinCalc = vpinCalculators.get(vpinKey, k -> new AdaptiveVPINCalculator(avgDailyVolume));
+
+        // FIX: Use minute-average volume instead of daily volume for bucket sizing
+        // BEFORE: bucketSize = dailyVolume / 50 = 200K for 10M daily (7+ minutes to fill 1 bucket)
+        // AFTER: bucketSize = minuteAvgVolume / 50 ≈ 533 for 10M daily (fills properly per minute)
+        // Trading day = 375 minutes (9:15-15:30), so minuteAvg = dailyVolume / 375
+        // This ensures buckets fill within reasonable timeframes for toxic flow detection
+        final int TRADING_MINUTES_PER_DAY = 375;  // NSE trading hours: 9:15 AM to 3:30 PM
+        double minuteAvgVolume = avgDailyVolume / TRADING_MINUTES_PER_DAY;
+
+        // Get or create VPIN calculator using minute-average volume
+        AdaptiveVPINCalculator vpinCalc = vpinCalculators.get(vpinKey, k -> new AdaptiveVPINCalculator(minuteAvgVolume));
         
         // Reset VPIN if we've crossed into a new trading day (market open)
         LocalDate lastTradingDay = vpinLastTradingDay.getIfPresent(vpinKey);
