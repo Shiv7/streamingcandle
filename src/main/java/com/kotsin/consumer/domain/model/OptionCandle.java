@@ -106,28 +106,85 @@ public class OptionCandle {
     }
 
     /**
-     * Create from InstrumentCandle
+     * Create from InstrumentCandle (backward compatible - no spot price)
      */
     public static OptionCandle fromInstrumentCandle(InstrumentCandle candle) {
+        return fromInstrumentCandle(candle, null);
+    }
+
+    /**
+     * Create from InstrumentCandle with spot price for moneyness calculation
+     * FIX: Now calculates isITM, isATM, intrinsicValue, timeValue
+     *
+     * @param candle InstrumentCandle for the option
+     * @param spotPrice Current spot price (equity close) for moneyness calculation
+     */
+    public static OptionCandle fromInstrumentCandle(InstrumentCandle candle, Double spotPrice) {
         // FIX: Check for null InstrumentType before calling isOption() (BUG-004)
         if (candle == null || candle.getInstrumentType() == null || !candle.getInstrumentType().isOption()) {
             return null;
         }
 
-        return OptionCandle.builder()
+        double strike = candle.getStrikePrice() != null ? candle.getStrikePrice() : 0.0;
+        String optType = candle.getOptionType();
+        double premium = candle.getClose();
+
+        // Build base option candle
+        OptionCandle.OptionCandleBuilder builder = OptionCandle.builder()
             .scripCode(candle.getScripCode())
-            .symbol(candle.getSymbol())
-            .strikePrice(candle.getStrikePrice() != null ? candle.getStrikePrice() : 0.0)
-            .optionType(candle.getOptionType())
+            .symbol(candle.getCompanyName() != null ? candle.getCompanyName() : candle.getScripCode())  // FIX: Use companyName as symbol
+            .strikePrice(strike)
+            .optionType(optType)
             .expiry(candle.getExpiry())
             .open(candle.getOpen())
             .high(candle.getHigh())
             .low(candle.getLow())
-            .close(candle.getClose())
+            .close(premium)
             .volume(candle.getVolume())
             .openInterest(candle.getOpenInterest() != null ? candle.getOpenInterest() : 0L)
             .oiChange(candle.getOiChange() != null ? candle.getOiChange() : 0L)
             .oiChangePercent(candle.getOiChangePercent() != null ? candle.getOiChangePercent() : 0.0)
-            .build();
+            // Copy Greeks if available
+            .impliedVolatility(candle.getImpliedVolatility())
+            .delta(candle.getDelta())
+            .gamma(candle.getGamma())
+            .theta(candle.getTheta())
+            .vega(candle.getVega());
+
+        // FIX: Calculate moneyness if spot price and strike are available
+        if (spotPrice != null && spotPrice > 0 && strike > 0 && optType != null) {
+            boolean isCall = "CE".equalsIgnoreCase(optType);
+            boolean isPut = "PE".equalsIgnoreCase(optType);
+
+            // ITM: Call is ITM when spot > strike, Put is ITM when spot < strike
+            boolean itm = false;
+            if (isCall) {
+                itm = spotPrice > strike;
+            } else if (isPut) {
+                itm = spotPrice < strike;
+            }
+            builder.isITM(itm);
+
+            // ATM: Within 1% of strike (or within half the strike gap for index options)
+            double diff = Math.abs(spotPrice - strike);
+            double atmThreshold = Math.max(strike * 0.01, 50.0);  // 1% or 50 points, whichever is larger
+            boolean atm = diff <= atmThreshold;
+            builder.isATM(atm);
+
+            // Intrinsic value
+            double intrinsic = 0.0;
+            if (isCall) {
+                intrinsic = Math.max(0, spotPrice - strike);
+            } else if (isPut) {
+                intrinsic = Math.max(0, strike - spotPrice);
+            }
+            builder.intrinsicValue(intrinsic);
+
+            // Time value = Premium - Intrinsic
+            double timeValue = Math.max(0, premium - intrinsic);
+            builder.timeValue(timeValue);
+        }
+
+        return builder.build();
     }
 }

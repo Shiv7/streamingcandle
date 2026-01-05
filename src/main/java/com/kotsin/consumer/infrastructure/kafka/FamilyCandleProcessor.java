@@ -562,9 +562,11 @@ public class FamilyCandleProcessor {
 
         // Set future candle (already retrieved above)
         if (future != null && equity != null) {
-            // Only validate future separately if we have both equity and future
+            // FIX: Set hasFuture=true when BOTH equity AND future exist
+            // BEFORE: hasFuture was never set in this branch (BUG!)
             validateOHLC(future, "FUTURE", familyId);
             builder.future(future);
+            builder.hasFuture(true);  // FIX: Was missing!
         } else if (future != null && equity == null && isCommodity) {
             // Commodity case: future is set as equity for compatibility, but ALSO set in future field
             // so that MTISProcessor can access OI/PCR via getFuture()
@@ -627,22 +629,31 @@ public class FamilyCandleProcessor {
                 future != null ? future.getScripCode() : "null");
         }
         
+        // FIX: Get spot price for moneyness calculation (ITM/ATM)
+        Double spotPrice = null;
+        if (primary != null) {
+            spotPrice = primary.getClose();
+        }
+
         // Convert to OptionCandle and log each conversion
+        // FIX: Pass spot price to calculate isITM, isATM, intrinsicValue, timeValue
         List<OptionCandle> options = new ArrayList<>();
         for (InstrumentCandle rawOption : rawOptions) {
-            OptionCandle converted = OptionCandle.fromInstrumentCandle(rawOption);
+            OptionCandle converted = OptionCandle.fromInstrumentCandle(rawOption, spotPrice);
             if (converted == null) {
-                log.warn("[OPTIONS-DEBUG] FamilyId: {} | Option conversion FAILED for scripCode: {} | InstrumentType: {} | Reason: fromInstrumentCandle returned null", 
-                    familyId, 
+                log.warn("[OPTIONS-DEBUG] FamilyId: {} | Option conversion FAILED for scripCode: {} | InstrumentType: {} | Reason: fromInstrumentCandle returned null",
+                    familyId,
                     rawOption.getScripCode(),
                     rawOption.getInstrumentType() != null ? rawOption.getInstrumentType().name() : "NULL");
             } else {
                 options.add(converted);
-                log.debug("[OPTIONS-DEBUG] FamilyId: {} | Option conversion SUCCESS for scripCode: {} | Strike: {} | Type: {}", 
-                    familyId, 
+                log.debug("[OPTIONS-DEBUG] FamilyId: {} | Option conversion SUCCESS for scripCode: {} | Strike: {} | Type: {} | ITM: {} | ATM: {}",
+                    familyId,
                     converted.getScripCode(),
                     converted.getStrikePrice(),
-                    converted.getOptionType());
+                    converted.getOptionType(),
+                    converted.isITM(),
+                    converted.isATM());
             }
         }
         

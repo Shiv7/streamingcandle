@@ -901,7 +901,8 @@ public class UnifiedInstrumentCandleProcessor {
         
         String companyName = tickCompanyName;
         String companyNameSource = "tick";
-        
+        Scrip scripFromDb = null;  // FIX: Store Scrip for direct access to strikeRate, scripType
+
         // Level 2: Fallback to orderbook
         if ((companyName == null || companyName.isEmpty()) && orderbook != null) {
             companyName = orderbookCompanyName;
@@ -933,11 +934,14 @@ public class UnifiedInstrumentCandleProcessor {
                         Scrip s = scrip.get();
                         String dbName = s.getName();
                         String dbFullName = s.getFullName();
-                        
-                        log.info("[COMPANY-NAME-DB-LOOKUP-FOUND] scripCode: {} | Found in DB | Name: '{}' | FullName: '{}' | queryTime: {}ms",
-                            scripCode, dbName != null ? dbName : "null", 
-                            dbFullName != null ? dbFullName : "null", dbQueryTime);
-                        
+
+                        log.info("[COMPANY-NAME-DB-LOOKUP-FOUND] scripCode: {} | Found in DB | Name: '{}' | FullName: '{}' | strikeRate: '{}' | scripType: '{}' | queryTime: {}ms",
+                            scripCode, dbName != null ? dbName : "null",
+                            dbFullName != null ? dbFullName : "null",
+                            s.getStrikeRate() != null ? s.getStrikeRate() : "null",
+                            s.getScripType() != null ? s.getScripType() : "null",
+                            dbQueryTime);
+
                         // Prefer Name field, fallback to FullName
                         companyName = dbName;
                         if ((companyName == null || companyName.isEmpty()) && dbFullName != null) {
@@ -945,7 +949,11 @@ public class UnifiedInstrumentCandleProcessor {
                             log.debug("[COMPANY-NAME-DB-LOOKUP] scripCode: {} | Using FullName (Name was null/empty): '{}'",
                                 scripCode, companyName);
                         }
-                        
+
+                        // FIX: Store Scrip entity for direct access to strikeRate, scripType, expiry
+                        // This is used later to populate option fields directly instead of parsing companyName
+                        scripFromDb = s;
+
                         if (companyName != null && !companyName.isEmpty()) {
                             companyNameSource = "scripRepository";
                             log.info("[COMPANY-NAME-DB-LOOKUP-SUCCESS] scripCode: {} | Final companyName: '{}' | source: {} | queryTime: {}ms",
@@ -1272,12 +1280,14 @@ public class UnifiedInstrumentCandleProcessor {
 
         // Add option-specific fields (including days to expiry and greeks)
         if (type.isOption()) {
-            parseOptionDetails(builder, tick.getCompanyName());
+            // FIX: Pass Scrip entity for direct access to strikeRate, scripType
+            // This is more reliable than parsing from companyName
+            parseOptionDetails(builder, companyName, scripFromDb);
             // PHASE 9: Calculate option greeks (Delta, Gamma, Vega, Theta)
             // Note: We need to build a temporary candle to access parsed fields, then recalculate
             InstrumentCandle tempCandle = builder.build();
-            calculateOptionGreeks(builder, tick, 
-                tempCandle.getStrikePrice(), 
+            calculateOptionGreeks(builder, tick,
+                tempCandle.getStrikePrice(),
                 tempCandle.getOptionType(),
                 tempCandle.getHoursToExpiry());
         }
@@ -1585,41 +1595,109 @@ public class UnifiedInstrumentCandleProcessor {
     }
 
     /**
-     * Parse option details from company name
-     * e.g., "UNOMINDA 30 DEC 2025 CE 1280.00"
+     * Parse option details from Scrip entity OR company name
+     * FIX: Prefer direct Scrip fields (strikeRate, scripType, expiry) over parsing companyName
+     *
+     * @param builder InstrumentCandle builder
+     * @param companyName Company name string (fallback)
+     * @param scrip Scrip entity from MongoDB (preferred source)
      */
-    private void parseOptionDetails(InstrumentCandle.InstrumentCandleBuilder builder, String companyName) {
-        if (companyName == null) return;
+    private void parseOptionDetails(InstrumentCandle.InstrumentCandleBuilder builder, String companyName, Scrip scrip) {
+        boolean foundStrike = false;
+        boolean foundOptionType = false;
+        boolean foundExpiry = false;
 
-        String[] parts = companyName.split("\\s+");
-        if (parts.length >= 5) {
-            // Try to extract strike price (last part)
-            try {
-                String lastPart = parts[parts.length - 1];
-                builder.strikePrice(Double.parseDouble(lastPart));
-            } catch (NumberFormatException e) {
-                // Ignore
-            }
-
-            // Extract option type
-            for (String part : parts) {
-                if (part.equalsIgnoreCase("CE")) {
-                    builder.optionType("CE");
-                    break;
-                } else if (part.equalsIgnoreCase("PE")) {
-                    builder.optionType("PE");
-                    break;
+        // ═══════════════════════════════════════════════════════════════════════════════
+        // PRIORITY 1: Use Scrip entity fields directly (most reliable)
+        // ═══════════════════════════════════════════════════════════════════════════════
+        if (scrip != null) {
+            // Strike price from StrikeRate field
+            if (scrip.getStrikeRate() != null && !scrip.getStrikeRate().isEmpty()) {
+                try {
+                    double strike = Double.parseDouble(scrip.getStrikeRate());
+                    builder.strikePrice(strike);
+                    foundStrike = true;
+                    log.debug("[OPTION-PARSE] Strike from Scrip.StrikeRate: {}", strike);
+                } catch (NumberFormatException e) {
+                    log.warn("[OPTION-PARSE] Failed to parse Scrip.StrikeRate '{}': {}", scrip.getStrikeRate(), e.getMessage());
                 }
             }
 
-            // Extract expiry (3 parts: DD MON YYYY)
-            if (parts.length >= 4) {
-                String expiryStr = parts[1] + " " + parts[2] + " " + parts[3];
-                builder.expiry(expiryStr);
-
-                // PHASE 8: Calculate days to expiry
-                calculateDaysToExpiry(builder, expiryStr);
+            // Option type from ScripType field (CE/PE)
+            if (scrip.getScripType() != null && !scrip.getScripType().isEmpty()) {
+                String scripType = scrip.getScripType().toUpperCase();
+                if (scripType.equals("CE") || scripType.equals("PE")) {
+                    builder.optionType(scripType);
+                    foundOptionType = true;
+                    log.debug("[OPTION-PARSE] OptionType from Scrip.ScripType: {}", scripType);
+                } else if (scripType.contains("CALL") || scripType.contains("CE")) {
+                    builder.optionType("CE");
+                    foundOptionType = true;
+                } else if (scripType.contains("PUT") || scripType.contains("PE")) {
+                    builder.optionType("PE");
+                    foundOptionType = true;
+                }
             }
+
+            // Expiry from Expiry field
+            if (scrip.getExpiry() != null && !scrip.getExpiry().isEmpty()) {
+                builder.expiry(scrip.getExpiry());
+                foundExpiry = true;
+                calculateDaysToExpiry(builder, scrip.getExpiry());
+                log.debug("[OPTION-PARSE] Expiry from Scrip.Expiry: {}", scrip.getExpiry());
+            }
+        }
+
+        // ═══════════════════════════════════════════════════════════════════════════════
+        // PRIORITY 2: Parse from companyName as fallback
+        // Format: "SYMBOL DD MON YYYY CE/PE STRIKE" e.g., "TITAN 30 JAN 2026 CE 4100.00"
+        // ═══════════════════════════════════════════════════════════════════════════════
+        if (companyName != null && (!foundStrike || !foundOptionType || !foundExpiry)) {
+            String[] parts = companyName.split("\\s+");
+            if (parts.length >= 5) {
+                // Strike price (last part)
+                if (!foundStrike) {
+                    try {
+                        String lastPart = parts[parts.length - 1];
+                        builder.strikePrice(Double.parseDouble(lastPart));
+                        foundStrike = true;
+                        log.debug("[OPTION-PARSE] Strike from companyName: {}", lastPart);
+                    } catch (NumberFormatException e) {
+                        // Ignore
+                    }
+                }
+
+                // Option type (CE/PE)
+                if (!foundOptionType) {
+                    for (String part : parts) {
+                        if (part.equalsIgnoreCase("CE")) {
+                            builder.optionType("CE");
+                            foundOptionType = true;
+                            break;
+                        } else if (part.equalsIgnoreCase("PE")) {
+                            builder.optionType("PE");
+                            foundOptionType = true;
+                            break;
+                        }
+                    }
+                }
+
+                // Expiry (DD MON YYYY)
+                if (!foundExpiry && parts.length >= 4) {
+                    String expiryStr = parts[1] + " " + parts[2] + " " + parts[3];
+                    builder.expiry(expiryStr);
+                    foundExpiry = true;
+                    calculateDaysToExpiry(builder, expiryStr);
+                }
+            }
+        }
+
+        // Log warning if critical fields missing
+        if (!foundStrike || !foundOptionType) {
+            log.warn("[OPTION-PARSE-INCOMPLETE] strike={} optionType={} expiry={} | companyName='{}' | scrip={}",
+                foundStrike, foundOptionType, foundExpiry,
+                companyName != null ? companyName : "null",
+                scrip != null ? "present" : "null");
         }
     }
 
