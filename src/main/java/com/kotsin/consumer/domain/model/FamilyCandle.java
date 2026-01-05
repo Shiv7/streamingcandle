@@ -2,6 +2,8 @@ package com.kotsin.consumer.domain.model;
 
 import com.fasterxml.jackson.annotation.JsonIgnoreProperties;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.kotsin.consumer.model.GreeksPortfolio;
+import com.kotsin.consumer.model.IVSurface;
 import com.kotsin.consumer.model.MTFDistribution;
 import lombok.AllArgsConstructor;
 import lombok.Builder;
@@ -49,8 +51,9 @@ public class FamilyCandle {
     private String humanReadableTime;
 
     // ==================== INSTRUMENTS ====================
-    private InstrumentCandle equity;        // Equity/Index candle (always present if family exists)
+    private InstrumentCandle equity;        // Equity/Index candle (may be null for commodity families or mapping failures)
     private InstrumentCandle future;        // Future candle (may be null)
+    private InstrumentCandle primaryInstrument;  // Primary instrument for analysis (equity if available, else future)
     private List<OptionCandle> options;     // 4 options: CE/PE at ATM ± 1 strike
 
     // ==================== AVAILABILITY FLAGS ====================
@@ -107,6 +110,32 @@ public class FamilyCandle {
      */
     private MTFDistribution mtfDistribution;
 
+    // ========================================================================
+    // PHASE 3: INSTITUTIONAL-GRADE ANALYTICS
+    // ========================================================================
+
+    /**
+     * Family-level aggregated Greeks portfolio
+     * Contains:
+     * - Total delta/gamma/vega/theta exposure
+     * - Delta ladder (directional exposure by strike)
+     * - Gamma ladder with squeeze detection
+     * - Vega bucketing by expiry
+     * - Theta decay profile
+     */
+    private GreeksPortfolio greeksPortfolio;
+
+    /**
+     * Implied Volatility Surface analytics
+     * Contains:
+     * - Smile curve (IV by strike)
+     * - Skew metrics (25Δ skew, risk reversal)
+     * - Term structure (IV by expiry)
+     * - IV rank/percentile
+     * - IV dynamics (velocity, crush risk)
+     */
+    private IVSurface ivSurface;
+
     // ==================== HELPER METHODS ====================
 
     /**
@@ -124,6 +153,25 @@ public class FamilyCandle {
     }
 
     /**
+     * Check if primary instrument is available (equity or future)
+     */
+    public boolean hasPrimaryInstrument() {
+        return primaryInstrument != null;
+    }
+
+    /**
+     * Get the primary instrument for analysis (equity if available, else future)
+     * This is the main reference for price, volume, and microstructure analysis
+     */
+    public InstrumentCandle getPrimaryInstrumentOrFallback() {
+        if (primaryInstrument != null) {
+            return primaryInstrument;
+        }
+        // Fallback chain: equity → future
+        return equity != null ? equity : future;
+    }
+
+    /**
      * Get equity close price
      */
     public double getSpotPrice() {
@@ -131,16 +179,25 @@ public class FamilyCandle {
     }
 
     /**
+     * Get primary instrument close price (most reliable price for this family)
+     * Uses equity if available, else future
+     */
+    public double getPrimaryPrice() {
+        InstrumentCandle primary = getPrimaryInstrumentOrFallback();
+        return primary != null ? primary.getClose() : 0.0;
+    }
+
+    /**
      * Get future close price
-     * For commodities: future is in equity slot, so use equity.getClose() if future is null
+     * For commodities: uses primaryInstrument which is the future
      */
     public double getFuturePrice() {
         if (future != null) {
             return future.getClose();
         }
-        // For commodities: future is stored in equity slot
-        if (isCommodity && equity != null) {
-            return equity.getClose();
+        // For commodities: future is in primaryInstrument (NOT equity slot anymore)
+        if (isCommodity && primaryInstrument != null) {
+            return primaryInstrument.getClose();
         }
         return 0.0;
     }
@@ -236,6 +293,71 @@ public class FamilyCandle {
         }
 
         return signals > 0 ? (double) confirmedSignals / signals : 0.0;
+    }
+
+    // ==================== GREEKS & IV CONVENIENCE METHODS ====================
+
+    /**
+     * Check if Greeks portfolio is available
+     */
+    public boolean hasGreeksPortfolio() {
+        return greeksPortfolio != null && greeksPortfolio.hasExposure();
+    }
+
+    /**
+     * Get total delta exposure
+     */
+    public double getTotalDelta() {
+        return greeksPortfolio != null ? greeksPortfolio.getTotalDelta() : 0.0;
+    }
+
+    /**
+     * Get total gamma exposure
+     */
+    public double getTotalGamma() {
+        return greeksPortfolio != null ? greeksPortfolio.getTotalGamma() : 0.0;
+    }
+
+    /**
+     * Check if gamma squeeze risk exists
+     */
+    public boolean hasGammaSqueezeRisk() {
+        return greeksPortfolio != null && greeksPortfolio.isGammaSqueezeRisk();
+    }
+
+    /**
+     * Check if IV surface is available
+     */
+    public boolean hasIVSurface() {
+        return ivSurface != null && ivSurface.hasData();
+    }
+
+    /**
+     * Get IV rank (0-100)
+     */
+    public double getIVRank() {
+        return ivSurface != null ? ivSurface.getIvRank() : 50.0; // Default neutral
+    }
+
+    /**
+     * Check if IV is elevated
+     */
+    public boolean isIVElevated() {
+        return ivSurface != null && ivSurface.isIVElevated();
+    }
+
+    /**
+     * Get IV-based trading signal
+     */
+    public IVSurface.IVSignal getIVSignal() {
+        return ivSurface != null ? ivSurface.getIvSignal() : IVSurface.IVSignal.NEUTRAL;
+    }
+
+    /**
+     * Get recommended options strategy based on IV
+     */
+    public String getRecommendedStrategy() {
+        return ivSurface != null ? ivSurface.getRecommendedStrategy() : "NEUTRAL";
     }
 
     // ==================== SERDE ====================

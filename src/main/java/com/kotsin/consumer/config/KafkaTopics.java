@@ -81,6 +81,10 @@ public final class KafkaTopics {
     public static final String KOTSIN_FUDKII = "kotsin_FUDKII";  // Standalone FUDKII strategy
     public static final String TRADE_POSITION_SIZE = "trade-position-size";
 
+    // ========== NEW: Quant Score Topics ==========
+    public static final String QUANT_SCORES = "quant-scores";
+    public static final String QUANT_TRADING_SIGNALS = "quant-trading-signals";
+
     // ========== State Store Names ==========
     public static final String STORE_FMA_HISTORY = "fma-candle-history";
     public static final String STORE_FUDKII_HISTORY = "fudkii-candle-history";

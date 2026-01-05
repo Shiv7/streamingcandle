@@ -496,6 +496,7 @@ public class FamilyCandleProcessor {
             // VALIDATE OHLC
             validateOHLC(equity, "EQUITY", familyId);
             builder.equity(equity);
+            builder.primaryInstrument(equity);  // FIX: Set primaryInstrument for consistent access
             String symbol = extractSymbolRoot(equity.getCompanyName());
             // Fallback: if symbol is null, try to get from family data or use scripCode
             if (symbol == null || symbol.isEmpty()) {
@@ -519,8 +520,9 @@ public class FamilyCandleProcessor {
             builder.symbol(symbol);
         } else if (future != null && isCommodity) {
             // ONLY for commodities (MCX): use future as the primary instrument
-            // Set as "equity" slot for downstream compatibility (MTISProcessor expects equity)
-            builder.equity(future);  // Commodity future acts as primary
+            // Set primaryInstrument for proper analysis, keep equity=null (no equity for commodities)
+            builder.primaryInstrument(future);  // PRIMARY FIX: Use primaryInstrument, not equity
+            // NOTE: We intentionally leave equity=null for commodities
             String symbol = extractSymbolRoot(future.getCompanyName());
             // Fallback: if symbol is null, try to get from family data or use scripCode
             if (symbol == null || symbol.isEmpty()) {
@@ -542,12 +544,13 @@ public class FamilyCandleProcessor {
                 }
             }
             builder.symbol(symbol);
-            log.debug("Commodity family {} using future as primary: {}", familyId, future.getCompanyName());
+            log.debug("Commodity family {} using future as primaryInstrument: {}", familyId, future.getCompanyName());
         } else if (future != null) {
             // NSE stock with only future (no equity) - this indicates GROUPING FAILURE
-            // The equity and future likely have different familyIds due to missing mapping
-            // Set future in equity slot as fallback, but this is NOT ideal
-            builder.equity(future);  // Use future as fallback, NOT ideal
+            // CRITICAL FIX: Do NOT assign future to equity field - equity must be null when missing
+            // Set primaryInstrument instead for downstream analysis
+            builder.primaryInstrument(future);  // FIX: Use primaryInstrument, NOT equity
+            // NOTE: equity remains null - this is correct behavior for type safety
             String symbol = extractSymbolRoot(future.getCompanyName());
             if (symbol == null || symbol.isEmpty()) {
                 symbol = familyId; // Fallback to scripCode
@@ -555,8 +558,8 @@ public class FamilyCandleProcessor {
             }
             builder.symbol(symbol);
             log.warn("[FAMILY-GROUPING-FAILURE] Family {} has future (scripCode: {}) but NO equity - " +
-                     "This indicates equity and future have different familyIds. " +
-                     "Check if symbol-based fallback is working. Using future as fallback (incomplete family).",
+                     "equity field will be null, using primaryInstrument for analysis. " +
+                     "Check if symbol-based fallback is working. (incomplete family).",
                      familyId, future.getScripCode());
         }
 

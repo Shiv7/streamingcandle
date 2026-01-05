@@ -135,17 +135,32 @@ public class MTFDistribution {
     private boolean momentumDecelerating;
     
     // ========== Confidence Metrics ==========
-    
+
     /**
      * Confidence in distribution analysis (0 to 1)
      * Based on number of sub-candles (more = better)
-     * 
+     *
      * < 3 candles = low confidence (0.3)
      * 3-4 candles = medium (0.6)
      * 5+ candles = high (1.0)
      */
     private double confidence;
-    
+
+    // ========================================================================
+    // PHASE 3 ENHANCEMENT: Evolution Metrics (Institutional Grade)
+    // ========================================================================
+
+    /**
+     * Comprehensive temporal evolution tracking.
+     * Contains:
+     * - CandleSequence (pattern strings like "↑↑↑↓↓")
+     * - PCREvolution (how PCR changed through window)
+     * - OIEvolution (when OI accumulated: early/middle/late)
+     * - VolumeProfileEvolution (POC migration, Value Area dynamics)
+     * - WyckoffPhase (accumulation/markup/distribution/markdown)
+     */
+    private EvolutionMetrics evolution;
+
     // ========== Convenience Methods ==========
     
     /**
@@ -191,5 +206,97 @@ public class MTFDistribution {
         } else {
             return "NORMAL";
         }
+    }
+
+    // ========== Evolution Convenience Methods ==========
+
+    /**
+     * Check if evolution metrics are available
+     */
+    public boolean hasEvolution() {
+        return evolution != null && evolution.hasData();
+    }
+
+    /**
+     * Get candle sequence pattern (e.g., "↑↑↑↓↓")
+     */
+    public String getSequencePattern() {
+        if (evolution == null || evolution.getCandleSequence() == null) {
+            return null;
+        }
+        return evolution.getCandleSequence().getPattern();
+    }
+
+    /**
+     * Get PCR pattern within window
+     */
+    public EvolutionMetrics.PCREvolution.PCRPattern getPcrPattern() {
+        if (evolution == null || evolution.getPcrEvolution() == null) {
+            return null;
+        }
+        return evolution.getPcrEvolution().getPcrPattern();
+    }
+
+    /**
+     * Check if PCR is diverging from price
+     */
+    public boolean hasPcrDivergence() {
+        return evolution != null
+            && evolution.getPcrEvolution() != null
+            && evolution.getPcrEvolution().isPcrDivergence();
+    }
+
+    /**
+     * Get OI buildup type
+     */
+    public EvolutionMetrics.OIEvolution.BuildupType getOiBuildupType() {
+        if (evolution == null || evolution.getOiEvolution() == null) {
+            return null;
+        }
+        return evolution.getOiEvolution().getBuildupType();
+    }
+
+    /**
+     * Get Wyckoff phase
+     */
+    public EvolutionMetrics.WyckoffPhase.Phase getWyckoffPhase() {
+        if (evolution == null || evolution.getWyckoffPhase() == null) {
+            return null;
+        }
+        return evolution.getWyckoffPhase().getPhase();
+    }
+
+    /**
+     * Check if in Wyckoff accumulation phase (bullish)
+     */
+    public boolean isAccumulationPhase() {
+        return getWyckoffPhase() == EvolutionMetrics.WyckoffPhase.Phase.ACCUMULATION;
+    }
+
+    /**
+     * Check if in Wyckoff distribution phase (bearish)
+     */
+    public boolean isDistributionPhase() {
+        return getWyckoffPhase() == EvolutionMetrics.WyckoffPhase.Phase.DISTRIBUTION;
+    }
+
+    /**
+     * Get POC (Point of Control) migration
+     */
+    public Double getPocMigration() {
+        if (evolution == null || evolution.getVolumeProfileEvolution() == null) {
+            return null;
+        }
+        return evolution.getVolumeProfileEvolution().getPocMigration();
+    }
+
+    /**
+     * Get overall evolution confidence
+     */
+    public double getEvolutionConfidence() {
+        if (evolution == null) {
+            return 0.0;
+        }
+        return evolution.getOverallConfidence();
     }
 }
