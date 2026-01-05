@@ -100,7 +100,7 @@ public class PreviousCloseStore {
             }
             
             store.put(scripCode, closePrice);
-            log.debug("💾 Saved previous close for {}: {:.2f}", scripCode, closePrice);
+            log.debug("💾 Saved previous close for {}: {}", scripCode, String.format("%.2f", closePrice));
         }
         
         /**
@@ -114,7 +114,7 @@ public class PreviousCloseStore {
             
             Double prevClose = store.get(scripCode);
             if (prevClose != null) {
-                log.debug("📖 Retrieved previous close for {}: {:.2f}", scripCode, prevClose);
+                log.debug("📖 Retrieved previous close for {}: {}", scripCode, String.format("%.2f", prevClose));
             } else {
                 log.debug("⚠️ No previous close found for {} (first day or new instrument)", scripCode);
             }

@@ -429,8 +429,11 @@ public class TickAggregate {
         previousTradeClassification = classification;
 
         if (log.isDebugEnabled()) {
-            log.debug("[TRADE-CLASSIFY] {} | {} | price={:.2f} bid={:.2f} ask={:.2f} | vol={}",
-                scripCode, classification, tradePrice, bidPrice, askPrice, deltaVol);
+            log.debug("[TRADE-CLASSIFY] {} | {} | price={} bid={} ask={} | vol={}",
+                scripCode, classification,
+                String.format("%.2f", tradePrice),
+                String.format("%.2f", bidPrice),
+                String.format("%.2f", askPrice), deltaVol);
         }
 
         return classification;
@@ -509,8 +512,8 @@ public class TickAggregate {
         }
         if (Math.abs(dollarImbalance) >= expectedDollarImbalance) {
             dibTriggered = true;
-            log.debug("[DIB-TRIGGER] {} | imbalance={:.0f} threshold={:.0f}", 
-                scripCode, dollarImbalance, expectedDollarImbalance);
+            log.debug("[DIB-TRIGGER] {} | imbalance={} threshold={}",
+                scripCode, String.format("%.0f", dollarImbalance), String.format("%.0f", expectedDollarImbalance));
             dollarImbalance = 0.0;
         }
         if (Math.abs(tickRuns) >= expectedTickRuns) {
@@ -583,8 +586,8 @@ public class TickAggregate {
         for (TradeInfo trade : tradeHistory) {
             if (trade.quantity > largeThreshold) {
                 largeTradeCount++;
-                log.debug("[LARGE-TRADE] {} | size={} threshold={:.0f}", 
-                    scripCode, trade.quantity, largeThreshold);
+                log.debug("[LARGE-TRADE] {} | size={} threshold={}",
+                    scripCode, trade.quantity, String.format("%.0f", largeThreshold));
             }
         }
 

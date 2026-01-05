@@ -1099,12 +1099,12 @@ public class UnifiedInstrumentCandleProcessor {
 
             // Log iceberg detection
             if (orderbook.detectIcebergAtBestBid() || orderbook.detectIcebergAtBestAsk()) {
-                log.warn("[ICEBERG-DETECTED] {} | Bid: {} orders x {:.0f} avg | Ask: {} orders x {:.0f} avg",
+                log.warn("[ICEBERG-DETECTED] {} | Bid: {} orders x {} avg | Ask: {} orders x {} avg",
                     tick.getScripCode(),
                     orderbook.getOrdersAtBestBid(),
-                    orderbook.getAvgBidOrderSize(),
+                    String.format("%.0f", orderbook.getAvgBidOrderSize()),
                     orderbook.getOrdersAtBestAsk(),
-                    orderbook.getAvgAskOrderSize());
+                    String.format("%.0f", orderbook.getAvgAskOrderSize()));
             }
 
             // ========== PHASE 7: ORDERBOOK UPDATE DYNAMICS ==========
@@ -1119,9 +1119,9 @@ public class UnifiedInstrumentCandleProcessor {
 
             // Detect rapid spread changes (potential manipulation)
             if (orderbook.getSpreadChangeRate() > 1.0) {  // 1 rupee per second
-                log.warn("[RAPID-SPREAD-CHANGE] {} | Rate: {:.2f}/sec | Max: {} Min: {}",
+                log.warn("[RAPID-SPREAD-CHANGE] {} | Rate: {}/sec | Max: {} Min: {}",
                     tick.getScripCode(),
-                    orderbook.getSpreadChangeRate(),
+                    String.format("%.2f", orderbook.getSpreadChangeRate()),
                     orderbook.getMaxSpread(),
                     orderbook.getMinSpread());
             }
@@ -1321,11 +1321,11 @@ public class UnifiedInstrumentCandleProcessor {
 
         // Block trade detection
         if (tick.getLargeTradeCount() > 0) {
-            log.info("[BLOCK-TRADE] {} | Count: {} | Max size: {} (avg: {:.0f})",
+            log.info("[BLOCK-TRADE] {} | Count: {} | Max size: {} (avg: {})",
                 tick.getScripCode(),
                 tick.getLargeTradeCount(),
                 tick.getMaxTradeSize(),
-                tick.getAvgTradeSize());
+                String.format("%.0f", tick.getAvgTradeSize()));
         }
 
         // ========== IMBALANCE BARS (Fix #1) ==========
@@ -1345,11 +1345,11 @@ public class UnifiedInstrumentCandleProcessor {
             if (tick.isDibTriggered()) triggered.add("DIB");
             if (tick.isTrbTriggered()) triggered.add("TRB");
             if (tick.isVrbTriggered()) triggered.add("VRB");
-            log.info("[IMBALANCE-TRIGGER] {} | {} | VIB={} DIB={:.0f} TRB={} VRB={}",
+            log.info("[IMBALANCE-TRIGGER] {} | {} | VIB={} DIB={} TRB={} VRB={}",
                 tick.getScripCode(),
                 String.join(",", triggered),
                 tick.getVolumeImbalance(),
-                tick.getDollarImbalance(),
+                String.format("%.0f", tick.getDollarImbalance()),
                 tick.getTickRuns(),
                 tick.getVolumeRuns());
         }
@@ -1368,11 +1368,11 @@ public class UnifiedInstrumentCandleProcessor {
 
         // Log significant gaps
         if (Math.abs(gap) > 1.0) {  // > 1% gap
-            log.info("[GAP-DETECT] {} | gap={:.2f}% prevClose={:.2f} open={:.2f} {}",
+            log.info("[GAP-DETECT] {} | gap={}% prevClose={} open={} {}",
                 tick.getScripCode(),
-                gap,
-                tick.getPreviousClose(),
-                tick.getOpen(),
+                String.format("%.2f", gap),
+                String.format("%.2f", tick.getPreviousClose()),
+                String.format("%.2f", tick.getOpen()),
                 gap > 0 ? "⬆ GAP_UP" : "⬇ GAP_DOWN");
         }
 
@@ -1383,8 +1383,11 @@ public class UnifiedInstrumentCandleProcessor {
 
         // Warn if VWAP drifts > 1% from exchange
         if (Math.abs(vwapDrift) > 1.0 && tick.getExchangeVwap() > 0) {
-            log.warn("[VWAP-DRIFT] {} | calculated={:.2f} exchange={:.2f} drift={:.2f}%",
-                tick.getScripCode(), tick.getVwap(), tick.getExchangeVwap(), vwapDrift);
+            log.warn("[VWAP-DRIFT] {} | calculated={} exchange={} drift={}%",
+                tick.getScripCode(),
+                String.format("%.2f", tick.getVwap()),
+                String.format("%.2f", tick.getExchangeVwap()),
+                String.format("%.2f", vwapDrift));
         }
 
         // ========== TICK-LEVEL SPREAD METRICS (Execution Cost) ==========
@@ -1403,13 +1406,13 @@ public class UnifiedInstrumentCandleProcessor {
         builder.priceImprovementRatio(tick.getPriceImprovementRatio());
 
         if (log.isDebugEnabled() && tick.getAverageTickSpread() > 0) {
-            log.debug("[SPREAD-METRICS] {} | avg={:.4f} min={:.4f} max={:.4f} vol={:.4f} tight={:.1f}%",
+            log.debug("[SPREAD-METRICS] {} | avg={} min={} max={} vol={} tight={}%",
                 tick.getScripCode(),
-                tick.getAverageTickSpread(),
-                tick.getMinTickSpread(),
-                tick.getMaxTickSpread(),
-                tick.getSpreadVolatility(),
-                tick.getTightSpreadPercent());
+                String.format("%.4f", tick.getAverageTickSpread()),
+                String.format("%.4f", tick.getMinTickSpread()),
+                String.format("%.4f", tick.getMaxTickSpread()),
+                String.format("%.4f", tick.getSpreadVolatility()),
+                String.format("%.1f", tick.getTightSpreadPercent()));
         }
 
         // ========== VWAP BANDS (Trading Signals) ==========
@@ -1420,22 +1423,22 @@ public class UnifiedInstrumentCandleProcessor {
         builder.vwapSignal(vwapSignal);
 
         if (log.isDebugEnabled() && tick.getVWAPStdDev() > 0) {
-            log.debug("[VWAP-BANDS] {} | VWAP={:.2f} Upper={:.2f} Lower={:.2f} σ={:.4f} Signal={}",
+            log.debug("[VWAP-BANDS] {} | VWAP={} Upper={} Lower={} σ={} Signal={}",
                 tick.getScripCode(),
-                tick.getVwap(),
-                tick.getVWAPUpperBand(),
-                tick.getVWAPLowerBand(),
-                tick.getVWAPStdDev(),
+                String.format("%.2f", tick.getVwap()),
+                String.format("%.2f", tick.getVWAPUpperBand()),
+                String.format("%.2f", tick.getVWAPLowerBand()),
+                String.format("%.4f", tick.getVWAPStdDev()),
                 vwapSignal);
         }
 
         // Warn on overbought/oversold signals
         if ("OVERBOUGHT".equals(vwapSignal) || "OVERSOLD".equals(vwapSignal)) {
-            log.info("[VWAP-SIGNAL] {} | {} at price={:.2f} (VWAP={:.2f})",
+            log.info("[VWAP-SIGNAL] {} | {} at price={} (VWAP={})",
                 tick.getScripCode(),
                 vwapSignal,
-                tick.getClose(),
-                tick.getVwap());
+                String.format("%.2f", tick.getClose()),
+                String.format("%.2f", tick.getVwap()));
         }
 
         // ========== P2: TICK INTENSITY ZONES ==========
@@ -1446,8 +1449,8 @@ public class UnifiedInstrumentCandleProcessor {
         
         // Log algo detection
         if (tick.isAlgoActivityDetected()) {
-            log.info("[ALGO-DETECTED] {} | maxTicks/sec={} burstRatio={:.2f} (threshold=3.0)",
-                tick.getScripCode(), tick.getMaxTicksInAnySecond(), tick.getTickBurstRatio());
+            log.info("[ALGO-DETECTED] {} | maxTicks/sec={} burstRatio={} (threshold=3.0)",
+                tick.getScripCode(), tick.getMaxTicksInAnySecond(), String.format("%.2f", tick.getTickBurstRatio()));
         }
 
         // ========== PHASE 6: CROSS-STREAM LATENCY MEASUREMENT ==========

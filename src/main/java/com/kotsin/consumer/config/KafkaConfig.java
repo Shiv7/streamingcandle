@@ -139,6 +139,19 @@ public class KafkaConfig {
         // Producer configuration
         props.put(StreamsConfig.PRODUCER_PREFIX + "message.timestamp.type", producerTimestampType);
 
+        // ═══════════════════════════════════════════════════════════════════════
+        // LARGE MESSAGE SUPPORT FOR FAMILY CANDLES
+        // ═══════════════════════════════════════════════════════════════════════
+        // FamilyCandle can be 16-33MB for NIFTY/BANKNIFTY with 100s of options
+        // Default max.request.size is 1MB which causes RecordTooLargeException
+        props.put(StreamsConfig.PRODUCER_PREFIX + "max.request.size", "52428800"); // 50MB
+        props.put(StreamsConfig.PRODUCER_PREFIX + "buffer.memory", "104857600"); // 100MB buffer
+        props.put(StreamsConfig.PRODUCER_PREFIX + "compression.type", "lz4"); // Fast compression
+
+        // Consumer also needs to handle large messages
+        props.put(StreamsConfig.CONSUMER_PREFIX + "max.partition.fetch.bytes", "52428800"); // 50MB
+        props.put(StreamsConfig.CONSUMER_PREFIX + "fetch.max.bytes", "104857600"); // 100MB
+
         // Resilience configuration
         props.put(StreamsConfig.RETRY_BACKOFF_MS_CONFIG, retryBackoffMs);
         props.put(StreamsConfig.RECONNECT_BACKOFF_MS_CONFIG, reconnectBackoffMs);
