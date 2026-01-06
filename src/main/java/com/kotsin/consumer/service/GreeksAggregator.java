@@ -48,6 +48,17 @@ public class GreeksAggregator {
             return GreeksPortfolio.empty();
         }
 
+        // 🔴 CRITICAL FIX: Estimate spotPrice from ATM options if not provided
+        // This fixes Gamma=0, Vega=0 when family has options but no equity/future
+        if (spotPrice <= 0) {
+            spotPrice = estimateSpotPriceFromOptions(options);
+            if (spotPrice > 0) {
+                log.info("[GREEKS-FIX] Estimated spotPrice from ATM options: {}", spotPrice);
+            } else {
+                log.warn("[GREEKS-FIX] Could not estimate spotPrice - Greeks will use exchange values only");
+            }
+        }
+
         // Initialize aggregation containers
         double totalDelta = 0.0;
         double totalGamma = 0.0;
@@ -345,6 +356,75 @@ public class GreeksAggregator {
         score += vegaNormalized * 30;
 
         return Math.min(score, 100.0);
+    }
+
+    /**
+     * 🔴 CRITICAL FIX: Estimate spotPrice from ATM option strikes
+     * When family has no equity/future but has options, we can estimate spot
+     * by finding the strike closest to where Call premium ≈ Put premium (ATM)
+     *
+     * @param options List of OptionCandle
+     * @return Estimated spot price, or 0 if cannot estimate
+     */
+    private double estimateSpotPriceFromOptions(List<OptionCandle> options) {
+        if (options == null || options.isEmpty()) {
+            return 0.0;
+        }
+
+        // Method 1: Find strike with highest OI (typically ATM)
+        double maxOIStrike = 0.0;
+        long maxOI = 0;
+
+        // Method 2: Average of all strikes weighted by OI
+        double weightedStrikeSum = 0.0;
+        long totalOI = 0;
+
+        for (OptionCandle opt : options) {
+            if (opt == null) continue;
+
+            double strike = opt.getStrikePrice();
+            long oi = opt.getOpenInterest();
+
+            if (strike > 0 && oi > 0) {
+                // Track max OI strike
+                if (oi > maxOI) {
+                    maxOI = oi;
+                    maxOIStrike = strike;
+                }
+
+                // Accumulate weighted average
+                weightedStrikeSum += strike * oi;
+                totalOI += oi;
+            }
+        }
+
+        // Prefer max OI strike (most liquid = typically ATM)
+        if (maxOIStrike > 0) {
+            log.debug("[GREEKS-ESTIMATE] Using max OI strike as spotPrice estimate: {} (OI={})", maxOIStrike, maxOI);
+            return maxOIStrike;
+        }
+
+        // Fallback to weighted average
+        if (totalOI > 0) {
+            double avgStrike = weightedStrikeSum / totalOI;
+            log.debug("[GREEKS-ESTIMATE] Using weighted avg strike as spotPrice estimate: {}", avgStrike);
+            return avgStrike;
+        }
+
+        // Last resort: median strike
+        double medianStrike = options.stream()
+            .filter(o -> o != null && o.getStrikePrice() > 0)
+            .mapToDouble(OptionCandle::getStrikePrice)
+            .sorted()
+            .skip(options.size() / 2)
+            .findFirst()
+            .orElse(0.0);
+
+        if (medianStrike > 0) {
+            log.debug("[GREEKS-ESTIMATE] Using median strike as spotPrice estimate: {}", medianStrike);
+        }
+
+        return medianStrike;
     }
 
     /**

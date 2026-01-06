@@ -46,8 +46,20 @@ public class IVSurfaceCalculator {
      * @return IVSurface with comprehensive volatility analytics
      */
     public IVSurface calculate(List<OptionCandle> options, double spotPrice, Double historicalIVRank) {
-        if (options == null || options.isEmpty() || spotPrice <= 0) {
+        if (options == null || options.isEmpty()) {
             return IVSurface.empty();
+        }
+
+        // 🔴 CRITICAL FIX: Estimate spotPrice from ATM options if not provided
+        // This fixes IV Surface returning empty when family has options but no equity/future
+        if (spotPrice <= 0) {
+            spotPrice = estimateSpotPriceFromOptions(options);
+            if (spotPrice > 0) {
+                log.info("[IV-FIX] Estimated spotPrice from ATM options: {}", spotPrice);
+            } else {
+                log.warn("[IV-FIX] Could not estimate spotPrice - returning empty IV Surface");
+                return IVSurface.empty();
+            }
         }
 
         // Separate calls and puts
@@ -599,6 +611,45 @@ public class IVSurfaceCalculator {
         } catch (Exception e) {
             return LocalDate.now().plusYears(1); // Default to far future
         }
+    }
+
+    /**
+     * 🔴 CRITICAL FIX: Estimate spotPrice from ATM option strikes
+     * When family has no equity/future but has options, we can estimate spot
+     * by finding the strike closest to where Call premium ≈ Put premium (ATM)
+     */
+    private double estimateSpotPriceFromOptions(List<OptionCandle> options) {
+        if (options == null || options.isEmpty()) {
+            return 0.0;
+        }
+
+        // Find strike with highest OI (typically ATM)
+        double maxOIStrike = 0.0;
+        long maxOI = 0;
+
+        for (OptionCandle opt : options) {
+            if (opt == null) continue;
+            double strike = opt.getStrikePrice();
+            long oi = opt.getOpenInterest();
+            if (strike > 0 && oi > maxOI) {
+                maxOI = oi;
+                maxOIStrike = strike;
+            }
+        }
+
+        if (maxOIStrike > 0) {
+            log.debug("[IV-ESTIMATE] Using max OI strike as spotPrice estimate: {} (OI={})", maxOIStrike, maxOI);
+            return maxOIStrike;
+        }
+
+        // Fallback: median strike
+        return options.stream()
+            .filter(o -> o != null && o.getStrikePrice() > 0)
+            .mapToDouble(OptionCandle::getStrikePrice)
+            .sorted()
+            .skip(options.size() / 2)
+            .findFirst()
+            .orElse(0.0);
     }
 
     /**
