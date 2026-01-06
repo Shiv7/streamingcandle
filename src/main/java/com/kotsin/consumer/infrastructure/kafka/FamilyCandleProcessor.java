@@ -660,12 +660,21 @@ public class FamilyCandleProcessor {
             }
         }
         
-        log.info("[OPTIONS-DEBUG] FamilyId: {} | Final options count: {} | hasOptions: {}", 
-            familyId, options.size(), !options.isEmpty());
-        
+        // 🔴 CRITICAL: Use totalOptionsReceived for analytics (original count before limiting)
+        int totalReceived = collector.getTotalOptionsReceived();
+        int keptCount = options.size();
+
+        if (totalReceived > keptCount) {
+            log.info("[OPTIONS-LIMITED] FamilyId: {} | Received: {} | Kept: {} (top by OI) | Dropped: {}",
+                familyId, totalReceived, keptCount, totalReceived - keptCount);
+        } else {
+            log.info("[OPTIONS-DEBUG] FamilyId: {} | Final options count: {} | hasOptions: {}",
+                familyId, options.size(), !options.isEmpty());
+        }
+
         builder.options(options);
         builder.hasOptions(!options.isEmpty());
-        builder.optionCount(options.size());
+        builder.optionCount(totalReceived);  // Track ORIGINAL count for analytics
 
         // Calculate cross-instrument metrics
         calculateCrossInstrumentMetrics(builder, equity, future, options);
@@ -706,6 +715,10 @@ public class FamilyCandleProcessor {
         FamilyCandle familyCandle = builder
             .quality(familyQuality)
             .build();
+
+        // 🔴 NOTE: Options already limited to 200 in FamilyCandleCollector.add()
+        // No need for additional compaction - 200 options × ~1KB = ~200KB (safe for Kafka)
+        // The compactForEmission() method is kept as backup but not called
 
         return familyCandle;
     }
@@ -864,10 +877,22 @@ public class FamilyCandleProcessor {
     /**
      * Collector for family members within a window
      * FIXED: Now properly merges OHLCV instead of replacing
+     *
+     * 🔴 CRITICAL FIX: Limit options to prevent 94MB changelog messages
+     * The state store changelog was storing ALL options (thousands for NIFTY/BANKNIFTY),
+     * causing RecordTooLargeException (94MB > 50MB limit) and OOM during restore.
+     *
+     * Solution: Limit options during aggregation, not just at emission.
+     * Keep top 200 by OI to cover important strikes while preventing huge messages.
      */
     @lombok.Data
     @lombok.NoArgsConstructor
     public static class FamilyCandleCollector {
+        // 🔴 CRITICAL: Limit options to prevent 94MB changelog messages
+        // 200 options covers ~100 strikes (CE+PE) which is sufficient for analysis
+        // Original full count is tracked in totalOptionsReceived for metrics
+        private static final int MAX_OPTIONS_IN_COLLECTOR = 200;
+
         private InstrumentCandle equity;
         private InstrumentCandle future;
         // REMOVED: private List<InstrumentCandle> options = new ArrayList<>(); (dead code - never populated)
@@ -876,6 +901,9 @@ public class FamilyCandleProcessor {
         // Track merge counts for debugging
         private int equityMergeCount = 0;
         private int futureMergeCount = 0;
+
+        // Track total options received (before limiting) for metrics
+        private int totalOptionsReceived = 0;
 
         // PHASE 2: MTF Distribution - track sub-candles during aggregation
         private List<com.kotsin.consumer.model.UnifiedCandle> equitySubCandles = new ArrayList<>();
@@ -917,20 +945,48 @@ public class FamilyCandleProcessor {
                     break;
                 case OPTION_CE:
                 case OPTION_PE:
+                    // 🔴 CRITICAL FIX: Limit options to prevent 94MB changelog messages
+                    // Track total received for metrics
+                    totalOptionsReceived++;
+
                     // Deduplicate by scripCode and merge OHLCV
                     String scripCode = candle.getScripCode();
                     if (scripCode != null) {
                         InstrumentCandle existing = optionsByScripCode.get(scripCode);
                         if (existing == null) {
-                            optionsByScripCode.put(scripCode, candle);
-                            // Enhanced logging for options
-                            log.info("[OPTIONS-DEBUG] Option ADDED to collector | scripCode: {} | type: {} | companyName: {} | windowStart: {} | windowEnd: {} | optionsCountAfter: {}",
-                                scripCode,
-                                type.name(),
-                                candle.getCompanyName() != null ? candle.getCompanyName() : "null",
-                                candle.getWindowStartMillis(),
-                                candle.getWindowEndMillis(),
-                                optionsByScripCode.size());
+                            // Check if we've hit the limit
+                            if (optionsByScripCode.size() >= MAX_OPTIONS_IN_COLLECTOR) {
+                                // Find the option with lowest OI and replace if new one has higher OI
+                                long newOI = candle.getOpenInterest();
+                                String lowestOIKey = null;
+                                long lowestOI = Long.MAX_VALUE;
+
+                                for (Map.Entry<String, InstrumentCandle> entry : optionsByScripCode.entrySet()) {
+                                    long oi = entry.getValue().getOpenInterest();
+                                    if (oi < lowestOI) {
+                                        lowestOI = oi;
+                                        lowestOIKey = entry.getKey();
+                                    }
+                                }
+
+                                if (newOI > lowestOI && lowestOIKey != null) {
+                                    // Replace lowest OI option with new higher OI option
+                                    optionsByScripCode.remove(lowestOIKey);
+                                    optionsByScripCode.put(scripCode, candle);
+                                    log.debug("[OPTIONS-LIMIT] Replaced low-OI option {} (OI={}) with {} (OI={})",
+                                        lowestOIKey, lowestOI, scripCode, newOI);
+                                } else {
+                                    // New option has lower OI than all existing - skip it
+                                    log.debug("[OPTIONS-LIMIT] Skipped low-OI option {} (OI={}) - limit {} reached",
+                                        scripCode, newOI, MAX_OPTIONS_IN_COLLECTOR);
+                                }
+                            } else {
+                                // Under limit - just add it
+                                optionsByScripCode.put(scripCode, candle);
+                                log.debug("[OPTIONS-DEBUG] Option ADDED to collector | scripCode: {} | type: {} | OI: {} | count: {}/{}",
+                                    scripCode, type.name(), candle.getOpenInterest(),
+                                    optionsByScripCode.size(), MAX_OPTIONS_IN_COLLECTOR);
+                            }
                         } else {
                             // Merge OHLCV for same option
                             log.debug("[OPTIONS-DEBUG] Option MERGED in collector | scripCode: {} | existing window: [{}, {}] | incoming window: [{}, {}]",
@@ -982,10 +1038,19 @@ public class FamilyCandleProcessor {
         /**
          * Get deduplicated options list
          * FIX: Removed dead code - options list was never populated, only optionsByScripCode map is used
+         * 🔴 NOTE: This returns limited options (max 200) - totalOptionsReceived tracks original count
          */
         public List<InstrumentCandle> getOptions() {
             // Return deduplicated options from map
             return new ArrayList<>(optionsByScripCode.values());
+        }
+
+        /**
+         * Get total options received before limiting
+         * Used for metrics to track how many options were dropped
+         */
+        public int getTotalOptionsReceived() {
+            return totalOptionsReceived;
         }
 
         public boolean hasEquity() {
