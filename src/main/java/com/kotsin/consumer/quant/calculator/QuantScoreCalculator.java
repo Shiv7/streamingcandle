@@ -167,12 +167,12 @@ public class QuantScoreCalculator {
         boolean hasGreeks = family.hasGreeksPortfolio();
         boolean hasIV = family.hasIVSurface();
         boolean hasMicro = family.getOptions() != null && !family.getOptions().isEmpty() &&
-                          family.getOptions().stream().anyMatch(o -> o.getOfi() != 0);
+                          family.getOptions().stream().anyMatch(o -> o.getOfi() != null && o.getOfi() != 0);
         boolean hasFlow = family.getPcr() != null;
         boolean hasPrice = family.getMtfDistribution() != null &&
                           family.getMtfDistribution().getEvolution() != null;
         boolean hasVolume = family.getOptions() != null &&
-                           family.getOptions().stream().anyMatch(o -> o.getPoc() > 0);
+                           family.getOptions().stream().anyMatch(o -> o.getPoc() != null && o.getPoc() > 0);
         boolean hasCross = family.isHasFuture() || family.getSpotFuturePremium() != null;
 
         int count = 0;
@@ -358,10 +358,10 @@ public class QuantScoreCalculator {
 
         for (OptionCandle opt : options) {
             if (opt == null) continue;
-            totalOFI += opt.getOfi();
-            totalVPIN += opt.getVpin();
-            totalDepth += opt.getDepthImbalance();
-            totalLambda += opt.getKyleLambda();
+            if (opt.getOfi() != null) totalOFI += opt.getOfi();
+            if (opt.getVpin() != null) totalVPIN += opt.getVpin();
+            if (opt.getDepthImbalance() != null) totalDepth += opt.getDepthImbalance();
+            if (opt.getKyleLambda() != null) totalLambda += opt.getKyleLambda();
             if (opt.getAggressiveBuyVolume() != null) totalAggBuy += opt.getAggressiveBuyVolume();
             if (opt.getAggressiveSellVolume() != null) totalAggSell += opt.getAggressiveSellVolume();
             count++;

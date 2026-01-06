@@ -58,7 +58,7 @@ public class MicrostructureScoreCalculator {
         int count = 0;
 
         for (OptionCandle opt : options) {
-            if (opt != null) {
+            if (opt != null && opt.getOfi() != null) {
                 totalOFI += opt.getOfi();
                 count++;
             }
@@ -85,7 +85,7 @@ public class MicrostructureScoreCalculator {
         int count = 0;
 
         for (OptionCandle opt : options) {
-            if (opt != null && opt.getVpin() > 0) {
+            if (opt != null && opt.getVpin() != null && opt.getVpin() > 0) {
                 totalVPIN += opt.getVpin();
                 count++;
             }
@@ -115,7 +115,7 @@ public class MicrostructureScoreCalculator {
         int count = 0;
 
         for (OptionCandle opt : options) {
-            if (opt != null) {
+            if (opt != null && opt.getDepthImbalance() != null) {
                 totalImbalance += opt.getDepthImbalance();
                 count++;
             }
@@ -144,7 +144,7 @@ public class MicrostructureScoreCalculator {
         int count = 0;
 
         for (OptionCandle opt : options) {
-            if (opt != null && opt.getKyleLambda() > 0) {
+            if (opt != null && opt.getKyleLambda() != null && opt.getKyleLambda() > 0) {
                 totalLambda += opt.getKyleLambda();
                 count++;
             }

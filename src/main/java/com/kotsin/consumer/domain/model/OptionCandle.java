@@ -399,9 +399,10 @@ public class OptionCandle {
         double score = 0.0;
         int components = 0;
 
-        // OFI component (normalized) - OFI is primitive double, check for non-zero
-        double ofi = candle.getOfi();
-        if (ofi != 0.0) {
+        // OFI component (normalized) - OFI is nullable Double, check for null first
+        Double ofiValue = candle.getOfi();
+        if (ofiValue != null && ofiValue != 0.0) {
+            double ofi = ofiValue;
             // OFI is unbounded, normalize to [-1, 1] range using tanh
             double ofiNormalized = Math.tanh(ofi / 10000.0);
             score += Math.abs(ofiNormalized);
