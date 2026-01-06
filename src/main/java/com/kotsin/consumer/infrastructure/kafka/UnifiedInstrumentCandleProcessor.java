@@ -1709,8 +1709,11 @@ public class UnifiedInstrumentCandleProcessor {
         if (expiryStr == null || expiryStr.isEmpty()) return;
 
         try {
-            // Parse expiry date: "DD MON YYYY"
-            java.time.format.DateTimeFormatter formatter = java.time.format.DateTimeFormatter.ofPattern("dd MMM yyyy", java.util.Locale.ENGLISH);
+            // Parse expiry date: "DD MON YYYY" - CASE INSENSITIVE for uppercase months like "27 JAN 2026"
+            java.time.format.DateTimeFormatter formatter = new java.time.format.DateTimeFormatterBuilder()
+                .parseCaseInsensitive()
+                .appendPattern("d MMM yyyy")
+                .toFormatter(java.util.Locale.ENGLISH);
             LocalDate expiryDate = LocalDate.parse(expiryStr, formatter);
 
             // Get current date in IST

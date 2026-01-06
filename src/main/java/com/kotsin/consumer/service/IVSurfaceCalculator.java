@@ -8,6 +8,7 @@ import org.springframework.stereotype.Service;
 
 import java.time.LocalDate;
 import java.time.format.DateTimeFormatter;
+import java.time.format.DateTimeFormatterBuilder;
 import java.time.temporal.ChronoUnit;
 import java.util.*;
 import java.util.stream.Collectors;
@@ -615,8 +616,11 @@ public class IVSurfaceCalculator {
             if (expiry.contains("-")) {
                 expiryDate = LocalDate.parse(expiry);
             } else {
-                // Try NSE format (27 JAN 2026)
-                DateTimeFormatter nseFormatter = DateTimeFormatter.ofPattern("d MMM yyyy", java.util.Locale.ENGLISH);
+                // Try NSE format (27 JAN 2026) - CASE INSENSITIVE for uppercase months
+                DateTimeFormatter nseFormatter = new DateTimeFormatterBuilder()
+                    .parseCaseInsensitive()
+                    .appendPattern("d MMM yyyy")
+                    .toFormatter(java.util.Locale.ENGLISH);
                 expiryDate = LocalDate.parse(expiry, nseFormatter);
             }
             LocalDate today = LocalDate.now();

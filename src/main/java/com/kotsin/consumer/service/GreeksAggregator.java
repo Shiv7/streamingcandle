@@ -362,9 +362,11 @@ public class GreeksAggregator {
             if (expiry.contains("-")) {
                 expiryDate = java.time.LocalDate.parse(expiry);
             } else {
-                // Try NSE format (27 JAN 2026)
-                java.time.format.DateTimeFormatter nseFormatter =
-                    java.time.format.DateTimeFormatter.ofPattern("d MMM yyyy", java.util.Locale.ENGLISH);
+                // Try NSE format (27 JAN 2026) - CASE INSENSITIVE for uppercase months
+                java.time.format.DateTimeFormatter nseFormatter = new java.time.format.DateTimeFormatterBuilder()
+                    .parseCaseInsensitive()
+                    .appendPattern("d MMM yyyy")
+                    .toFormatter(java.util.Locale.ENGLISH);
                 expiryDate = java.time.LocalDate.parse(expiry, nseFormatter);
             }
             java.time.LocalDate today = java.time.LocalDate.now();
