@@ -2,9 +2,12 @@ package com.kotsin.consumer.service;
 
 import com.kotsin.consumer.domain.model.OptionCandle;
 import com.kotsin.consumer.model.GreeksPortfolio;
+import com.kotsin.consumer.util.BlackScholesGreeks;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.stereotype.Service;
 
+import java.time.LocalDate;
+import java.time.temporal.ChronoUnit;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
@@ -79,6 +82,29 @@ public class GreeksAggregator {
             double strike = opt.getStrikePrice();
             String expiry = opt.getExpiry();
             boolean isCall = opt.isCall();
+
+            // FIX: Calculate Greeks if not present using Black-Scholes
+            // This fixes the bug where underlying price was incorrectly set to option premium
+            if (delta == null || gamma == null || vega == null || theta == null) {
+                if (strike > 0 && spotPrice > 0 && expiry != null) {
+                    try {
+                        int dte = estimateDTE(expiry);
+                        if (dte > 0) {
+                            double timeToExpiryYears = dte / 365.0;
+                            double volatility = opt.getImpliedVolatility() != null ? opt.getImpliedVolatility() : 0.30;
+                            BlackScholesGreeks.GreeksResult greeks = BlackScholesGreeks.calculateGreeks(
+                                spotPrice, strike, timeToExpiryYears, volatility, isCall
+                            );
+                            if (delta == null) delta = greeks.delta;
+                            if (gamma == null) gamma = greeks.gamma;
+                            if (vega == null) vega = greeks.vega;
+                            if (theta == null) theta = greeks.theta;
+                        }
+                    } catch (Exception e) {
+                        log.debug("Failed to calculate Greeks for option strike {}: {}", strike, e.getMessage());
+                    }
+                }
+            }
 
             // Aggregate total Greeks (weighted by OI)
             if (delta != null) {

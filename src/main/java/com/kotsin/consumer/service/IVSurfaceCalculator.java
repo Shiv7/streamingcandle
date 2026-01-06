@@ -2,6 +2,7 @@ package com.kotsin.consumer.service;
 
 import com.kotsin.consumer.domain.model.OptionCandle;
 import com.kotsin.consumer.model.IVSurface;
+import com.kotsin.consumer.util.BlackScholesGreeks;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.stereotype.Service;
 
@@ -60,9 +61,9 @@ public class IVSurfaceCalculator {
             return IVSurface.empty();
         }
 
-        // Build IV by strike maps
-        Map<Double, Double> callIVByStrike = buildIVByStrike(calls);
-        Map<Double, Double> putIVByStrike = buildIVByStrike(puts);
+        // Build IV by strike maps (FIX: pass spotPrice for IV calculation when missing)
+        Map<Double, Double> callIVByStrike = buildIVByStrike(calls, spotPrice);
+        Map<Double, Double> putIVByStrike = buildIVByStrike(puts, spotPrice);
 
         // Calculate ATM IV
         double atmCallIV = findATMIV(calls, spotPrice);
@@ -150,14 +151,33 @@ public class IVSurfaceCalculator {
 
     /**
      * Build IV by strike map from options list
+     * FIX: Calculate IV using Newton-Raphson if not present, using correct spot price
      */
-    private Map<Double, Double> buildIVByStrike(List<OptionCandle> options) {
+    private Map<Double, Double> buildIVByStrike(List<OptionCandle> options, double spotPrice) {
         Map<Double, Double> ivByStrike = new HashMap<>();
         for (OptionCandle opt : options) {
             if (opt == null) continue;
             Double iv = opt.getImpliedVolatility();
+            double strike = opt.getStrikePrice();
+
+            // FIX: Calculate IV if not present using Newton-Raphson method
+            if ((iv == null || iv <= 0) && spotPrice > 0 && strike > 0 && opt.getExpiry() != null) {
+                try {
+                    int dte = estimateDTE(opt.getExpiry());
+                    if (dte > 0) {
+                        double optionPrice = opt.getClose();
+                        double timeToExpiryYears = dte / 365.0;
+                        boolean isCall = opt.isCall();
+                        iv = BlackScholesGreeks.estimateImpliedVolatility(
+                            optionPrice, spotPrice, strike, timeToExpiryYears, isCall
+                        );
+                    }
+                } catch (Exception e) {
+                    log.debug("Failed to calculate IV for strike {}: {}", strike, e.getMessage());
+                }
+            }
+
             if (iv != null && iv > 0) {
-                double strike = opt.getStrikePrice();
                 // If multiple options at same strike, average the IV
                 ivByStrike.merge(strike, iv, (old, newIv) -> (old + newIv) / 2);
             }
@@ -167,17 +187,37 @@ public class IVSurfaceCalculator {
 
     /**
      * Find ATM IV for a list of options
+     * FIX: Calculate IV if not present using Newton-Raphson method
      */
     private double findATMIV(List<OptionCandle> options, double spotPrice) {
         if (options.isEmpty()) return 0.0;
 
         // Find option closest to ATM
         OptionCandle atmOption = options.stream()
-            .filter(o -> o.getImpliedVolatility() != null && o.getImpliedVolatility() > 0)
             .min(Comparator.comparingDouble(o -> Math.abs(o.getStrikePrice() - spotPrice)))
             .orElse(null);
 
-        return atmOption != null && atmOption.getImpliedVolatility() != null ? atmOption.getImpliedVolatility() : 0.0;
+        if (atmOption == null) return 0.0;
+
+        Double iv = atmOption.getImpliedVolatility();
+
+        // FIX: Calculate IV if not present
+        if ((iv == null || iv <= 0) && atmOption.getExpiry() != null && atmOption.getStrikePrice() > 0) {
+            try {
+                int dte = estimateDTE(atmOption.getExpiry());
+                if (dte > 0) {
+                    double timeToExpiryYears = dte / 365.0;
+                    iv = BlackScholesGreeks.estimateImpliedVolatility(
+                        atmOption.getClose(), spotPrice, atmOption.getStrikePrice(),
+                        timeToExpiryYears, atmOption.isCall()
+                    );
+                }
+            } catch (Exception e) {
+                log.debug("Failed to calculate ATM IV: {}", e.getMessage());
+            }
+        }
+
+        return iv != null && iv > 0 ? iv : 0.0;
     }
 
     /**
