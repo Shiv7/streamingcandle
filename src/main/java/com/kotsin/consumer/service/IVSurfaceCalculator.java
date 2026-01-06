@@ -7,6 +7,7 @@ import lombok.extern.slf4j.Slf4j;
 import org.springframework.stereotype.Service;
 
 import java.time.LocalDate;
+import java.time.format.DateTimeFormatter;
 import java.time.temporal.ChronoUnit;
 import java.util.*;
 import java.util.stream.Collectors;
@@ -601,6 +602,7 @@ public class IVSurfaceCalculator {
 
     /**
      * Estimate days to expiry from expiry string
+     * Handles both ISO format (2026-01-27) and NSE format (27 JAN 2026)
      */
     private int estimateDTE(String expiry) {
         if (expiry == null || expiry.isEmpty()) {
@@ -608,7 +610,15 @@ public class IVSurfaceCalculator {
         }
 
         try {
-            LocalDate expiryDate = LocalDate.parse(expiry);
+            LocalDate expiryDate;
+            // Try ISO format first (2026-01-27)
+            if (expiry.contains("-")) {
+                expiryDate = LocalDate.parse(expiry);
+            } else {
+                // Try NSE format (27 JAN 2026)
+                DateTimeFormatter nseFormatter = DateTimeFormatter.ofPattern("d MMM yyyy", java.util.Locale.ENGLISH);
+                expiryDate = LocalDate.parse(expiry, nseFormatter);
+            }
             LocalDate today = LocalDate.now();
             return (int) ChronoUnit.DAYS.between(today, expiryDate);
         } catch (Exception e) {

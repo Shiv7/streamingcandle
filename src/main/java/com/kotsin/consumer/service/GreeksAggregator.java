@@ -357,7 +357,16 @@ public class GreeksAggregator {
         }
 
         try {
-            java.time.LocalDate expiryDate = java.time.LocalDate.parse(expiry);
+            java.time.LocalDate expiryDate;
+            // Try ISO format first (2026-01-27)
+            if (expiry.contains("-")) {
+                expiryDate = java.time.LocalDate.parse(expiry);
+            } else {
+                // Try NSE format (27 JAN 2026)
+                java.time.format.DateTimeFormatter nseFormatter =
+                    java.time.format.DateTimeFormatter.ofPattern("d MMM yyyy", java.util.Locale.ENGLISH);
+                expiryDate = java.time.LocalDate.parse(expiry, nseFormatter);
+            }
             java.time.LocalDate today = java.time.LocalDate.now();
             return (int) java.time.temporal.ChronoUnit.DAYS.between(today, expiryDate);
         } catch (Exception e) {
