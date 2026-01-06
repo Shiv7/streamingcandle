@@ -468,7 +468,7 @@ public class IVSurfaceCalculator {
         int count = 0;
 
         for (OptionCandle opt : options) {
-            if (opt != null) {
+            if (opt != null && opt.getIvChange() != null) {
                 double ivChange = opt.getIvChange();
                 if (ivChange != 0) {
                     totalChange += ivChange;

@@ -124,10 +124,10 @@ public class VolumeProfileScoreCalculator {
         int count = 0;
 
         for (OptionCandle opt : options) {
-            if (opt != null && opt.getPoc() > 0) {
+            if (opt != null && opt.getPoc() != null && opt.getPoc() > 0) {
                 totalPOC += opt.getPoc();
-                totalVAH += opt.getVah();
-                totalVAL += opt.getVal();
+                if (opt.getVah() != null) totalVAH += opt.getVah();
+                if (opt.getVal() != null) totalVAL += opt.getVal();
                 count++;
             }
         }
