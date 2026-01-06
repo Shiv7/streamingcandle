@@ -872,17 +872,17 @@ public class FamilyCandleProcessor {
         private InstrumentCandle future;
         // REMOVED: private List<InstrumentCandle> options = new ArrayList<>(); (dead code - never populated)
         private Map<String, InstrumentCandle> optionsByScripCode = new HashMap<>();
-        
+
         // Track merge counts for debugging
         private int equityMergeCount = 0;
         private int futureMergeCount = 0;
-        
+
         // PHASE 2: MTF Distribution - track sub-candles during aggregation
         private List<com.kotsin.consumer.model.UnifiedCandle> equitySubCandles = new ArrayList<>();
 
         public FamilyCandleCollector add(InstrumentCandle candle) {
             if (candle == null) return this;
-            
+
             InstrumentType type = candle.getInstrumentType();
             if (type == null) {
                 type = InstrumentType.detect(
@@ -933,15 +933,15 @@ public class FamilyCandleProcessor {
                                 optionsByScripCode.size());
                         } else {
                             // Merge OHLCV for same option
-                            log.debug("[OPTIONS-DEBUG] Option MERGED in collector | scripCode: {} | existing window: [{}, {}] | incoming window: [{}, {}]", 
+                            log.debug("[OPTIONS-DEBUG] Option MERGED in collector | scripCode: {} | existing window: [{}, {}] | incoming window: [{}, {}]",
                                 scripCode,
                                 existing.getWindowStartMillis(), existing.getWindowEndMillis(),
                                 candle.getWindowStartMillis(), candle.getWindowEndMillis());
                             mergeInstrumentCandle(existing, candle);
                         }
                     } else {
-                        log.warn("[OPTIONS-DEBUG] Option REJECTED - null scripCode | type: {} | companyName: {}", 
-                            type.name(), 
+                        log.warn("[OPTIONS-DEBUG] Option REJECTED - null scripCode | type: {} | companyName: {}",
+                            type.name(),
                             candle.getCompanyName() != null ? candle.getCompanyName() : "null");
                     }
                     break;
