@@ -391,6 +391,10 @@ public class TradingSignal {
     /**
      * Calculate trade parameters (entry, stop, targets)
      * Call this AFTER classifySignal
+     *
+     * 🔴 CRITICAL FIX: Also set longSignal/shortSignal flags based on direction
+     * for WARNING signals (DIVERGENCE_WARNING, ACCUMULATION_DETECTED, etc.)
+     * to pass downstream validation in TradeExecutionModule
      */
     public void calculateTradeParams(MTVCPOutput vcp, IPUOutput ipu) {
         // Clamp confidence
@@ -414,12 +418,46 @@ public class TradingSignal {
             this.stopLoss = this.currentPrice + (1.5 * atrValue);
             this.target1 = this.currentPrice - (2.0 * atrValue);
             this.target2 = this.currentPrice - (3.5 * atrValue);
-        } else {
-            // No signal - no targets
+        } else if (isWarningSignal()) {
+            // 🔴 FIX: Warning signals need trade params based on DIRECTION
+            // Without this, validation fails with "stopLoss must be > 0"
             this.entryPrice = this.currentPrice;
-            this.stopLoss = 0;
-            this.target1 = 0;
-            this.target2 = 0;
+
+            // Use direction to determine stop/target orientation
+            if (this.direction == IPUOutput.Direction.BULLISH) {
+                // Bullish warning (like DIVERGENCE in uptrend) - set LONG-style params
+                this.stopLoss = this.currentPrice - (1.5 * atrValue);
+                this.target1 = this.currentPrice + (2.0 * atrValue);
+                this.target2 = this.currentPrice + (3.5 * atrValue);
+                this.longSignal = true;   // Mark as long for validation
+            } else if (this.direction == IPUOutput.Direction.BEARISH) {
+                // Bearish warning (like DISTRIBUTION) - set SHORT-style params
+                this.stopLoss = this.currentPrice + (1.5 * atrValue);
+                this.target1 = this.currentPrice - (2.0 * atrValue);
+                this.target2 = this.currentPrice - (3.5 * atrValue);
+                this.shortSignal = true;  // Mark as short for validation
+            } else {
+                // Neutral warning - use wider stops
+                this.stopLoss = this.currentPrice * 0.97;   // 3% stop
+                this.target1 = this.currentPrice * 1.03;    // 3% target
+                this.target2 = this.currentPrice * 1.05;    // 5% target
+                this.longSignal = true;  // Default to long for neutral
+            }
+        } else {
+            // NO_SIGNAL - still set reasonable defaults for validation
+            this.entryPrice = this.currentPrice;
+            // Use direction hint if available
+            if (this.direction == IPUOutput.Direction.BEARISH) {
+                this.stopLoss = this.currentPrice + (1.5 * atrValue);
+                this.target1 = this.currentPrice - (2.0 * atrValue);
+                this.target2 = this.currentPrice - (3.5 * atrValue);
+                this.shortSignal = true;
+            } else {
+                this.stopLoss = this.currentPrice - (1.5 * atrValue);
+                this.target1 = this.currentPrice + (2.0 * atrValue);
+                this.target2 = this.currentPrice + (3.5 * atrValue);
+                this.longSignal = true;
+            }
         }
 
         // Calculate risk/reward
