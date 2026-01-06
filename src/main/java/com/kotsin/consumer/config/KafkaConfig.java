@@ -142,15 +142,16 @@ public class KafkaConfig {
         // ═══════════════════════════════════════════════════════════════════════
         // LARGE MESSAGE SUPPORT FOR FAMILY CANDLES
         // ═══════════════════════════════════════════════════════════════════════
-        // FamilyCandle can be 16-33MB for NIFTY/BANKNIFTY with 100s of options
-        // Default max.request.size is 1MB which causes RecordTooLargeException
-        props.put(StreamsConfig.PRODUCER_PREFIX + "max.request.size", "52428800"); // 50MB
-        props.put(StreamsConfig.PRODUCER_PREFIX + "buffer.memory", "104857600"); // 100MB buffer
+        // FamilyCandle can be 50-100MB for NIFTY/BANKNIFTY with 100s of options
+        // and full microstructure data. Actual observed: 94MB for NIFTY family.
+        // CRITICAL: Broker must also have message.max.bytes >= 150MB
+        props.put(StreamsConfig.PRODUCER_PREFIX + "max.request.size", "157286400"); // 150MB
+        props.put(StreamsConfig.PRODUCER_PREFIX + "buffer.memory", "209715200"); // 200MB buffer
         props.put(StreamsConfig.PRODUCER_PREFIX + "compression.type", "lz4"); // Fast compression
 
         // Consumer also needs to handle large messages
-        props.put(StreamsConfig.CONSUMER_PREFIX + "max.partition.fetch.bytes", "52428800"); // 50MB
-        props.put(StreamsConfig.CONSUMER_PREFIX + "fetch.max.bytes", "104857600"); // 100MB
+        props.put(StreamsConfig.CONSUMER_PREFIX + "max.partition.fetch.bytes", "157286400"); // 150MB
+        props.put(StreamsConfig.CONSUMER_PREFIX + "fetch.max.bytes", "209715200"); // 200MB
 
         // Resilience configuration
         props.put(StreamsConfig.RETRY_BACKOFF_MS_CONFIG, retryBackoffMs);
