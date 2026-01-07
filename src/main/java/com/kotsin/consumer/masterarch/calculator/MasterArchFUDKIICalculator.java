@@ -127,8 +127,9 @@ public class MasterArchFUDKIICalculator {
         
         // ======================== ATR FOR NORMALIZATION ========================
         double atr14 = calculateATR(candles30m, ATR_PERIOD);
+        // FIX Bug #23: Use 1.5% fallback (more realistic than 1%)
         if (atr14 <= 0) {
-            atr14 = 0.01 * close; // Fallback to 1% of price
+            atr14 = 0.015 * close;
         }
         
         // ======================== BOLLINGER BANDS ========================

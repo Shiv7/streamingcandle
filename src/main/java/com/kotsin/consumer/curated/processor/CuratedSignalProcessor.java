@@ -29,6 +29,7 @@ import org.springframework.kafka.annotation.KafkaListener;
 import org.springframework.kafka.core.KafkaTemplate;
 import org.springframework.stereotype.Component;
 
+import jakarta.annotation.PostConstruct;
 import com.github.benmanes.caffeine.cache.Cache;
 import com.github.benmanes.caffeine.cache.Caffeine;
 import java.util.List;
@@ -100,6 +101,16 @@ public class CuratedSignalProcessor {
     @Value("${gate.chain.enabled:true}")
     private boolean gateChainEnabled;
 
+    // FIX Bug #17: Cooldown to prevent excessive signal emissions
+    @Value("${curated.processor.cooldown.minutes:15}")
+    private int cooldownMinutes;
+
+    // Cooldown cache: key = scripCode:direction, value = last emission timestamp
+    private final Cache<String, Long> curatedEmissionCache = Caffeine.newBuilder()
+            .maximumSize(5_000)
+            .expireAfterWrite(60, TimeUnit.MINUTES)  // Auto-cleanup old entries
+            .build();
+
     // 🛡️ MEMORY LEAK FIX: Replaced unbounded ConcurrentHashMaps with Caffeine caches
     // All caches now have size limits and TTL to prevent OOM
 
@@ -132,12 +143,63 @@ public class CuratedSignalProcessor {
     private static final String DEFAULT_INDEX = "NIFTY50";
     
     static {
-        // Example mappings - in production, load from config/DB
-        // Bank stocks should align with BANKNIFTY
-        // IT stocks should align with NIFTYIT
-        // This is a simplified version - full implementation would use sector-mappings.csv
+        // FIX Bug #15/#20: Populate SCRIP_TO_INDEX_MAP with actual sector mappings
+        // In production, this should be loaded from config/DB
+
+        // BANKNIFTY stocks (Banking sector)
+        String[] bankStocks = {"HDFCBANK", "ICICIBANK", "SBIN", "KOTAKBANK", "AXISBANK",
+                "INDUSINDBK", "BANDHANBNK", "FEDERALBNK", "IDFCFIRSTB", "PNB",
+                "BANKBARODA", "AUBANK", "RBLBANK", "CANBK", "UNIONBANK"};
+        for (String s : bankStocks) SCRIP_TO_INDEX_MAP.put(s, "BANKNIFTY");
+
+        // NIFTYIT stocks (IT sector)
+        String[] itStocks = {"TCS", "INFY", "WIPRO", "HCLTECH", "TECHM",
+                "LTIM", "MPHASIS", "COFORGE", "PERSISTENT", "LTTS"};
+        for (String s : itStocks) SCRIP_TO_INDEX_MAP.put(s, "NIFTYIT");
+
+        // FINNIFTY stocks (Financial services)
+        String[] finStocks = {"BAJFINANCE", "BAJAJFINSV", "SBILIFE", "HDFCLIFE", "ICICIGI",
+                "SBICARD", "CHOLAFIN", "M&MFIN", "SHRIRAMFIN", "POONAWALLA"};
+        for (String s : finStocks) SCRIP_TO_INDEX_MAP.put(s, "FINNIFTY");
+
+        // NIFTY PHARMA stocks
+        String[] pharmaStocks = {"SUNPHARMA", "DRREDDY", "CIPLA", "DIVISLAB", "APOLLOHOSP",
+                "LUPIN", "TORNTPHARM", "AUROPHARMA", "BIOCON", "ALKEM"};
+        for (String s : pharmaStocks) SCRIP_TO_INDEX_MAP.put(s, "NIFTYPHARMA");
+
+        // NIFTY METAL stocks
+        String[] metalStocks = {"TATASTEEL", "JSWSTEEL", "HINDALCO", "VEDL", "COALINDIA",
+                "NMDC", "JINDALSTEL", "SAIL", "NATIONALUM", "APLAPOLLO"};
+        for (String s : metalStocks) SCRIP_TO_INDEX_MAP.put(s, "NIFTYMETAL");
+
+        // NIFTY AUTO stocks
+        String[] autoStocks = {"MARUTI", "M&M", "TATAMOTORS", "BAJAJ-AUTO", "HEROMOTOCO",
+                "EICHERMOT", "TVSMOTOR", "ASHOKLEY", "BHARATFORG", "MOTHERSON"};
+        for (String s : autoStocks) SCRIP_TO_INDEX_MAP.put(s, "NIFTYAUTO");
+
+        // NIFTY ENERGY stocks
+        String[] energyStocks = {"RELIANCE", "ONGC", "NTPC", "POWERGRID", "BPCL",
+                "IOC", "GAIL", "ADANIGREEN", "TATAPOWER", "ADANIPOWER"};
+        for (String s : energyStocks) SCRIP_TO_INDEX_MAP.put(s, "NIFTYENERGY");
+
+        // NIFTY FMCG stocks
+        String[] fmcgStocks = {"HINDUNILVR", "ITC", "NESTLEIND", "BRITANNIA", "DABUR",
+                "MARICO", "GODREJCP", "COLPAL", "TATACONSUM", "VBL"};
+        for (String s : fmcgStocks) SCRIP_TO_INDEX_MAP.put(s, "NIFTYFMCG");
+
+        // NIFTY REALTY stocks
+        String[] realtyStocks = {"DLF", "GODREJPROP", "OBEROIRLTY", "PRESTIGE", "SOBHA",
+                "PHOENIXLTD", "BRIGADE", "LODHA", "MAHLIFE"};
+        for (String s : realtyStocks) SCRIP_TO_INDEX_MAP.put(s, "NIFTYREALTY");
+
+        // MCX Commodities - use their own index concept
+        String[] commodities = {"GOLDM", "GOLD", "GOLDPETAL", "SILVERM", "SILVER",
+                "SILVERMIC", "CRUDEOIL", "CRUDEOILM", "NATURALGAS", "COPPER"};
+        for (String s : commodities) SCRIP_TO_INDEX_MAP.put(s, "MCX");
+
+        // FIX Bug #15/#20: Loaded sector mappings - logging moved to @PostConstruct
     }
-    
+
     /**
      * FIX: Get relevant index for a scrip instead of hardcoded NIFTY50
      */
@@ -181,6 +243,50 @@ public class CuratedSignalProcessor {
             .maximumSize(5_000)
             .expireAfterWrite(2, TimeUnit.HOURS)
             .build();
+
+    @PostConstruct
+    public void init() {
+        log.info("[Bug#15 FIX] Loaded {} scrip-to-index sector mappings", SCRIP_TO_INDEX_MAP.size());
+        log.info("[Bug#15 FIX] Sectors: BANKNIFTY={}, NIFTYIT={}, FINNIFTY={}, PHARMA={}, METAL={}, AUTO={}, ENERGY={}, FMCG={}, REALTY={}, MCX={}",
+                SCRIP_TO_INDEX_MAP.entrySet().stream().filter(e -> e.getValue().equals("BANKNIFTY")).count(),
+                SCRIP_TO_INDEX_MAP.entrySet().stream().filter(e -> e.getValue().equals("NIFTYIT")).count(),
+                SCRIP_TO_INDEX_MAP.entrySet().stream().filter(e -> e.getValue().equals("FINNIFTY")).count(),
+                SCRIP_TO_INDEX_MAP.entrySet().stream().filter(e -> e.getValue().equals("NIFTYPHARMA")).count(),
+                SCRIP_TO_INDEX_MAP.entrySet().stream().filter(e -> e.getValue().equals("NIFTYMETAL")).count(),
+                SCRIP_TO_INDEX_MAP.entrySet().stream().filter(e -> e.getValue().equals("NIFTYAUTO")).count(),
+                SCRIP_TO_INDEX_MAP.entrySet().stream().filter(e -> e.getValue().equals("NIFTYENERGY")).count(),
+                SCRIP_TO_INDEX_MAP.entrySet().stream().filter(e -> e.getValue().equals("NIFTYFMCG")).count(),
+                SCRIP_TO_INDEX_MAP.entrySet().stream().filter(e -> e.getValue().equals("NIFTYREALTY")).count(),
+                SCRIP_TO_INDEX_MAP.entrySet().stream().filter(e -> e.getValue().equals("MCX")).count());
+        log.info("[Bug#17 FIX] Curated signal cooldown: {} minutes per scripCode+direction", cooldownMinutes);
+    }
+
+    /**
+     * FIX Bug #17: Check if emission is allowed (not in cooldown)
+     * @return true if emission allowed, false if still in cooldown
+     */
+    private boolean canEmitCuratedSignal(String scripCode, String direction) {
+        String cooldownKey = scripCode + ":" + direction;
+        Long lastEmission = curatedEmissionCache.getIfPresent(cooldownKey);
+        long now = System.currentTimeMillis();
+        long cooldownMs = cooldownMinutes * 60 * 1000L;
+
+        if (lastEmission != null && (now - lastEmission) < cooldownMs) {
+            long remainingMinutes = (cooldownMs - (now - lastEmission)) / 60000;
+            log.debug("Curated signal cooldown active for {} {} - {} minutes remaining",
+                    scripCode, direction, remainingMinutes);
+            return false;
+        }
+        return true;
+    }
+
+    /**
+     * FIX Bug #17: Record emission for cooldown tracking
+     */
+    private void recordCuratedEmission(String scripCode, String direction) {
+        String cooldownKey = scripCode + ":" + direction;
+        curatedEmissionCache.put(cooldownKey, System.currentTimeMillis());
+    }
 
     /**
      * Listen to family candle streams (1m, 2m, 3m)
@@ -367,6 +473,12 @@ public class CuratedSignalProcessor {
         String direction = breakout.getPrimaryBreakout().getDirection();
         String signalType = "BREAKOUT_IMMEDIATE";
 
+        // FIX Bug #17: Check cooldown before generating signal
+        if (!canEmitCuratedSignal(scripCode, direction)) {
+            log.debug("Curated breakout signal skipped for {} {} - cooldown active", scripCode, direction);
+            return;
+        }
+
         // Fetch all module outputs
         String relevantIndex = getRelevantIndex(scripCode);
         IndexRegime indexRegime = indexRegimeCache.getIfPresent(relevantIndex);
@@ -471,14 +583,18 @@ public class CuratedSignalProcessor {
         // Send to Kafka
         curatedSignalProducer.send("trading-signals-curated", scripCode, signal);
 
-        log.info("📤 CURATED SIGNAL EMITTED (IMMEDIATE) | {} | dir={} | Score={} | Entry={} | SL={} | Target={} | R:R={}",
+        // FIX Bug #17: Record emission for cooldown tracking
+        recordCuratedEmission(scripCode, direction);
+
+        log.info("📤 CURATED SIGNAL EMITTED (IMMEDIATE) | {} | dir={} | Score={} | Entry={} | SL={} | Target={} | R:R={} | cooldown={}min",
                 scripCode,
                 direction,
                 String.format("%.1f", curatedScore),
                 String.format("%.2f", entry.getEntryPrice()),
                 String.format("%.2f", entry.getStopLoss()),
                 String.format("%.2f", entry.getTarget()),
-                String.format("%.2f", riskReward));
+                String.format("%.2f", riskReward),
+                cooldownMinutes);
         log.info("   Reason: {}", reason);
     }
 
@@ -518,6 +634,12 @@ public class CuratedSignalProcessor {
         // BUG-FIX: Use BreakoutBar's direction field instead of inferring
         String direction = breakout.getPrimaryBreakout().getDirection();
         String signalType = "BREAKOUT_RETEST";
+
+        // FIX Bug #17: Check cooldown before generating retest signal
+        if (!canEmitCuratedSignal(scripCode, direction)) {
+            log.debug("Curated retest signal skipped for {} {} - cooldown active", scripCode, direction);
+            return;
+        }
 
         // Fetch all module outputs
         String relevantIndex = getRelevantIndex(scripCode);
@@ -680,14 +802,19 @@ public class CuratedSignalProcessor {
         // Send to Kafka
         curatedSignalProducer.send("trading-signals-curated", scripCode, signal);
 
-        log.info("📤 CURATED SIGNAL EMITTED | {} | Score={} | Entry={} | SL={} | Target={} | R:R={} | PosMulti={}",
+        // FIX Bug #17: Record emission for cooldown tracking
+        recordCuratedEmission(scripCode, direction);
+
+        log.info("📤 CURATED SIGNAL EMITTED | {} | dir={} | Score={} | Entry={} | SL={} | Target={} | R:R={} | PosMulti={} | cooldown={}min",
                 scripCode,
+                direction,
                 String.format("%.1f", curatedScore),
                 String.format("%.2f", optimizedEntry.getEntryPrice()),
                 String.format("%.2f", optimizedEntry.getStopLoss()),
                 String.format("%.2f", optimizedEntry.getTarget()),
                 String.format("%.2f", optimizedEntry.getRiskReward()),
-                String.format("%.2f", optimizedEntry.getPositionSizeMultiplier()));
+                String.format("%.2f", optimizedEntry.getPositionSizeMultiplier()),
+                cooldownMinutes);
         log.info("   Reason: {}", reason);
     }
 
@@ -766,16 +893,34 @@ public class CuratedSignalProcessor {
 
     /**
      * Get ATR for stop loss calculation
+     * FIX Bug #23: Use proper ATR estimation when data is insufficient
      */
     private double getATR(String scripCode) {
+        // Priority 1: Use cached ATR from security regime
         SecurityRegime securityRegime = securityRegimeCache.getIfPresent(scripCode);
         if (securityRegime != null && securityRegime.getAtr14() > 0) {
             return securityRegime.getAtr14();
         }
 
-        // Fallback: Calculate from recent candles
+        // Priority 2: Calculate from recent candle range
         UnifiedCandle candle = structureTracker.getLatestCandle(scripCode, "3m");
-        return candle != null ? candle.getRange() : 1.0;
+        if (candle != null && candle.getRange() > 0) {
+            return candle.getRange();
+        }
+
+        // Priority 3: FIX Bug #23 - Use 1.5% of price as fallback ATR estimate
+        // This is more realistic than a fixed value for different price levels
+        FamilyCandle family = familyCandleCache.getIfPresent(scripCode);
+        if (family != null && family.getSpotPrice() > 0) {
+            double estimatedATR = family.getSpotPrice() * 0.015; // 1.5% of price
+            log.debug("[Bug#23 FIX] Using estimated ATR for {}: {:.2f} (1.5% of price {:.2f})",
+                    scripCode, estimatedATR, family.getSpotPrice());
+            return estimatedATR;
+        }
+
+        // Last resort: Return 0 to indicate no valid ATR (caller should handle this)
+        log.warn("[Bug#23 FIX] No ATR available for {} - returning 0", scripCode);
+        return 0;
     }
 
     /**

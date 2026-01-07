@@ -17,6 +17,8 @@ import org.springframework.kafka.core.KafkaTemplate;
 import org.springframework.stereotype.Service;
 
 import java.util.List;
+import java.util.concurrent.ConcurrentHashMap;
+import java.util.Map;
 
 /**
  * FUDKIIProcessor - Standalone FUDKII Strategy
@@ -52,15 +54,23 @@ public class FUDKIIProcessor {
 
     @Value("${fudkii.processor.history.candles:50}")
     private int historyCandles;
-    
+
     @Value("${supertrend.atr.period:10}")
     private int superTrendAtrPeriod;
+
+    // FIX Bug #17: Cooldown to prevent excessive signal emissions
+    @Value("${fudkii.processor.cooldown.minutes:30}")
+    private int cooldownMinutes;
+
+    // Cooldown cache: key = scripCode:direction, value = last emission timestamp
+    private final Map<String, Long> lastEmissionCache = new ConcurrentHashMap<>();
 
     @PostConstruct
     public void init() {
         log.info("📊 FUDKIIProcessor initialized. Enabled: {}, MinStrength: {}", enabled, minStrength);
         log.info("📊 Output topic: {}", KafkaTopics.KOTSIN_FUDKII);
         log.info("📊 Strategy: Strict BB+ST simultaneity on 30m candles");
+        log.info("📊 [Bug#17 FIX] Cooldown: {} minutes per scripCode+direction", cooldownMinutes);
     }
 
     @KafkaListener(
@@ -176,6 +186,19 @@ public class FUDKIIProcessor {
                 return;
             }
 
+            // FIX Bug #17: Check cooldown - don't emit duplicate signals within cooldown period
+            String cooldownKey = scripCode + ":" + direction;
+            Long lastEmission = lastEmissionCache.get(cooldownKey);
+            long now = System.currentTimeMillis();
+            long cooldownMs = cooldownMinutes * 60 * 1000L;
+
+            if (lastEmission != null && (now - lastEmission) < cooldownMs) {
+                long remainingMinutes = (cooldownMs - (now - lastEmission)) / 60000;
+                log.debug("FUDKII cooldown active for {} {} - {} minutes remaining",
+                        scripCode, direction, remainingMinutes);
+                return;
+            }
+
             // Calculate volume Z-score
             double volumeZScore = bbSuperTrendDetector.calculateVolumeZScore(candles30m);
 
@@ -217,14 +240,18 @@ public class FUDKIIProcessor {
             // Emit to Kafka
             String outputJson = objectMapper.writeValueAsString(signal);
             kafkaTemplate.send(KafkaTopics.KOTSIN_FUDKII, scripCode, outputJson);
-            
-            log.info("📊 FUDKII Signal: {} {} | dir={} | strength={} | BB%B={} | STflip={} | volZ={}",
-                scripCode, companyName, 
+
+            // FIX Bug #17: Update cooldown cache after successful emission
+            lastEmissionCache.put(cooldownKey, now);
+
+            log.info("📊 FUDKII Signal: {} {} | dir={} | strength={} | BB%B={} | STflip={} | volZ={} | cooldown={}min",
+                scripCode, companyName,
                 direction,
                 String.format("%.2f", signalStrength),
                 String.format("%.2f", bbPercentB),
                 superTrendFlipped,
-                String.format("%.1f", volumeZScore));
+                String.format("%.1f", volumeZScore),
+                cooldownMinutes);
 
         } catch (Exception e) {
             log.error("Error processing FUDKII candle: {}", e.getMessage(), e);
