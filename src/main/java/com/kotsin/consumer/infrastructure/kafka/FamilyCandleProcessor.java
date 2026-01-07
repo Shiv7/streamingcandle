@@ -217,18 +217,20 @@ public class FamilyCandleProcessor {
             .peek((key, familyCandle) -> {
                 if (log.isDebugEnabled() && familyCandle != null) {
                     String familyId = familyCandle.getFamilyId();
-                    InstrumentCandle equity = familyCandle.getEquity();
-                    String scripCode = equity != null ? equity.getScripCode() : "N/A";
-                    log.debug("[FAMILY] {} | {} | equity={} future={} options={} | OHLC={}/{}/{}/{} vol={} | emitted to {}", 
+                    // FIX: Use primaryInstrument for OHLC display (handles commodities correctly)
+                    InstrumentCandle primary = familyCandle.getPrimaryInstrumentOrFallback();
+                    String scripCode = primary != null ? primary.getScripCode() : "N/A";
+                    log.debug("[FAMILY] {} | {} | equity={} future={} options={} commodity={} | OHLC={}/{}/{}/{} vol={} | emitted to {}",
                         familyId, scripCode,
-                        equity != null ? "YES" : "NO",
+                        familyCandle.getEquity() != null ? "YES" : "NO",
                         familyCandle.getFuture() != null ? "YES" : "NO",
                         familyCandle.getOptions() != null ? familyCandle.getOptions().size() : 0,
-                        equity != null ? equity.getOpen() : 0.0, 
-                        equity != null ? equity.getHigh() : 0.0, 
-                        equity != null ? equity.getLow() : 0.0,
-                        equity != null ? equity.getClose() : 0.0,
-                        equity != null ? equity.getVolume() : 0L, outputTopic);
+                        familyCandle.isCommodity() ? "YES" : "NO",
+                        primary != null ? primary.getOpen() : 0.0,
+                        primary != null ? primary.getHigh() : 0.0,
+                        primary != null ? primary.getLow() : 0.0,
+                        primary != null ? primary.getClose() : 0.0,
+                        primary != null ? primary.getVolume() : 0L, outputTopic);
                 }
             })
             .to(outputTopic, Produced.with(Serdes.String(), FamilyCandle.serde()));
@@ -694,22 +696,34 @@ public class FamilyCandleProcessor {
         
         // PHASE 2: MTF Distribution Analysis
         // Calculate intra-window sub-candle patterns for directional consistency
+        // FIX: For commodities, use futureSubCandles when equitySubCandles is empty
         List<com.kotsin.consumer.model.UnifiedCandle> subCandles = collector.getEquitySubCandles();
+        String subCandleSource = "equity";
+
+        // For commodities (no equity), use future sub-candles for MTF distribution
+        if ((subCandles == null || subCandles.isEmpty()) && isCommodity) {
+            subCandles = collector.getFutureSubCandles();
+            subCandleSource = "future";
+        }
+
         if (subCandles != null && !subCandles.isEmpty() && subCandles.size() > 1) {
             try {
                 com.kotsin.consumer.model.MTFDistribution dist = mtfDistributionCalculator.calculate(subCandles);
                 builder.mtfDistribution(dist);
-                
-                log.info("📊 MTF Distribution for {}: {} sub-candles, consistency={:.2f}, interpretation={}",
-                         familyId, dist.getTotalSubCandles(), 
+
+                log.info("📊 MTF Distribution for {}: {} sub-candles (from {}), consistency={:.2f}, interpretation={}",
+                         familyId, dist.getTotalSubCandles(), subCandleSource,
                          dist.getDirectionalConsistency(),
                          dist.getInterpretation());
             } catch (Exception e) {
                 log.warn("⚠️ MTF Distribution calculation failed for {}: {}", familyId, e.getMessage());
             }
         } else {
-            log.debug("⚠️ MTF Distribution skipped for {} - insufficient sub-candles (count={})",
-                      familyId, subCandles != null ? subCandles.size() : 0);
+            log.debug("⚠️ MTF Distribution skipped for {} - insufficient sub-candles (equityCount={}, futureCount={}, isCommodity={})",
+                      familyId,
+                      collector.getEquitySubCandles() != null ? collector.getEquitySubCandles().size() : 0,
+                      collector.getFutureSubCandles() != null ? collector.getFutureSubCandles().size() : 0,
+                      isCommodity);
         }
 
         FamilyCandle familyCandle = builder
@@ -907,6 +921,8 @@ public class FamilyCandleProcessor {
 
         // PHASE 2: MTF Distribution - track sub-candles during aggregation
         private List<com.kotsin.consumer.model.UnifiedCandle> equitySubCandles = new ArrayList<>();
+        // FIX: Also track future sub-candles for commodities (MCX)
+        private List<com.kotsin.consumer.model.UnifiedCandle> futureSubCandles = new ArrayList<>();
 
         public FamilyCandleCollector add(InstrumentCandle candle) {
             if (candle == null) return this;
@@ -942,6 +958,8 @@ public class FamilyCandleProcessor {
                         mergeInstrumentCandle(this.future, candle);
                         futureMergeCount++;
                     }
+                    // FIX: Track future sub-candles for MTF distribution (commodities)
+                    futureSubCandles.add(com.kotsin.consumer.model.UnifiedCandle.from(candle));
                     break;
                 case OPTION_CE:
                 case OPTION_PE:
@@ -1077,6 +1095,11 @@ public class FamilyCandleProcessor {
         // PHASE 2: Getter for MTF sub-candles
         public List<com.kotsin.consumer.model.UnifiedCandle> getEquitySubCandles() {
             return equitySubCandles;
+        }
+
+        // FIX: Getter for future sub-candles (for commodities MTF distribution)
+        public List<com.kotsin.consumer.model.UnifiedCandle> getFutureSubCandles() {
+            return futureSubCandles;
         }
 
         public static org.apache.kafka.common.serialization.Serde<FamilyCandleCollector> serde() {

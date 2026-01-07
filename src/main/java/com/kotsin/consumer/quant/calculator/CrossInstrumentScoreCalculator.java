@@ -39,12 +39,47 @@ public class CrossInstrumentScoreCalculator {
 
     /**
      * Calculate spot-future premium alignment score (0-5)
+     *
+     * FIX: For commodities (no equity, hence no spot-future premium),
+     * calculate score based on future's price action and OI buildup instead.
      */
     private double calculateSpotFuturePremiumScore(FamilyCandle family, double priceDirection) {
         double maxPoints = 5.0;
 
         Double premium = family.getSpotFuturePremium();
+
+        // FIX: For commodities, use futures buildup and direction instead of spot-future premium
         if (premium == null) {
+            // Check if this is a commodity with futures data
+            if (family.isCommodity() && family.isHasFuture()) {
+                double score = maxPoints * 0.3;  // Base score for having futures data
+
+                // Check futures buildup type
+                String buildup = family.getFuturesBuildup();
+                if (buildup != null) {
+                    // Bullish buildups aligned with bullish direction
+                    if (("LONG_BUILDUP".equals(buildup) && priceDirection > 0) ||
+                        ("SHORT_COVERING".equals(buildup) && priceDirection > 0)) {
+                        score += maxPoints * 0.4;
+                    }
+                    // Bearish buildups aligned with bearish direction
+                    else if (("SHORT_BUILDUP".equals(buildup) && priceDirection < 0) ||
+                             ("LONG_UNWINDING".equals(buildup) && priceDirection < 0)) {
+                        score += maxPoints * 0.4;
+                    }
+                    // Any buildup is somewhat actionable
+                    else if (!buildup.isEmpty() && !"NEUTRAL".equals(buildup)) {
+                        score += maxPoints * 0.2;
+                    }
+                }
+
+                // Future OI building up adds confidence
+                if (family.isFutureOiBuildingUp()) {
+                    score += maxPoints * 0.1;
+                }
+
+                return Math.min(maxPoints, score);
+            }
             return 0;
         }
 
@@ -74,6 +109,9 @@ public class CrossInstrumentScoreCalculator {
 
     /**
      * Calculate instrument agreement score (0-5)
+     *
+     * FIX: For commodities (no equity), use primaryInstrument (future) as the baseline
+     * and calculate agreement based on futures buildup, OI signals, and options flow.
      */
     private double calculateInstrumentAgreementScore(FamilyCandle family) {
         double maxPoints = 5.0;
@@ -84,19 +122,49 @@ public class CrossInstrumentScoreCalculator {
         int agreementCount = 0;
         int totalInstruments = 0;
 
-        // Determine equity direction
-        Boolean equityBullish = null;
-        if (equity != null && equity.getOpen() > 0) {
-            equityBullish = equity.getClose() > equity.getOpen();
+        // FIX: For commodities, use primaryInstrument (future) as the baseline
+        Boolean primaryBullish = null;
+        InstrumentCandle primary = family.getPrimaryInstrumentOrFallback();
+
+        if (primary != null && primary.getOpen() > 0) {
+            primaryBullish = primary.getClose() > primary.getOpen();
             totalInstruments++;
         }
 
-        // Check future agreement
-        if (future != null && future.getOpen() > 0) {
+        // For equity-based families: check equity-future agreement
+        if (equity != null && future != null && equity.getOpen() > 0 && future.getOpen() > 0) {
+            boolean equityBullish = equity.getClose() > equity.getOpen();
             boolean futureBullish = future.getClose() > future.getOpen();
             totalInstruments++;
-            if (equityBullish != null && futureBullish == equityBullish) {
+            if (equityBullish == futureBullish) {
                 agreementCount++;
+            }
+        }
+
+        // FIX: For commodities, check OI signal alignment with price direction
+        if (family.isCommodity() && primaryBullish != null) {
+            // OI signal agreement
+            String oiSignal = family.getOiSignal();
+            if (oiSignal != null) {
+                boolean oiBullish = "BULLISH_ACCUMULATION".equals(oiSignal) || "SHORT_COVERING_RALLY".equals(oiSignal);
+                boolean oiBearish = "BEARISH_DISTRIBUTION".equals(oiSignal) || "LONG_UNWINDING".equals(oiSignal);
+
+                if ((oiBullish && primaryBullish) || (oiBearish && !primaryBullish)) {
+                    agreementCount++;
+                }
+                totalInstruments++;
+            }
+
+            // Futures buildup agreement
+            String buildup = family.getFuturesBuildup();
+            if (buildup != null && !buildup.isEmpty() && !"NEUTRAL".equals(buildup)) {
+                boolean buildupBullish = "LONG_BUILDUP".equals(buildup) || "SHORT_COVERING".equals(buildup);
+                boolean buildupBearish = "SHORT_BUILDUP".equals(buildup) || "LONG_UNWINDING".equals(buildup);
+
+                if ((buildupBullish && primaryBullish) || (buildupBearish && !primaryBullish)) {
+                    agreementCount++;
+                }
+                totalInstruments++;
             }
         }
 
@@ -108,7 +176,9 @@ public class CrossInstrumentScoreCalculator {
             (double) (agreementCount + (volumeConf > 0.5 ? 1 : 0)) / (totalInstruments + 1) : 0;
 
         // Score based on family completeness and agreement
-        double completenessBonus = family.isComplete() ? 0.2 : 0;
+        // FIX: For commodities, having futures data is considered "complete enough"
+        double completenessBonus = family.isComplete() ? 0.2 :
+                                   (family.isCommodity() && family.isHasFuture()) ? 0.1 : 0;
 
         return maxPoints * (agreementRatio + completenessBonus);
     }
