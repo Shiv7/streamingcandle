@@ -1,0 +1,22 @@
+{
+	"folders": [
+		{
+			"path": "../../../.."
+		},
+		{
+			"path": "../../../../../tradeExecutionModule"
+		},
+		{
+			"path": "../../../../../tradingDashboard"
+		},
+		{
+			"path": "../../../../../optionProducerJava"
+		},
+		{
+			"path": "../../../../../scripFinder"
+		},
+		{
+			"path": "../../../../../strategyModule"
+		}
+	]
+}

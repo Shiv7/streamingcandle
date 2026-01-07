@@ -1,0 +1,14 @@
+{
+	"folders": [
+		{
+			"path": "../../../../../../../.."
+		},
+		{
+			"path": "../../../../../../../../../tradeExecutionModule"
+		},
+		{
+			"path": "../../../../../../../../../tradingDashboard"
+		}
+	],
+	"settings": {}
+}

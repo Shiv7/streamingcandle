@@ -1,0 +1,198 @@
+package com.kotsin.consumer.config;
+
+
+import lombok.extern.slf4j.Slf4j;
+import org.apache.kafka.common.serialization.Serdes;
+import org.apache.kafka.streams.StreamsConfig;
+import org.apache.kafka.streams.errors.LogAndContinueExceptionHandler;
+import org.springframework.beans.factory.annotation.Value;
+import org.springframework.stereotype.Component;
+
+import java.io.File;
+import java.util.Properties;
+
+@Component
+@Slf4j
+public class KafkaConfig {
+
+    // All configuration injected from application.properties
+    @Value("${spring.kafka.bootstrap-servers:localhost:9092}")
+    private String bootstrapServers;
+
+    @Value("${spring.kafka.streams.state-dir:/tmp/kafka-streams/streamingcandle}")
+    private String baseStateDir;
+
+    @Value("${spring.kafka.streams.properties.commit.interval.ms:100}")
+    private int commitIntervalMs;
+
+    @Value("${spring.kafka.streams.properties.statestore.cache.max.bytes:104857600}")
+    private long statestoreCacheMaxBytes;
+
+    @Value("${spring.kafka.streams.properties.num.stream.threads:2}")
+    private int numStreamThreads;
+
+    @Value("${spring.kafka.streams.properties.processing.guarantee:at_least_once}")
+    private String processingGuarantee;
+
+    @Value("${spring.kafka.streams.properties.auto.offset.reset:latest}")
+    private String autoOffsetReset;
+
+    @Value("${spring.kafka.streams.properties.retry.backoff.ms:100}")
+    private long retryBackoffMs;
+
+    @Value("${spring.kafka.streams.properties.reconnect.backoff.ms:50}")
+    private long reconnectBackoffMs;
+
+    @Value("${spring.kafka.streams.properties.request.timeout.ms:40000}")
+    private int requestTimeoutMs;
+
+    @Value("${spring.kafka.streams.properties.topology.optimization:all}")
+    private String topologyOptimization;
+
+    @Value("${spring.kafka.streams.properties.default.deserialization.exception.handler:org.apache.kafka.streams.errors.LogAndContinueExceptionHandler}")
+    private String deserializationExceptionHandler;
+
+    @Value("${spring.kafka.streams.properties.producer.message.timestamp.type:CreateTime}")
+    private String producerTimestampType;
+
+    /**
+     * CONFIGURABLE APP-ID PREFIX
+     * This prefix is prepended to ALL processor application-ids.
+     * To replay data from earliest, simply change this prefix to a new unique value.
+     * Example: "replay-20251228-" will make consumer group "replay-20251228-unified-instrument-candle-processor"
+     */
+    @Value("${kafka.streams.app-id-prefix:}")
+    private String appIdPrefix;
+
+    /**
+     * Gets the bootstrap servers configuration.
+     *
+     * @return The bootstrap servers string.
+     */
+    public String getBootstrapServers() {
+        return bootstrapServers;
+    }
+
+    /**
+     * Gets the configured auto.offset.reset setting.
+     *
+     * @return The auto offset reset setting (earliest/latest).
+     */
+    public String getAutoOffsetReset() {
+        return autoOffsetReset;
+    }
+
+    /**
+     * Gets the application-id prefix.
+     *
+     * @return The prefix to prepend to all application-ids.
+     */
+    public String getAppIdPrefix() {
+        return appIdPrefix;
+    }
+
+    /**
+     * Retrieves Kafka Streams properties with a given application ID.
+     * The application ID is prefixed with the configurable kafka.streams.app-id-prefix.
+     * All settings are now configurable via application.properties.
+     *
+     * @param appId The base application ID for the Kafka Streams instance.
+     * @return Properties configured for Kafka Streams.
+     */
+    public Properties getStreamProperties(String appId) {
+        Properties props = new Properties();
+
+        // Apply configurable prefix to application-id for easy replay
+        String fullAppId = (appIdPrefix != null && !appIdPrefix.isEmpty()) 
+            ? appIdPrefix + appId 
+            : appId;
+
+        // Core configuration
+        props.put(StreamsConfig.APPLICATION_ID_CONFIG, fullAppId);
+        log.info("Creating Kafka Streams with app-id: {} (prefix: '{}')", fullAppId, appIdPrefix);
+        props.put(StreamsConfig.BOOTSTRAP_SERVERS_CONFIG, bootstrapServers);
+        props.put(StreamsConfig.DEFAULT_KEY_SERDE_CLASS_CONFIG, Serdes.String().getClass().getName());
+        props.put(StreamsConfig.DEFAULT_VALUE_SERDE_CLASS_CONFIG, Serdes.String().getClass().getName());
+
+        // State directory (unique per application instance)
+        String uniqueStateDir = createUniqueStateDir(appId);
+        props.put(StreamsConfig.STATE_DIR_CONFIG, uniqueStateDir);
+
+        // Performance tuning (all configurable from properties)
+        props.put(StreamsConfig.COMMIT_INTERVAL_MS_CONFIG, commitIntervalMs);
+        props.put(StreamsConfig.STATESTORE_CACHE_MAX_BYTES_CONFIG, statestoreCacheMaxBytes);
+        props.put(StreamsConfig.NUM_STREAM_THREADS_CONFIG, numStreamThreads);
+
+        // Processing guarantee (at_least_once or exactly_once_v2)
+        props.put(StreamsConfig.PROCESSING_GUARANTEE_CONFIG, processingGuarantee);
+
+        // Topology optimization
+        props.put(StreamsConfig.TOPOLOGY_OPTIMIZATION_CONFIG, topologyOptimization);
+
+        // Exception handling
+        props.put(StreamsConfig.DEFAULT_DESERIALIZATION_EXCEPTION_HANDLER_CLASS_CONFIG,
+                deserializationExceptionHandler);
+
+        // Consumer configuration
+        props.put(StreamsConfig.CONSUMER_PREFIX + "auto.offset.reset", autoOffsetReset);
+
+        // Producer configuration
+        props.put(StreamsConfig.PRODUCER_PREFIX + "message.timestamp.type", producerTimestampType);
+
+        // ═══════════════════════════════════════════════════════════════════════
+        // LARGE MESSAGE SUPPORT FOR FAMILY CANDLES
+        // ═══════════════════════════════════════════════════════════════════════
+        // FamilyCandle can be 50-100MB for NIFTY/BANKNIFTY with 100s of options
+        // and full microstructure data. Actual observed: 94MB for NIFTY family.
+        // CRITICAL: Broker must also have message.max.bytes >= 150MB
+        props.put(StreamsConfig.PRODUCER_PREFIX + "max.request.size", "157286400"); // 150MB
+        props.put(StreamsConfig.PRODUCER_PREFIX + "buffer.memory", "209715200"); // 200MB buffer
+        props.put(StreamsConfig.PRODUCER_PREFIX + "compression.type", "lz4"); // Fast compression
+
+        // Consumer also needs to handle large messages
+        props.put(StreamsConfig.CONSUMER_PREFIX + "max.partition.fetch.bytes", "157286400"); // 150MB
+        props.put(StreamsConfig.CONSUMER_PREFIX + "fetch.max.bytes", "209715200"); // 200MB
+
+        // Resilience configuration
+        props.put(StreamsConfig.RETRY_BACKOFF_MS_CONFIG, retryBackoffMs);
+        props.put(StreamsConfig.RECONNECT_BACKOFF_MS_CONFIG, reconnectBackoffMs);
+        props.put(StreamsConfig.REQUEST_TIMEOUT_MS_CONFIG, requestTimeoutMs);
+
+        // ═══════════════════════════════════════════════════════════════════════
+        // TIMESTAMP HANDLING FOR REPLAY
+        // ═══════════════════════════════════════════════════════════════════════
+        // The TimestampExtractors (TickDataTimestampExtractor, etc.) now clamp
+        // future timestamps to wall clock + 1 hour to prevent broker rejection.
+        // This allows replaying historical data with "future" timestamps safely.
+        // ═══════════════════════════════════════════════════════════════════════
+        
+        // Producer resilience settings for handling message production delays
+        props.put(StreamsConfig.PRODUCER_PREFIX + "max.block.ms", "60000");
+        props.put(StreamsConfig.PRODUCER_PREFIX + "delivery.timeout.ms", "120000");
+        
+        log.info("Kafka Streams configured with timestamp clamping in extractors for safe replay");
+
+        return props;
+    }
+    
+    /**
+     * Creates a unique state directory for the Kafka Streams application to prevent conflicts.
+     * PRODUCTION FIX: Ensures each instance gets its own state directory.
+     */
+    private String createUniqueStateDir(String appId) {
+        // Create base directory if it doesn't exist
+        File baseDir = new File(baseStateDir);
+        if (!baseDir.exists()) {
+            boolean created = baseDir.mkdirs();
+            if (!created) {
+                // Fallback to temp directory if we can't create in /var/lib
+                String fallbackPath = System.getProperty("java.io.tmpdir") + "/kafka-streams/" + appId;
+                log.warn("Could not create state directory {}, falling back to {}", baseStateDir, fallbackPath);
+                return fallbackPath;
+            }
+        }
+
+        // Return path for this application instance
+        return baseStateDir + "/" + appId;
+    }
+}
