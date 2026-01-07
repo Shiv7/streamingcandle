@@ -152,18 +152,15 @@ public class TradingSignalProcessor {
                 })
                 .to(outputTopic, Produced.with(Serdes.String(), TradingSignal.serde()));
 
-        // Also emit NO_SIGNAL for downstream awareness (optional - comment out if too noisy)
-        tradingSignals
-                .filter((k, v) -> v != null && v.getSignal() == TradingSignal.SignalType.NO_SIGNAL)
-                .filter((k, v) -> v.getIpuFinalScore() > 0.3)  // Only emit if there's some activity
-                .peek((k, v) -> {
-                    if (LOGGER.isDebugEnabled()) {
-                        LOGGER.debug("📊 NO_SIGNAL | scrip={} ipu={} vcp={}",
-                                k, String.format("%.2f", v.getIpuFinalScore()), 
-                                String.format("%.2f", v.getVcpCombinedScore()));
-                    }
-                })
-                .to(outputTopic, Produced.with(Serdes.String(), TradingSignal.serde()));
+        // NOTE: Disabled NO_SIGNAL emission to trading-signals topic.
+        // NO_SIGNAL signals were causing validation failures downstream in tradeExecution module
+        // because SignalValidator requires longSignal=true or shortSignal=true.
+        // If downstream needs NO_SIGNAL awareness, they should consume from ipu-signals directly.
+        //
+        // tradingSignals
+        //         .filter((k, v) -> v != null && v.getSignal() == TradingSignal.SignalType.NO_SIGNAL)
+        //         .filter((k, v) -> v.getIpuFinalScore() > 0.3)
+        //         .to(outputTopic, Produced.with(Serdes.String(), TradingSignal.serde()));
 
         LOGGER.info("📐 Built TradingSignal join topology: {} + {} -> {}",
                 vcpTopic, ipuTopic, outputTopic);

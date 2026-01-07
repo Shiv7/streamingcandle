@@ -187,11 +187,14 @@ public class TradingSignal {
 
         TradingSignal signal = builder.build();
         signal.classifySignal(vcp, ipu);
-        signal.calculateTradeParams(vcp, ipu);  // Calculate entry/stop/targets
+        signal.calculateTradeParams(vcp, ipu);  // Calculate entry/stop/targets AND sets signal flags
 
-        // FIX: Set signal flags AFTER classification
-        signal.setLongSignal(signal.isLongSignal());
-        signal.setShortSignal(signal.isShortSignal());
+        // NOTE: Do NOT override signal flags here!
+        // calculateTradeParams() already sets longSignal/shortSignal based on direction,
+        // even for NO_SIGNAL cases. Overriding with isLongSignal()/isShortSignal() would
+        // reset them to false for NO_SIGNAL, causing validation failures downstream.
+
+        // Only set warningSignal flag (doesn't get set in calculateTradeParams)
         signal.setWarningSignal(signal.isWarningSignal());
 
         // FIX: Calculate trailing stop distance
