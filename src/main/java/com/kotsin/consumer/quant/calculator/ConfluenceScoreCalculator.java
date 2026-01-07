@@ -21,10 +21,15 @@ public class ConfluenceScoreCalculator {
 
     private final QuantScoreConfig config;
 
-    private static final double CATEGORY_THRESHOLD = 60.0;  // % of max to consider "strong"
+    // ENHANCED: Lower thresholds to be more realistic
+    private static final double STRONG_THRESHOLD = 50.0;  // % of max to consider "strong"
+    private static final double MODERATE_THRESHOLD = 30.0;  // % of max to consider "moderate"
 
     /**
      * Calculate confluence subscore based on category agreement
+     *
+     * ENHANCED: Uses tiered scoring instead of binary threshold.
+     * Categories can contribute partially to confluence.
      *
      * @param breakdown Breakdown with individual category scores
      * @param direction Overall direction being analyzed
@@ -37,25 +42,27 @@ public class ConfluenceScoreCalculator {
             return 0;
         }
 
-        // Count categories above threshold
+        // ENHANCED: Calculate weighted confluence using tiered scoring
+        double totalConfluence = calculateTieredConfluence(breakdown);
+
+        // Scale to max score (totalConfluence is 0-7)
+        double baseScore = maxScore * (totalConfluence / 7.0);
+
+        // Count categories with any meaningful data
         int strongCategories = countStrongCategories(breakdown);
-
-        // Calculate agreement score based on how many categories agree
-        // 8 categories total
-        double agreementRatio = strongCategories / 8.0;
-
-        // Base score from agreement
-        double baseScore = maxScore * agreementRatio;
+        int moderateCategories = countModerateCategories(breakdown);
 
         // Bonus for high concentration of strong signals
-        if (strongCategories >= 6) {
-            baseScore *= 1.2;  // 20% bonus for 6+ categories
-        } else if (strongCategories >= 4) {
-            baseScore *= 1.1;  // 10% bonus for 4-5 categories
+        if (strongCategories >= 5) {
+            baseScore *= 1.3;  // 30% bonus for 5+ strong categories
+        } else if (strongCategories >= 3) {
+            baseScore *= 1.15;  // 15% bonus for 3-4 strong categories
+        } else if (moderateCategories >= 4) {
+            baseScore *= 1.05;  // 5% bonus for moderate agreement
         }
 
-        // Penalty for very low confluence
-        if (strongCategories <= 1) {
+        // Only apply penalty for truly no confluence (< 2 moderate categories)
+        if (strongCategories == 0 && moderateCategories < 2) {
             baseScore *= 0.5;
         }
 
@@ -63,7 +70,7 @@ public class ConfluenceScoreCalculator {
         double variance = calculateScoreVariance(breakdown);
         if (variance < 200) {
             baseScore *= 1.1;  // Low variance bonus
-        } else if (variance > 500) {
+        } else if (variance > 600) {
             baseScore *= 0.9;  // High variance penalty
         }
 
@@ -71,20 +78,63 @@ public class ConfluenceScoreCalculator {
     }
 
     /**
-     * Count categories above threshold percentage
+     * Calculate tiered confluence score
+     * Each category contributes: 1.0 if strong, 0.5 if moderate, 0 otherwise
+     */
+    private double calculateTieredConfluence(QuantScoreBreakdown breakdown) {
+        double total = 0;
+
+        total += getTieredScore(breakdown.getGreeksPct());
+        total += getTieredScore(breakdown.getIvSurfacePct());
+        total += getTieredScore(breakdown.getMicrostructurePct());
+        total += getTieredScore(breakdown.getOptionsFlowPct());
+        total += getTieredScore(breakdown.getPriceActionPct());
+        total += getTieredScore(breakdown.getVolumeProfilePct());
+        total += getTieredScore(breakdown.getCrossInstrumentPct());
+
+        return total;
+    }
+
+    /**
+     * Get tiered score contribution for a category
+     */
+    private double getTieredScore(double pct) {
+        if (pct >= STRONG_THRESHOLD) return 1.0;
+        if (pct >= MODERATE_THRESHOLD) return 0.5;
+        if (pct > 10) return 0.2;  // Some data available
+        return 0;
+    }
+
+    /**
+     * Count categories above strong threshold
      */
     private int countStrongCategories(QuantScoreBreakdown breakdown) {
         int count = 0;
-        double threshold = CATEGORY_THRESHOLD;
 
-        if (breakdown.getGreeksPct() >= threshold) count++;
-        if (breakdown.getIvSurfacePct() >= threshold) count++;
-        if (breakdown.getMicrostructurePct() >= threshold) count++;
-        if (breakdown.getOptionsFlowPct() >= threshold) count++;
-        if (breakdown.getPriceActionPct() >= threshold) count++;
-        if (breakdown.getVolumeProfilePct() >= threshold) count++;
-        if (breakdown.getCrossInstrumentPct() >= threshold) count++;
-        // Confluence is calculated last, so we don't include it here
+        if (breakdown.getGreeksPct() >= STRONG_THRESHOLD) count++;
+        if (breakdown.getIvSurfacePct() >= STRONG_THRESHOLD) count++;
+        if (breakdown.getMicrostructurePct() >= STRONG_THRESHOLD) count++;
+        if (breakdown.getOptionsFlowPct() >= STRONG_THRESHOLD) count++;
+        if (breakdown.getPriceActionPct() >= STRONG_THRESHOLD) count++;
+        if (breakdown.getVolumeProfilePct() >= STRONG_THRESHOLD) count++;
+        if (breakdown.getCrossInstrumentPct() >= STRONG_THRESHOLD) count++;
+
+        return count;
+    }
+
+    /**
+     * Count categories above moderate threshold
+     */
+    private int countModerateCategories(QuantScoreBreakdown breakdown) {
+        int count = 0;
+
+        if (breakdown.getGreeksPct() >= MODERATE_THRESHOLD) count++;
+        if (breakdown.getIvSurfacePct() >= MODERATE_THRESHOLD) count++;
+        if (breakdown.getMicrostructurePct() >= MODERATE_THRESHOLD) count++;
+        if (breakdown.getOptionsFlowPct() >= MODERATE_THRESHOLD) count++;
+        if (breakdown.getPriceActionPct() >= MODERATE_THRESHOLD) count++;
+        if (breakdown.getVolumeProfilePct() >= MODERATE_THRESHOLD) count++;
+        if (breakdown.getCrossInstrumentPct() >= MODERATE_THRESHOLD) count++;
 
         return count;
     }

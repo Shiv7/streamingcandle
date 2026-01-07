@@ -159,27 +159,64 @@ public class PriceActionScoreCalculator {
 
     /**
      * Fallback basic price action score
+     *
+     * ENHANCED: Uses MTFDistribution basic metrics when evolution is not available.
+     * This ensures we still get a reasonable score from directional consistency,
+     * momentum shift, and volume patterns.
      */
     private double calculateBasicPriceActionScore(FamilyCandle family) {
         double maxScore = config.getWeight().getPriceAction();
-
         double score = 0;
 
-        // Check reversal signals
+        // Try to use MTFDistribution basic metrics
+        MTFDistribution mtf = family.getMtfDistribution();
+        if (mtf != null) {
+            // Score from directional consistency (0-4)
+            // High consistency = strong trend = actionable
+            double consistency = mtf.getDirectionalConsistency();
+            score += maxScore * 0.33 * consistency;
+
+            // Score from momentum (0-4)
+            // Accelerating or decelerating momentum is actionable
+            if (mtf.isMomentumAccelerating()) {
+                score += maxScore * 0.25;
+            } else if (mtf.isMomentumDecelerating()) {
+                score += maxScore * 0.2;  // Potential reversal
+            } else if (Math.abs(mtf.getMomentumShift()) > 0.05) {
+                score += maxScore * 0.15;
+            }
+
+            // Score from volume pattern (0-4)
+            if (mtf.buildingStrength()) {
+                score += maxScore * 0.25;  // Late volume + accelerating momentum
+            } else if (mtf.showsExhaustion()) {
+                score += maxScore * 0.2;  // Reversal setup
+            } else if (mtf.isStrongTrend()) {
+                score += maxScore * 0.2;
+            }
+
+            // Bonus for clear interpretation
+            String interpretation = mtf.getInterpretation();
+            if ("STRONG_TREND".equals(interpretation) || "BUILDING_STRENGTH".equals(interpretation)) {
+                score += maxScore * 0.1;
+            }
+        }
+
+        // Also check family-level reversal signals
         if (family.isEquityShowingReversal()) {
-            score += maxScore * 0.3;
+            score += maxScore * 0.15;
         }
 
         if (family.isOiConfirmsReversal()) {
-            score += maxScore * 0.3;
+            score += maxScore * 0.15;
         }
 
         // Check directional bias
         String bias = family.getDirectionalBias();
         if ("STRONG_BULLISH".equals(bias) || "STRONG_BEARISH".equals(bias)) {
-            score += maxScore * 0.3;
+            score += maxScore * 0.15;
         } else if ("BULLISH".equals(bias) || "BEARISH".equals(bias)) {
-            score += maxScore * 0.2;
+            score += maxScore * 0.1;
         }
 
         return Math.min(maxScore, score);
