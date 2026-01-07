@@ -94,9 +94,18 @@ public class GreeksAggregator {
             String expiry = opt.getExpiry();
             boolean isCall = opt.isCall();
 
-            // FIX: Calculate Greeks if not present using Black-Scholes
+            // FIX: Calculate Greeks if not present OR suspiciously small using Black-Scholes
             // This fixes the bug where underlying price was incorrectly set to option premium
-            if (delta == null || gamma == null || vega == null || theta == null) {
+            // Check for null OR near-zero values (indicating incorrect calculation upstream)
+            boolean needsRecalc = delta == null || gamma == null || vega == null || theta == null;
+            if (!needsRecalc && delta != null && gamma != null && vega != null) {
+                // Check if values are suspiciously small (indicates option premium used as underlying)
+                // Valid delta should be in range [-1, 1] with typical values > 0.01 for ATM options
+                // If all Greeks are near-zero, they were likely calculated with wrong underlying price
+                boolean allNearZero = Math.abs(delta) < 0.001 && Math.abs(gamma) < 0.0001 && Math.abs(vega) < 0.01;
+                needsRecalc = allNearZero;
+            }
+            if (needsRecalc) {
                 if (strike > 0 && spotPrice > 0 && expiry != null) {
                     try {
                         int dte = estimateDTE(expiry);

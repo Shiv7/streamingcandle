@@ -1748,13 +1748,27 @@ public class UnifiedInstrumentCandleProcessor {
     /**
      * PHASE 9: Calculate option greeks (Delta, Gamma, Vega, Theta)
      * Uses Black-Scholes model with estimated volatility
+     *
+     * NOTE: For options, tick.getClose() returns the OPTION PREMIUM, not the underlying price.
+     * Greeks calculation here is SKIPPED for options - GreeksAggregator will calculate them
+     * correctly using the actual underlying equity/future price (spotPrice).
+     * This prevents the bug where option premium (~15) was used instead of underlying (~24000).
      */
     private void calculateOptionGreeks(InstrumentCandle.InstrumentCandleBuilder builder, TickAggregate tick,
                                        Double strikePrice, String optionType, Double hoursToExpiry) {
         try {
-            // Get required inputs
-            Double underlyingPrice = tick.getClose(); // Use candle close as underlying price
-            
+            // CRITICAL FIX: Skip Greeks calculation for options at this stage.
+            // For options, tick.getClose() returns the option premium, NOT the underlying price.
+            // Using option premium (e.g., Rs 15) as underlying price in Black-Scholes
+            // produces near-zero Greeks. GreeksAggregator will calculate correctly with spotPrice.
+            if (optionType != null && (optionType.equals("CE") || optionType.equals("PE"))) {
+                // Leave Greeks as null - GreeksAggregator will calculate with correct spotPrice
+                return;
+            }
+
+            // For non-options (futures, equities), use close price
+            Double underlyingPrice = tick.getClose();
+
             // Validate inputs
             if (strikePrice == null || strikePrice <= 0) {
                 return; // Strike not available

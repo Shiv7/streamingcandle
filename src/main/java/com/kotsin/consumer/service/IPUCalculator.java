@@ -611,26 +611,34 @@ public class IPUCalculator {
                              + normalizedWeight15m * (has15m ? ipu15m.getFinalIpuScore() : 0)
                              + normalizedWeight30m * (has30m ? ipu30m.getFinalIpuScore() : 0);
 
-        // Dominant momentum state (higher TF dominates)
+        // Dominant momentum state (higher TF dominates) - with null safety
         IPUOutput.MomentumState dominantMomentum;
-        if (ipu30m.getMomentumState() == IPUOutput.MomentumState.ACCELERATING 
-                || ipu30m.getMomentumState() == IPUOutput.MomentumState.TRENDING) {
-            dominantMomentum = ipu30m.getMomentumState();
-        } else if (ipu15m.getMomentumState() == IPUOutput.MomentumState.ACCELERATING 
-                || ipu15m.getMomentumState() == IPUOutput.MomentumState.TRENDING) {
-            dominantMomentum = ipu15m.getMomentumState();
+        IPUOutput.MomentumState momentum30m = ipu30m != null ? ipu30m.getMomentumState() : null;
+        IPUOutput.MomentumState momentum15m = ipu15m != null ? ipu15m.getMomentumState() : null;
+        IPUOutput.MomentumState momentum5m = ipu5m != null ? ipu5m.getMomentumState() : IPUOutput.MomentumState.FLAT;
+
+        if (momentum30m == IPUOutput.MomentumState.ACCELERATING
+                || momentum30m == IPUOutput.MomentumState.TRENDING) {
+            dominantMomentum = momentum30m;
+        } else if (momentum15m == IPUOutput.MomentumState.ACCELERATING
+                || momentum15m == IPUOutput.MomentumState.TRENDING) {
+            dominantMomentum = momentum15m;
         } else {
-            dominantMomentum = ipu5m.getMomentumState();
+            dominantMomentum = momentum5m != null ? momentum5m : IPUOutput.MomentumState.FLAT;
         }
 
-        // Direction alignment
+        // Direction alignment - with null safety
         int bullishCount = 0, bearishCount = 0;
-        if (ipu5m.getDirection() == IPUOutput.Direction.BULLISH) bullishCount++;
-        if (ipu15m.getDirection() == IPUOutput.Direction.BULLISH) bullishCount++;
-        if (ipu30m.getDirection() == IPUOutput.Direction.BULLISH) bullishCount++;
-        if (ipu5m.getDirection() == IPUOutput.Direction.BEARISH) bearishCount++;
-        if (ipu15m.getDirection() == IPUOutput.Direction.BEARISH) bearishCount++;
-        if (ipu30m.getDirection() == IPUOutput.Direction.BEARISH) bearishCount++;
+        IPUOutput.Direction dir5m = ipu5m != null ? ipu5m.getDirection() : null;
+        IPUOutput.Direction dir15m = ipu15m != null ? ipu15m.getDirection() : null;
+        IPUOutput.Direction dir30m = ipu30m != null ? ipu30m.getDirection() : null;
+
+        if (dir5m == IPUOutput.Direction.BULLISH) bullishCount++;
+        if (dir15m == IPUOutput.Direction.BULLISH) bullishCount++;
+        if (dir30m == IPUOutput.Direction.BULLISH) bullishCount++;
+        if (dir5m == IPUOutput.Direction.BEARISH) bearishCount++;
+        if (dir15m == IPUOutput.Direction.BEARISH) bearishCount++;
+        if (dir30m == IPUOutput.Direction.BEARISH) bearishCount++;
 
         IPUOutput.Direction direction;
         if (bullishCount == 3) {
@@ -645,42 +653,47 @@ public class IPUCalculator {
             direction = IPUOutput.Direction.NEUTRAL;
         }
 
-        // Exhaustion consensus
-        boolean mtfExhaustion = ipu30m.isExhaustionWarning() && ipu15m.isExhaustionWarning();
+        // Exhaustion consensus - with null safety
+        boolean exh30m = ipu30m != null && ipu30m.isExhaustionWarning();
+        boolean exh15m = ipu15m != null && ipu15m.isExhaustionWarning();
+        boolean mtfExhaustion = exh30m && exh15m;
+        double exhScore15m = ipu15m != null ? ipu15m.getExhaustionScore() : 0;
+        double exhScore30m = ipu30m != null ? ipu30m.getExhaustionScore() : 0;
 
         // Return combined using 5m as base, override key fields
+        // Note: ipu5m must be non-null at this point (caller responsibility)
         return IPUOutput.builder()
-                .scripCode(ipu5m.getScripCode())
-                .companyName(ipu5m.getCompanyName())
+                .scripCode(ipu5m != null ? ipu5m.getScripCode() : null)
+                .companyName(ipu5m != null ? ipu5m.getCompanyName() : null)
                 .timeframe("combined")
                 .timestamp(System.currentTimeMillis())
                 .finalIpuScore(combinedScore)
-                .volExpansionScore(ipu5m.getVolExpansionScore())
-                .priceEfficiency(ipu5m.getPriceEfficiency())
-                .ofQuality(ipu5m.getOfQuality())
-                .instProxy(ipu5m.getInstProxy())
-                .momentumContext(ipu5m.getMomentumContext())
-                .slopeMagnitude(ipu5m.getSlopeMagnitude())
-                .accelMagnitude(ipu5m.getAccelMagnitude())
-                .mmsSlope(ipu5m.getMmsSlope())
-                .mmsAcceleration(ipu5m.getMmsAcceleration())
-                .validatedMomentum(ipu5m.getValidatedMomentum())
-                .momentumAlignment(ipu5m.getMomentumAlignment())
-                .flowMomentumAgreement(ipu5m.getFlowMomentumAgreement())
+                .volExpansionScore(ipu5m != null ? ipu5m.getVolExpansionScore() : 0)
+                .priceEfficiency(ipu5m != null ? ipu5m.getPriceEfficiency() : 0)
+                .ofQuality(ipu5m != null ? ipu5m.getOfQuality() : 0)
+                .instProxy(ipu5m != null ? ipu5m.getInstProxy() : 0)
+                .momentumContext(ipu5m != null ? ipu5m.getMomentumContext() : 0)
+                .slopeMagnitude(ipu5m != null ? ipu5m.getSlopeMagnitude() : 0)
+                .accelMagnitude(ipu5m != null ? ipu5m.getAccelMagnitude() : 0)
+                .mmsSlope(ipu5m != null ? ipu5m.getMmsSlope() : 0)
+                .mmsAcceleration(ipu5m != null ? ipu5m.getMmsAcceleration() : 0)
+                .validatedMomentum(ipu5m != null ? ipu5m.getValidatedMomentum() : 0)
+                .momentumAlignment(ipu5m != null ? ipu5m.getMomentumAlignment() : 0)
+                .flowMomentumAgreement(ipu5m != null ? ipu5m.getFlowMomentumAgreement() : 0)
                 .momentumState(dominantMomentum)
-                .exhaustionScore(Math.max(ipu15m.getExhaustionScore(), ipu30m.getExhaustionScore()))
+                .exhaustionScore(Math.max(exhScore15m, exhScore30m))
                 .exhaustionWarning(mtfExhaustion)
-                .urgencyScore(ipu5m.getUrgencyScore())
-                .urgencyLevel(ipu5m.getUrgencyLevel())
+                .urgencyScore(ipu5m != null ? ipu5m.getUrgencyScore() : 0)
+                .urgencyLevel(ipu5m != null ? ipu5m.getUrgencyLevel() : IPUOutput.UrgencyLevel.PASSIVE)
                 .direction(direction)
-                .directionalConviction(ipu5m.getDirectionalConviction())
-                .xfactorScore(ipu5m.getXfactorScore())
-                .xfactorFlag(ipu5m.isXfactorFlag())
-                .certainty(ipu5m.getCertainty())
+                .directionalConviction(ipu5m != null ? ipu5m.getDirectionalConviction() : 0)
+                .xfactorScore(ipu5m != null ? ipu5m.getXfactorScore() : 0)
+                .xfactorFlag(ipu5m != null && ipu5m.isXfactorFlag())
+                .certainty(ipu5m != null ? ipu5m.getCertainty() : 0)
                 // FIX: Include price context from 5m for signal generation
-                .currentPrice(ipu5m.getCurrentPrice())
-                .atr(ipu5m.getAtr())
-                .raw(ipu5m.getRaw())
+                .currentPrice(ipu5m != null ? ipu5m.getCurrentPrice() : 0)
+                .atr(ipu5m != null ? ipu5m.getAtr() : 0)
+                .raw(ipu5m != null ? ipu5m.getRaw() : null)
                 .build();
     }
 
