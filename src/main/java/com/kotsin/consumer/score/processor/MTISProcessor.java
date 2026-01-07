@@ -92,8 +92,31 @@ public class MTISProcessor {
     // Cache for latest NIFTY regime (for relative strength calculation)
     private volatile IndexRegime latestNiftyRegime;
 
+    // FIX Bug #17: Cooldown to prevent excessive signal emissions
+    // Key = scripCode:timeframe, Value = {lastEmitTime, lastMtis, lastActionable}
+    private final Map<String, EmissionState> emissionStateCache = new ConcurrentHashMap<>();
+
+    @Value("${mtis.processor.cooldown.minutes:5}")
+    private int cooldownMinutes;
+
+    @Value("${mtis.processor.significant.change:5.0}")
+    private double significantChangeThreshold;
+
     // Thread pool for async processing (prevents blocking Kafka consumer)
     private ExecutorService asyncProcessorPool;
+
+    // FIX Bug #17: Inner class to track emission state
+    private static class EmissionState {
+        long lastEmitTime;
+        double lastMtis;
+        boolean lastActionable;
+
+        EmissionState(long time, double mtis, boolean actionable) {
+            this.lastEmitTime = time;
+            this.lastMtis = mtis;
+            this.lastActionable = actionable;
+        }
+    }
 
     @PostConstruct
     public void init() {
@@ -107,6 +130,7 @@ public class MTISProcessor {
         log.info("🎯 MTISProcessor initialized. Enabled: {}, Output topic: {}", enabled, outputTopic);
         log.info("🎯 Listening to: family-candle-*, regime-*, ipu-combined, fudkii-output, vcp-combined");
         log.info("🎯 Async processing pool size: {}", poolSize);
+        log.info("🎯 [Bug#17 FIX] Cooldown: {}min, significant change threshold: {}", cooldownMinutes, significantChangeThreshold);
     }
 
     // ==================== MAIN LISTENER ====================
@@ -271,6 +295,48 @@ public class MTISProcessor {
 
         // 6. Update state with new MTIS
         updateStateAfterCalculation(state, score, familyCandle);
+
+        // FIX Bug #17: Check cooldown before emitting - don't spam output topic
+        String emissionKey = familyId + ":" + timeframe;
+        long now = System.currentTimeMillis();
+        long cooldownMs = cooldownMinutes * 60 * 1000L;
+        EmissionState lastState = emissionStateCache.get(emissionKey);
+
+        boolean shouldEmit = false;
+        String emitReason = "";
+
+        if (lastState == null) {
+            // First time - always emit
+            shouldEmit = true;
+            emitReason = "first";
+        } else {
+            boolean cooldownExpired = (now - lastState.lastEmitTime) >= cooldownMs;
+            boolean statusChanged = score.isActionable() != lastState.lastActionable;
+            boolean significantChange = Math.abs(score.getMtis() - lastState.lastMtis) >= significantChangeThreshold;
+
+            if (statusChanged) {
+                // Status change (actionable ↔ non-actionable) - always emit
+                shouldEmit = true;
+                emitReason = "status-changed";
+            } else if (significantChange) {
+                // Significant MTIS change - always emit
+                shouldEmit = true;
+                emitReason = "significant-change";
+            } else if (cooldownExpired) {
+                // Cooldown expired - emit for update
+                shouldEmit = true;
+                emitReason = "cooldown-expired";
+            }
+        }
+
+        if (!shouldEmit) {
+            log.debug("MTIS emission skipped for {} {} - cooldown active, no significant change",
+                    familyId, timeframe);
+            return;
+        }
+
+        // Update emission state cache
+        emissionStateCache.put(emissionKey, new EmissionState(now, score.getMtis(), score.isActionable()));
 
         // 7. Emit to output topic (async send - non-blocking)
         try {

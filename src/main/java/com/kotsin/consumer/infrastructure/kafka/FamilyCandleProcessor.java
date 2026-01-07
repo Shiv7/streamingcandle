@@ -217,18 +217,20 @@ public class FamilyCandleProcessor {
             .peek((key, familyCandle) -> {
                 if (log.isDebugEnabled() && familyCandle != null) {
                     String familyId = familyCandle.getFamilyId();
-                    InstrumentCandle equity = familyCandle.getEquity();
-                    String scripCode = equity != null ? equity.getScripCode() : "N/A";
-                    log.debug("[FAMILY] {} | {} | equity={} future={} options={} | OHLC={}/{}/{}/{} vol={} | emitted to {}", 
+                    // FIX: Use primaryInstrument for OHLC display (handles commodities correctly)
+                    InstrumentCandle primary = familyCandle.getPrimaryInstrumentOrFallback();
+                    String scripCode = primary != null ? primary.getScripCode() : "N/A";
+                    log.debug("[FAMILY] {} | {} | equity={} future={} options={} commodity={} | OHLC={}/{}/{}/{} vol={} | emitted to {}",
                         familyId, scripCode,
-                        equity != null ? "YES" : "NO",
+                        familyCandle.getEquity() != null ? "YES" : "NO",
                         familyCandle.getFuture() != null ? "YES" : "NO",
                         familyCandle.getOptions() != null ? familyCandle.getOptions().size() : 0,
-                        equity != null ? equity.getOpen() : 0.0, 
-                        equity != null ? equity.getHigh() : 0.0, 
-                        equity != null ? equity.getLow() : 0.0,
-                        equity != null ? equity.getClose() : 0.0,
-                        equity != null ? equity.getVolume() : 0L, outputTopic);
+                        familyCandle.isCommodity() ? "YES" : "NO",
+                        primary != null ? primary.getOpen() : 0.0,
+                        primary != null ? primary.getHigh() : 0.0,
+                        primary != null ? primary.getLow() : 0.0,
+                        primary != null ? primary.getClose() : 0.0,
+                        primary != null ? primary.getVolume() : 0L, outputTopic);
                 }
             })
             .to(outputTopic, Produced.with(Serdes.String(), FamilyCandle.serde()));
@@ -694,22 +696,34 @@ public class FamilyCandleProcessor {
         
         // PHASE 2: MTF Distribution Analysis
         // Calculate intra-window sub-candle patterns for directional consistency
+        // FIX: For commodities, use futureSubCandles when equitySubCandles is empty
         List<com.kotsin.consumer.model.UnifiedCandle> subCandles = collector.getEquitySubCandles();
+        String subCandleSource = "equity";
+
+        // For commodities (no equity), use future sub-candles for MTF distribution
+        if ((subCandles == null || subCandles.isEmpty()) && isCommodity) {
+            subCandles = collector.getFutureSubCandles();
+            subCandleSource = "future";
+        }
+
         if (subCandles != null && !subCandles.isEmpty() && subCandles.size() > 1) {
             try {
                 com.kotsin.consumer.model.MTFDistribution dist = mtfDistributionCalculator.calculate(subCandles);
                 builder.mtfDistribution(dist);
-                
-                log.info("📊 MTF Distribution for {}: {} sub-candles, consistency={:.2f}, interpretation={}",
-                         familyId, dist.getTotalSubCandles(), 
+
+                log.info("📊 MTF Distribution for {}: {} sub-candles (from {}), consistency={:.2f}, interpretation={}",
+                         familyId, dist.getTotalSubCandles(), subCandleSource,
                          dist.getDirectionalConsistency(),
                          dist.getInterpretation());
             } catch (Exception e) {
                 log.warn("⚠️ MTF Distribution calculation failed for {}: {}", familyId, e.getMessage());
             }
         } else {
-            log.debug("⚠️ MTF Distribution skipped for {} - insufficient sub-candles (count={})",
-                      familyId, subCandles != null ? subCandles.size() : 0);
+            log.debug("⚠️ MTF Distribution skipped for {} - insufficient sub-candles (equityCount={}, futureCount={}, isCommodity={})",
+                      familyId,
+                      collector.getEquitySubCandles() != null ? collector.getEquitySubCandles().size() : 0,
+                      collector.getFutureSubCandles() != null ? collector.getFutureSubCandles().size() : 0,
+                      isCommodity);
         }
 
         FamilyCandle familyCandle = builder
@@ -907,6 +921,8 @@ public class FamilyCandleProcessor {
 
         // PHASE 2: MTF Distribution - track sub-candles during aggregation
         private List<com.kotsin.consumer.model.UnifiedCandle> equitySubCandles = new ArrayList<>();
+        // FIX: Also track future sub-candles for commodities (MCX)
+        private List<com.kotsin.consumer.model.UnifiedCandle> futureSubCandles = new ArrayList<>();
 
         public FamilyCandleCollector add(InstrumentCandle candle) {
             if (candle == null) return this;
@@ -942,6 +958,8 @@ public class FamilyCandleProcessor {
                         mergeInstrumentCandle(this.future, candle);
                         futureMergeCount++;
                     }
+                    // FIX: Track future sub-candles for MTF distribution (commodities)
+                    futureSubCandles.add(com.kotsin.consumer.model.UnifiedCandle.from(candle));
                     break;
                 case OPTION_CE:
                 case OPTION_PE:
@@ -956,29 +974,32 @@ public class FamilyCandleProcessor {
                         if (existing == null) {
                             // Check if we've hit the limit
                             if (optionsByScripCode.size() >= MAX_OPTIONS_IN_COLLECTOR) {
-                                // Find the option with lowest OI and replace if new one has higher OI
-                                long newOI = candle.getOpenInterest();
-                                String lowestOIKey = null;
-                                long lowestOI = Long.MAX_VALUE;
+                                // FIX Bug #24: Use HYBRID ranking (ATM proximity + OI) not just OI
+                                // ATM options are critical for analysis - don't drop them for far OTM high-OI
+                                double spotPrice = getEstimatedSpotPrice();
+                                double newScore = calculateHybridOptionScore(candle, spotPrice);
+
+                                String worstKey = null;
+                                double worstScore = Double.MAX_VALUE;
 
                                 for (Map.Entry<String, InstrumentCandle> entry : optionsByScripCode.entrySet()) {
-                                    long oi = entry.getValue().getOpenInterest();
-                                    if (oi < lowestOI) {
-                                        lowestOI = oi;
-                                        lowestOIKey = entry.getKey();
+                                    double score = calculateHybridOptionScore(entry.getValue(), spotPrice);
+                                    if (score < worstScore) {
+                                        worstScore = score;
+                                        worstKey = entry.getKey();
                                     }
                                 }
 
-                                if (newOI > lowestOI && lowestOIKey != null) {
-                                    // Replace lowest OI option with new higher OI option
-                                    optionsByScripCode.remove(lowestOIKey);
+                                if (newScore > worstScore && worstKey != null) {
+                                    // Replace worst-scored option with better one
+                                    optionsByScripCode.remove(worstKey);
                                     optionsByScripCode.put(scripCode, candle);
-                                    log.debug("[OPTIONS-LIMIT] Replaced low-OI option {} (OI={}) with {} (OI={})",
-                                        lowestOIKey, lowestOI, scripCode, newOI);
+                                    log.debug("[OPTIONS-LIMIT Bug#24] Replaced {} (score={:.2f}) with {} (score={:.2f})",
+                                        worstKey, worstScore, scripCode, newScore);
                                 } else {
-                                    // New option has lower OI than all existing - skip it
-                                    log.debug("[OPTIONS-LIMIT] Skipped low-OI option {} (OI={}) - limit {} reached",
-                                        scripCode, newOI, MAX_OPTIONS_IN_COLLECTOR);
+                                    // New option scores worse than all existing - skip it
+                                    log.debug("[OPTIONS-LIMIT Bug#24] Skipped {} (score={:.2f}) - limit {} reached",
+                                        scripCode, newScore, MAX_OPTIONS_IN_COLLECTOR);
                                 }
                             } else {
                                 // Under limit - just add it
@@ -1053,6 +1074,67 @@ public class FamilyCandleProcessor {
             return totalOptionsReceived;
         }
 
+        /**
+         * FIX Bug #24: Get estimated spot price from equity or future
+         * Used for ATM proximity calculation in hybrid option ranking
+         */
+        private double getEstimatedSpotPrice() {
+            if (equity != null && equity.getClose() > 0) {
+                return equity.getClose();
+            }
+            if (future != null && future.getClose() > 0) {
+                return future.getClose();
+            }
+            // Fallback: estimate from existing options' average strike (weighted by OI)
+            if (!optionsByScripCode.isEmpty()) {
+                double weightedSum = 0;
+                long totalOI = 0;
+                for (InstrumentCandle opt : optionsByScripCode.values()) {
+                    double strike = opt.getStrikePrice();
+                    long oi = opt.getOpenInterest();
+                    if (strike > 0 && oi > 0) {
+                        weightedSum += strike * oi;
+                        totalOI += oi;
+                    }
+                }
+                if (totalOI > 0) {
+                    return weightedSum / totalOI;
+                }
+            }
+            return 0;
+        }
+
+        /**
+         * FIX Bug #24: Calculate hybrid option score prioritizing ATM proximity then OI
+         *
+         * Score formula: ATM_PROXIMITY_SCORE (0-100) + OI_BONUS (0-20)
+         * - ATM options score 100, far OTM score lower
+         * - OI provides up to 20 bonus points
+         *
+         * This ensures ATM options with moderate OI beat far OTM with high OI
+         */
+        private double calculateHybridOptionScore(InstrumentCandle option, double spotPrice) {
+            double strike = option.getStrikePrice();
+            long oi = option.getOpenInterest();
+
+            // If no spot price, fall back to pure OI ranking
+            if (spotPrice <= 0 || strike <= 0) {
+                return oi;
+            }
+
+            // ATM proximity score: 100 at ATM, decays with distance
+            // Formula: 100 * exp(-distance_pct^2 / decay_factor)
+            // decay_factor = 100 means ~37% score at 10% OTM
+            double distancePct = Math.abs(strike - spotPrice) / spotPrice * 100;
+            double atmScore = 100 * Math.exp(-distancePct * distancePct / 100);
+
+            // OI bonus: log-scaled to prevent extreme OI from dominating
+            // Max bonus ~20 points for very high OI
+            double oiBonus = oi > 0 ? Math.min(20, Math.log10(oi) * 3) : 0;
+
+            return atmScore + oiBonus;
+        }
+
         public boolean hasEquity() {
             return equity != null;
         }
@@ -1077,6 +1159,11 @@ public class FamilyCandleProcessor {
         // PHASE 2: Getter for MTF sub-candles
         public List<com.kotsin.consumer.model.UnifiedCandle> getEquitySubCandles() {
             return equitySubCandles;
+        }
+
+        // FIX: Getter for future sub-candles (for commodities MTF distribution)
+        public List<com.kotsin.consumer.model.UnifiedCandle> getFutureSubCandles() {
+            return futureSubCandles;
         }
 
         public static org.apache.kafka.common.serialization.Serde<FamilyCandleCollector> serde() {

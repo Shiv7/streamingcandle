@@ -191,7 +191,8 @@ public class CompositeStructureScore {
 
         double price = current.getClose();
         double atr = current.getHigh() - current.getLow();
-        if (atr <= 0) atr = price * 0.01;  // 1% fallback
+        // FIX Bug #23: Use 1.5% fallback (more realistic than 1%)
+        if (atr <= 0) atr = price * 0.015;
 
         // Calculate distance to nearest level
         double[] significantLevels = {
