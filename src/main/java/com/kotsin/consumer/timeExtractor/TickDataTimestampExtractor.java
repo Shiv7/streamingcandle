@@ -6,6 +6,8 @@ import org.apache.kafka.streams.processor.TimestampExtractor;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
+import java.util.concurrent.atomic.AtomicLong;
+
 /**
  * 🛡️ CRITICAL FIX: Event-Time Processing for TickData
  *
@@ -15,19 +17,23 @@ import org.slf4j.LoggerFactory;
  * CRITICAL: Ensures consistent windowing behavior for both replay and live data.
  * Without this, replay of historical tick data won't aggregate correctly into candles.
  *
- * TIMESTAMP CLAMPING:
- * Uses wall clock time as reference to prevent repartition topic failures.
- * If event time is too far in the future (relative to now), clamp it to prevent
- * InvalidTimestampException on internal Kafka Streams topics.
+ * TIMESTAMP CLAMPING (ISSUE #1 FIX):
+ * Uses max observed STREAM TIME as reference instead of wall clock.
+ * This ensures correct behavior during replay of historical data.
+ * - During replay: clamps relative to replay stream time
+ * - During live: stream time ≈ wall clock anyway
  */
 public class TickDataTimestampExtractor implements TimestampExtractor {
 
     private static final Logger LOGGER = LoggerFactory.getLogger(TickDataTimestampExtractor.class);
     private static final long MIN_VALID_TIMESTAMP = 1577836800000L; // Jan 1, 2020
 
-    // Maximum allowed future drift from wall clock (1 hour = 3600000 ms)
-    // This aligns with typical Kafka broker max.message.time.difference.ms
+    // Maximum allowed future drift from observed stream time (1 hour = 3600000 ms)
     private static final long MAX_FUTURE_DRIFT_MS = 3600000L;
+
+    // ISSUE #1 FIX: Track max observed stream time instead of using wall clock
+    // This enables correct replay of historical data
+    private static final AtomicLong maxObservedStreamTime = new AtomicLong(0);
 
     @Override
     public long extract(ConsumerRecord<Object, Object> record, long partitionTime) {
@@ -44,20 +50,33 @@ public class TickDataTimestampExtractor implements TimestampExtractor {
                 return record.timestamp() > 0 ? record.timestamp() : partitionTime;
             }
 
-            // Use wall clock as reference point for clamping
-            // This ensures consistent behavior regardless of processing order
-            long wallClock = System.currentTimeMillis();
-            long maxAllowedTimestamp = wallClock + MAX_FUTURE_DRIFT_MS;
+            // ISSUE #1 FIX: Use max observed stream time as reference instead of wall clock
+            // This ensures correct behavior during replay of historical data
+            long currentMax = maxObservedStreamTime.get();
 
-            // Check if timestamp is too far in the future
+            // Update max observed time if this event is newer (but not too far ahead)
+            if (eventTime > currentMax && eventTime <= currentMax + MAX_FUTURE_DRIFT_MS) {
+                maxObservedStreamTime.updateAndGet(prev -> Math.max(prev, eventTime));
+                currentMax = maxObservedStreamTime.get();
+            }
+
+            // For first few records or cold start, use wall clock as bootstrap reference
+            if (currentMax == 0) {
+                currentMax = System.currentTimeMillis();
+                maxObservedStreamTime.compareAndSet(0, currentMax);
+            }
+
+            long maxAllowedTimestamp = currentMax + MAX_FUTURE_DRIFT_MS;
+
+            // Check if timestamp is too far in the future relative to stream time
             if (eventTime > maxAllowedTimestamp) {
                 // Clamp to prevent InvalidTimestampException on repartition topics
                 long clampedTimestamp = maxAllowedTimestamp;
 
-                LOGGER.warn("TickData timestamp {} is {}ms ahead of wall clock {}. " +
+                LOGGER.warn("TickData timestamp {} is {}ms ahead of stream time {}. " +
                         "Clamping to {} to prevent InvalidTimestampException. " +
                         "Topic: {}, Partition: {}, Offset: {}, Token: {}",
-                    eventTime, eventTime - wallClock, wallClock, clampedTimestamp,
+                    eventTime, eventTime - currentMax, currentMax, clampedTimestamp,
                     record.topic(), record.partition(), record.offset(), tick.getToken());
 
                 return clampedTimestamp;

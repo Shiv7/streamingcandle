@@ -1,6 +1,7 @@
 package com.kotsin.consumer.service;
 
 import lombok.extern.slf4j.Slf4j;
+import org.springframework.beans.factory.annotation.Value;
 import org.springframework.scheduling.annotation.Scheduled;
 import org.springframework.stereotype.Service;
 
@@ -12,18 +13,24 @@ import java.util.concurrent.atomic.AtomicLong;
 
 /**
  * LiveMonitoringService - Production-grade monitoring for live data
- * 
+ *
  * Provides:
  * - Per-topic throughput counters
  * - Periodic heartbeat logs
  * - Data flow health checks
  * - Latency tracking
+ *
+ * ISSUE #2 FIX: Added replay mode config to bypass market hours check during replay.
  */
 @Slf4j
 @Service
 public class LiveMonitoringService {
 
     private static final DateTimeFormatter TIME_FMT = DateTimeFormatter.ofPattern("HH:mm:ss");
+
+    // ISSUE #2 FIX: Config flag to enable monitoring during replay (outside market hours)
+    @Value("${monitoring.replay.mode:false}")
+    private boolean replayMode;
 
     // Throughput counters
     private final ConcurrentHashMap<String, AtomicLong> messageCounters = new ConcurrentHashMap<>();
@@ -79,10 +86,13 @@ public class LiveMonitoringService {
     @Scheduled(fixedRate = 60000)
     public void heartbeat() {
         LocalTime now = LocalTime.now();
-        
-        // Only log during extended market hours (9:00 - 16:00)
-        if (now.isBefore(LocalTime.of(9, 0)) || now.isAfter(LocalTime.of(16, 0))) {
-            return;
+
+        // ISSUE #2 FIX: Skip market hours check in replay mode
+        if (!replayMode) {
+            // Only log during extended market hours (9:00 - 16:00)
+            if (now.isBefore(LocalTime.of(9, 0)) || now.isAfter(LocalTime.of(16, 0))) {
+                return;
+            }
         }
 
         log.info("💓 HEARTBEAT | time={} | signals={} (L:{} S:{}) | errors={}",
@@ -99,10 +109,13 @@ public class LiveMonitoringService {
     @Scheduled(fixedRate = 300000)
     public void throughputReport() {
         LocalTime now = LocalTime.now();
-        
-        // Only log during extended market hours
-        if (now.isBefore(LocalTime.of(9, 0)) || now.isAfter(LocalTime.of(16, 0))) {
-            return;
+
+        // ISSUE #2 FIX: Skip market hours check in replay mode
+        if (!replayMode) {
+            // Only log during extended market hours
+            if (now.isBefore(LocalTime.of(9, 0)) || now.isAfter(LocalTime.of(16, 0))) {
+                return;
+            }
         }
 
         StringBuilder sb = new StringBuilder();
@@ -137,10 +150,13 @@ public class LiveMonitoringService {
     @Scheduled(fixedRate = 120000)
     public void stalenessCheck() {
         LocalTime now = LocalTime.now();
-        
-        // Only check during market hours (9:15 - 15:30)
-        if (now.isBefore(LocalTime.of(9, 15)) || now.isAfter(LocalTime.of(15, 30))) {
-            return;
+
+        // ISSUE #2 FIX: Skip market hours check in replay mode
+        if (!replayMode) {
+            // Only check during market hours (9:15 - 15:30)
+            if (now.isBefore(LocalTime.of(9, 15)) || now.isAfter(LocalTime.of(15, 30))) {
+                return;
+            }
         }
 
         long staleThreshold = 120000; // 2 minutes

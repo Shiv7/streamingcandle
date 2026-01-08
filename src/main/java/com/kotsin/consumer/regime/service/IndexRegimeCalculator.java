@@ -11,6 +11,7 @@ import org.springframework.stereotype.Service;
 
 import java.time.*;
 import java.util.*;
+import java.util.concurrent.atomic.AtomicLong;
 
 /**
  * IndexRegimeCalculator - Module 1: Index Regime
@@ -53,6 +54,10 @@ public class IndexRegimeCalculator {
     public static final String BANKNIFTY_CODE = "999920005";
     public static final String FINNIFTY_CODE = "999920041";
     public static final String MIDCPNIFTY_CODE = "999920043";
+
+    // ISSUE #4 FIX: Track last observed event time for fallback instead of wall clock
+    // This enables correct timestamps during replay of historical data
+    private static final AtomicLong lastObservedEventTime = new AtomicLong(0);
 
     /**
      * Calculate full Index Regime from multi-timeframe candle data
@@ -605,46 +610,63 @@ public class IndexRegimeCalculator {
     /**
      * Extract event timestamp from the most recent candle
      * Prioritizes higher frequency timeframes (5m -> 30m -> 2H -> 1D)
-     * Falls back to System.currentTimeMillis() if no candles available
+     *
+     * ISSUE #4 FIX: Falls back to last observed stream time instead of wall clock
+     * This ensures correct timestamps during replay of historical data
      */
     private long getEventTimestamp(List<InstrumentCandle> candles30m,
                                    List<InstrumentCandle> candles5m,
                                    List<InstrumentCandle> candles2H,
                                    List<InstrumentCandle> candles1D) {
+        long timestamp = 0;
+
         // Try 5m first (most recent)
         if (candles5m != null && !candles5m.isEmpty()) {
             InstrumentCandle latest = candles5m.get(candles5m.size() - 1);
             if (latest.getWindowEndMillis() > 0) {
-                return latest.getWindowEndMillis();
+                timestamp = latest.getWindowEndMillis();
             }
         }
 
         // Try 30m
-        if (candles30m != null && !candles30m.isEmpty()) {
+        if (timestamp == 0 && candles30m != null && !candles30m.isEmpty()) {
             InstrumentCandle latest = candles30m.get(candles30m.size() - 1);
             if (latest.getWindowEndMillis() > 0) {
-                return latest.getWindowEndMillis();
+                timestamp = latest.getWindowEndMillis();
             }
         }
 
         // Try 2H
-        if (candles2H != null && !candles2H.isEmpty()) {
+        if (timestamp == 0 && candles2H != null && !candles2H.isEmpty()) {
             InstrumentCandle latest = candles2H.get(candles2H.size() - 1);
             if (latest.getWindowEndMillis() > 0) {
-                return latest.getWindowEndMillis();
+                timestamp = latest.getWindowEndMillis();
             }
         }
 
         // Try 1D
-        if (candles1D != null && !candles1D.isEmpty()) {
+        if (timestamp == 0 && candles1D != null && !candles1D.isEmpty()) {
             InstrumentCandle latest = candles1D.get(candles1D.size() - 1);
             if (latest.getWindowEndMillis() > 0) {
-                return latest.getWindowEndMillis();
+                timestamp = latest.getWindowEndMillis();
             }
         }
 
-        // Fallback to system time (should rarely happen in production)
-        log.warn("No candles with valid timestamps found, falling back to System.currentTimeMillis()");
+        // If we found a valid timestamp, update the tracker and return
+        if (timestamp > 0) {
+            lastObservedEventTime.updateAndGet(prev -> Math.max(prev, timestamp));
+            return timestamp;
+        }
+
+        // ISSUE #4 FIX: Fallback to last observed stream time, then wall clock
+        long lastObserved = lastObservedEventTime.get();
+        if (lastObserved > 0) {
+            log.debug("No candles with valid timestamps found, using last observed stream time: {}", lastObserved);
+            return lastObserved;
+        }
+
+        // Ultimate fallback to wall clock (only for cold start)
+        log.warn("No candles and no observed stream time, falling back to System.currentTimeMillis()");
         return System.currentTimeMillis();
     }
 }
