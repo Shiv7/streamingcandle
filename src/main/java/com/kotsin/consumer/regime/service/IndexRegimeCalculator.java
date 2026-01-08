@@ -654,7 +654,8 @@ public class IndexRegimeCalculator {
 
         // If we found a valid timestamp, update the tracker and return
         if (timestamp > 0) {
-            lastObservedEventTime.updateAndGet(prev -> Math.max(prev, timestamp));
+            final long finalTimestamp = timestamp;
+            lastObservedEventTime.updateAndGet(prev -> Math.max(prev, finalTimestamp));
             return timestamp;
         }
 
