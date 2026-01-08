@@ -1564,22 +1564,22 @@ public class UnifiedInstrumentCandleProcessor {
             stalenessReason.append("); ");
         }
         
+        // FIX: Removed duplicate staleness logging code
         if (stalenessReason.length() > 0) {
             builder.stalenessReason(stalenessReason.toString());
 
-            log.warn("[STALE-DATA] {} | {} | MaxAge: {}ms",
-                tick.getScripCode(),
-                stalenessReason.toString(),
-                maxAge);
-        }
-
-        if (stalenessReason.length() > 0) {
-            builder.stalenessReason(stalenessReason.toString());
-
-            log.warn("[STALE-DATA] {} | {} | MaxAge: {}ms",
-                tick.getScripCode(),
-                stalenessReason.toString(),
-                maxAge);
+            // FIX: Only log if staleness is significant (> 30 seconds) to reduce log spam
+            if (maxAge > 30000) {
+                log.warn("[STALE-DATA] {} | {} | MaxAge: {}ms",
+                    tick.getScripCode(),
+                    stalenessReason.toString(),
+                    maxAge);
+            } else {
+                log.debug("[STALE-DATA] {} | {} | MaxAge: {}ms",
+                    tick.getScripCode(),
+                    stalenessReason.toString(),
+                    maxAge);
+            }
         }
 
         InstrumentCandle candle = builder.build();

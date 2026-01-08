@@ -35,6 +35,11 @@ public class TickDataTimestampExtractor implements TimestampExtractor {
     // This enables correct replay of historical data
     private static final AtomicLong maxObservedStreamTime = new AtomicLong(0);
 
+    // FIX: Rate-limit invalid timestamp warnings to reduce log spam
+    private static final AtomicLong invalidTimestampCount = new AtomicLong(0);
+    private static final AtomicLong lastInvalidTimestampLogTime = new AtomicLong(0);
+    private static final long INVALID_TIMESTAMP_LOG_INTERVAL_MS = 60000; // Log at most once per minute
+
     @Override
     public long extract(ConsumerRecord<Object, Object> record, long partitionTime) {
         Object value = record.value();
@@ -45,8 +50,20 @@ public class TickDataTimestampExtractor implements TimestampExtractor {
 
             // Validate event time is reasonable (after Jan 1, 2020)
             if (eventTime < MIN_VALID_TIMESTAMP) {
-                LOGGER.warn("Invalid timestamp {} for token {}, using record timestamp",
-                        eventTime, tick.getToken());
+                // FIX: Rate-limit warnings to reduce log spam
+                long count = invalidTimestampCount.incrementAndGet();
+                long now = System.currentTimeMillis();
+                long lastLog = lastInvalidTimestampLogTime.get();
+
+                if (now - lastLog > INVALID_TIMESTAMP_LOG_INTERVAL_MS) {
+                    if (lastInvalidTimestampLogTime.compareAndSet(lastLog, now)) {
+                        LOGGER.warn("[INVALID-TIMESTAMP] {} ticks with invalid timestamp in last {}s. " +
+                                "Latest: token={}, timestamp={}, using record timestamp instead",
+                                count, INVALID_TIMESTAMP_LOG_INTERVAL_MS / 1000,
+                                tick.getToken(), eventTime);
+                        invalidTimestampCount.set(0); // Reset counter after logging
+                    }
+                }
                 return record.timestamp() > 0 ? record.timestamp() : partitionTime;
             }
 

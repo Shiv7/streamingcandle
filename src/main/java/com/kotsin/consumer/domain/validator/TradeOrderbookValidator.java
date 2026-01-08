@@ -25,7 +25,12 @@ public class TradeOrderbookValidator {
     // Thresholds for validation
     private static final double MIN_CORRELATION = 0.3;
     private static final double HIGH_CORRELATION = 0.7;
-    private static final double EPSILON = 0.01;  // Ignore tiny values
+    private static final double EPSILON = 0.05;  // FIX: Increased from 0.01 to 0.05 to ignore small noise
+
+    // FIX: Minimum absolute thresholds to trigger CONFLICT
+    // Only flag CONFLICT when both trade imbalance AND OFI are significant
+    private static final long MIN_TRADE_IMBALANCE_FOR_CONFLICT = 1000;  // Min volume imbalance
+    private static final double MIN_OFI_FOR_CONFLICT = 10000.0;  // Min OFI magnitude
 
     /**
      * Validation result with quality and reason
@@ -80,12 +85,26 @@ public class TradeOrderbookValidator {
         boolean tradePositive = tradeImbalance > 0;
         boolean ofiPositive = ofi > 0;
 
+        // FIX: Only flag CONFLICT when BOTH signals are significant
+        // Small imbalances in opposite directions are just noise, not conflict
+        boolean tradeSignificant = Math.abs(tradeImbalance) >= MIN_TRADE_IMBALANCE_FOR_CONFLICT;
+        boolean ofiSignificant = Math.abs(ofi) >= MIN_OFI_FOR_CONFLICT;
+
         if (tradePositive != ofiPositive && !tradeNearZero && !ofiNearZero) {
-            // CONFLICT: Trade says buy, OFI says sell (or vice versa)
-            return new ValidationResult(DataQuality.CONFLICT,
-                String.format("Trade imbalance (%d) conflicts with OFI (%.2f)", 
-                    tradeImbalance, ofi),
-                -0.5);  // Negative correlation indicates conflict
+            // Only CONFLICT if both signals are significant
+            if (tradeSignificant && ofiSignificant) {
+                // CONFLICT: Trade says buy, OFI says sell (or vice versa) with significant magnitude
+                return new ValidationResult(DataQuality.CONFLICT,
+                    String.format("Trade imbalance (%d) conflicts with OFI (%.2f)",
+                        tradeImbalance, ofi),
+                    -0.5);  // Negative correlation indicates conflict
+            } else {
+                // FIX: Downgrade to WARNING if signals are weak
+                return new ValidationResult(DataQuality.WARNING,
+                    String.format("Weak directional conflict: trade=%d (sig=%s), ofi=%.2f (sig=%s)",
+                        tradeImbalance, tradeSignificant, ofi, ofiSignificant),
+                    -0.2);
+            }
         }
 
         // Same direction - calculate normalized correlation
