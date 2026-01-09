@@ -53,6 +53,10 @@ public class TimeframeAggregator {
     @Value("${family.output.topics.1m:family-candle-1m}")
     private String inputTopic;
 
+    // FIX: Configurable grace period (2 seconds default for fast emission)
+    @Value("${timeframe.aggregator.grace.seconds:2}")
+    private int graceSeconds;
+
     private final Map<String, KafkaStreams> streamsByTimeframe = new HashMap<>();
 
     // Timeframe configurations: name -> minutes
@@ -140,9 +144,10 @@ public class TimeframeAggregator {
         );
 
         // Window by target timeframe with alignment to market open
+        // FIX: Use configurable grace period (2s default for fast emission)
         TimeWindows windows = TimeWindows.ofSizeAndGrace(
             Duration.ofMinutes(minutes),
-            Duration.ofSeconds(10)
+            Duration.ofSeconds(graceSeconds)
         );
 
         KTable<Windowed<String>, FamilyCandle> aggregated = input
@@ -224,9 +229,10 @@ public class TimeframeAggregator {
             );
 
             // Use 6h 15m window (market session length) with gap detection
+            // FIX: Use configurable grace period (2s default for fast emission)
             TimeWindows dailyWindows = TimeWindows.ofSizeAndGrace(
                 Duration.ofMinutes(375), // 6h 15m = 375 minutes
-                Duration.ofMinutes(5)
+                Duration.ofSeconds(graceSeconds)
             );
 
             KTable<Windowed<String>, FamilyCandle> aggregated = input
