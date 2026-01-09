@@ -202,39 +202,39 @@ public class MasterArchProcessor {
 
             // Log based on actionability with enhanced details
             if (result.isActionable()) {
-                log.info("🎯 MASTER ARCH SIGNAL | {} | decision={} | finalScore={:.3f} | direction={} | lots={}",
+                log.info("MASTER ARCH SIGNAL | {} | decision={} | finalScore={} | direction={} | lots={}",
                         symbol,
                         result.getDecision(),
-                        result.getFinalScore().getFinalScore().getCurrent(),
+                        String.format("%.3f", result.getFinalScore().getFinalScore().getCurrent()),
                         result.getFinalScore().getDirectionConfidence() > 0 ? "BULLISH" : "BEARISH",
                         result.getPosition() != null ? result.getPosition().getRecommendedLots() : 0);
-                
+
                 // Log component scores
-                log.info("   📊 Components | index={:.2f} | security={:.2f} | fudkii={:.2f} | volume={:.2f}",
-                        result.getIndexContext() != null ? result.getIndexContext().getContextScore().getCurrent() : 0,
-                        result.getSecurityContext() != null ? result.getSecurityContext().getContextScore().getCurrent() : 0,
-                        result.getFudkii() != null ? result.getFudkii().getStrength() : 0,
-                        result.getVolume() != null ? result.getVolume().getVolumeCertainty() : 0);
-                
+                log.info("   Components | index={} | security={} | fudkii={} | volume={}",
+                        String.format("%.2f", result.getIndexContext() != null ? result.getIndexContext().getContextScore().getCurrent() : 0),
+                        String.format("%.2f", result.getSecurityContext() != null ? result.getSecurityContext().getContextScore().getCurrent() : 0),
+                        String.format("%.2f", result.getFudkii() != null ? result.getFudkii().getStrength() : 0),
+                        String.format("%.2f", result.getVolume() != null ? result.getVolume().getVolumeCertainty() : 0));
+
                 // Log microstructure if present
                 if (result.getMicrostructure() != null) {
                     var micro = result.getMicrostructure();
-                    log.info("   🔬 Microstructure | VPIN={:.2f}({}) | OFI={:.2f}({}) | PCR={:.2f}({}) | oiBuildUp={} | mult={:.2f}",
-                            micro.getVpin(), micro.getVpinSignal(),
-                            micro.getOfi(), micro.getOfiDirection(),
-                            micro.getPcr(), micro.getPcrSignal(),
+                    log.info("   Microstructure | VPIN={}({}) | OFI={}({}) | PCR={}({}) | oiBuildUp={} | mult={}",
+                            String.format("%.2f", micro.getVpin()), micro.getVpinSignal(),
+                            String.format("%.2f", micro.getOfi()), micro.getOfiDirection(),
+                            String.format("%.2f", micro.getPcr()), micro.getPcrSignal(),
                             micro.isOiBuildingUp(),
-                            micro.getMicrostructureMultiplier());
+                            String.format("%.2f", micro.getMicrostructureMultiplier()));
                 }
             } else {
                 // Log all signals, not just actionable ones
-                log.info("📈 {} | {} | finalScore={:.3f} | fudkii={:.2f} | micro={}",
+                log.info("{} | {} | finalScore={} | fudkii={} | micro={}",
                         symbol,
                         result.getDecision(),
-                        result.getFinalScore() != null && result.getFinalScore().getFinalScore() != null 
-                            ? result.getFinalScore().getFinalScore().getCurrent() : 0.0,
-                        result.getFudkii() != null ? result.getFudkii().getStrength() : 0.0,
-                        result.getMicrostructure() != null ? 
+                        String.format("%.3f", result.getFinalScore() != null && result.getFinalScore().getFinalScore() != null
+                            ? result.getFinalScore().getFinalScore().getCurrent() : 0.0),
+                        String.format("%.2f", result.getFudkii() != null ? result.getFudkii().getStrength() : 0.0),
+                        result.getMicrostructure() != null ?
                             String.format("%.2f", result.getMicrostructure().getMicrostructureMultiplier()) : "N/A");
             }
 

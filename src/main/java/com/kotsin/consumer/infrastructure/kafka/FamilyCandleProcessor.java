@@ -738,9 +738,9 @@ public class FamilyCandleProcessor {
                 com.kotsin.consumer.model.MTFDistribution dist = mtfDistributionCalculator.calculate(subCandles);
                 builder.mtfDistribution(dist);
 
-                log.info("📊 MTF Distribution for {}: {} sub-candles (from {}), consistency={:.2f}, interpretation={}",
+                log.info("MTF Distribution for {}: {} sub-candles (from {}), consistency={}, interpretation={}",
                          familyId, dist.getTotalSubCandles(), subCandleSource,
-                         dist.getDirectionalConsistency(),
+                         String.format("%.2f", dist.getDirectionalConsistency()),
                          dist.getInterpretation());
             } catch (Exception e) {
                 log.warn("⚠️ MTF Distribution calculation failed for {}: {}", familyId, e.getMessage());
@@ -1021,12 +1021,12 @@ public class FamilyCandleProcessor {
                                     // Replace worst-scored option with better one
                                     optionsByScripCode.remove(worstKey);
                                     optionsByScripCode.put(scripCode, candle);
-                                    log.debug("[OPTIONS-LIMIT Bug#24] Replaced {} (score={:.2f}) with {} (score={:.2f})",
-                                        worstKey, worstScore, scripCode, newScore);
+                                    log.debug("[OPTIONS-LIMIT Bug#24] Replaced {} (score={}) with {} (score={})",
+                                        worstKey, String.format("%.2f", worstScore), scripCode, String.format("%.2f", newScore));
                                 } else {
                                     // New option scores worse than all existing - skip it
-                                    log.debug("[OPTIONS-LIMIT Bug#24] Skipped {} (score={:.2f}) - limit {} reached",
-                                        scripCode, newScore, MAX_OPTIONS_IN_COLLECTOR);
+                                    log.debug("[OPTIONS-LIMIT Bug#24] Skipped {} (score={}) - limit {} reached",
+                                        scripCode, String.format("%.2f", newScore), MAX_OPTIONS_IN_COLLECTOR);
                                 }
                             } else {
                                 // Under limit - just add it

@@ -455,6 +455,11 @@ public class UnifiedInstrumentCandleProcessor {
             );
 
         // ========== 7. LEFT JOIN: TICK (mandatory) + ORDERBOOK (optional) ==========
+        // FIX: Add suppress on the joined KTable to prevent duplicate emissions
+        // Without suppress, the join emits TWICE:
+        //   1. When tickCandles emits (with ob=null if obAggregates hasn't emitted yet)
+        //   2. When obAggregates emits (with ob=value, triggering another join evaluation)
+        // With suppress, we wait until both sides have emitted before producing output
         KTable<Windowed<String>, TickWithOrderbook> tickCandlesWithOb = tickCandles.leftJoin(
             obAggregates,
             (tick, ob) -> {
@@ -464,7 +469,10 @@ public class UnifiedInstrumentCandleProcessor {
                 }
                 return new TickWithOrderbook(tick, ob);
             }
-        );
+        )
+        // FIX: Suppress intermediate join emissions - emit only once per window
+        // This prevents duplicate candles when tick and orderbook emit at slightly different times
+        .suppress(Suppressed.untilWindowCloses(Suppressed.BufferConfig.unbounded()));
 
         // ========== 8. LEFT JOIN: TICK+OB + OI (optional) ==========
         // FIX: Use transformValues with state store lookup for OI
@@ -725,8 +733,9 @@ public class UnifiedInstrumentCandleProcessor {
                             
                             // Log significant gaps
                             if (Math.abs(gapPercent) > 0.3) {
-                                log.info("📊 GAP {} for {}: {:.2f}%",
-                                         gapPercent > 0 ? "UP" : "DOWN", candle.getScripCode(), gapPercent);
+                                log.info("GAP {} for {}: {}%",
+                                         gapPercent > 0 ? "UP" : "DOWN", candle.getScripCode(),
+                                         String.format("%.2f", gapPercent));
                             }
                         }
                     }
@@ -1810,8 +1819,8 @@ public class UnifiedInstrumentCandleProcessor {
             
             // Log for near-expiry options (high gamma risk)
             if (hoursToExpiry != null && hoursToExpiry <= 24 && Math.abs(greeks.gamma) > 0.01) {
-                log.info("[HIGH-GAMMA] Option {} | Strike: {} | Gamma: {:.4f} | Hours to expiry: {}",
-                    tick.getCompanyName(), strikePrice, greeks.gamma, hoursToExpiry);
+                log.info("[HIGH-GAMMA] Option {} | Strike: {} | Gamma: {} | Hours to expiry: {}",
+                    tick.getCompanyName(), strikePrice, String.format("%.4f", greeks.gamma), hoursToExpiry);
             }
             
         } catch (Exception e) {

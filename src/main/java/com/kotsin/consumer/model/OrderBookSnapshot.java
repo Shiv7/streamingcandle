@@ -115,20 +115,32 @@ public class OrderBookSnapshot {
 
     /**
      * Get best bid price
+     * FIX: Also checks raw 'bids' if 'allBids' not yet populated (before parseDetails called)
      */
     public double getBestBid() {
+        // First check parsed data
         if (allBids != null && !allBids.isEmpty()) {
             return allBids.get(0).getPrice();
+        }
+        // Fallback to raw bids if parseDetails not called yet
+        if (bids != null && !bids.isEmpty()) {
+            return bids.get(0).getPrice();
         }
         return 0.0;
     }
 
     /**
      * Get best ask price
+     * FIX: Also checks raw 'asks' if 'allAsks' not yet populated (before parseDetails called)
      */
     public double getBestAsk() {
+        // First check parsed data
         if (allAsks != null && !allAsks.isEmpty()) {
             return allAsks.get(0).getPrice();
+        }
+        // Fallback to raw asks if parseDetails not called yet
+        if (asks != null && !asks.isEmpty()) {
+            return asks.get(0).getPrice();
         }
         return 0.0;
     }
