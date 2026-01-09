@@ -44,6 +44,12 @@ public class TickAggregate {
     private double high;
     private double low;
     private double close;
+    // FIX: Track event time of OHLC to handle out-of-order ticks correctly
+    // Close = price at LATEST event time (end of window)
+    // High/Low = track when extremes occurred for analytics
+    private long closeEventTime = 0;
+    private long highEventTime = 0;
+    private long lowEventTime = 0;
     private long volume;
     private long buyVolume;
     private long sellVolume;
@@ -191,6 +197,12 @@ public class TickAggregate {
             open = tick.getLastRate();
             high = tick.getLastRate();
             low = tick.getLastRate();
+            close = tick.getLastRate();
+            // Initialize event times with first tick's event time
+            long firstEventTime = tick.getTimestamp() > 0 ? tick.getTimestamp() : kafkaTimestamp;
+            closeEventTime = firstEventTime;
+            highEventTime = firstEventTime;
+            lowEventTime = firstEventTime;
 
             firstTickTimestamp = kafkaTimestamp;
             firstTickEventTime = tick.getTimestamp();
@@ -221,9 +233,33 @@ public class TickAggregate {
         tickCountPerSecond.merge(secondBucket, 1, Integer::sum);
 
         // ========== UPDATE OHLC ==========
-        close = tick.getLastRate();
-        high = Math.max(high, tick.getLastRate());
-        low = Math.min(low, tick.getLastRate());
+        // FIX: Get tick event time from TickDt (parsed during deserialization)
+        // Fallback to Kafka timestamp if TickDt not available
+        long tickEventTime = tick.getTimestamp();
+        if (tickEventTime <= 0) {
+            tickEventTime = kafkaTimestamp;
+        }
+
+        // FIX: Close should be price of tick with LATEST event time, NOT last processed!
+        // Out-of-order ticks due to network latency can cause wrong Close otherwise.
+        // Close represents the price at END of the time window.
+        if (tickEventTime >= closeEventTime) {
+            close = tick.getLastRate();
+            closeEventTime = tickEventTime;
+        }
+
+        // High: Update if new high found, track when it occurred
+        double price = tick.getLastRate();
+        if (price > high) {
+            high = price;
+            highEventTime = tickEventTime;
+        }
+
+        // Low: Update if new low found, track when it occurred
+        if (price < low) {
+            low = price;
+            lowEventTime = tickEventTime;
+        }
 
         // ========== VOLUME DELTA CALCULATION ==========
         long currentTotalQty = tick.getTotalQuantity();
@@ -635,6 +671,11 @@ public class TickAggregate {
 
     public long getMinTickGap() { return minTickGap == Long.MAX_VALUE ? 0 : minTickGap; }
     public long getMinTradeSize() { return minTradeSize == Long.MAX_VALUE ? 0 : minTradeSize; }
+
+    // Event time getters for OHLC (useful for analytics - when did high/low occur?)
+    public long getHighEventTime() { return highEventTime; }
+    public long getLowEventTime() { return lowEventTime; }
+    public long getCloseEventTime() { return closeEventTime; }
     
     public List<TradeInfo> getTradeHistory() {
         return tradeHistory != null ? new ArrayList<>(tradeHistory) : new ArrayList<>();
