@@ -270,15 +270,20 @@ public class VCPProcessor {
 
             if (key == null || familyCandle == null) return;
 
-            // Extract equity InstrumentCandle from FamilyCandle
-            InstrumentCandle equity = familyCandle.getEquity();
-            if (equity == null) {
-                LOGGER.warn("No equity data in FamilyCandle for {}", key);
-                return;
+            // FIX: Use primary instrument - equity for NSE, future for MCX commodities
+            InstrumentCandle primary = familyCandle.getEquity();
+            if (primary == null) {
+                // No equity - check if it's a commodity with futures
+                primary = familyCandle.getFuture();
+                if (primary == null) {
+                    LOGGER.debug("No equity or future data in FamilyCandle for {} - skipping", key);
+                    return;
+                }
+                LOGGER.debug("VCP: Processing commodity {} using futures as primary", key);
             }
 
             // Convert InstrumentCandle to UnifiedCandle for backwards compatibility
-            UnifiedCandle candle = FamilyCandleConverter.toUnifiedCandle(equity);
+            UnifiedCandle candle = FamilyCandleConverter.toUnifiedCandle(primary);
 
             // Get or create history
             CandleHistory history = historyStore.get(key);

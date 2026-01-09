@@ -155,10 +155,16 @@ public class MTISProcessor {
         // Quick validation - return immediately to keep consumer thread free
         if (familyCandle == null) return;
 
-        InstrumentCandle equity = familyCandle.getEquity();
-        if (equity == null) {
-            log.debug("No equity in FamilyCandle for {}", familyCandle.getFamilyId());
-            return;
+        // FIX: Use primary instrument - equity for NSE, future for MCX commodities
+        InstrumentCandle primary = familyCandle.getEquity();
+        if (primary == null) {
+            // No equity - check if it's a commodity with futures
+            primary = familyCandle.getFuture();
+            if (primary == null) {
+                log.debug("No equity or future in FamilyCandle for {} - skipping", familyCandle.getFamilyId());
+                return;
+            }
+            log.debug("MTIS: Processing commodity {} using futures as primary", familyCandle.getFamilyId());
         }
 
         // Process asynchronously with retry logic - don't block Kafka consumer thread
