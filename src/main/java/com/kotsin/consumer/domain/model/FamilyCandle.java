@@ -303,9 +303,17 @@ public class FamilyCandle {
 
     /**
      * Get equity close price
+     * FIX: For commodities (no equity), returns future price instead of 0
      */
     public double getSpotPrice() {
-        return equity != null ? equity.getClose() : 0.0;
+        if (equity != null) {
+            return equity.getClose();
+        }
+        // For commodities: use future price as spot
+        if (isCommodity && future != null) {
+            return future.getClose();
+        }
+        return 0.0;
     }
 
     /**

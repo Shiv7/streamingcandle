@@ -35,7 +35,9 @@ public class ReversalSignalCalculator {
     private static final double BUY_PRESSURE_THRESHOLD = 0.55;         // 55% buy pressure
     private static final double CALL_SURGE_THRESHOLD = 0.10;           // 10% call premium increase
     private static final double PUT_DROP_THRESHOLD = -0.05;            // 5% put premium decrease
-    private static final double PRICE_CHANGE_THRESHOLD = 0.001;        // 0.1% price change considered significant
+    // FIX: Lowered from 0.001 (0.1%) to 0.0005 (0.05%) to catch edge cases
+    // A -0.099% move was being missed because threshold was 0.1%
+    private static final double PRICE_CHANGE_THRESHOLD = 0.0005;      // 0.05% price change considered significant
     private static final double OI_CHANGE_THRESHOLD = 0.01;            // 1% OI change considered significant
     private static final double HIGH_CONFIDENCE_SCORE = 6.0;           // Score >= 6 is high confidence
 
