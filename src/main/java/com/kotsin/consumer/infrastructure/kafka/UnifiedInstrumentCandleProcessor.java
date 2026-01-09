@@ -648,11 +648,37 @@ public class UnifiedInstrumentCandleProcessor {
         // ========== 9. EMIT ON WINDOW CLOSE ==========
         // Note: We work directly with the stream since we need to convert to stream anyway
         // The windowed key is preserved through the join
+
+        // FIX: Deduplicate KTable-KTable join outputs
+        // KTable-KTable joins emit when EITHER side changes. With both tickCandles and obAggregates
+        // suppressed, each emits once per window, but the join still fires TWICE (once per emission).
+        // Use a cache to deduplicate based on window key (key + windowStart).
+        // Cache TTL is 2 minutes (longer than any window + grace period)
+        final Cache<String, Boolean> emittedWindows = Caffeine.newBuilder()
+            .expireAfterWrite(2, TimeUnit.MINUTES)
+            .maximumSize(100000)
+            .build();
+
         fullDataStream
             .filter((windowedKey, data) -> {
                 if (data == null || data.tick == null) {
                     return false;
                 }
+
+                // Deduplicate: only emit first record per window key
+                String dedupeKey = windowedKey.key() + "@" + windowedKey.window().start();
+                Boolean alreadyEmitted = emittedWindows.getIfPresent(dedupeKey);
+                if (alreadyEmitted != null) {
+                    if (log.isDebugEnabled()) {
+                        log.debug("[DEDUPE] Skipping duplicate for {} window=[{} - {}]",
+                            data.tick.getScripCode(),
+                            new java.util.Date(windowedKey.window().start()),
+                            new java.util.Date(windowedKey.window().end()));
+                    }
+                    return false;  // Skip duplicate
+                }
+                emittedWindows.put(dedupeKey, Boolean.TRUE);
+
                 // Additional validation: log if OI is missing for derivatives
                 if (data.tick != null && "D".equals(data.tick.getExchangeType()) && data.oi == null) {
                     if (log.isDebugEnabled()) {
