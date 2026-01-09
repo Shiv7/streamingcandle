@@ -117,18 +117,41 @@ public class WallClockWindowEmitter<K, V> implements Processor<Windowed<K>, V, W
         // Create unique key for deduplication
         String windowKey = windowedKey.key().toString() + "|" + windowedKey.window().start() + "|" + windowEnd;
 
-        // If wall clock already past close time, emit immediately
-        if (now >= closeTime) {
-            if (!emittedWindowKeys.contains(windowKey)) {
-                emitWindow(windowedKey, value, record.timestamp());
-                emittedWindowKeys.add(windowKey);
-                cleanupOldKeys(now);
+        // CRITICAL FIX: Never emit immediately on record arrival!
+        // Always buffer and let punctuate() handle emission.
+        // This gives time for ALL family members (future + options) to arrive
+        // before the window is emitted.
+        //
+        // The old code had a bug: if wall clock was past closeTime when the first
+        // record (e.g., future) arrived, it was emitted immediately without waiting
+        // for options. This caused FamilyCandles to have options=[] even though
+        // options arrived just milliseconds later.
+        //
+        // Now: Buffer ALL records and emit on next punctuate cycle.
+        // Max delay = checkIntervalMs (1 second) which is acceptable.
+
+        if (emittedWindowKeys.contains(windowKey)) {
+            // Window already emitted - skip late arrivals
+            if (log.isDebugEnabled()) {
+                log.debug("WallClockEmitter: late record for already-emitted window key={}", windowKey);
             }
-        } else {
-            // Buffer until wall clock reaches close time
-            // Replace existing pending window for same key (keep latest value)
-            pendingWindows.removeIf(pw -> pw.windowKey.equals(windowKey));
-            pendingWindows.add(new PendingWindow<>(windowKey, windowedKey, value, closeTime, record.timestamp()));
+            return;
+        }
+
+        // Buffer until punctuate emits it (even if past close time)
+        // Replace existing pending window for same key (keep latest value)
+        pendingWindows.removeIf(pw -> pw.windowKey.equals(windowKey));
+
+        // Use max of original closeTime or (now + small buffer) to ensure punctuate picks it up
+        long effectiveCloseTime = Math.max(closeTime, now);
+        pendingWindows.add(new PendingWindow<>(windowKey, windowedKey, value, effectiveCloseTime, record.timestamp()));
+
+        if (log.isDebugEnabled()) {
+            log.debug("WallClockEmitter buffered: key={} window=[{},{}] pendingCount={}",
+                windowedKey.key(),
+                Instant.ofEpochMilli(windowedKey.window().start()),
+                Instant.ofEpochMilli(windowEnd),
+                pendingWindows.size());
         }
     }
 

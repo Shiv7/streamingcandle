@@ -288,7 +288,11 @@ public class FamilyCandle {
     /**
      * Get the primary instrument for analysis (equity if available, else future)
      * This is the main reference for price, volume, and microstructure analysis
+     *
+     * @JsonIgnore prevents this getter from being serialized as a separate field
+     * (the data is already in equity/future/primaryInstrument fields)
      */
+    @com.fasterxml.jackson.annotation.JsonIgnore
     public InstrumentCandle getPrimaryInstrumentOrFallback() {
         if (primaryInstrument != null) {
             return primaryInstrument;
