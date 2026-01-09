@@ -581,9 +581,18 @@ public class TimeframeAggregator {
         aggregate.setHumanReadableTime(incoming.getHumanReadableTime());
 
         // ===== VOLUME CLASSIFICATION (SUM) =====
-        aggregate.setAggressiveBuyVolume(aggregate.getAggressiveBuyVolume() + incoming.getAggressiveBuyVolume());
-        aggregate.setAggressiveSellVolume(aggregate.getAggressiveSellVolume() + incoming.getAggressiveSellVolume());
-        aggregate.setMidpointVolume(aggregate.getMidpointVolume() + incoming.getMidpointVolume());
+        // FIX: Null-safe aggregation for volume classification fields
+        Long aggBuyVol = aggregate.getAggressiveBuyVolume();
+        Long incBuyVol = incoming.getAggressiveBuyVolume();
+        aggregate.setAggressiveBuyVolume((aggBuyVol != null ? aggBuyVol : 0L) + (incBuyVol != null ? incBuyVol : 0L));
+
+        Long aggSellVol = aggregate.getAggressiveSellVolume();
+        Long incSellVol = incoming.getAggressiveSellVolume();
+        aggregate.setAggressiveSellVolume((aggSellVol != null ? aggSellVol : 0L) + (incSellVol != null ? incSellVol : 0L));
+
+        Long aggMidVol = aggregate.getMidpointVolume();
+        Long incMidVol = incoming.getMidpointVolume();
+        aggregate.setMidpointVolume((aggMidVol != null ? aggMidVol : 0L) + (incMidVol != null ? incMidVol : 0L));
 
         // Recalculate buy/sell pressure from aggregated volumes
         long totalVol = aggregate.getVolume();
@@ -593,10 +602,22 @@ public class TimeframeAggregator {
         }
 
         // ===== IMBALANCE METRICS (SUM - cumulative imbalance) =====
-        aggregate.setVolumeImbalance(aggregate.getVolumeImbalance() + incoming.getVolumeImbalance());
-        aggregate.setDollarImbalance(aggregate.getDollarImbalance() + incoming.getDollarImbalance());
-        aggregate.setTickRuns(aggregate.getTickRuns() + incoming.getTickRuns());
-        aggregate.setVolumeRuns(aggregate.getVolumeRuns() + incoming.getVolumeRuns());
+        // FIX: Null-safe aggregation for imbalance metrics
+        Long aggVolImb = aggregate.getVolumeImbalance();
+        Long incVolImb = incoming.getVolumeImbalance();
+        aggregate.setVolumeImbalance((aggVolImb != null ? aggVolImb : 0L) + (incVolImb != null ? incVolImb : 0L));
+
+        Double aggDolImb = aggregate.getDollarImbalance();
+        Double incDolImb = incoming.getDollarImbalance();
+        aggregate.setDollarImbalance((aggDolImb != null ? aggDolImb : 0.0) + (incDolImb != null ? incDolImb : 0.0));
+
+        Integer aggTickRuns = aggregate.getTickRuns();
+        Integer incTickRuns = incoming.getTickRuns();
+        aggregate.setTickRuns((aggTickRuns != null ? aggTickRuns : 0) + (incTickRuns != null ? incTickRuns : 0));
+
+        Long aggVolRuns = aggregate.getVolumeRuns();
+        Long incVolRuns = incoming.getVolumeRuns();
+        aggregate.setVolumeRuns((aggVolRuns != null ? aggVolRuns : 0L) + (incVolRuns != null ? incVolRuns : 0L));
 
         // Imbalance triggers = OR'd (any trigger in window = triggered)
         aggregate.setVibTriggered(aggregate.isVibTriggered() || incoming.isVibTriggered());
@@ -609,7 +630,10 @@ public class TimeframeAggregator {
         if (incoming.getVpin() > 0) {
             aggregate.setVpin(incoming.getVpin());
         }
-        aggregate.setVpinBucketCount(aggregate.getVpinBucketCount() + incoming.getVpinBucketCount());
+        // FIX: Null-safe aggregation for vpinBucketCount
+        Integer aggVpinBucket = aggregate.getVpinBucketCount();
+        Integer incVpinBucket = incoming.getVpinBucketCount();
+        aggregate.setVpinBucketCount((aggVpinBucket != null ? aggVpinBucket : 0) + (incVpinBucket != null ? incVpinBucket : 0));
 
         // ===== ORDERBOOK METRICS (latest values - point-in-time snapshot) =====
         if (incoming.isOrderbookPresent()) {
@@ -631,7 +655,10 @@ public class TimeframeAggregator {
         // Kyle Lambda = latest (point-in-time price impact)
         aggregate.setKyleLambda(incoming.getKyleLambda());
         // Orderbook update count = SUM
-        aggregate.setOrderbookUpdateCount(aggregate.getOrderbookUpdateCount() + incoming.getOrderbookUpdateCount());
+        // FIX: Null-safe aggregation for orderbookUpdateCount
+        Integer aggObCount = aggregate.getOrderbookUpdateCount();
+        Integer incObCount = incoming.getOrderbookUpdateCount();
+        aggregate.setOrderbookUpdateCount((aggObCount != null ? aggObCount : 0) + (incObCount != null ? incObCount : 0));
 
         // ===== OI AGGREGATION =====
         if (incoming.isOiPresent()) {
