@@ -1527,7 +1527,10 @@ public class UnifiedInstrumentCandleProcessor {
         // If processing historical data (window end is far in past), use window-relative age
         boolean isReplay = (currentTime - windowEndTime) > 60000; // Window end > 1 min ago = replay
         long effectiveTickAge = isReplay ? tickAgeFromWindow : tickAge;
-        builder.tickStale(effectiveTickAge > 5000);  // 5 seconds threshold
+        // FIX: Increased from 5s to 10s - 5s was too tight for market close + grace period
+        // With 2s grace period + processing time, candles emit 3-5s after window close
+        // At market close, last tick could be several seconds before window end
+        builder.tickStale(effectiveTickAge > 10000);  // 10 seconds threshold
 
         // Initialize effective ages (will be set in if blocks)
         long effectiveObAge = 0;
@@ -1553,7 +1556,7 @@ public class UnifiedInstrumentCandleProcessor {
             long obAgeFromWindow = orderbook.getWindowEndMillis() > 0 ?
                 windowEndTime - orderbook.getWindowEndMillis() : 0;
             effectiveObAge = isReplay ? obAgeFromWindow : obAge;
-            builder.orderbookStale(effectiveObAge > 5000);
+            builder.orderbookStale(effectiveObAge > 10000);  // Match 10s threshold
             maxAge = Math.max(maxAge, effectiveObAge);
         }
 
@@ -1578,12 +1581,12 @@ public class UnifiedInstrumentCandleProcessor {
 
         // Determine staleness reason (use effective ages) - MUST be before first log that uses it
         StringBuilder stalenessReason = new StringBuilder();
-        if (effectiveTickAge > 5000) {
-            stalenessReason.append("Tick stale (").append(effectiveTickAge).append("ms"); 
+        if (effectiveTickAge > 10000) {  // Match 10s threshold
+            stalenessReason.append("Tick stale (").append(effectiveTickAge).append("ms");
             if (isReplay) stalenessReason.append(" from window");
             stalenessReason.append("); ");
         }
-        if (orderbook != null && effectiveObAge > 5000) {
+        if (orderbook != null && effectiveObAge > 10000) {  // Match 10s threshold
             stalenessReason.append("Orderbook stale (").append(effectiveObAge).append("ms");
             if (isReplay) stalenessReason.append(" from window");
             stalenessReason.append("); ");

@@ -237,8 +237,13 @@ public class TickAggregate {
             tradeHistory = new ArrayList<>(MAX_TRADE_HISTORY);
             previousClose = tick.getPreviousClose();
             tickCountPerSecond = new HashMap<>();
-            
-            log.debug("[TICK-AGG-INIT] {} | open={} kafkaTs={}", 
+
+            // FIX: Initialize tick intensity tracking (first tick will be counted in regular logic below)
+            currentSecondBucket = kafkaTimestamp / 1000;
+            currentSecondTickCount = 0;  // Will be incremented to 1 below
+            lastSeenSecondBucket = -1;  // Mark as uninitialized so first second gets counted
+
+            log.debug("[TICK-AGG-INIT] {} | open={} kafkaTs={}",
                 scripCode, open, kafkaTimestamp);
         }
 
@@ -688,9 +693,15 @@ public class TickAggregate {
         }
 
         // Calculate ticksPerSecond from persisted timestamps
+        // FIX: Avoid integer division returning 0 when ticks < 1 per second
         long windowDurationMs = lastTickTimestamp - firstTickTimestamp;
-        ticksPerSecond = windowDurationMs > 0 ?
-            (int) (tickCount * 1000L / windowDurationMs) : tickCount;
+        if (windowDurationMs > 0 && tickCount > 0) {
+            // Calculate as ticks per second, minimum 1 if any ticks exist
+            double tps = (double) tickCount * 1000.0 / windowDurationMs;
+            ticksPerSecond = (int) Math.ceil(tps);  // Round up - if 0.5 tps, report 1
+        } else {
+            ticksPerSecond = tickCount;  // All ticks in same millisecond
+        }
 
         tickAcceleration = ticksPerSecond - previousTicksPerSecond;
         previousTicksPerSecond = ticksPerSecond;
