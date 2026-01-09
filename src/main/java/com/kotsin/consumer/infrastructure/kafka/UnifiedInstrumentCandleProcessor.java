@@ -455,11 +455,9 @@ public class UnifiedInstrumentCandleProcessor {
             );
 
         // ========== 7. LEFT JOIN: TICK (mandatory) + ORDERBOOK (optional) ==========
-        // FIX: Add suppress on the joined KTable to prevent duplicate emissions
-        // Without suppress, the join emits TWICE:
-        //   1. When tickCandles emits (with ob=null if obAggregates hasn't emitted yet)
-        //   2. When obAggregates emits (with ob=value, triggering another join evaluation)
-        // With suppress, we wait until both sides have emitted before producing output
+        // NOTE: Both tickCandles and obAggregates already have suppress() applied
+        // The join may emit multiple times if tick and orderbook windows close at different times,
+        // but deduplication happens downstream via the unique window key
         KTable<Windowed<String>, TickWithOrderbook> tickCandlesWithOb = tickCandles.leftJoin(
             obAggregates,
             (tick, ob) -> {
@@ -469,10 +467,7 @@ public class UnifiedInstrumentCandleProcessor {
                 }
                 return new TickWithOrderbook(tick, ob);
             }
-        )
-        // FIX: Suppress intermediate join emissions - emit only once per window
-        // This prevents duplicate candles when tick and orderbook emit at slightly different times
-        .suppress(Suppressed.untilWindowCloses(Suppressed.BufferConfig.unbounded()));
+        );
 
         // ========== 8. LEFT JOIN: TICK+OB + OI (optional) ==========
         // FIX: Use transformValues with state store lookup for OI
