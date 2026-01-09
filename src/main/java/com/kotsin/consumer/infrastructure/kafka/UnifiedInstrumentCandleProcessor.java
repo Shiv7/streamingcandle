@@ -555,15 +555,15 @@ public class UnifiedInstrumentCandleProcessor {
                             }
                             
                             if (oi == null && tickExchType.equals("D")) {
-                                log.warn("[JOIN-MISS] {} | OI missing for derivative! tickExch={} tickExchType={} scripCode={} | OI key used: {}", 
+                                log.warn("[JOIN-MISS] {} | OI missing for derivative! tickExch={} tickExchType={} scripCode={} | OI key used: {}",
                                     scripCode, tickExch, tickExchType, scripCode, oiKey);
                             } else if (oi != null) {
                                 if (log.isDebugEnabled()) {
-                                    log.debug("[JOIN-SUCCESS] {} | OI joined! OI={} OIChange={} OIChangePct={}", 
-                                        scripCode, 
-                                        oi.getOiClose(), 
-                                        oi.getOiChange() != null ? oi.getOiChange() : 0,
-                                        oi.getOiChangePercent() != null ? String.format("%.2f%%", oi.getOiChangePercent()) : "N/A");
+                                    // Note: Cross-window OI change is calculated later in buildInstrumentCandle()
+                                    // using previousOICloseCache. This log shows current OI close only.
+                                    log.debug("[JOIN-SUCCESS] {} | OI joined! OI={}",
+                                        scripCode,
+                                        oi.getOiClose());
                                 }
                             }
                         }
@@ -1225,7 +1225,12 @@ public class UnifiedInstrumentCandleProcessor {
                 builder.oiChange(oiChange);
                 builder.oiChangePercent(oiChangePercent);
 
-                if (log.isDebugEnabled()) {
+                // Log significant OI changes at INFO level for visibility
+                if (Math.abs(oiChangePercent) >= 0.5) {
+                    log.info("[OI-CHANGE] {} | prevOI={} currOI={} change={} changePct={}%",
+                        oiKey, previousOIClose, oi.getOiClose(), oiChange,
+                        String.format("%.2f", oiChangePercent));
+                } else if (log.isDebugEnabled()) {
                     log.debug("[OI-CHANGE] {} | prevOI={} currOI={} change={} changePct={}%",
                         oiKey, previousOIClose, oi.getOiClose(), oiChange,
                         String.format("%.2f", oiChangePercent));
@@ -1238,7 +1243,7 @@ public class UnifiedInstrumentCandleProcessor {
                 builder.oiChangePercent(null);
 
                 if (log.isDebugEnabled() && oi.getOiClose() != null) {
-                    log.debug("[OI-CHANGE-INIT] {} | currOI={} | No previous OI - change set to null (first window)",
+                    log.debug("[OI-CHANGE-INIT] {} | currOI={} | No previous OI - first window",
                         oiKey, oi.getOiClose());
                 }
             }

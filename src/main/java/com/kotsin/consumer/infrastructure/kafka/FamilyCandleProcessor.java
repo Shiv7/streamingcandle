@@ -4,7 +4,9 @@ import com.kotsin.consumer.config.KafkaConfig;
 import com.kotsin.consumer.domain.calculator.FuturesBuildupDetector;
 import com.kotsin.consumer.domain.calculator.OISignalDetector;
 import com.kotsin.consumer.domain.calculator.PCRCalculator;
+import com.kotsin.consumer.domain.calculator.ReversalSignalCalculator;
 import com.kotsin.consumer.domain.model.*;
+import com.kotsin.consumer.service.ReversalSignalStateStore;
 import com.kotsin.consumer.domain.service.IFamilyDataProvider;
 import jakarta.annotation.PostConstruct;
 import jakarta.annotation.PreDestroy;
@@ -63,6 +65,10 @@ public class FamilyCandleProcessor {
     // PHASE 2: MTF Distribution Calculator
     @Autowired
     private com.kotsin.consumer.service.MTFDistributionCalculator mtfDistributionCalculator;
+
+    // PHASE 3: Reversal Signal State Store
+    @Autowired
+    private ReversalSignalStateStore reversalSignalStateStore;
 
     // FIX: Increased default grace period from 5 to 30 seconds
     // BEFORE: 5 seconds - options arriving late would miss family window
@@ -774,6 +780,75 @@ public class FamilyCandleProcessor {
         FamilyCandle familyCandle = builder
             .quality(familyQuality)
             .build();
+
+        // ========== PHASE 3: REVERSAL SIGNAL DETECTION ==========
+        // Calculate OFI velocity, exhaustion, delta divergence, OI interpretation, and reversal score
+        // This requires previous candle state from ReversalSignalStateStore
+        if (reversalSignalStateStore != null) {
+            try {
+                ReversalSignalStateStore.FamilyState prevState = reversalSignalStateStore.getOrCreateState(familyId);
+
+                // Get ATM option premiums for options flow analysis
+                Double atmCallPremium = null;
+                Double atmPutPremium = null;
+                if (options != null) {
+                    for (OptionCandle opt : options) {
+                        if (opt.isATM()) {
+                            if ("CE".equals(opt.getOptionType())) {
+                                atmCallPremium = opt.getClose();
+                            } else if ("PE".equals(opt.getOptionType())) {
+                                atmPutPremium = opt.getClose();
+                            }
+                        }
+                    }
+                }
+
+                // Calculate all reversal signals
+                ReversalSignalCalculator.calculate(
+                    familyCandle,
+                    prevState.previousOfi,
+                    prevState.previousOfiVelocity,
+                    prevState.previousVolume,
+                    prevState.previousCallPremium,
+                    prevState.previousPutPremium,
+                    prevState.sessionLow,
+                    prevState.sessionHigh
+                );
+
+                // Update state for next candle
+                InstrumentCandle primaryForState = familyCandle.getPrimaryInstrumentOrFallback();
+                if (primaryForState != null) {
+                    reversalSignalStateStore.updateState(
+                        familyId,
+                        primaryForState.getOfi(),
+                        familyCandle.getOfiVelocity(),
+                        primaryForState.getVolume(),
+                        atmCallPremium,
+                        atmPutPremium,
+                        primaryForState.getHigh(),
+                        primaryForState.getLow(),
+                        familyCandle.getWindowStartMillis()
+                    );
+                }
+
+                // Log high-confidence reversals
+                if (familyCandle.isHighConfidenceReversal()) {
+                    log.info("[REVERSAL-HIGH-CONFIDENCE] {} | Score: {} | Signals: {} | OFI: {} vel={} | OI: {} | Exhaustion: {}",
+                        familyId,
+                        String.format("%.1f", familyCandle.getReversalScore()),
+                        familyCandle.getReversalSignals(),
+                        primaryForState != null && primaryForState.getOfi() != null ?
+                            String.format("%.0f", primaryForState.getOfi()) : "N/A",
+                        familyCandle.getOfiVelocity() != null ?
+                            String.format("%.0f", familyCandle.getOfiVelocity()) : "N/A",
+                        familyCandle.getOiInterpretation(),
+                        familyCandle.getExhaustionType());
+                }
+            } catch (Exception e) {
+                log.warn("[REVERSAL-CALC-ERROR] {} | Failed to calculate reversal signals: {}",
+                    familyId, e.getMessage());
+            }
+        }
 
         // 🔴 NOTE: Options already limited to 200 in FamilyCandleCollector.add()
         // No need for additional compaction - 200 options × ~1KB = ~200KB (safe for Kafka)

@@ -98,6 +98,132 @@ public class FamilyCandle {
     private boolean oiConfirmsReversal;     // OI pattern confirms reversal
     private String reversalType;            // e.g., "MORNING_STAR + CALL_ACCUMULATION"
 
+    // ==================== OFI VELOCITY & EXHAUSTION (Priority 1) ====================
+    /**
+     * OFI Velocity = current OFI - previous OFI
+     * Positive velocity = buying pressure increasing
+     * Negative velocity = selling pressure increasing
+     */
+    private Double ofiVelocity;
+
+    /**
+     * OFI Acceleration = current velocity - previous velocity
+     * Deceleration (positive when OFI was negative) = exhaustion signal
+     */
+    private Double ofiAcceleration;
+
+    /**
+     * True when OFI velocity indicates exhaustion:
+     * - Selling exhaustion: OFI was very negative but velocity turns positive
+     * - Buying exhaustion: OFI was very positive but velocity turns negative
+     */
+    private boolean exhaustionDetected;
+
+    /**
+     * Type of exhaustion detected:
+     * SELLING_EXHAUSTION - sellers giving up, potential reversal up
+     * BUYING_EXHAUSTION - buyers giving up, potential reversal down
+     * NONE - no exhaustion detected
+     */
+    private String exhaustionType;
+
+    /**
+     * Previous candle's OFI for velocity calculation
+     * Used internally, serialized for state continuity
+     */
+    private Double previousOfi;
+
+    // ==================== DELTA DIVERGENCE (Priority 4) ====================
+    /**
+     * Delta divergence detected when:
+     * - Price makes new low but volume delta is positive (bullish divergence)
+     * - Price makes new high but volume delta is negative (bearish divergence)
+     */
+    private boolean deltaDivergenceDetected;
+
+    /**
+     * Type of delta divergence:
+     * BULLISH_DIVERGENCE - price low but buyers dominating (reversal up signal)
+     * BEARISH_DIVERGENCE - price high but sellers dominating (reversal down signal)
+     * NONE - no divergence
+     */
+    private String deltaDivergenceType;
+
+    // ==================== REVERSAL SCORE (Priority 3) ====================
+    /**
+     * Composite reversal score (0-10):
+     * - OFI flip: +3
+     * - Volume spike on reversal: +2
+     * - Options flow confirmation: +2
+     * - At support/resistance: +1
+     * - Delta divergence: +1
+     * - Exhaustion detected: +1
+     */
+    private Double reversalScore;
+
+    /**
+     * Human-readable list of signals contributing to reversal score
+     * e.g., ["OFI_FLIP_POSITIVE", "VOLUME_SPIKE_60PCT_BUY", "CALL_SURGE_13PCT"]
+     */
+    private List<String> reversalSignals;
+
+    /**
+     * Is this a high-confidence reversal setup?
+     * True when reversalScore >= 6 (multiple confirming signals)
+     */
+    private boolean highConfidenceReversal;
+
+    // ==================== OPTIONS FLOW REVERSAL SIGNALS ====================
+    /**
+     * Call premium change percentage (current vs previous candle)
+     * Positive = calls getting expensive = bullish flow
+     */
+    private Double callPremiumChange;
+
+    /**
+     * Put premium change percentage (current vs previous candle)
+     * Negative = puts getting cheaper = bullish flow
+     */
+    private Double putPremiumChange;
+
+    /**
+     * Options flow confirms reversal when:
+     * - Calls surge (>10%) while puts drop (>5%) = bullish reversal
+     * - Puts surge (>10%) while calls drop (>5%) = bearish reversal
+     */
+    private boolean optionsFlowConfirmsReversal;
+
+    /**
+     * Short squeeze signal detected:
+     * CE premium explosion (>10%) + PE collapse (>5%) + high buy pressure
+     */
+    private boolean shortSqueezeDetected;
+
+    // ==================== ENHANCED OI INTERPRETATION (Priority 2) ====================
+    /**
+     * Proper OI interpretation based on price + OI change:
+     * LONG_BUILDUP: Price ↑ + OI ↑ (new longs entering - bullish continuation)
+     * SHORT_COVERING: Price ↑ + OI ↓ (shorts exiting - bullish, but may exhaust)
+     * SHORT_BUILDUP: Price ↓ + OI ↑ (new shorts entering - bearish continuation)
+     * LONG_UNWINDING: Price ↓ + OI ↓ (longs exiting - bearish, but may exhaust)
+     *
+     * This REPLACES the old futuresBuildup field with proper interpretation
+     */
+    private String oiInterpretation;
+
+    /**
+     * Confidence in OI interpretation (0-1)
+     * Higher when price change and OI change are both significant
+     */
+    private Double oiInterpretationConfidence;
+
+    /**
+     * True if OI interpretation suggests potential reversal:
+     * - SHORT_COVERING during downtrend = bullish reversal
+     * - LONG_UNWINDING during uptrend = bearish reversal
+     */
+    private boolean oiSuggestsReversal;
+
     // ==================== DATA QUALITY ====================
     private DataQuality quality;
     private String qualityReason;
