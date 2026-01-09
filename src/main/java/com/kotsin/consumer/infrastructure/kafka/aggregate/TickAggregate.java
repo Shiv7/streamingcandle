@@ -76,8 +76,13 @@ public class TickAggregate {
     private int spreadCount = 0;
     private double minSpread = Double.MAX_VALUE;
     private double maxSpread = 0.0;
-    @JsonIgnore private transient List<Double> spreadHistory;  // For volatility calculation
+    @JsonIgnore private transient List<Double> spreadHistory;  // For volatility calculation (transient - backup only)
     private int tightSpreadCount = 0;  // Count of spreads <= 1 tick
+
+    // FIX: Welford's online algorithm for spread volatility (persisted - survives serialization)
+    private double spreadWelfordMean = 0.0;
+    private double spreadWelfordM2 = 0.0;
+    private int spreadWelfordCount = 0;
 
     // ==================== EFFECTIVE SPREAD (ACTUAL EXECUTION COST) ====================
     // Effective spread = 2 * |trade_price - midpoint|
@@ -95,7 +100,12 @@ public class TickAggregate {
 
     // ==================== VWAP BANDS (Trading Signals) ====================
     // Track price history for VWAP standard deviation calculation
-    @JsonIgnore private transient List<Double> priceHistory;  // For std dev around VWAP
+    @JsonIgnore private transient List<Double> priceHistory;  // For std dev around VWAP (transient - backup only)
+
+    // FIX: Welford's online algorithm for VWAP std dev (persisted - survives serialization)
+    private double priceWelfordMean = 0.0;
+    private double priceWelfordM2 = 0.0;
+    private int priceWelfordCount = 0;
 
     // ==================== VOLUME DELTA TRACKING (Phase 1.1) ====================
     private long previousTotalQty = 0;
