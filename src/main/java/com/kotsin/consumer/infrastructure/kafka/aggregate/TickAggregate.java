@@ -44,6 +44,9 @@ public class TickAggregate {
     private double high;
     private double low;
     private double close;
+    // FIX: Track event time of close price to handle out-of-order ticks correctly
+    // Close should be the price of the tick with LATEST event time, not last processed
+    private long closeEventTime = 0;
     private long volume;
     private long buyVolume;
     private long sellVolume;
@@ -191,6 +194,9 @@ public class TickAggregate {
             open = tick.getLastRate();
             high = tick.getLastRate();
             low = tick.getLastRate();
+            close = tick.getLastRate();
+            // Initialize closeEventTime with first tick's event time
+            closeEventTime = tick.getTimestamp() > 0 ? tick.getTimestamp() : kafkaTimestamp;
 
             firstTickTimestamp = kafkaTimestamp;
             firstTickEventTime = tick.getTimestamp();
@@ -221,7 +227,22 @@ public class TickAggregate {
         tickCountPerSecond.merge(secondBucket, 1, Integer::sum);
 
         // ========== UPDATE OHLC ==========
-        close = tick.getLastRate();
+        // FIX: Get tick event time from TickDt (parsed during deserialization)
+        // Fallback to Kafka timestamp if TickDt not available
+        long tickEventTime = tick.getTimestamp();
+        if (tickEventTime <= 0) {
+            tickEventTime = kafkaTimestamp;
+        }
+
+        // FIX: Close should be price of tick with LATEST event time, NOT last processed!
+        // Out-of-order ticks due to network latency can cause wrong Close otherwise.
+        // Close represents the price at END of the time window.
+        if (tickEventTime >= closeEventTime) {
+            close = tick.getLastRate();
+            closeEventTime = tickEventTime;
+        }
+
+        // High/Low: Math.max/min are order-independent - correct regardless of processing order
         high = Math.max(high, tick.getLastRate());
         low = Math.min(low, tick.getLastRate());
 
