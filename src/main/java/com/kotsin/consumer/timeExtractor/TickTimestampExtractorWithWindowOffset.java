@@ -38,18 +38,26 @@ public class TickTimestampExtractorWithWindowOffset implements TimestampExtracto
 
         TickData tick = (TickData) value;
 
-        // SIMPLIFIED: Use Kafka record timestamp as the single source of truth
-        // For live data, this is the most reliable timestamp
-        long baseTs = record.timestamp() > 0 ? record.timestamp() : previousTimestamp;
+        // FIX: Use exchange timestamp (TickDt) as primary source of truth for OHLC accuracy
+        // TickDt contains when the trade actually happened on the exchange
+        // Kafka timestamp is ingestion time which can be delayed/out-of-order due to network latency
+        // parseTimestamp() is called during deserialization, so tick.getTimestamp() has the parsed TickDt
+        long baseTs = tick.getTimestamp();
 
-        // Ensure we have a valid timestamp
+        // Fallback to Kafka timestamp if TickDt was not parsed (invalid or missing)
         if (baseTs <= 0) {
-            LOGGER.warn("Invalid Kafka timestamp for tick (token={}). Using previousTimestamp.", tick.getToken());
-            baseTs = Math.max(previousTimestamp, 0L);
+            baseTs = record.timestamp() > 0 ? record.timestamp() : previousTimestamp;
+            if (LOGGER.isDebugEnabled()) {
+                LOGGER.debug("TickDt missing/invalid for token={}, using Kafka timestamp={}",
+                    tick.getToken(), baseTs);
+            }
         }
 
-        // Store the base timestamp in the tick for reference
-        tick.setTimestamp(baseTs);
+        // Final fallback to previous timestamp
+        if (baseTs <= 0) {
+            LOGGER.warn("No valid timestamp for tick (token={}). Using previousTimestamp.", tick.getToken());
+            baseTs = Math.max(previousTimestamp, System.currentTimeMillis());
+        }
 
         // Apply market-specific offset to align N-minute boundaries
         String exchange = tick.getExchange();

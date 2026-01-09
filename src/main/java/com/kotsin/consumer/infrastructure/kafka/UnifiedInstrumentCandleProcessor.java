@@ -455,6 +455,9 @@ public class UnifiedInstrumentCandleProcessor {
             );
 
         // ========== 7. LEFT JOIN: TICK (mandatory) + ORDERBOOK (optional) ==========
+        // NOTE: Both tickCandles and obAggregates already have suppress() applied
+        // The join may emit multiple times if tick and orderbook windows close at different times,
+        // but deduplication happens downstream via the unique window key
         KTable<Windowed<String>, TickWithOrderbook> tickCandlesWithOb = tickCandles.leftJoin(
             obAggregates,
             (tick, ob) -> {
@@ -645,11 +648,37 @@ public class UnifiedInstrumentCandleProcessor {
         // ========== 9. EMIT ON WINDOW CLOSE ==========
         // Note: We work directly with the stream since we need to convert to stream anyway
         // The windowed key is preserved through the join
+
+        // FIX: Deduplicate KTable-KTable join outputs
+        // KTable-KTable joins emit when EITHER side changes. With both tickCandles and obAggregates
+        // suppressed, each emits once per window, but the join still fires TWICE (once per emission).
+        // Use a cache to deduplicate based on window key (key + windowStart).
+        // Cache TTL is 2 minutes (longer than any window + grace period)
+        final Cache<String, Boolean> emittedWindows = Caffeine.newBuilder()
+            .expireAfterWrite(2, TimeUnit.MINUTES)
+            .maximumSize(100000)
+            .build();
+
         fullDataStream
             .filter((windowedKey, data) -> {
                 if (data == null || data.tick == null) {
                     return false;
                 }
+
+                // Deduplicate: only emit first record per window key
+                String dedupeKey = windowedKey.key() + "@" + windowedKey.window().start();
+                Boolean alreadyEmitted = emittedWindows.getIfPresent(dedupeKey);
+                if (alreadyEmitted != null) {
+                    if (log.isDebugEnabled()) {
+                        log.debug("[DEDUPE] Skipping duplicate for {} window=[{} - {}]",
+                            data.tick.getScripCode(),
+                            new java.util.Date(windowedKey.window().start()),
+                            new java.util.Date(windowedKey.window().end()));
+                    }
+                    return false;  // Skip duplicate
+                }
+                emittedWindows.put(dedupeKey, Boolean.TRUE);
+
                 // Additional validation: log if OI is missing for derivatives
                 if (data.tick != null && "D".equals(data.tick.getExchangeType()) && data.oi == null) {
                     if (log.isDebugEnabled()) {
@@ -725,8 +754,9 @@ public class UnifiedInstrumentCandleProcessor {
                             
                             // Log significant gaps
                             if (Math.abs(gapPercent) > 0.3) {
-                                log.info("📊 GAP {} for {}: {:.2f}%",
-                                         gapPercent > 0 ? "UP" : "DOWN", candle.getScripCode(), gapPercent);
+                                log.info("GAP {} for {}: {}%",
+                                         gapPercent > 0 ? "UP" : "DOWN", candle.getScripCode(),
+                                         String.format("%.2f", gapPercent));
                             }
                         }
                     }
@@ -1564,22 +1594,22 @@ public class UnifiedInstrumentCandleProcessor {
             stalenessReason.append("); ");
         }
         
+        // FIX: Removed duplicate staleness logging code
         if (stalenessReason.length() > 0) {
             builder.stalenessReason(stalenessReason.toString());
 
-            log.warn("[STALE-DATA] {} | {} | MaxAge: {}ms",
-                tick.getScripCode(),
-                stalenessReason.toString(),
-                maxAge);
-        }
-
-        if (stalenessReason.length() > 0) {
-            builder.stalenessReason(stalenessReason.toString());
-
-            log.warn("[STALE-DATA] {} | {} | MaxAge: {}ms",
-                tick.getScripCode(),
-                stalenessReason.toString(),
-                maxAge);
+            // FIX: Only log if staleness is significant (> 30 seconds) to reduce log spam
+            if (maxAge > 30000) {
+                log.warn("[STALE-DATA] {} | {} | MaxAge: {}ms",
+                    tick.getScripCode(),
+                    stalenessReason.toString(),
+                    maxAge);
+            } else {
+                log.debug("[STALE-DATA] {} | {} | MaxAge: {}ms",
+                    tick.getScripCode(),
+                    stalenessReason.toString(),
+                    maxAge);
+            }
         }
 
         InstrumentCandle candle = builder.build();
@@ -1810,8 +1840,8 @@ public class UnifiedInstrumentCandleProcessor {
             
             // Log for near-expiry options (high gamma risk)
             if (hoursToExpiry != null && hoursToExpiry <= 24 && Math.abs(greeks.gamma) > 0.01) {
-                log.info("[HIGH-GAMMA] Option {} | Strike: {} | Gamma: {:.4f} | Hours to expiry: {}",
-                    tick.getCompanyName(), strikePrice, greeks.gamma, hoursToExpiry);
+                log.info("[HIGH-GAMMA] Option {} | Strike: {} | Gamma: {} | Hours to expiry: {}",
+                    tick.getCompanyName(), strikePrice, String.format("%.4f", greeks.gamma), hoursToExpiry);
             }
             
         } catch (Exception e) {

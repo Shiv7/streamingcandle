@@ -549,20 +549,47 @@ public class FamilyCandleProcessor {
             log.debug("Commodity family {} using future as primaryInstrument: {}", familyId, future.getCompanyName());
         } else if (future != null) {
             // NSE stock with only future (no equity) - this indicates GROUPING FAILURE
-            // CRITICAL FIX: Do NOT assign future to equity field - equity must be null when missing
-            // Set primaryInstrument instead for downstream analysis
-            builder.primaryInstrument(future);  // FIX: Use primaryInstrument, NOT equity
-            // NOTE: equity remains null - this is correct behavior for type safety
+            // FIX: Try to look up equity using symbol from future before giving up
             String symbol = extractSymbolRoot(future.getCompanyName());
+
+            if (symbol != null && !symbol.isEmpty()) {
+                // FIX: Attempt to find equity scripCode by symbol
+                try {
+                    String equityScripCode = familyDataProvider.findEquityBySymbol(symbol);
+                    if (equityScripCode != null && !equityScripCode.equals(familyId)) {
+                        // Found equity scripCode - try to get family data to confirm mapping
+                        log.debug("[FAMILY-RECOVERY] Family {} | Found equity {} for symbol {} from future {}",
+                            familyId, equityScripCode, symbol, future.getScripCode());
+                        // Note: We can't recover the actual equity candle here (it's in a different partition)
+                        // but at least we have the correct symbol for downstream processing
+                    }
+                } catch (Exception e) {
+                    log.debug("[FAMILY-RECOVERY-FAILED] Family {} | Symbol lookup failed for {}: {}",
+                        familyId, symbol, e.getMessage());
+                }
+            }
+
             if (symbol == null || symbol.isEmpty()) {
                 symbol = familyId; // Fallback to scripCode
                 log.warn("Family {}: companyName is null, using scripCode as symbol fallback", familyId);
             }
+
+            // CRITICAL FIX: Do NOT assign future to equity field - equity must be null when missing
+            // Set primaryInstrument instead for downstream analysis
+            builder.primaryInstrument(future);  // FIX: Use primaryInstrument, NOT equity
+            // NOTE: equity remains null - this is correct behavior for type safety
             builder.symbol(symbol);
-            log.warn("[FAMILY-GROUPING-FAILURE] Family {} has future (scripCode: {}) but NO equity - " +
-                     "equity field will be null, using primaryInstrument for analysis. " +
-                     "Check if symbol-based fallback is working. (incomplete family).",
-                     familyId, future.getScripCode());
+
+            // Only log warning if this is truly an incomplete family (not a commodity or index future)
+            if (!symbol.contains("NIFTY") && !symbol.contains("BANK") && !symbol.contains("FIN")) {
+                log.warn("[FAMILY-GROUPING-FAILURE] Family {} has future (scripCode: {}) but NO equity - " +
+                         "equity field will be null, using primaryInstrument for analysis. Symbol: {}",
+                         familyId, future.getScripCode(), symbol);
+            } else {
+                // Index futures (NIFTY, BANKNIFTY, FINNIFTY) don't have equity - this is normal
+                log.debug("[FAMILY-INDEX] Family {} | Index future {} has no equity (expected)",
+                         familyId, symbol);
+            }
         }
 
         // Set future candle (already retrieved above)
@@ -711,9 +738,9 @@ public class FamilyCandleProcessor {
                 com.kotsin.consumer.model.MTFDistribution dist = mtfDistributionCalculator.calculate(subCandles);
                 builder.mtfDistribution(dist);
 
-                log.info("📊 MTF Distribution for {}: {} sub-candles (from {}), consistency={:.2f}, interpretation={}",
+                log.info("MTF Distribution for {}: {} sub-candles (from {}), consistency={}, interpretation={}",
                          familyId, dist.getTotalSubCandles(), subCandleSource,
-                         dist.getDirectionalConsistency(),
+                         String.format("%.2f", dist.getDirectionalConsistency()),
                          dist.getInterpretation());
             } catch (Exception e) {
                 log.warn("⚠️ MTF Distribution calculation failed for {}: {}", familyId, e.getMessage());
@@ -994,12 +1021,12 @@ public class FamilyCandleProcessor {
                                     // Replace worst-scored option with better one
                                     optionsByScripCode.remove(worstKey);
                                     optionsByScripCode.put(scripCode, candle);
-                                    log.debug("[OPTIONS-LIMIT Bug#24] Replaced {} (score={:.2f}) with {} (score={:.2f})",
-                                        worstKey, worstScore, scripCode, newScore);
+                                    log.debug("[OPTIONS-LIMIT Bug#24] Replaced {} (score={}) with {} (score={})",
+                                        worstKey, String.format("%.2f", worstScore), scripCode, String.format("%.2f", newScore));
                                 } else {
                                     // New option scores worse than all existing - skip it
-                                    log.debug("[OPTIONS-LIMIT Bug#24] Skipped {} (score={:.2f}) - limit {} reached",
-                                        scripCode, newScore, MAX_OPTIONS_IN_COLLECTOR);
+                                    log.debug("[OPTIONS-LIMIT Bug#24] Skipped {} (score={}) - limit {} reached",
+                                        scripCode, String.format("%.2f", newScore), MAX_OPTIONS_IN_COLLECTOR);
                                 }
                             } else {
                                 // Under limit - just add it

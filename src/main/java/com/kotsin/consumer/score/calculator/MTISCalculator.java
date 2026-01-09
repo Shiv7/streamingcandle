@@ -182,7 +182,7 @@ public class MTISCalculator {
         score.setCprWidth(levels != null && levels.getDailyPivot() != null ? 
                 String.valueOf(levels.getDailyPivot().getCprType()) : null);
         score.setExpiryDay(isExpiryDay(family));
-        score.setSessionPhase(getSessionPhase());
+        score.setSessionPhase(getSessionPhase(family));
 
         // Detect divergence
         if (state != null && family.getFuture() != null) {
@@ -678,13 +678,31 @@ public class MTISCalculator {
         return false;
     }
 
-    private String getSessionPhase() {
-        // FIX: This is called from calculate() which has access to family
-        // But for now, keep using wall clock for session phase display
-        // TODO: Pass family to getSessionPhase() to use event time
-        LocalTime now = LocalTime.now(ZoneId.of("Asia/Kolkata"));
-        int hour = now.getHour();
-        int minute = now.getMinute();
+    /**
+     * ISSUE #3 FIX: Use event time from FamilyCandle instead of wall clock
+     * This ensures correct session phase during replay of historical data
+     */
+    private String getSessionPhase(FamilyCandle family) {
+        // Extract event time from family candle
+        long eventTimeMs = 0;
+        if (family != null && family.getEquity() != null) {
+            eventTimeMs = family.getEquity().getWindowEndMillis();
+        } else if (family != null && family.getFuture() != null) {
+            eventTimeMs = family.getFuture().getWindowEndMillis();
+        }
+
+        // Use event time if available, otherwise fall back to wall clock
+        LocalTime eventTime;
+        if (eventTimeMs > 0) {
+            eventTime = java.time.Instant.ofEpochMilli(eventTimeMs)
+                    .atZone(ZoneId.of("Asia/Kolkata"))
+                    .toLocalTime();
+        } else {
+            eventTime = LocalTime.now(ZoneId.of("Asia/Kolkata"));
+        }
+
+        int hour = eventTime.getHour();
+        int minute = eventTime.getMinute();
 
         if (hour == 9 && minute < 30) return "OPENING";
         if (hour >= 9 && hour < 12) return "MORNING";
