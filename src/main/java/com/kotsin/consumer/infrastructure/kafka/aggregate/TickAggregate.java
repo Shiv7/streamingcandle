@@ -202,6 +202,14 @@ public class TickAggregate {
     private int currentSecondTickCount = 0;
     private long lastSeenSecondBucket = -1;
 
+    // ==================== SUB-CANDLE TRACKING (MTF Distribution Fix) ====================
+    // Track sub-candle snapshots every 10 seconds for MTF pattern analysis
+    // This allows FamilyCandleProcessor to analyze intra-window patterns even though
+    // WallClockWindowEmitter only emits once per window
+    private static final long SUB_CANDLE_INTERVAL_MS = 10_000L;  // 10 seconds
+    private List<SubCandleSnapshot> subCandleSnapshots = new ArrayList<>();
+    private long lastSubCandleSnapshotTime = 0;
+
     /**
      * Update aggregate with new tick data.
      * 
@@ -263,6 +271,12 @@ public class TickAggregate {
         }
         long secondBucket = kafkaTimestamp / 1000;
         tickCountPerSecond.merge(secondBucket, 1, Integer::sum);
+
+        // ========== SUB-CANDLE SNAPSHOT TRACKING (MTF Distribution Fix) ==========
+        // Create snapshots every 10 seconds of event time for MTF pattern analysis
+        // This allows MTFDistributionCalculator to analyze intra-window patterns
+        long tickEventTimeForSnapshot = tick.getTimestamp() > 0 ? tick.getTimestamp() : kafkaTimestamp;
+        createSubCandleSnapshotIfNeeded(tickEventTimeForSnapshot);
 
         // ========== UPDATE OHLC ==========
         // FIX: Get tick event time from TickDt (parsed during deserialization)
@@ -1021,6 +1035,121 @@ public class TickAggregate {
         private String classification;
         private double bidPrice;
         private double askPrice;
+    }
+
+    // ==================== SUB-CANDLE SNAPSHOT (MTF Distribution Fix) ====================
+
+    /**
+     * Sub-candle snapshot for MTF Distribution analysis.
+     * Created every 10 seconds during tick aggregation.
+     *
+     * This allows FamilyCandleProcessor to analyze intra-window patterns
+     * (V-patterns, momentum acceleration, volume distribution) even though
+     * WallClockWindowEmitter only emits ONE final InstrumentCandle per window.
+     */
+    @Data
+    @NoArgsConstructor
+    @AllArgsConstructor
+    public static class SubCandleSnapshot {
+        private long eventTime;       // Event time when snapshot was created
+        private double open;
+        private double high;
+        private double low;
+        private double close;
+        private long volume;
+        private long buyVolume;
+        private long sellVolume;
+        private double vwap;
+        private int tickCount;
+        private Long oiClose;         // OI at snapshot time (if available)
+    }
+
+    /**
+     * Create a sub-candle snapshot if enough time has passed since last snapshot.
+     * Called during tick aggregation to track intra-window patterns.
+     *
+     * @param eventTime Current tick event time
+     */
+    private void createSubCandleSnapshotIfNeeded(long eventTime) {
+        // Initialize snapshot time on first call
+        if (lastSubCandleSnapshotTime == 0) {
+            lastSubCandleSnapshotTime = eventTime;
+            return;
+        }
+
+        // Check if enough time has passed for a new snapshot
+        if (eventTime - lastSubCandleSnapshotTime >= SUB_CANDLE_INTERVAL_MS) {
+            // Create snapshot with current OHLCV state
+            SubCandleSnapshot snapshot = new SubCandleSnapshot(
+                lastSubCandleSnapshotTime,  // Snapshot represents period UP TO this time
+                open,
+                high,
+                low,
+                close,
+                volume,
+                buyVolume,
+                sellVolume,
+                vwap,
+                tickCount,
+                null  // OI populated later if available
+            );
+
+            if (subCandleSnapshots == null) {
+                subCandleSnapshots = new ArrayList<>();
+            }
+            subCandleSnapshots.add(snapshot);
+            lastSubCandleSnapshotTime = eventTime;
+
+            if (log.isDebugEnabled()) {
+                log.debug("[SUB-CANDLE] {} | Created snapshot #{} at {} | OHLC={}/{}/{}/{} vol={}",
+                    scripCode, subCandleSnapshots.size(), eventTime,
+                    String.format("%.2f", open), String.format("%.2f", high),
+                    String.format("%.2f", low), String.format("%.2f", close), volume);
+            }
+        }
+    }
+
+    /**
+     * Finalize sub-candle snapshots at end of window.
+     * Creates a final snapshot for remaining data not yet captured.
+     *
+     * @param windowEndTime End time of the aggregation window
+     */
+    public void finalizeSubCandleSnapshots(long windowEndTime) {
+        // Always create a final snapshot for remaining data
+        if (tickCount > 0) {
+            SubCandleSnapshot finalSnapshot = new SubCandleSnapshot(
+                windowEndTime,
+                open,
+                high,
+                low,
+                close,
+                volume,
+                buyVolume,
+                sellVolume,
+                vwap,
+                tickCount,
+                null
+            );
+
+            if (subCandleSnapshots == null) {
+                subCandleSnapshots = new ArrayList<>();
+            }
+            subCandleSnapshots.add(finalSnapshot);
+
+            if (log.isDebugEnabled()) {
+                log.debug("[SUB-CANDLE-FINAL] {} | Total snapshots: {} | Window end: {}",
+                    scripCode, subCandleSnapshots.size(), windowEndTime);
+            }
+        }
+    }
+
+    /**
+     * Get sub-candle snapshots for MTF Distribution analysis.
+     * @return List of sub-candle snapshots (may be empty if window had no ticks)
+     */
+    public List<SubCandleSnapshot> getSubCandleSnapshots() {
+        return subCandleSnapshots != null ? new ArrayList<>(subCandleSnapshots) : new ArrayList<>();
     }
 
     public static Serde<TickAggregate> serde() {

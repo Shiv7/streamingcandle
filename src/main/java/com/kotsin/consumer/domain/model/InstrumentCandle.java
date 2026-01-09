@@ -224,6 +224,32 @@ public class InstrumentCandle {
     private long maxTickAgeMs;
     private long minTickAgeMs;
 
+    // ==================== SUB-CANDLE SNAPSHOTS (MTF Distribution Fix) ====================
+    // Track intra-window patterns for MTF Distribution analysis
+    // Created every 10 seconds during tick aggregation in TickAggregate
+    private java.util.List<SubCandleSnapshot> subCandleSnapshots;
+
+    /**
+     * Sub-candle snapshot for MTF Distribution analysis.
+     * Mirrors TickAggregate.SubCandleSnapshot structure.
+     */
+    @lombok.Data
+    @lombok.NoArgsConstructor
+    @lombok.AllArgsConstructor
+    public static class SubCandleSnapshot {
+        private long eventTime;
+        private double open;
+        private double high;
+        private double low;
+        private double close;
+        private long volume;
+        private long buyVolume;
+        private long sellVolume;
+        private double vwap;
+        private int tickCount;
+        private Long oiClose;
+    }
+
     // ==================== P1: VWAP VALIDATION ====================
     private Double exchangeVwap;              // From TickData.averageRate
     private Double vwapDrift;                 // (calculated - exchange) / exchange * 100

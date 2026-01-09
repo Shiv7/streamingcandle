@@ -1067,8 +1067,9 @@ public class FamilyCandleProcessor {
                         mergeInstrumentCandle(this.equity, candle);
                         equityMergeCount++;
                     }
-                    // PHASE 2: Track sub-candle for MTF distribution
-                    equitySubCandles.add(com.kotsin.consumer.model.UnifiedCandle.from(candle));
+                    // MTF Distribution Fix: Extract embedded sub-candle snapshots from InstrumentCandle
+                    // These are created every 10 seconds during tick aggregation
+                    extractAndAddSubCandles(candle, equitySubCandles, "equity");
                     break;
                 case FUTURE:
                     if (this.future == null) {
@@ -1078,8 +1079,9 @@ public class FamilyCandleProcessor {
                         mergeInstrumentCandle(this.future, candle);
                         futureMergeCount++;
                     }
-                    // FIX: Track future sub-candles for MTF distribution (commodities)
-                    futureSubCandles.add(com.kotsin.consumer.model.UnifiedCandle.from(candle));
+                    // MTF Distribution Fix: Extract embedded sub-candle snapshots from InstrumentCandle
+                    // This enables MTF distribution for commodities (MCX) where future is primary
+                    extractAndAddSubCandles(candle, futureSubCandles, "future");
                     break;
                 case OPTION_CE:
                 case OPTION_PE:
@@ -1253,6 +1255,57 @@ public class FamilyCandleProcessor {
             double oiBonus = oi > 0 ? Math.min(20, Math.log10(oi) * 3) : 0;
 
             return atmScore + oiBonus;
+        }
+
+        /**
+         * MTF Distribution Fix: Extract embedded sub-candle snapshots from InstrumentCandle
+         * and convert them to UnifiedCandle objects for MTF pattern analysis.
+         *
+         * Before this fix: Only 1 sub-candle per window (the final aggregated InstrumentCandle)
+         * After this fix: Multiple sub-candles (one every ~10 seconds during tick aggregation)
+         *
+         * @param candle InstrumentCandle with embedded sub-candle snapshots
+         * @param targetList List to add the converted UnifiedCandle objects
+         * @param type Type string for logging ("equity" or "future")
+         */
+        private void extractAndAddSubCandles(InstrumentCandle candle,
+                                              List<com.kotsin.consumer.model.UnifiedCandle> targetList,
+                                              String type) {
+            java.util.List<InstrumentCandle.SubCandleSnapshot> snapshots = candle.getSubCandleSnapshots();
+
+            if (snapshots != null && !snapshots.isEmpty()) {
+                // Convert each SubCandleSnapshot to UnifiedCandle
+                for (InstrumentCandle.SubCandleSnapshot snapshot : snapshots) {
+                    com.kotsin.consumer.model.UnifiedCandle uc = com.kotsin.consumer.model.UnifiedCandle.builder()
+                        .scripCode(candle.getScripCode())
+                        .companyName(candle.getCompanyName())
+                        .exchange(candle.getExchange())
+                        .exchangeType(candle.getExchangeType())
+                        .windowStartMillis(snapshot.getEventTime() - 10_000L)  // Approximate start (10s before snapshot)
+                        .windowEndMillis(snapshot.getEventTime())
+                        .open(snapshot.getOpen())
+                        .high(snapshot.getHigh())
+                        .low(snapshot.getLow())
+                        .close(snapshot.getClose())
+                        .volume(snapshot.getVolume())
+                        .buyVolume(snapshot.getBuyVolume())
+                        .sellVolume(snapshot.getSellVolume())
+                        .vwap(snapshot.getVwap())
+                        .tickCount(snapshot.getTickCount())
+                        .oiClose(snapshot.getOiClose())
+                        .build();
+                    targetList.add(uc);
+                }
+
+                log.debug("[MTF-SUB-CANDLE] {} {} | Extracted {} sub-candle snapshots from InstrumentCandle",
+                    candle.getScripCode(), type, snapshots.size());
+            } else {
+                // Fallback: No embedded snapshots, use the candle itself as single sub-candle
+                // This maintains backward compatibility with older data that doesn't have snapshots
+                targetList.add(com.kotsin.consumer.model.UnifiedCandle.from(candle));
+                log.debug("[MTF-SUB-CANDLE] {} {} | No embedded snapshots, using candle as single sub-candle",
+                    candle.getScripCode(), type);
+            }
         }
 
         public boolean hasEquity() {

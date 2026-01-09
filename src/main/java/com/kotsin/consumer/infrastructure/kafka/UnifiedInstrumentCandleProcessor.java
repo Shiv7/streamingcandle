@@ -1612,6 +1612,35 @@ public class UnifiedInstrumentCandleProcessor {
             }
         }
 
+        // ========== SUB-CANDLE SNAPSHOTS (MTF Distribution Fix) ==========
+        // Finalize and copy sub-candle snapshots from TickAggregate to InstrumentCandle
+        // This allows FamilyCandleProcessor to analyze intra-window patterns
+        tick.finalizeSubCandleSnapshots(windowedKey.window().end());
+        List<TickAggregate.SubCandleSnapshot> tickSnapshots = tick.getSubCandleSnapshots();
+        if (tickSnapshots != null && !tickSnapshots.isEmpty()) {
+            List<InstrumentCandle.SubCandleSnapshot> candleSnapshots = new ArrayList<>(tickSnapshots.size());
+            for (TickAggregate.SubCandleSnapshot ts : tickSnapshots) {
+                candleSnapshots.add(new InstrumentCandle.SubCandleSnapshot(
+                    ts.getEventTime(),
+                    ts.getOpen(),
+                    ts.getHigh(),
+                    ts.getLow(),
+                    ts.getClose(),
+                    ts.getVolume(),
+                    ts.getBuyVolume(),
+                    ts.getSellVolume(),
+                    ts.getVwap(),
+                    ts.getTickCount(),
+                    ts.getOiClose()
+                ));
+            }
+            builder.subCandleSnapshots(candleSnapshots);
+            if (log.isDebugEnabled()) {
+                log.debug("[SUB-CANDLE-TRANSFER] {} | Transferred {} sub-candle snapshots to InstrumentCandle",
+                    tick.getScripCode(), candleSnapshots.size());
+            }
+        }
+
         InstrumentCandle candle = builder.build();
         candle.updateHumanReadableTime();
 
