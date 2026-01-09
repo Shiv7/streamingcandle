@@ -188,6 +188,19 @@ public class FamilyCandleProcessor {
             Duration.ofSeconds(graceSeconds)
         );
 
+        // 🛡️ CRITICAL FIX: Use wall-clock based emission instead of suppress(untilWindowCloses)
+        //
+        // PROBLEM: suppress(untilWindowCloses) uses "stream-time" which only advances when
+        // new records arrive. During low-activity periods or market close, this causes
+        // multi-minute delays (e.g., 2+ minutes delay observed).
+        //
+        // SOLUTION: WallClockWindowEmitter uses WALL_CLOCK_TIME punctuation to emit windows
+        // when real wall-clock time exceeds window_end + grace_period, regardless of stream-time.
+        // This ensures consistent ~2-3 second latency after window close.
+        //
+        // BEFORE: suppress(untilWindowCloses) -> delayed by stream-time gaps
+        // AFTER:  WallClockWindowEmitter -> emits on wall clock, max delay = grace period + 1s
+
         KTable<Windowed<String>, FamilyCandleCollector> collected = keyedByFamily
             .groupByKey(Grouped.with(Serdes.String(), InstrumentCandle.serde()))
             .windowedBy(windows)
@@ -197,13 +210,18 @@ public class FamilyCandleProcessor {
                 Materialized.<String, FamilyCandleCollector, org.apache.kafka.streams.state.WindowStore<org.apache.kafka.common.utils.Bytes, byte[]>>as(stateStoreName)
                     .withKeySerde(Serdes.String())
                     .withValueSerde(FamilyCandleCollector.serde())
-            )
-            .suppress(Suppressed.untilWindowCloses(Suppressed.BufferConfig.unbounded()));
+            );
+            // REMOVED: .suppress(Suppressed.untilWindowCloses(...)) - replaced with WallClockWindowEmitter
 
         // Convert to FamilyCandle and emit with metrics tracking
         // FIX: Allow futures-only families (for commodities like MCX Gold, Crude, etc.)
         // Commodities don't have underlying equity - future IS the primary instrument
+        //
+        // Wall-clock emitter replaces suppress() - emits once per window based on real time
+        long graceMsForEmitter = graceSeconds * 1000L;
+
         collected.toStream()
+            .process(() -> new WallClockWindowEmitter<>(graceMsForEmitter))  // Wall-clock based emission
             .filter((windowedKey, collector) -> collector != null && collector.hasPrimaryInstrument())
             .mapValues((windowedKey, collector) -> {
                 FamilyCandle familyCandle = buildFamilyCandle(windowedKey, collector);

@@ -162,11 +162,16 @@ public class TimeframeAggregator {
                     .withValueSerde(FamilyCandle.serde())
             );
 
-        // Emit on window close with validation
+        // 🛡️ CRITICAL FIX: Wall-clock based emission instead of suppress()
+        // BEFORE: suppress(untilWindowCloses) - delayed by stream-time gaps
+        // AFTER: WallClockWindowEmitter - emits on wall clock, consistent latency
+        long graceMsForEmitter = graceSeconds * 1000L;
+
         aggregated
-            .suppress(Suppressed.untilWindowCloses(Suppressed.BufferConfig.unbounded()))
+            // REMOVED: .suppress(Suppressed.untilWindowCloses(...))
             .toStream()
             .filter((windowedKey, candle) -> candle != null)
+            .process(() -> new WallClockWindowEmitter<>(graceMsForEmitter))  // Wall-clock based emission
             .map((windowedKey, candle) -> {
                 // Update window times
                 candle.setWindowStartMillis(windowedKey.window().start());
@@ -247,10 +252,14 @@ public class TimeframeAggregator {
                         .withValueSerde(FamilyCandle.serde())
                 );
 
+            // 🛡️ Wall-clock based emission for daily candles
+            long dailyGraceMs = graceSeconds * 1000L;
+
             aggregated
-                .suppress(Suppressed.untilWindowCloses(Suppressed.BufferConfig.unbounded()))
+                // REMOVED: .suppress(Suppressed.untilWindowCloses(...))
                 .toStream()
                 .filter((windowedKey, candle) -> candle != null)
+                .process(() -> new WallClockWindowEmitter<>(dailyGraceMs))  // Wall-clock based emission
                 .map((windowedKey, candle) -> {
                     candle.setWindowStartMillis(windowedKey.window().start());
                     candle.setWindowEndMillis(windowedKey.window().end());

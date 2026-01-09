@@ -373,11 +373,11 @@ public class UnifiedInstrumentCandleProcessor {
                     .withKeySerde(Serdes.String())
                     .withValueSerde(TickAggregate.serde())
                     .withRetention(Duration.ofDays(14))  // 2 weeks retention for replay scenarios
-            )
-            // FIX: Suppress intermediate emissions - emit only when window closes
-            // BEFORE: Emitted on EVERY tick update during grace period (duplicate candles)
-            // AFTER: Emit exactly ONCE per window at close (correct behavior)
-            .suppress(Suppressed.untilWindowCloses(Suppressed.BufferConfig.unbounded()));
+            );
+            // REMOVED: .suppress(Suppressed.untilWindowCloses(...))
+            // REASON: suppress() uses stream-time which only advances when records arrive.
+            // During low activity, this causes multi-minute delays.
+            // REPLACED BY: WallClockWindowEmitter applied after the join (see below)
 
         // ========== 5. AGGREGATE ORDERBOOK INTO OFI/LAMBDA ==========
         // Repartition orderbooks to 20 partitions for co-partitioning
@@ -400,10 +400,10 @@ public class UnifiedInstrumentCandleProcessor {
                     .withKeySerde(Serdes.String())
                     .withValueSerde(OrderbookAggregate.serde())
                     .withRetention(Duration.ofDays(14))  // 2 weeks retention for replay scenarios
-            )
-            // FIX: Suppress intermediate emissions - emit only when window closes
-            // Matches tickCandles suppress for consistent join behavior
-            .suppress(Suppressed.untilWindowCloses(Suppressed.BufferConfig.unbounded()));
+            );
+            // REMOVED: .suppress(Suppressed.untilWindowCloses(...))
+            // REASON: suppress() uses stream-time which only advances when records arrive.
+            // REPLACED BY: WallClockWindowEmitter applied after the join (see below)
 
         // ========== 5.5. CREATE NON-WINDOWED ORDERBOOK LATEST STORE (FALLBACK) ==========
         // This store keeps the latest orderbook aggregate for each instrument
@@ -455,9 +455,10 @@ public class UnifiedInstrumentCandleProcessor {
             );
 
         // ========== 7. LEFT JOIN: TICK (mandatory) + ORDERBOOK (optional) ==========
-        // NOTE: Both tickCandles and obAggregates already have suppress() applied
-        // The join may emit multiple times if tick and orderbook windows close at different times,
-        // but deduplication happens downstream via the unique window key
+        // NOTE: suppress() has been REMOVED from both tickCandles and obAggregates.
+        // Without suppress(), KTables emit on EVERY update during the window.
+        // The join fires on each update, which means multiple emissions per window.
+        // Deduplication and wall-clock emission timing is handled by WallClockWindowEmitter (see below)
         KTable<Windowed<String>, TickWithOrderbook> tickCandlesWithOb = tickCandles.leftJoin(
             obAggregates,
             (tick, ob) -> {
@@ -645,50 +646,41 @@ public class UnifiedInstrumentCandleProcessor {
                 "orderbook-latest-store"  // State store name for orderbook fallback lookup
             );
         
-        // ========== 9. EMIT ON WINDOW CLOSE ==========
-        // Note: We work directly with the stream since we need to convert to stream anyway
-        // The windowed key is preserved through the join
+        // ========== 9. EMIT ON WINDOW CLOSE (WALL CLOCK BASED) ==========
+        //
+        // 🛡️ CRITICAL FIX: Use wall-clock based emission instead of stream-time
+        //
+        // PROBLEM (BEFORE):
+        // - suppress(untilWindowCloses) uses "stream-time" which only advances when records arrive
+        // - During low activity periods, stream-time doesn't advance, causing multi-minute delays
+        // - Caffeine cache deduplication kept FIRST emission (incomplete) instead of LAST (complete)
+        //
+        // SOLUTION (AFTER):
+        // - Removed suppress() from both tickCandles and obAggregates
+        // - KTable-KTable join fires on EVERY update (multiple times per window)
+        // - WallClockWindowEmitter buffers updates and emits the LATEST (most complete) value
+        // - Emission happens when WALL CLOCK time > window_end + grace (consistent ~2-3s latency)
+        //
+        // BENEFITS:
+        // - Consistent low latency regardless of data arrival patterns
+        // - Emits LATEST value (most complete data) instead of FIRST (incomplete)
+        // - Works correctly during market close, low activity, and replay scenarios
 
-        // FIX: Deduplicate KTable-KTable join outputs
-        // KTable-KTable joins emit when EITHER side changes. With both tickCandles and obAggregates
-        // suppressed, each emits once per window, but the join still fires TWICE (once per emission).
-        // Use a cache to deduplicate based on window key (key + windowStart).
-        // Cache TTL is 2 minutes (longer than any window + grace period)
-        final Cache<String, Boolean> emittedWindows = Caffeine.newBuilder()
-            .expireAfterWrite(2, TimeUnit.MINUTES)
-            .maximumSize(100000)
-            .build();
+        long graceMsForEmitter = graceSeconds * 1000L;
 
         fullDataStream
-            .filter((windowedKey, data) -> {
-                if (data == null || data.tick == null) {
-                    return false;
+            // Filter out null data first
+            .filter((windowedKey, data) -> data != null && data.tick != null)
+            // Wall-clock based emission: buffers updates, emits once per window at close time
+            .process(() -> new WallClockWindowEmitter<>(graceMsForEmitter))
+            // Log OI misses for derivatives (informational, after deduplication)
+            .peek((windowedKey, data) -> {
+                if (log.isDebugEnabled() && data.tick != null && "D".equals(data.tick.getExchangeType()) && data.oi == null) {
+                    log.debug("[OI-MISS-DEBUG] {} | window=[{} - {}] | OI not found in KTable lookup",
+                        data.tick.getScripCode(),
+                        new java.util.Date(windowedKey.window().start()),
+                        new java.util.Date(windowedKey.window().end()));
                 }
-
-                // Deduplicate: only emit first record per window key
-                String dedupeKey = windowedKey.key() + "@" + windowedKey.window().start();
-                Boolean alreadyEmitted = emittedWindows.getIfPresent(dedupeKey);
-                if (alreadyEmitted != null) {
-                    if (log.isDebugEnabled()) {
-                        log.debug("[DEDUPE] Skipping duplicate for {} window=[{} - {}]",
-                            data.tick.getScripCode(),
-                            new java.util.Date(windowedKey.window().start()),
-                            new java.util.Date(windowedKey.window().end()));
-                    }
-                    return false;  // Skip duplicate
-                }
-                emittedWindows.put(dedupeKey, Boolean.TRUE);
-
-                // Additional validation: log if OI is missing for derivatives
-                if (data.tick != null && "D".equals(data.tick.getExchangeType()) && data.oi == null) {
-                    if (log.isDebugEnabled()) {
-                        log.debug("[OI-MISS-DEBUG] {} | window=[{} - {}] | OI not found in KTable lookup",
-                            data.tick.getScripCode(),
-                            new java.util.Date(windowedKey.window().start()),
-                            new java.util.Date(windowedKey.window().end()));
-                    }
-                }
-                return true;
             })
             .mapValues((windowedKey, data) -> buildInstrumentCandle(windowedKey, data))
             .map((windowedKey, candle) -> KeyValue.pair(windowedKey.key(), candle))
