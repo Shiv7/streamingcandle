@@ -9,11 +9,15 @@ import com.kotsin.consumer.enrichment.signal.SignalGenerator;
 import com.kotsin.consumer.enrichment.signal.TradingSignalPublisher;
 import com.kotsin.consumer.enrichment.signal.model.TradingSignal;
 import com.kotsin.consumer.enrichment.store.EventStore;
+import com.kotsin.consumer.config.KafkaTopics;
+import com.fasterxml.jackson.databind.ObjectMapper;
 import lombok.AllArgsConstructor;
 import lombok.Builder;
 import lombok.Data;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
+import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.kafka.core.KafkaTemplate;
 import org.springframework.stereotype.Service;
 
 import java.time.Instant;
@@ -44,6 +48,13 @@ public class EnrichmentPipeline {
     private final EventStore eventStore;
     private final SignalGenerator signalGenerator;
     private final TradingSignalPublisher signalPublisher;
+
+    // Kafka publishers for intelligence outputs
+    @Autowired(required = false)
+    private KafkaTemplate<String, String> kafkaTemplate;
+
+    @Autowired(required = false)
+    private ObjectMapper objectMapper;
 
     // Statistics
     private long totalProcessed = 0;
@@ -96,6 +107,9 @@ public class EnrichmentPipeline {
             if (!signals.isEmpty()) {
                 publishedCount = signalPublisher.publishSignals(signals);
             }
+
+            // Publish intelligence outputs to Kafka for dashboard
+            publishIntelligenceOutputs(familyId, intelligence);
 
             // =============== Build Result ===============
             long totalTime = System.currentTimeMillis() - startTime;
@@ -218,6 +232,46 @@ public class EnrichmentPipeline {
         eventStore.clearFamily(familyId);
         // Signal cache is auto-cleaned, but we can trigger clearing for a specific family
         // if we add that method to SignalGenerator
+    }
+
+    /**
+     * Publish intelligence outputs to Kafka for dashboard consumption
+     */
+    private void publishIntelligenceOutputs(String familyId, MarketIntelligence intelligence) {
+        if (kafkaTemplate == null || objectMapper == null || intelligence == null) {
+            return;
+        }
+
+        try {
+            // Publish market narrative
+            if (intelligence.getNarrative() != null) {
+                String narrativeJson = objectMapper.writeValueAsString(intelligence.getNarrative());
+                kafkaTemplate.send(KafkaTopics.MARKET_NARRATIVE, familyId, narrativeJson);
+                log.debug("[PIPELINE] Published narrative for {} | headline: {}",
+                    familyId, intelligence.getHeadline());
+            }
+
+            // Publish full market intelligence
+            String intelligenceJson = objectMapper.writeValueAsString(intelligence);
+            kafkaTemplate.send(KafkaTopics.MARKET_INTELLIGENCE, familyId, intelligenceJson);
+
+            // Publish active setups if any
+            if (intelligence.getReadySetups() != null && !intelligence.getReadySetups().isEmpty()) {
+                String setupsJson = objectMapper.writeValueAsString(intelligence.getReadySetups());
+                kafkaTemplate.send(KafkaTopics.ACTIVE_SETUPS, familyId, setupsJson);
+                log.info("[PIPELINE] Published {} ready setups for {}",
+                    intelligence.getReadySetups().size(), familyId);
+            }
+
+            // Publish opportunity forecast if available
+            if (intelligence.getForecast() != null) {
+                String forecastJson = objectMapper.writeValueAsString(intelligence.getForecast());
+                kafkaTemplate.send(KafkaTopics.OPPORTUNITY_FORECAST, familyId, forecastJson);
+            }
+
+        } catch (Exception e) {
+            log.warn("[PIPELINE] Failed to publish intelligence for {}: {}", familyId, e.getMessage());
+        }
     }
 
     // ======================== RESULT MODELS ========================

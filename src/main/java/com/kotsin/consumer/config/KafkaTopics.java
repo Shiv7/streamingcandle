@@ -99,6 +99,12 @@ public final class KafkaTopics {
     public static final String PATTERN_SIGNALS = "pattern-signals";
     public static final String PATTERN_OUTCOMES = "pattern-outcomes";
 
+    // Intelligence topics (Phase 5-6)
+    public static final String MARKET_NARRATIVE = "market-narrative";
+    public static final String MARKET_INTELLIGENCE = "market-intelligence";
+    public static final String ACTIVE_SETUPS = "active-setups";
+    public static final String OPPORTUNITY_FORECAST = "opportunity-forecast";
+
     // Outcome topics
     public static final String TRADE_OUTCOMES = "trade-outcomes";
     public static final String PAPER_TRADE_OUTCOMES = "paper-trade-outcomes";
