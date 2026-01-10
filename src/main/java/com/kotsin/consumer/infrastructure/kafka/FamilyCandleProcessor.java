@@ -968,13 +968,18 @@ public class FamilyCandleProcessor {
             // Use equity if available, otherwise use future as primary (for MCX commodities)
             InstrumentCandle primary = equity != null ? equity : future;
 
+            // 🔴 FIX: Include isCommodity flag so OISignalDetector can use dynamic thresholds
+            boolean isCommodity = isMCXExchange(primary);
             FamilyCandle tempFamily = FamilyCandle.builder()
                 .familyId(builder.build().getFamilyId())
                 .equity(equity)  // null for MCX commodities
                 .future(future)
                 .options(options)
+                .isCommodity(isCommodity)  // 🔴 CRITICAL: Pass commodity flag for threshold selection
                 .build();
-            OISignalDetector.OISignalType oiSignal = OISignalDetector.detect(tempFamily);
+
+            // 🔴 FIX: Use detectWithDynamicThresholds for commodities (lower thresholds)
+            OISignalDetector.OISignalType oiSignal = OISignalDetector.detectWithDynamicThresholds(tempFamily);
             builder.oiSignal(oiSignal.name());
 
             // 🔍 DEBUG: Log OI signal detection details

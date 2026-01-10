@@ -83,9 +83,22 @@ public class QuantScoreProcessor {
 
     /**
      * Process FamilyCandle from Kafka and calculate QuantScore
+     *
+     * 🔴 CRITICAL FIX Bug #8 & #10: Listen to ALL timeframe topics, not just 1m.
+     * BEFORE: Only 1m candles got Greeks/IV enrichment → 30m had totalDelta=0, ivrank=50
+     * AFTER: All timeframes get enrichment → proper Greeks/IV for all MTF candles
      */
     @KafkaListener(
-        topics = "family-candle-1m",
+        topics = {
+            "family-candle-1m",
+            "family-candle-5m",
+            "family-candle-15m",
+            "family-candle-30m",
+            "family-candle-1h",
+            "family-candle-2h",
+            "family-candle-4h",
+            "family-candle-1d"
+        },
         groupId = "quant-score-processor-v1",
         containerFactory = "familyCandleListenerContainerFactory"
     )
@@ -96,6 +109,10 @@ public class QuantScoreProcessor {
 
         try {
             String familyId = family.getFamilyId();
+            String timeframe = family.getTimeframe() != null ? family.getTimeframe() : "1m";
+
+            // 🔴 FIX: Include timeframe in cache key to avoid overwriting across timeframes
+            String cacheKey = familyId + ":" + timeframe;
 
             // Enrich with Greeks and IV if not already present
             enrichFamilyCandle(family);
@@ -103,8 +120,8 @@ public class QuantScoreProcessor {
             // Calculate QuantScore
             QuantScore score = scoreCalculator.calculate(family);
 
-            // Cache the score
-            scoreCache.put(familyId, score);
+            // Cache the score (keyed by familyId:timeframe)
+            scoreCache.put(cacheKey, score);
 
             // Emit score to dashboard topic
             emitScore(score);
@@ -114,13 +131,19 @@ public class QuantScoreProcessor {
                 QuantTradingSignal signal = signalGenerator.generate(score, family);
                 if (signal.isActionable()) {
                     emitSignal(signal);
-                    recordEmission(familyId);
+                    recordEmission(cacheKey);  // Rate limit per timeframe
                 }
             }
 
+            log.debug("[QUANT-MTF] Processed {} {} | score={} hasGreeks={} hasIV={}",
+                familyId, timeframe,
+                String.format("%.1f", score.getQuantScore()),
+                family.hasGreeksPortfolio(),
+                family.hasIVSurface());
+
         } catch (Exception e) {
-            log.error("Error processing FamilyCandle {}: {}",
-                family.getFamilyId(), e.getMessage(), e);
+            log.error("Error processing FamilyCandle {} ({}): {}",
+                family.getFamilyId(), family.getTimeframe(), e.getMessage(), e);
         }
     }
 

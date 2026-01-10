@@ -266,9 +266,18 @@ public class FamilyCandle {
 
     /**
      * Check if complete family data is available
+     *
+     * 🔴 FIX Bug #6: For commodities (MCX), equity is null - don't require it.
+     * BEFORE: Required equity for all families → commodities always incomplete
+     * AFTER: Commodities require future, NSE stocks require equity + future
      */
     public boolean isComplete() {
-        return equity != null && hasFuture && hasOptions && optionCount >= 4;
+        // For commodities: future is the primary instrument, equity is not available
+        if (isCommodity) {
+            return future != null && hasOptions && optionCount >= 2;  // Lower option threshold for commodities
+        }
+        // For NSE stocks: require equity, future is optional but preferred
+        return equity != null && hasOptions && optionCount >= 4;
     }
 
     /**
@@ -356,28 +365,36 @@ public class FamilyCandle {
 
     /**
      * Get signal strength (0-1) based on confluence
-     * 
-     * FIX: OI signal no longer auto-confirms - must align with equity direction
+     *
+     * 🔴 FIX Bug #11: For commodities, use future as baseline instead of equity.
+     * BEFORE: Commodity families had signals=0 → returned 0.0 or 1.0 incorrectly
+     * AFTER: Uses primary instrument (future for commodities) as baseline
      */
     public double getSignalStrength() {
         int signals = 0;
         int confirmedSignals = 0;
-        
-        // First determine equity direction (baseline)
-        boolean equityBullish = equity != null && equity.getClose() > equity.getOpen();
-        boolean equityBearish = equity != null && equity.getClose() < equity.getOpen();
 
-        // Check equity trend (always counts as one signal/confirmation)
-        if (equity != null && equity.getClose() != equity.getOpen()) {
-            signals++;
-            confirmedSignals++;  // Equity defines the direction, so it's always "confirmed"
+        // 🔴 FIX: Determine primary instrument direction (equity for NSE, future for MCX)
+        InstrumentCandle primary = equity != null ? equity : future;
+        if (primary == null) {
+            return 0.0;  // No primary instrument, no signal strength
         }
 
-        // Check future trend confirmation
+        boolean primaryBullish = primary.getClose() > primary.getOpen();
+        boolean primaryBearish = primary.getClose() < primary.getOpen();
+
+        // Check primary instrument trend (always counts as one signal/confirmation)
+        if (primary.getClose() != primary.getOpen()) {
+            signals++;
+            confirmedSignals++;  // Primary defines the direction, so it's always "confirmed"
+        }
+
+        // Check future trend confirmation (only if different from primary)
         if (future != null && equity != null) {
+            // Both exist - check if future confirms equity
             signals++;
             boolean futureBullish = future.getClose() > future.getOpen();
-            if (futureBullish == equityBullish) {
+            if (futureBullish == primaryBullish) {
                 confirmedSignals++;
             }
         }
@@ -386,7 +403,6 @@ public class FamilyCandle {
         if (pcr != null) {
             signals++;
 
-            // 🎯 CRITICAL FIX: Respect contrarian PCR extremes
             // Extreme PCR values often predict reversals (fear/greed indicators)
             boolean extremeBearishPCR = pcr > 1.5;  // Panic = Contrarian BUY signal
             boolean extremeBullishPCR = pcr < 0.5;  // Euphoria = Contrarian SELL signal
@@ -395,21 +411,17 @@ public class FamilyCandle {
 
             boolean pcrConfirms = false;
 
-            // Case 1: Normal PCR - confirm if matches equity direction (trend-following)
-            if ((normalBullishPCR && equityBullish) || (normalBearishPCR && equityBearish)) {
+            // Case 1: Normal PCR - confirm if matches primary direction (trend-following)
+            if ((normalBullishPCR && primaryBullish) || (normalBearishPCR && primaryBearish)) {
                 pcrConfirms = true;
             }
             // Case 2: Extreme bearish PCR (panic) - confirms if setup for reversal
             else if (extremeBearishPCR) {
-                // Extreme fear confirms BULLISH setup (contrarian)
-                // Either price already turning up, OR still falling (early entry)
-                pcrConfirms = true;  // Always confirm - extreme fear is tradeable
+                pcrConfirms = true;  // Extreme fear is tradeable
             }
             // Case 3: Extreme bullish PCR (euphoria) - confirms if setup for reversal
             else if (extremeBullishPCR) {
-                // Extreme greed confirms BEARISH setup (contrarian)
-                // Either price already turning down, OR still rising (early entry)
-                pcrConfirms = true;  // Always confirm - extreme greed is tradeable
+                pcrConfirms = true;  // Extreme greed is tradeable
             }
 
             if (pcrConfirms) {
@@ -417,17 +429,26 @@ public class FamilyCandle {
             }
         }
 
-        // FIX: Check OI signal alignment with equity direction (was double-counting before)
+        // Check OI signal alignment with primary direction
         if (oiSignal != null && !oiSignal.equals("NEUTRAL")) {
             signals++;
-            // OI signal must ALIGN with equity direction to confirm
             boolean oiIsBullish = isBullishOI();
             boolean oiIsBearish = isBearishOI();
-            
-            if ((oiIsBullish && equityBullish) || (oiIsBearish && equityBearish)) {
+
+            if ((oiIsBullish && primaryBullish) || (oiIsBearish && primaryBearish)) {
                 confirmedSignals++;
             }
-            // If OI disagrees with equity, it doesn't confirm (0 added to confirmedSignals)
+        }
+
+        // 🔴 NEW: Check directional bias confirmation
+        if (directionalBias != null && !directionalBias.equals("NEUTRAL")) {
+            signals++;
+            boolean biasBullish = "BULLISH".equals(directionalBias) || "STRONG_BULLISH".equals(directionalBias);
+            boolean biasBearish = "BEARISH".equals(directionalBias) || "STRONG_BEARISH".equals(directionalBias);
+
+            if ((biasBullish && primaryBullish) || (biasBearish && primaryBearish)) {
+                confirmedSignals++;
+            }
         }
 
         return signals > 0 ? (double) confirmedSignals / signals : 0.0;

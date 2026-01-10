@@ -34,10 +34,15 @@ import java.util.List;
 @Slf4j
 public class OISignalDetector {
 
-    // Thresholds
+    // Default Thresholds (for high-liquidity NSE stocks)
     private static final double PRICE_THRESHOLD = 0.1;  // 0.1% price change
     private static final double OI_THRESHOLD = 2.0;     // 2% OI change for futures
     private static final long OPTION_OI_MIN_CHANGE = 1000;  // Minimum OI change for options
+
+    // Dynamic thresholds for commodities (lower due to lower liquidity)
+    private static final double COMMODITY_PRICE_THRESHOLD = 0.03;   // 0.03% (more sensitive)
+    private static final double COMMODITY_OI_THRESHOLD = 0.3;       // 0.3% OI change
+    private static final long COMMODITY_OPTION_OI_MIN_CHANGE = 50;  // 50 contracts
 
     /**
      * OI Signal Type enumeration
@@ -164,6 +169,197 @@ public class OISignalDetector {
         }
 
         return OISignalType.NEUTRAL;
+    }
+
+    /**
+     * 🔴 CRITICAL FIX Bug #3: Detect OI signal with dynamic thresholds based on instrument type.
+     *
+     * BEFORE: Fixed thresholds (2% OI, 1000 option contracts) - too high for commodities
+     * AFTER: Dynamic thresholds based on family type and liquidity
+     *
+     * For NATURALGAS with OI ~30,000:
+     * - Old: 90 change = 0.29% < 2% threshold → NEUTRAL (WRONG)
+     * - New: 90 change = 0.29% > 0.3% commodity threshold → Detects signal (CORRECT)
+     *
+     * @param family FamilyCandle to analyze
+     * @return OISignalType classification
+     */
+    public static OISignalType detectWithDynamicThresholds(FamilyCandle family) {
+        if (family == null) {
+            return OISignalType.NEUTRAL;
+        }
+
+        // Determine if this is a commodity (MCX)
+        boolean isCommodity = isCommodityFamily(family);
+
+        // Select appropriate thresholds
+        double priceThreshold = isCommodity ? COMMODITY_PRICE_THRESHOLD : PRICE_THRESHOLD;
+        double oiThreshold = isCommodity ? COMMODITY_OI_THRESHOLD : OI_THRESHOLD;
+        long optionOiMinChange = isCommodity ? COMMODITY_OPTION_OI_MIN_CHANGE : OPTION_OI_MIN_CHANGE;
+
+        // Further adjust based on OI liquidity
+        InstrumentCandle future = family.getFuture();
+        if (future != null && future.hasOI()) {
+            long futureOI = future.getOpenInterest() != null ? future.getOpenInterest() : 0L;
+            // For very low OI instruments, use even lower thresholds
+            if (futureOI < 10000) {
+                oiThreshold = Math.min(oiThreshold, 0.2);
+            } else if (futureOI < 50000) {
+                oiThreshold = Math.min(oiThreshold, 0.5);
+            } else if (futureOI < 200000) {
+                oiThreshold = Math.min(oiThreshold, 1.0);
+            }
+            // High OI instruments (NIFTY/BANKNIFTY) keep default 2%
+        }
+
+        // Use primary instrument for price direction
+        InstrumentCandle equity = family.getEquity();
+        InstrumentCandle primary = equity != null ? equity : future;
+        if (primary == null) {
+            return OISignalType.NEUTRAL;
+        }
+
+        // Calculate price change from aggregated OHLC (more accurate than stored value)
+        double priceChangePercent;
+        if (primary.getOpen() > 0) {
+            priceChangePercent = (primary.getClose() - primary.getOpen()) / primary.getOpen() * 100.0;
+        } else {
+            priceChangePercent = primary.getPriceChangePercent();
+        }
+
+        if (Double.isNaN(priceChangePercent) || Double.isInfinite(priceChangePercent)) {
+            return OISignalType.NEUTRAL;
+        }
+
+        boolean priceUp = priceChangePercent > priceThreshold;
+        boolean priceDown = priceChangePercent < -priceThreshold;
+
+        // Get future OI direction with dynamic threshold
+        boolean futureOiUp = false;
+        boolean futureOiDown = false;
+        if (future != null && future.hasOI()) {
+            Double oiChangePercent = future.getOiChangePercent();
+            if (oiChangePercent != null && !Double.isNaN(oiChangePercent)) {
+                futureOiUp = oiChangePercent > oiThreshold;
+                futureOiDown = oiChangePercent < -oiThreshold;
+            }
+        }
+
+        // Get options OI direction with dynamic threshold
+        long callOiChange = 0L;
+        long putOiChange = 0L;
+        List<OptionCandle> options = family.getOptions();
+        if (options != null && !options.isEmpty()) {
+            callOiChange = options.stream()
+                .filter(OptionCandle::isCall)
+                .mapToLong(OptionCandle::getOiChange)
+                .sum();
+            putOiChange = options.stream()
+                .filter(OptionCandle::isPut)
+                .mapToLong(OptionCandle::getOiChange)
+                .sum();
+        }
+
+        boolean callOiUp = callOiChange > optionOiMinChange;
+        boolean callOiDown = callOiChange < -optionOiMinChange;
+        boolean putOiUp = putOiChange > optionOiMinChange;
+        boolean putOiDown = putOiChange < -optionOiMinChange;
+
+        // Log detection details for debugging
+        if (isCommodity) {
+            log.debug("[OI-SIGNAL-DYNAMIC] {} | isCommodity={} | price={}% (threshold={}) up={} down={} | " +
+                      "futureOI={}% (threshold={}) up={} down={} | callOI={} putOI={} (threshold={})",
+                family.getFamilyId(), isCommodity,
+                String.format("%.3f", priceChangePercent), priceThreshold, priceUp, priceDown,
+                future != null ? String.format("%.3f", future.getOiChangePercent()) : "N/A",
+                oiThreshold, futureOiUp, futureOiDown,
+                callOiChange, putOiChange, optionOiMinChange);
+        }
+
+        // === THE KEY SIGNALS (same logic, dynamic thresholds) ===
+
+        // BULLISH ACCUMULATION: Price up + Future OI up + Call OI up + Put OI down/neutral
+        if (priceUp && futureOiUp && callOiUp && !putOiUp) {
+            return OISignalType.BULLISH_ACCUMULATION;
+        }
+
+        // BEARISH DISTRIBUTION: Price down + Future OI up + Put OI up + Call OI down/neutral
+        if (priceDown && futureOiUp && putOiUp && !callOiUp) {
+            return OISignalType.BEARISH_DISTRIBUTION;
+        }
+
+        // SHORT COVERING RALLY: Price up + Future OI down + Put OI down
+        if (priceUp && futureOiDown && putOiDown) {
+            return OISignalType.SHORT_COVERING_RALLY;
+        }
+
+        // LONG UNWINDING: Price down + Future OI down + Call OI down
+        if (priceDown && futureOiDown && callOiDown) {
+            return OISignalType.LONG_UNWINDING;
+        }
+
+        // CALL WRITING: Price down + Call OI up = Selling calls (bearish)
+        if (priceDown && callOiUp) {
+            return OISignalType.CALL_WRITING;
+        }
+
+        // CALL BUYING: Price up + Call OI up = Buying calls (bullish)
+        if (priceUp && callOiUp) {
+            return OISignalType.CALL_BUYING;
+        }
+
+        // PUT WRITING: Price up + Put OI up = Selling puts (bullish)
+        if (priceUp && putOiUp) {
+            return OISignalType.PUT_WRITING;
+        }
+
+        // PUT BUYING: Price down + Put OI up = Buying puts (bearish)
+        if (priceDown && putOiUp) {
+            return OISignalType.PUT_BUYING;
+        }
+
+        // 🔴 NEW: Additional signals for when only price or only OI crosses threshold
+        // This helps catch signals in low-liquidity instruments
+
+        // LONG_BUILDUP (weaker): Price up + OI up (even if options don't confirm)
+        if (priceUp && futureOiUp) {
+            log.debug("[OI-SIGNAL-WEAK] {} | LONG_BUILDUP detected (price+OI up, no option confirmation)",
+                family.getFamilyId());
+            return OISignalType.CALL_BUYING;  // Map to existing bullish signal
+        }
+
+        // SHORT_BUILDUP (weaker): Price down + OI up (even if options don't confirm)
+        if (priceDown && futureOiUp) {
+            log.debug("[OI-SIGNAL-WEAK] {} | SHORT_BUILDUP detected (price down+OI up, no option confirmation)",
+                family.getFamilyId());
+            return OISignalType.PUT_BUYING;  // Map to existing bearish signal
+        }
+
+        return OISignalType.NEUTRAL;
+    }
+
+    /**
+     * Check if family is a commodity (MCX)
+     */
+    private static boolean isCommodityFamily(FamilyCandle family) {
+        if (family == null) return false;
+
+        // Check isCommodity flag
+        if (family.isCommodity()) return true;
+
+        // Fallback: check future exchange
+        if (family.getFuture() != null) {
+            String exchange = family.getFuture().getExchange();
+            return "M".equalsIgnoreCase(exchange);
+        }
+
+        // Fallback: check equity exchange (if somehow we have equity for commodity)
+        if (family.getEquity() != null) {
+            String exchange = family.getEquity().getExchange();
+            return "M".equalsIgnoreCase(exchange);
+        }
+
+        return false;
     }
 
     /**

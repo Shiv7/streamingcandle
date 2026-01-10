@@ -217,11 +217,24 @@ public class OptionCandle {
     }
 
     /**
-     * Check if option is at-the-money (within 1% of strike)
+     * Check if option is at-the-money (within dynamic threshold of strike)
+     *
+     * 🔴 FIX Bug #9: ATM threshold was fixed at max(1%, 50 points) which is too wide.
+     * For NATURALGAS spot ~302, strike 320:
+     * - Old: diff=18, threshold=max(3.2, 50)=50, 18<50 → ATM=true (WRONG)
+     * - New: diff=18, threshold=302*0.02=6.04, 18>6 → ATM=false (CORRECT)
      */
     public boolean checkATM(double spotPrice) {
-        double diff = Math.abs(spotPrice - strikePrice) / strikePrice;
-        return diff < 0.01;  // Within 1%
+        if (spotPrice <= 0 || strikePrice <= 0) return false;
+
+        double diff = Math.abs(spotPrice - strikePrice);
+        // ATM threshold: 2% of spot price (more accurate than fixed 50 points)
+        double atmThreshold = spotPrice * 0.02;
+
+        // For very low-priced instruments, use minimum threshold of 1 unit
+        atmThreshold = Math.max(atmThreshold, 1.0);
+
+        return diff <= atmThreshold;
     }
 
     /**
@@ -372,9 +385,13 @@ public class OptionCandle {
             boolean itm = isCall ? spotPrice > strike : isPut && spotPrice < strike;
             builder.isITM(itm);
 
-            // ATM: Within 1% of strike (or within 50 points for index options)
+            // 🔴 FIX Bug #9: ATM threshold - use 2% of spot price (not fixed 50 points)
+            // For NATURALGAS spot ~302, strike 320:
+            // - Old: diff=18, threshold=max(3.2, 50)=50, 18<50 → ATM=true (WRONG)
+            // - New: diff=18, threshold=302*0.02=6.04, 18>6 → ATM=false (CORRECT)
             double diff = Math.abs(spotPrice - strike);
-            double atmThreshold = Math.max(strike * 0.01, 50.0);
+            double atmThreshold = spotPrice * 0.02;  // 2% of spot
+            atmThreshold = Math.max(atmThreshold, 1.0);  // Minimum 1 unit for low-priced
             builder.isATM(diff <= atmThreshold);
 
             // Intrinsic value
