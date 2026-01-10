@@ -475,42 +475,53 @@ public class MTISProcessor {
     // ==================== HELPER METHODS ====================
 
     private void updateTFState(FamilyIntelligenceState state, FamilyCandle family, String timeframe) {
-        InstrumentCandle equity = family.getEquity();
-        
+        // FIX: Use primary instrument - equity for NSE, future for MCX commodities
+        InstrumentCandle primary = family.getEquity();
+        if (primary == null) {
+            primary = family.getFuture();
+        }
+        if (primary == null) {
+            log.debug("No equity or future data in FamilyCandle for timeframe {} - skipping TF state update", timeframe);
+            return;
+        }
+
         // Calculate TF-specific score (simplified for now)
-        double tfScore = calculateSimpleTFScore(family);
-        
+        double tfScore = calculateSimpleTFScore(family, primary);
+
         state.updateTFState(
                 timeframe,
                 tfScore,
-                equity.getVwap(),
-                equity.getClose(),
+                primary.getVwap(),
+                primary.getClose(),
                 family.isHasFuture() && family.getFuture() != null && family.getFuture().hasOI(),
-                equity.hasOrderbook(),
+                primary.hasOrderbook(),
                 family.isHasFuture(),
                 family.isHasOptions()
         );
     }
 
-    private double calculateSimpleTFScore(FamilyCandle family) {
-        InstrumentCandle equity = family.getEquity();
+    private double calculateSimpleTFScore(FamilyCandle family, InstrumentCandle primary) {
         double score = 0;
-        
+
+        if (primary == null) {
+            return score;
+        }
+
         // Price vs VWAP
-        if (equity.getVwap() > 0) {
-            double vwapDist = (equity.getClose() - equity.getVwap()) / equity.getVwap() * 100;
+        if (primary.getVwap() > 0) {
+            double vwapDist = (primary.getClose() - primary.getVwap()) / primary.getVwap() * 100;
             score += clamp(vwapDist * 5, -15, 15);
         }
-        
+
         // Volume delta
-        score += clamp(equity.getVolumeDeltaPercent() / 5, -10, 10);
-        
+        score += clamp(primary.getVolumeDeltaPercent() / 5, -10, 10);
+
         // OI signal
         if (family.getOiSignal() != null) {
             if (family.getOiSignal().contains("BULLISH")) score += 10;
             else if (family.getOiSignal().contains("BEARISH")) score -= 10;
         }
-        
+
         return clamp(score, -50, 50);
     }
 
