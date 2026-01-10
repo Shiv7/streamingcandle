@@ -4,7 +4,6 @@ import com.kotsin.consumer.capital.model.FinalMagnitude;
 import com.kotsin.consumer.capital.model.FinalMagnitude.*;
 import com.kotsin.consumer.model.IPUOutput;
 import com.kotsin.consumer.model.MTVCPOutput;
-import com.kotsin.consumer.model.TradingSignal;
 import com.kotsin.consumer.model.UnifiedCandle;
 import com.kotsin.consumer.regime.model.ACLOutput;
 import com.kotsin.consumer.regime.model.IndexRegime;
@@ -72,12 +71,24 @@ public class FinalMagnitudeAssembly {
 
     /**
      * Calculate Final Magnitude from all module outputs
+     *
+     * @param scripCode Security identifier
+     * @param companyName Company name
+     * @param currentCandle Current candle data
+     * @param signalType Signal type string (from any signal source)
+     * @param ipuOutput IPU analysis output
+     * @param vcpOutput VCP analysis output
+     * @param indexRegime Index regime context
+     * @param securityRegime Security regime context
+     * @param aclOutput ACL output
+     * @param fudkiiOutput FUDKII output
+     * @return FinalMagnitude with calculated score
      */
     public FinalMagnitude calculate(
             String scripCode,
             String companyName,
             UnifiedCandle currentCandle,
-            TradingSignal tradingSignal,
+            String signalType,
             IPUOutput ipuOutput,
             MTVCPOutput vcpOutput,
             IndexRegime indexRegime,
@@ -136,8 +147,8 @@ public class FinalMagnitudeAssembly {
         Direction direction = determineDirection(ipuOutput, vcpOutput, securityRegime);
         double directionConfidence = calculateDirectionConfidence(ipuOutput, vcpOutput, securityRegime, indexRegime);
 
-        // Get signal type
-        String signalType = tradingSignal != null ? tradingSignal.getSignal().name() : "NO_SIGNAL";
+        // Use provided signal type or default
+        String finalSignalType = signalType != null ? signalType : "NO_SIGNAL";
 
         // Build component scores
         ComponentScores components = ComponentScores.builder()
@@ -186,7 +197,7 @@ public class FinalMagnitudeAssembly {
                 .finalMagnitude(finalMagnitude)
                 .direction(direction)
                 .directionConfidence(directionConfidence)
-                .signalType(signalType)
+                .signalType(finalSignalType)
                 .components(components)
                 .multipliers(multipliers)
                 .penalties(penalties)

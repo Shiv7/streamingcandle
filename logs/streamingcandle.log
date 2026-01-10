@@ -1,12 +1,96 @@
-2026-01-05 04:03:56.554 WARN  [main] o.a.k.s.p.internals.StateDirectory - Using an OS temp directory in the state.dir property can cause failures with writing the checkpoint file due to the fact that this directory can be cleared by the OS. Resolved state.dir: [/var/folders/q0/9zn8w7w12x76gfpt845612hm0000gn/T//kafka-streams]
-2026-01-05 04:04:00.199 INFO  [main] com.kotsin.consumer.util.TTLCache - 🗄️ Created TTLCache 'test-stats' with TTL=60000ms, maxSize=100
-2026-01-05 04:04:00.222 INFO  [main] com.kotsin.consumer.util.TTLCache - 🛑 Cache 'test-stats' shutdown complete
-2026-01-05 04:04:00.238 INFO  [main] com.kotsin.consumer.util.TTLCache - 🗄️ Created TTLCache 'test-lru' with TTL=60000ms, maxSize=3
-2026-01-05 04:04:00.240 INFO  [main] com.kotsin.consumer.util.TTLCache - 🛑 Cache 'test-lru' shutdown complete
-2026-01-05 04:04:00.296 INFO  [main] com.kotsin.consumer.util.TTLCache - 🗄️ Created TTLCache 'test-expire' with TTL=100ms, maxSize=100
-2026-01-05 04:04:00.503 INFO  [main] com.kotsin.consumer.util.TTLCache - 🛑 Cache 'test-expire' shutdown complete
-2026-01-05 04:04:06.451 INFO  [main] c.k.c.c.s.FuturesOptionsService - F&O Alignment for RELIANCE: score=0.24, bias=STRONG_BEARISH, aligned=false
-2026-01-05 04:04:06.724 WARN  [main] c.k.c.c.s.FuturesOptionsService - No F&O data available for RELIANCE
-2026-01-05 04:04:06.756 ERROR [pool-7-thread-1] c.k.c.c.s.FuturesOptionsService - Error fetching futures data for RELIANCE: API error
-2026-01-05 04:04:06.971 INFO  [main] c.k.c.c.s.FuturesOptionsService - F&O Alignment for RELIANCE: score=0.57, bias=BULLISH, aligned=false
-2026-01-05 04:04:07.022 INFO  [main] c.k.c.c.s.FuturesOptionsService - F&O Alignment for RELIANCE: score=0.88, bias=STRONG_BULLISH, aligned=true
+2026-01-10 15:50:42.849 WARN  [main] o.a.k.s.p.internals.StateDirectory - Using an OS temp directory in the state.dir property can cause failures with writing the checkpoint file due to the fact that this directory can be cleared by the OS. Resolved state.dir: [/var/folders/q0/9zn8w7w12x76gfpt845612hm0000gn/T//kafka-streams]
+2026-01-10 15:50:45.185 INFO  [main] com.kotsin.consumer.util.TTLCache - 🗄️ Created TTLCache 'test-stats' with TTL=60000ms, maxSize=100
+2026-01-10 15:50:45.199 INFO  [main] com.kotsin.consumer.util.TTLCache - 🛑 Cache 'test-stats' shutdown complete
+2026-01-10 15:50:45.204 INFO  [main] com.kotsin.consumer.util.TTLCache - 🗄️ Created TTLCache 'test-lru' with TTL=60000ms, maxSize=3
+2026-01-10 15:50:45.205 INFO  [main] com.kotsin.consumer.util.TTLCache - 🛑 Cache 'test-lru' shutdown complete
+2026-01-10 15:50:45.212 INFO  [main] com.kotsin.consumer.util.TTLCache - 🗄️ Created TTLCache 'test-expire' with TTL=100ms, maxSize=100
+2026-01-10 15:50:45.417 INFO  [main] com.kotsin.consumer.util.TTLCache - 🛑 Cache 'test-expire' shutdown complete
+2026-01-10 15:50:49.791 INFO  [main] c.k.c.c.s.FuturesOptionsService - F&O Alignment for RELIANCE: score=0.24, bias=STRONG_BEARISH, aligned=false
+2026-01-10 15:50:49.917 WARN  [main] c.k.c.c.s.FuturesOptionsService - No F&O data available for RELIANCE
+2026-01-10 15:50:49.931 ERROR [pool-8-thread-1] c.k.c.c.s.FuturesOptionsService - Error fetching futures data for RELIANCE: API error
+2026-01-10 15:50:50.027 INFO  [main] c.k.c.c.s.FuturesOptionsService - F&O Alignment for RELIANCE: score=0.57, bias=BULLISH, aligned=false
+2026-01-10 15:50:50.041 INFO  [main] c.k.c.c.s.FuturesOptionsService - F&O Alignment for RELIANCE: score=0.88, bias=STRONG_BULLISH, aligned=true
+2026-01-10 15:51:17.892 WARN  [main] o.a.k.s.p.internals.StateDirectory - Using an OS temp directory in the state.dir property can cause failures with writing the checkpoint file due to the fact that this directory can be cleared by the OS. Resolved state.dir: [/var/folders/q0/9zn8w7w12x76gfpt845612hm0000gn/T//kafka-streams]
+2026-01-10 15:51:20.272 INFO  [main] com.kotsin.consumer.util.TTLCache - 🗄️ Created TTLCache 'test-stats' with TTL=60000ms, maxSize=100
+2026-01-10 15:51:20.282 INFO  [main] com.kotsin.consumer.util.TTLCache - 🛑 Cache 'test-stats' shutdown complete
+2026-01-10 15:51:20.289 INFO  [main] com.kotsin.consumer.util.TTLCache - 🗄️ Created TTLCache 'test-lru' with TTL=60000ms, maxSize=3
+2026-01-10 15:51:20.290 INFO  [main] com.kotsin.consumer.util.TTLCache - 🛑 Cache 'test-lru' shutdown complete
+2026-01-10 15:51:20.295 INFO  [main] com.kotsin.consumer.util.TTLCache - 🗄️ Created TTLCache 'test-expire' with TTL=100ms, maxSize=100
+2026-01-10 15:51:20.500 INFO  [main] com.kotsin.consumer.util.TTLCache - 🛑 Cache 'test-expire' shutdown complete
+2026-01-10 15:51:24.739 INFO  [main] c.k.c.c.s.FuturesOptionsService - F&O Alignment for RELIANCE: score=0.24, bias=STRONG_BEARISH, aligned=false
+2026-01-10 15:51:24.857 WARN  [main] c.k.c.c.s.FuturesOptionsService - No F&O data available for RELIANCE
+2026-01-10 15:51:24.886 ERROR [pool-7-thread-1] c.k.c.c.s.FuturesOptionsService - Error fetching futures data for RELIANCE: API error
+2026-01-10 15:51:24.999 INFO  [main] c.k.c.c.s.FuturesOptionsService - F&O Alignment for RELIANCE: score=0.57, bias=BULLISH, aligned=false
+2026-01-10 15:51:25.009 INFO  [main] c.k.c.c.s.FuturesOptionsService - F&O Alignment for RELIANCE: score=0.88, bias=STRONG_BULLISH, aligned=true
+2026-01-10 15:51:48.474 WARN  [main] o.a.k.s.p.internals.StateDirectory - Using an OS temp directory in the state.dir property can cause failures with writing the checkpoint file due to the fact that this directory can be cleared by the OS. Resolved state.dir: [/var/folders/q0/9zn8w7w12x76gfpt845612hm0000gn/T//kafka-streams]
+2026-01-10 15:51:50.881 INFO  [main] com.kotsin.consumer.util.TTLCache - 🗄️ Created TTLCache 'test-stats' with TTL=60000ms, maxSize=100
+2026-01-10 15:51:50.894 INFO  [main] com.kotsin.consumer.util.TTLCache - 🛑 Cache 'test-stats' shutdown complete
+2026-01-10 15:51:50.901 INFO  [main] com.kotsin.consumer.util.TTLCache - 🗄️ Created TTLCache 'test-lru' with TTL=60000ms, maxSize=3
+2026-01-10 15:51:50.902 INFO  [main] com.kotsin.consumer.util.TTLCache - 🛑 Cache 'test-lru' shutdown complete
+2026-01-10 15:51:50.905 INFO  [main] com.kotsin.consumer.util.TTLCache - 🗄️ Created TTLCache 'test-expire' with TTL=100ms, maxSize=100
+2026-01-10 15:51:51.110 INFO  [main] com.kotsin.consumer.util.TTLCache - 🛑 Cache 'test-expire' shutdown complete
+2026-01-10 15:51:55.281 INFO  [main] c.k.c.c.s.FuturesOptionsService - F&O Alignment for RELIANCE: score=0.24, bias=STRONG_BEARISH, aligned=false
+2026-01-10 15:51:55.415 WARN  [main] c.k.c.c.s.FuturesOptionsService - No F&O data available for RELIANCE
+2026-01-10 15:51:55.429 ERROR [pool-7-thread-1] c.k.c.c.s.FuturesOptionsService - Error fetching futures data for RELIANCE: API error
+2026-01-10 15:51:55.505 INFO  [main] c.k.c.c.s.FuturesOptionsService - F&O Alignment for RELIANCE: score=0.57, bias=BULLISH, aligned=false
+2026-01-10 15:51:55.517 INFO  [main] c.k.c.c.s.FuturesOptionsService - F&O Alignment for RELIANCE: score=0.88, bias=STRONG_BULLISH, aligned=true
+2026-01-10 15:52:18.139 WARN  [main] o.a.k.s.p.internals.StateDirectory - Using an OS temp directory in the state.dir property can cause failures with writing the checkpoint file due to the fact that this directory can be cleared by the OS. Resolved state.dir: [/var/folders/q0/9zn8w7w12x76gfpt845612hm0000gn/T//kafka-streams]
+2026-01-10 15:52:20.379 INFO  [main] com.kotsin.consumer.util.TTLCache - 🗄️ Created TTLCache 'test-stats' with TTL=60000ms, maxSize=100
+2026-01-10 15:52:20.397 INFO  [main] com.kotsin.consumer.util.TTLCache - 🛑 Cache 'test-stats' shutdown complete
+2026-01-10 15:52:20.409 INFO  [main] com.kotsin.consumer.util.TTLCache - 🗄️ Created TTLCache 'test-lru' with TTL=60000ms, maxSize=3
+2026-01-10 15:52:20.410 INFO  [main] com.kotsin.consumer.util.TTLCache - 🛑 Cache 'test-lru' shutdown complete
+2026-01-10 15:52:20.416 INFO  [main] com.kotsin.consumer.util.TTLCache - 🗄️ Created TTLCache 'test-expire' with TTL=100ms, maxSize=100
+2026-01-10 15:52:20.622 INFO  [main] com.kotsin.consumer.util.TTLCache - 🛑 Cache 'test-expire' shutdown complete
+2026-01-10 15:52:24.742 INFO  [main] c.k.c.c.s.FuturesOptionsService - F&O Alignment for RELIANCE: score=0.24, bias=STRONG_BEARISH, aligned=false
+2026-01-10 15:52:24.901 WARN  [main] c.k.c.c.s.FuturesOptionsService - No F&O data available for RELIANCE
+2026-01-10 15:52:24.930 ERROR [pool-7-thread-1] c.k.c.c.s.FuturesOptionsService - Error fetching futures data for RELIANCE: API error
+2026-01-10 15:52:25.059 INFO  [main] c.k.c.c.s.FuturesOptionsService - F&O Alignment for RELIANCE: score=0.57, bias=BULLISH, aligned=false
+2026-01-10 15:52:25.078 INFO  [main] c.k.c.c.s.FuturesOptionsService - F&O Alignment for RELIANCE: score=0.88, bias=STRONG_BULLISH, aligned=true
+2026-01-10 16:45:59.868 WARN  [main] o.a.k.s.p.internals.StateDirectory - Using an OS temp directory in the state.dir property can cause failures with writing the checkpoint file due to the fact that this directory can be cleared by the OS. Resolved state.dir: [/var/folders/q0/9zn8w7w12x76gfpt845612hm0000gn/T//kafka-streams]
+2026-01-10 16:46:02.301 INFO  [main] com.kotsin.consumer.util.TTLCache - 🗄️ Created TTLCache 'test-stats' with TTL=60000ms, maxSize=100
+2026-01-10 16:46:02.338 INFO  [main] com.kotsin.consumer.util.TTLCache - 🛑 Cache 'test-stats' shutdown complete
+2026-01-10 16:46:02.367 INFO  [main] com.kotsin.consumer.util.TTLCache - 🗄️ Created TTLCache 'test-lru' with TTL=60000ms, maxSize=3
+2026-01-10 16:46:02.371 INFO  [main] com.kotsin.consumer.util.TTLCache - 🛑 Cache 'test-lru' shutdown complete
+2026-01-10 16:46:02.386 INFO  [main] com.kotsin.consumer.util.TTLCache - 🗄️ Created TTLCache 'test-expire' with TTL=100ms, maxSize=100
+2026-01-10 16:46:02.594 INFO  [main] com.kotsin.consumer.util.TTLCache - 🛑 Cache 'test-expire' shutdown complete
+2026-01-10 16:46:06.514 INFO  [main] c.k.c.c.s.FuturesOptionsService - F&O Alignment for RELIANCE: score=0.24, bias=STRONG_BEARISH, aligned=false
+2026-01-10 16:46:06.641 WARN  [main] c.k.c.c.s.FuturesOptionsService - No F&O data available for RELIANCE
+2026-01-10 16:46:06.668 ERROR [pool-7-thread-1] c.k.c.c.s.FuturesOptionsService - Error fetching futures data for RELIANCE: API error
+2026-01-10 16:46:06.763 INFO  [main] c.k.c.c.s.FuturesOptionsService - F&O Alignment for RELIANCE: score=0.57, bias=BULLISH, aligned=false
+2026-01-10 16:46:06.773 INFO  [main] c.k.c.c.s.FuturesOptionsService - F&O Alignment for RELIANCE: score=0.88, bias=STRONG_BULLISH, aligned=true
+2026-01-10 17:31:22.177 WARN  [main] o.a.k.s.p.internals.StateDirectory - Using an OS temp directory in the state.dir property can cause failures with writing the checkpoint file due to the fact that this directory can be cleared by the OS. Resolved state.dir: [/var/folders/q0/9zn8w7w12x76gfpt845612hm0000gn/T//kafka-streams]
+2026-01-10 17:31:24.738 INFO  [main] com.kotsin.consumer.util.TTLCache - 🗄️ Created TTLCache 'test-stats' with TTL=60000ms, maxSize=100
+2026-01-10 17:31:24.751 INFO  [main] com.kotsin.consumer.util.TTLCache - 🛑 Cache 'test-stats' shutdown complete
+2026-01-10 17:31:24.758 INFO  [main] com.kotsin.consumer.util.TTLCache - 🗄️ Created TTLCache 'test-lru' with TTL=60000ms, maxSize=3
+2026-01-10 17:31:24.758 INFO  [main] com.kotsin.consumer.util.TTLCache - 🛑 Cache 'test-lru' shutdown complete
+2026-01-10 17:31:24.765 INFO  [main] com.kotsin.consumer.util.TTLCache - 🗄️ Created TTLCache 'test-expire' with TTL=100ms, maxSize=100
+2026-01-10 17:31:24.971 INFO  [main] com.kotsin.consumer.util.TTLCache - 🛑 Cache 'test-expire' shutdown complete
+2026-01-10 17:31:29.793 INFO  [main] c.k.c.c.s.FuturesOptionsService - F&O Alignment for RELIANCE: score=0.24, bias=STRONG_BEARISH, aligned=false
+2026-01-10 17:31:30.045 WARN  [main] c.k.c.c.s.FuturesOptionsService - No F&O data available for RELIANCE
+2026-01-10 17:31:30.073 ERROR [pool-7-thread-1] c.k.c.c.s.FuturesOptionsService - Error fetching futures data for RELIANCE: API error
+2026-01-10 17:31:30.214 INFO  [main] c.k.c.c.s.FuturesOptionsService - F&O Alignment for RELIANCE: score=0.57, bias=BULLISH, aligned=false
+2026-01-10 17:31:30.229 INFO  [main] c.k.c.c.s.FuturesOptionsService - F&O Alignment for RELIANCE: score=0.88, bias=STRONG_BULLISH, aligned=true
+2026-01-10 17:32:02.170 WARN  [main] o.a.k.s.p.internals.StateDirectory - Using an OS temp directory in the state.dir property can cause failures with writing the checkpoint file due to the fact that this directory can be cleared by the OS. Resolved state.dir: [/var/folders/q0/9zn8w7w12x76gfpt845612hm0000gn/T//kafka-streams]
+2026-01-10 17:32:05.933 INFO  [main] com.kotsin.consumer.util.TTLCache - 🗄️ Created TTLCache 'test-stats' with TTL=60000ms, maxSize=100
+2026-01-10 17:32:05.950 INFO  [main] com.kotsin.consumer.util.TTLCache - 🛑 Cache 'test-stats' shutdown complete
+2026-01-10 17:32:05.965 INFO  [main] com.kotsin.consumer.util.TTLCache - 🗄️ Created TTLCache 'test-lru' with TTL=60000ms, maxSize=3
+2026-01-10 17:32:05.966 INFO  [main] com.kotsin.consumer.util.TTLCache - 🛑 Cache 'test-lru' shutdown complete
+2026-01-10 17:32:05.979 INFO  [main] com.kotsin.consumer.util.TTLCache - 🗄️ Created TTLCache 'test-expire' with TTL=100ms, maxSize=100
+2026-01-10 17:32:06.186 INFO  [main] com.kotsin.consumer.util.TTLCache - 🛑 Cache 'test-expire' shutdown complete
+2026-01-10 17:32:12.997 INFO  [main] c.k.c.c.s.FuturesOptionsService - F&O Alignment for RELIANCE: score=0.24, bias=STRONG_BEARISH, aligned=false
+2026-01-10 17:32:13.210 WARN  [main] c.k.c.c.s.FuturesOptionsService - No F&O data available for RELIANCE
+2026-01-10 17:32:13.227 ERROR [pool-7-thread-1] c.k.c.c.s.FuturesOptionsService - Error fetching futures data for RELIANCE: API error
+2026-01-10 17:32:13.342 INFO  [main] c.k.c.c.s.FuturesOptionsService - F&O Alignment for RELIANCE: score=0.57, bias=BULLISH, aligned=false
+2026-01-10 17:32:13.356 INFO  [main] c.k.c.c.s.FuturesOptionsService - F&O Alignment for RELIANCE: score=0.88, bias=STRONG_BULLISH, aligned=true
+2026-01-10 17:32:43.682 WARN  [main] o.a.k.s.p.internals.StateDirectory - Using an OS temp directory in the state.dir property can cause failures with writing the checkpoint file due to the fact that this directory can be cleared by the OS. Resolved state.dir: [/var/folders/q0/9zn8w7w12x76gfpt845612hm0000gn/T//kafka-streams]
+2026-01-10 17:32:46.320 INFO  [main] com.kotsin.consumer.util.TTLCache - 🗄️ Created TTLCache 'test-stats' with TTL=60000ms, maxSize=100
+2026-01-10 17:32:46.334 INFO  [main] com.kotsin.consumer.util.TTLCache - 🛑 Cache 'test-stats' shutdown complete
+2026-01-10 17:32:46.342 INFO  [main] com.kotsin.consumer.util.TTLCache - 🗄️ Created TTLCache 'test-lru' with TTL=60000ms, maxSize=3
+2026-01-10 17:32:46.343 INFO  [main] com.kotsin.consumer.util.TTLCache - 🛑 Cache 'test-lru' shutdown complete
+2026-01-10 17:32:46.347 INFO  [main] com.kotsin.consumer.util.TTLCache - 🗄️ Created TTLCache 'test-expire' with TTL=100ms, maxSize=100
+2026-01-10 17:32:46.553 INFO  [main] com.kotsin.consumer.util.TTLCache - 🛑 Cache 'test-expire' shutdown complete
+2026-01-10 17:32:50.424 INFO  [main] c.k.c.c.s.FuturesOptionsService - F&O Alignment for RELIANCE: score=0.24, bias=STRONG_BEARISH, aligned=false
+2026-01-10 17:32:50.569 WARN  [main] c.k.c.c.s.FuturesOptionsService - No F&O data available for RELIANCE
+2026-01-10 17:32:50.606 ERROR [pool-7-thread-1] c.k.c.c.s.FuturesOptionsService - Error fetching futures data for RELIANCE: API error
+2026-01-10 17:32:50.696 INFO  [main] c.k.c.c.s.FuturesOptionsService - F&O Alignment for RELIANCE: score=0.57, bias=BULLISH, aligned=false
+2026-01-10 17:32:50.706 INFO  [main] c.k.c.c.s.FuturesOptionsService - F&O Alignment for RELIANCE: score=0.88, bias=STRONG_BULLISH, aligned=true

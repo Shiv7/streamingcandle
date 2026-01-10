@@ -1,0 +1,1209 @@
+package com.kotsin.consumer.enrichment;
+
+import com.kotsin.consumer.domain.model.FamilyCandle;
+import com.kotsin.consumer.enrichment.calculator.ConfluenceCalculator;
+import com.kotsin.consumer.enrichment.calculator.GEXCalculator;
+import com.kotsin.consumer.enrichment.calculator.MaxPainCalculator;
+import com.kotsin.consumer.enrichment.calculator.ThresholdCalculator;
+import com.kotsin.consumer.enrichment.config.CommodityConfig;
+import com.kotsin.consumer.enrichment.detector.EventDetector;
+import com.kotsin.consumer.enrichment.enricher.ExpiryContextEnricher;
+import com.kotsin.consumer.enrichment.enricher.HistoricalContextEnricher;
+import com.kotsin.consumer.enrichment.enricher.TechnicalIndicatorEnricher;
+import com.kotsin.consumer.enrichment.enricher.TimeContextEnricher;
+import com.kotsin.consumer.enrichment.model.*;
+import com.kotsin.consumer.enrichment.pattern.matcher.PatternMatcher;
+import com.kotsin.consumer.enrichment.pattern.model.PatternSignal;
+import com.kotsin.consumer.enrichment.pattern.publisher.PatternSignalPublisher;
+import com.kotsin.consumer.enrichment.store.EventStore;
+import com.kotsin.consumer.quant.calculator.QuantScoreCalculator;
+import com.kotsin.consumer.quant.model.QuantScore;
+import lombok.RequiredArgsConstructor;
+import lombok.extern.slf4j.Slf4j;
+import org.springframework.stereotype.Service;
+
+import java.util.Collections;
+import java.util.List;
+
+/**
+ * EnrichedQuantScoreCalculator - Wraps QuantScoreCalculator with Phase 1, 2, 3 & 4 enrichment.
+ *
+ * This is the integration point between:
+ * - Existing QuantScoreCalculator (stateless)
+ * - Phase 1: HistoricalContextEnricher (stateful, adaptive)
+ * - Phase 2: GEX, MaxPain, TimeContext, ExpiryContext enrichers
+ * - Phase 3: EventDetector, TechnicalIndicatorEnricher, ConfluenceCalculator
+ * - Phase 4: PatternMatcher (sequence recognition, predictive patterns)
+ *
+ * Enhancements:
+ * 1. Adds historical context before score calculation
+ * 2. Uses adaptive thresholds based on percentiles
+ * 3. Applies commodity-specific modifiers
+ * 4. Detects flips and derived signals
+ * 5. Adjusts confidence based on data completeness
+ * 6. GEX regime detection (trending vs mean-reverting)
+ * 7. Max Pain analysis (expiry day positioning)
+ * 8. Time context (session quality, prime trading hours)
+ * 9. Expiry context (DTE awareness, gamma effects)
+ * 10. Technical indicators (SuperTrend, BB, Pivots)
+ * 11. Event detection (OFI flip, exhaustion, absorption, etc.)
+ * 12. Confluence zones (S/R level clustering)
+ * 13. Pattern recognition (sequence matching, predictive signals)
+ */
+@Slf4j
+@Service
+@RequiredArgsConstructor
+public class EnrichedQuantScoreCalculator {
+
+    private final QuantScoreCalculator baseCalculator;
+    private final HistoricalContextEnricher historicalEnricher;
+    private final ThresholdCalculator thresholdCalculator;
+    private final CommodityConfig commodityConfig;
+
+    // Phase 2 enrichers
+    private final GEXCalculator gexCalculator;
+    private final MaxPainCalculator maxPainCalculator;
+    private final TimeContextEnricher timeContextEnricher;
+    private final ExpiryContextEnricher expiryContextEnricher;
+
+    // Phase 3 enrichers
+    private final TechnicalIndicatorEnricher technicalEnricher;
+    private final EventDetector eventDetector;
+    private final ConfluenceCalculator confluenceCalculator;
+    private final EventStore eventStore;
+
+    // Phase 4 pattern recognition
+    private final PatternMatcher patternMatcher;
+    private final PatternSignalPublisher patternSignalPublisher;
+
+    /**
+     * Calculate enriched QuantScore with historical context and Phase 2, 3, 4 enrichments
+     *
+     * @param family FamilyCandle to score
+     * @return QuantScore with historical context and options intelligence integration
+     */
+    public EnrichedQuantScore calculate(FamilyCandle family) {
+        if (family == null) {
+            return EnrichedQuantScore.empty();
+        }
+
+        try {
+            // =============== PHASE 1: Historical Context ===============
+            HistoricalContext historicalContext = historicalEnricher.enrich(family);
+            applyHistoricalModifiers(family, historicalContext);
+
+            // =============== PHASE 2: Options Intelligence ===============
+            // GEX Analysis (market regime detection)
+            GEXProfile gexProfile = gexCalculator.calculate(family);
+
+            // Max Pain Analysis (expiry day positioning)
+            MaxPainProfile maxPainProfile = maxPainCalculator.calculate(family);
+
+            // Time Context (session awareness)
+            TimeContext timeContext = timeContextEnricher.enrich(family);
+
+            // Expiry Context (DTE awareness)
+            ExpiryContext expiryContext = expiryContextEnricher.enrich(family);
+
+            // =============== PHASE 3: Signal Intelligence ===============
+            // Technical Indicators (SuperTrend, BB, Pivots, ATR)
+            TechnicalContext technicalContext = technicalEnricher.enrich(family);
+
+            // Confluence Zones (S/R level clustering)
+            double currentPrice = family.getFuture() != null ? family.getFuture().getClose() : 0;
+            ConfluenceCalculator.ConfluenceResult confluenceResult = confluenceCalculator.calculate(
+                    currentPrice, technicalContext, gexProfile, maxPainProfile);
+
+            // Event Detection (OFI flip, exhaustion, absorption, etc.)
+            List<DetectedEvent> detectedEvents = eventDetector.detectEvents(
+                    family,
+                    historicalContext,
+                    gexProfile,
+                    maxPainProfile,
+                    technicalContext
+            );
+
+            // Store detected events for lifecycle management
+            for (DetectedEvent event : detectedEvents) {
+                eventStore.storeEvent(event);
+            }
+
+            // Check and update lifecycle of existing events
+            eventStore.checkEventLifecycles(family.getFamilyId(), currentPrice);
+
+            // =============== Calculate Base Score ===============
+            QuantScore baseScore = baseCalculator.calculate(family);
+
+            // =============== PHASE 4: Pattern Recognition ===============
+            // Build temporary EnrichedQuantScore for pattern context
+            EnrichedQuantScore tempScore = EnrichedQuantScore.builder()
+                    .baseScore(baseScore)
+                    .historicalContext(historicalContext)
+                    .gexProfile(gexProfile)
+                    .technicalContext(technicalContext)
+                    .confluenceResult(confluenceResult)
+                    .detectedEvents(detectedEvents)
+                    .build();
+            tempScore.setScripCode(family.getFuture() != null ? family.getFuture().getScripCode() : null);
+            tempScore.setCompanyName(family.getFuture() != null ? family.getFuture().getCompanyName() : null);
+            tempScore.setClose(currentPrice);
+
+            // Process events through PatternMatcher
+            List<PatternSignal> patternSignals = patternMatcher.processEvents(
+                    family.getFamilyId(), detectedEvents, tempScore);
+
+            // Publish any generated pattern signals to Kafka
+            if (!patternSignals.isEmpty()) {
+                patternSignalPublisher.publishSignals(patternSignals);
+                log.info("[PHASE4] Published {} pattern signals for family {}",
+                        patternSignals.size(), family.getFamilyId());
+            }
+
+            // =============== Apply All Modifiers ===============
+            // Phase 1 adaptive modifier
+            double adaptiveModifier = calculateAdaptiveModifier(historicalContext, family);
+
+            // Phase 2 modifiers
+            double gexModifier = calculateGEXModifier(gexProfile, baseScore);
+            double maxPainModifier = calculateMaxPainModifier(maxPainProfile, expiryContext, baseScore);
+            double timeModifier = timeContext != null ? timeContext.getConfidenceModifier() : 1.0;
+            double expiryModifier = expiryContext != null ? expiryContext.getConfidenceModifier() : 1.0;
+
+            // Phase 3 modifiers
+            double technicalModifier = calculateTechnicalModifier(technicalContext, baseScore);
+            double confluenceModifier = calculateConfluenceModifier(confluenceResult, baseScore);
+            double eventModifier = calculateEventModifier(detectedEvents);
+
+            // Combine all modifiers
+            double combinedModifier = adaptiveModifier * gexModifier * maxPainModifier
+                    * timeModifier * expiryModifier
+                    * technicalModifier * confluenceModifier * eventModifier;
+            combinedModifier = Math.max(0.3, Math.min(2.0, combinedModifier)); // Clamp to reasonable range
+
+            double adjustedScore = Math.min(100, baseScore.getQuantScore() * combinedModifier);
+
+            // =============== Adjust Confidence ===============
+            double adjustedConfidence = calculateAdjustedConfidence(
+                    baseScore.getConfidence(),
+                    historicalContext,
+                    timeContext,
+                    expiryContext
+            );
+
+            // =============== Determine Actionable Moment ===============
+            boolean isActionableMoment = determineActionableMoment(
+                    historicalContext, gexProfile, maxPainProfile, expiryContext,
+                    technicalContext, confluenceResult, detectedEvents, baseScore);
+
+            // =============== Generate Enrichment Note ===============
+            String enrichmentNote = generateEnrichmentNote(
+                    historicalContext, gexProfile, maxPainProfile, timeContext, expiryContext,
+                    technicalContext, confluenceResult, detectedEvents);
+
+            // =============== Build Enriched Score ===============
+            return EnrichedQuantScore.builder()
+                    .baseScore(baseScore)
+                    // Phase 1
+                    .historicalContext(historicalContext)
+                    // Phase 2
+                    .gexProfile(gexProfile)
+                    .maxPainProfile(maxPainProfile)
+                    .timeContext(timeContext)
+                    .expiryContext(expiryContext)
+                    // Phase 3
+                    .technicalContext(technicalContext)
+                    .confluenceResult(confluenceResult)
+                    .detectedEvents(detectedEvents)
+                    // Phase 4
+                    .patternSignals(patternSignals)
+                    // Adjusted scores
+                    .adjustedQuantScore(adjustedScore)
+                    .adjustedConfidence(adjustedConfidence)
+                    // Modifiers
+                    .adaptiveModifier(adaptiveModifier)
+                    .gexModifier(gexModifier)
+                    .maxPainModifier(maxPainModifier)
+                    .timeModifier(timeModifier)
+                    .expiryModifier(expiryModifier)
+                    .technicalModifier(technicalModifier)
+                    .confluenceModifier(confluenceModifier)
+                    .eventModifier(eventModifier)
+                    .combinedModifier(combinedModifier)
+                    // Actionable moment
+                    .isActionableMoment(isActionableMoment)
+                    .actionableMomentReason(getActionableMomentReason(
+                            historicalContext, gexProfile, maxPainProfile, expiryContext,
+                            technicalContext, confluenceResult, detectedEvents, baseScore))
+                    .enrichmentNote(enrichmentNote)
+                    .build();
+
+        } catch (Exception e) {
+            log.error("Error calculating enriched score for {}: {}",
+                    family.getFamilyId(), e.getMessage(), e);
+
+            // Fallback to base calculation
+            QuantScore baseScore = baseCalculator.calculate(family);
+            return EnrichedQuantScore.builder()
+                    .baseScore(baseScore)
+                    .adjustedQuantScore(baseScore.getQuantScore())
+                    .adjustedConfidence(baseScore.getConfidence() * 0.8) // Reduce confidence on error
+                    .adaptiveModifier(1.0)
+                    .combinedModifier(1.0)
+                    .isActionableMoment(false)
+                    .enrichmentNote("Enrichment failed - using base score")
+                    .build();
+        }
+    }
+
+    // ======================== PHASE 2 MODIFIER CALCULATIONS ========================
+
+    /**
+     * Calculate GEX-based modifier
+     * Adjusts signal confidence based on market regime
+     */
+    private double calculateGEXModifier(GEXProfile gex, QuantScore baseScore) {
+        if (gex == null || gex.getRegime() == null) {
+            return 1.0;
+        }
+
+        // Determine if this is a momentum or mean-reversion signal
+        // High scores with bullish direction = momentum signal
+        boolean isMomentumSignal = baseScore.getQuantScore() >= 60;
+
+        double modifier = gex.getSignalModifier(isMomentumSignal);
+
+        // Additional adjustment if near gamma flip
+        if (gex.isNearGammaFlip()) {
+            modifier *= 0.9; // Reduce confidence near regime change
+            log.debug("[GEX] Near gamma flip - reducing confidence");
+        }
+
+        log.debug("[GEX] Regime: {}, Momentum: {}, Modifier: {}",
+                gex.getRegime(), isMomentumSignal, modifier);
+
+        return modifier;
+    }
+
+    /**
+     * Calculate Max Pain modifier
+     * Strongest effect on expiry day afternoon
+     */
+    private double calculateMaxPainModifier(MaxPainProfile maxPain, ExpiryContext expiry, QuantScore baseScore) {
+        if (maxPain == null || expiry == null || !expiry.shouldApplyMaxPain()) {
+            return 1.0;
+        }
+
+        // Get signal direction
+        boolean isLongSignal = baseScore.getQuantScore() >= 50; // Simplified - would check actual direction
+
+        // Apply max pain modifier
+        double modifier = maxPain.getSignalModifier(
+                isLongSignal,
+                expiry.isExpiryDay(),
+                expiry.isExpiryDayAfternoon()
+        );
+
+        // Weight by max pain relevance
+        double relevance = expiry.getMaxPainRelevance();
+        modifier = 1.0 + (modifier - 1.0) * relevance;
+
+        if (maxPain.isInPinZone()) {
+            log.debug("[MAXPAIN] In pin zone around {} - reducing directional signals",
+                    maxPain.getMaxPainStrike());
+        }
+
+        log.debug("[MAXPAIN] Bias: {}, Long: {}, Relevance: {}, Modifier: {}",
+                maxPain.getBias(), isLongSignal, relevance, modifier);
+
+        return modifier;
+    }
+
+    // ======================== PHASE 3 MODIFIER CALCULATIONS ========================
+
+    /**
+     * Calculate technical indicator modifier
+     * Based on SuperTrend alignment and Bollinger Band position
+     */
+    private double calculateTechnicalModifier(TechnicalContext tech, QuantScore baseScore) {
+        if (tech == null) {
+            return 1.0;
+        }
+
+        double modifier = 1.0;
+        boolean isLongSignal = baseScore.getQuantScore() >= 50;
+
+        // SuperTrend alignment
+        if (tech.isSuperTrendFlip()) {
+            // Recent flip - boost confidence if aligned with signal direction
+            boolean stBullish = tech.isSuperTrendBullish();
+            if ((isLongSignal && stBullish) || (!isLongSignal && !stBullish)) {
+                modifier *= 1.15; // Boost for aligned SuperTrend flip
+                log.debug("[TECH] SuperTrend flip aligned with signal - boost 1.15");
+            } else {
+                modifier *= 0.85; // Reduce for opposing SuperTrend flip
+                log.debug("[TECH] SuperTrend flip opposes signal - reduce 0.85");
+            }
+        } else if (tech.getSuperTrendValue() > 0) {
+            // No flip, but check alignment
+            boolean stBullish = tech.isSuperTrendBullish();
+            if ((isLongSignal && stBullish) || (!isLongSignal && !stBullish)) {
+                modifier *= 1.05; // Small boost for alignment
+            }
+        }
+
+        // Bollinger Band position (bbPercentB is 0-1 when valid)
+        double percentB = tech.getBbPercentB();
+        if (percentB >= 0) {
+            if (isLongSignal && percentB <= 0) {
+                // Long signal at lower band - good entry
+                modifier *= 1.1;
+                log.debug("[TECH] Long signal at BB lower - boost 1.1");
+            } else if (!isLongSignal && percentB >= 1) {
+                // Short signal at upper band - good entry
+                modifier *= 1.1;
+                log.debug("[TECH] Short signal at BB upper - boost 1.1");
+            } else if (isLongSignal && percentB >= 1) {
+                // Long signal at upper band - risky
+                modifier *= 0.9;
+            } else if (!isLongSignal && percentB <= 0) {
+                // Short signal at lower band - risky
+                modifier *= 0.9;
+            }
+        }
+
+        // BB squeeze - volatility expansion likely
+        if (tech.isBbSqueezing()) {
+            modifier *= 1.05; // Slight boost for potential breakout
+            log.debug("[TECH] BB squeeze detected - boost 1.05");
+        }
+
+        log.debug("[TECH] Technical modifier: {}", modifier);
+        return Math.max(0.7, Math.min(1.3, modifier));
+    }
+
+    /**
+     * Calculate confluence zone modifier
+     * Boost signals at confluence, reduce against it
+     */
+    private double calculateConfluenceModifier(ConfluenceCalculator.ConfluenceResult confluence, QuantScore baseScore) {
+        if (confluence == null) {
+            return 1.0;
+        }
+
+        double modifier = 1.0;
+        boolean isLongSignal = baseScore.getQuantScore() >= 50;
+
+        // In confluence zone
+        if (confluence.isInConfluenceZone() && confluence.getCurrentZone() != null) {
+            ConfluenceCalculator.ConfluenceZone zone = confluence.getCurrentZone();
+
+            // Check if trading with the zone (support for longs, resistance for shorts)
+            boolean tradingWithZone =
+                    (isLongSignal && zone.getType() == ConfluenceCalculator.ZoneType.SUPPORT) ||
+                    (!isLongSignal && zone.getType() == ConfluenceCalculator.ZoneType.RESISTANCE);
+
+            if (tradingWithZone) {
+                modifier = zone.getSignalModifier(false); // Trading with zone
+                log.debug("[CONFLUENCE] Trading with {} zone - modifier: {}",
+                        zone.getType(), modifier);
+            } else {
+                modifier = zone.getSignalModifier(true); // Trading into zone
+                log.debug("[CONFLUENCE] Trading against {} zone - modifier: {}",
+                        zone.getType(), modifier);
+            }
+        } else {
+            // Not in zone - use confluence signal modifier
+            modifier = confluence.getSignalModifier(isLongSignal);
+        }
+
+        log.debug("[CONFLUENCE] Confluence modifier: {}", modifier);
+        return Math.max(0.6, Math.min(1.3, modifier));
+    }
+
+    /**
+     * Calculate event-based modifier
+     * Boost for high-confidence aligned events
+     */
+    private double calculateEventModifier(List<DetectedEvent> events) {
+        if (events == null || events.isEmpty()) {
+            return 1.0;
+        }
+
+        double modifier = 1.0;
+
+        // Count high-confidence events
+        long highConfidenceCount = events.stream()
+                .filter(e -> e.getStrength() >= 0.75)
+                .count();
+
+        // Boost for high-confidence events
+        if (highConfidenceCount > 0) {
+            modifier *= 1.0 + (highConfidenceCount * 0.05); // 5% boost per high-confidence event
+            log.debug("[EVENT] {} high-confidence events - boost modifier: {}", highConfidenceCount, modifier);
+        }
+
+        // Check for specific actionable events
+        boolean hasFlipEvent = events.stream()
+                .anyMatch(e -> e.getEventType() == DetectedEvent.EventType.OFI_FLIP ||
+                        e.getEventType() == DetectedEvent.EventType.SUPERTREND_FLIP);
+        if (hasFlipEvent) {
+            modifier *= 1.1;
+            log.debug("[EVENT] Flip event detected - boost modifier: {}", modifier);
+        }
+
+        // Check for exhaustion (reversal signal)
+        boolean hasExhaustion = events.stream()
+                .anyMatch(e -> e.getEventType() == DetectedEvent.EventType.SELLING_EXHAUSTION ||
+                        e.getEventType() == DetectedEvent.EventType.BUYING_EXHAUSTION);
+        if (hasExhaustion) {
+            modifier *= 1.05;
+            log.debug("[EVENT] Exhaustion event detected - boost modifier: {}", modifier);
+        }
+
+        // Check for absorption (institutional activity)
+        boolean hasAbsorption = events.stream()
+                .anyMatch(e -> e.getEventType() == DetectedEvent.EventType.ABSORPTION);
+        if (hasAbsorption) {
+            modifier *= 1.1;
+            log.debug("[EVENT] Absorption event detected - boost modifier: {}", modifier);
+        }
+
+        log.debug("[EVENT] Final event modifier: {}", modifier);
+        return Math.max(0.8, Math.min(1.5, modifier));
+    }
+
+    /**
+     * Calculate adjusted confidence with Phase 2 context
+     */
+    private double calculateAdjustedConfidence(double baseConfidence, HistoricalContext historical,
+                                                TimeContext time, ExpiryContext expiry) {
+        double adjusted = calculateAdjustedConfidence(baseConfidence, historical);
+
+        // Apply time context
+        if (time != null && time.shouldAvoidTrading()) {
+            adjusted *= 0.5; // Significantly reduce during bad sessions
+            log.debug("[TIME] Reducing confidence - {}", time.getLowConfidenceReason());
+        }
+
+        // Apply expiry context
+        if (expiry != null && expiry.isExpiryDay()) {
+            adjusted *= 0.8; // Reduce on expiry day due to unpredictability
+        }
+
+        return Math.max(0.1, Math.min(1.0, adjusted));
+    }
+
+    /**
+     * Apply historical context insights to family (modifies in-place for downstream processors)
+     */
+    private void applyHistoricalModifiers(FamilyCandle family, HistoricalContext ctx) {
+        if (ctx == null || ctx.isInLearningMode()) {
+            return;
+        }
+
+        // Set directional bias based on historical context
+        MetricContext.MetricRegime regime = ctx.getDominantRegime();
+        String bias = switch (regime) {
+            case STRONG_POSITIVE -> "STRONG_BULLISH";
+            case POSITIVE -> "BULLISH";
+            case STRONG_NEGATIVE -> "STRONG_BEARISH";
+            case NEGATIVE -> "BEARISH";
+            case NEUTRAL -> "NEUTRAL";
+        };
+
+        if (family.getDirectionalBias() == null || "NEUTRAL".equals(family.getDirectionalBias())) {
+            family.setDirectionalBias(bias);
+        }
+
+        // Boost bias confidence if regime is consistent
+        if (ctx.getOfiContext() != null && ctx.getOfiContext().getConsecutiveCount() >= 3) {
+            double currentConf = family.getBiasConfidence();
+            family.setBiasConfidence(Math.min(1.0, currentConf + 0.1));
+        }
+    }
+
+    /**
+     * Calculate adaptive modifier based on historical context
+     */
+    private double calculateAdaptiveModifier(HistoricalContext ctx, FamilyCandle family) {
+        if (ctx == null || ctx.isInLearningMode()) {
+            return 0.8; // Reduced modifier in learning mode
+        }
+
+        double modifier = 1.0;
+
+        // Boost for flip detection
+        if (ctx.getTotalFlipsDetected() > 0) {
+            modifier *= 1.1;
+            log.debug("[ADAPTIVE] Flip detected for {}, boost: 1.1", family.getFamilyId());
+        }
+
+        // Boost for absorption (institutional accumulation)
+        if (ctx.isAbsorptionDetected()) {
+            modifier *= 1.15;
+            log.debug("[ADAPTIVE] Absorption detected for {}, boost: 1.15", family.getFamilyId());
+        }
+
+        // Boost for informed flow
+        if (ctx.isInformedFlowActive()) {
+            modifier *= 1.05 + (ctx.getInformedFlowIntensity() * 0.1);
+            log.debug("[ADAPTIVE] Informed flow for {}, intensity: {}",
+                    family.getFamilyId(), ctx.getInformedFlowIntensity());
+        }
+
+        // Reduce for liquidity withdrawal (caution mode)
+        if (ctx.isLiquidityWithdrawal()) {
+            modifier *= 0.85;
+            log.debug("[ADAPTIVE] Liquidity withdrawal for {}, reduce: 0.85", family.getFamilyId());
+        }
+
+        // Reduce for exhaustion (reversal risk)
+        if (ctx.isSellingExhaustion() || ctx.isBuyingExhaustion()) {
+            modifier *= 0.9;
+            log.debug("[ADAPTIVE] Exhaustion detected for {}, reduce: 0.9", family.getFamilyId());
+        }
+
+        // Apply commodity-specific adjustment
+        boolean isCommodity = commodityConfig.isMCXExchange(
+                family.getFuture() != null ? family.getFuture().getExchange() : null);
+        if (isCommodity) {
+            // Commodities get slightly lower base confidence due to lower liquidity
+            modifier *= 0.95;
+        }
+
+        // Clamp to reasonable range
+        return Math.max(0.5, Math.min(1.5, modifier));
+    }
+
+    /**
+     * Calculate adjusted confidence based on data completeness
+     */
+    private double calculateAdjustedConfidence(double baseConfidence, HistoricalContext ctx) {
+        if (ctx == null) {
+            return baseConfidence * 0.5;
+        }
+
+        double historicalConfidence = ctx.getHistoricalConfidence();
+        double dataCompleteness = ctx.getDataCompleteness();
+
+        // Weight: 60% base confidence, 40% historical confidence
+        double adjusted = baseConfidence * 0.6 + historicalConfidence * 0.4;
+
+        // Apply data completeness penalty
+        if (dataCompleteness < 0.8) {
+            adjusted *= (0.5 + dataCompleteness * 0.5);
+        }
+
+        return Math.max(0.1, Math.min(1.0, adjusted));
+    }
+
+    /**
+     * Determine if this is an actionable moment based on all contexts (Phase 1 + Phase 2 + Phase 3)
+     */
+    private boolean determineActionableMoment(HistoricalContext ctx, GEXProfile gex,
+                                               MaxPainProfile maxPain, ExpiryContext expiry,
+                                               TechnicalContext tech,
+                                               ConfluenceCalculator.ConfluenceResult confluence,
+                                               List<DetectedEvent> events,
+                                               QuantScore baseScore) {
+        // Phase 1 checks
+        if (ctx != null && !ctx.isInLearningMode()) {
+            // 1. Significant flip detected
+            if (ctx.getTotalFlipsDetected() > 0 && ctx.getSignificantFlipZscore() > 1.5) {
+                return true;
+            }
+
+            // 2. Absorption detected (institutional activity)
+            if (ctx.isAbsorptionDetected()) {
+                return true;
+            }
+
+            // 3. Momentum building with strong base score
+            if (ctx.isMomentumBuilding() && baseScore.getQuantScore() >= 60) {
+                return true;
+            }
+
+            // 4. Exhaustion at extreme levels
+            if ((ctx.isSellingExhaustion() || ctx.isBuyingExhaustion()) &&
+                    ctx.getOfiContext() != null &&
+                    (ctx.getOfiContext().getPercentile() < 10 || ctx.getOfiContext().getPercentile() > 90)) {
+                return true;
+            }
+        }
+
+        // Phase 2 checks
+        // 5. Strong GEX regime with matching signal
+        if (gex != null && (gex.getRegime() == GEXProfile.GEXRegime.STRONG_TRENDING ||
+                gex.getRegime() == GEXProfile.GEXRegime.STRONG_MEAN_REVERTING)) {
+            return true;
+        }
+
+        // 6. Max pain actionable on expiry day
+        if (maxPain != null && expiry != null && expiry.isExpiryDayAfternoon() && maxPain.isActionable()) {
+            return true;
+        }
+
+        // Phase 3 checks
+        // 7. SuperTrend flip detected
+        if (tech != null && tech.isSuperTrendFlip()) {
+            return true;
+        }
+
+        // 8. At strong confluence zone
+        if (confluence != null && confluence.isInConfluenceZone() &&
+                confluence.getCurrentZone() != null && confluence.getCurrentZone().isStrong()) {
+            return true;
+        }
+
+        // 9. High-confidence event detected
+        if (events != null && !events.isEmpty()) {
+            boolean hasHighConfidenceEvent = events.stream()
+                    .anyMatch(e -> e.getStrength() >= 0.75);
+            if (hasHighConfidenceEvent) {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    /**
+     * Get reason for actionable moment (Phase 1 + Phase 2 + Phase 3)
+     */
+    private String getActionableMomentReason(HistoricalContext ctx, GEXProfile gex,
+                                              MaxPainProfile maxPain, ExpiryContext expiry,
+                                              TechnicalContext tech,
+                                              ConfluenceCalculator.ConfluenceResult confluence,
+                                              List<DetectedEvent> events,
+                                              QuantScore baseScore) {
+        StringBuilder reasons = new StringBuilder();
+
+        // Phase 1 reasons
+        if (ctx != null && !ctx.isInLearningMode()) {
+            if (ctx.getTotalFlipsDetected() > 0 && ctx.getSignificantFlipZscore() > 1.5) {
+                reasons.append(String.format("Significant %s flip (z=%.2f). ",
+                        ctx.getSignificantFlipMetric(), ctx.getSignificantFlipZscore()));
+            }
+
+            if (ctx.isAbsorptionDetected()) {
+                reasons.append("Institutional absorption detected. ");
+            }
+
+            if (ctx.isMomentumBuilding()) {
+                reasons.append(String.format("Momentum building (%s). ", ctx.getMomentumDirection()));
+            }
+
+            if (ctx.isSellingExhaustion()) {
+                reasons.append("Selling exhaustion at support. ");
+            }
+
+            if (ctx.isBuyingExhaustion()) {
+                reasons.append("Buying exhaustion at resistance. ");
+            }
+
+            if (ctx.isInformedFlowActive()) {
+                reasons.append(String.format("Informed flow active (%.0f%%). ",
+                        ctx.getInformedFlowIntensity() * 100));
+            }
+        } else if (ctx != null && ctx.isInLearningMode()) {
+            reasons.append("Learning mode - building history. ");
+        }
+
+        // Phase 2 reasons
+        if (gex != null && gex.getRegime() != null) {
+            if (gex.getRegime() == GEXProfile.GEXRegime.STRONG_TRENDING) {
+                reasons.append("Strong TRENDING regime - breakouts will run. ");
+            } else if (gex.getRegime() == GEXProfile.GEXRegime.STRONG_MEAN_REVERTING) {
+                reasons.append("Strong MEAN-REVERTING regime - fade extremes. ");
+            }
+        }
+
+        if (maxPain != null && expiry != null && expiry.isExpiryDayAfternoon() && maxPain.isActionable()) {
+            reasons.append(maxPain.getBiasDescription()).append(" ");
+        }
+
+        // Phase 3 reasons
+        if (tech != null && tech.isSuperTrendFlip()) {
+            String direction = tech.isSuperTrendBullish() ? "BULLISH" : "BEARISH";
+            reasons.append(String.format("SuperTrend flipped %s. ", direction));
+        }
+
+        if (confluence != null && confluence.isInConfluenceZone() &&
+                confluence.getCurrentZone() != null && confluence.getCurrentZone().isStrong()) {
+            reasons.append(String.format("At strong confluence zone (%.2f, %d sources). ",
+                    confluence.getCurrentZone().getCenterPrice(),
+                    confluence.getCurrentZone().getSourceCount()));
+        }
+
+        if (events != null && !events.isEmpty()) {
+            for (DetectedEvent event : events) {
+                if (event.getStrength() >= 0.75) {
+                    reasons.append(String.format("%s event detected (%.0f%% confidence). ",
+                            event.getEventType().name(), event.getStrength() * 100));
+                }
+            }
+        }
+
+        return reasons.length() > 0 ? reasons.toString().trim() : "No specific actionable moment";
+    }
+
+    /**
+     * Generate enrichment note summarizing all context
+     */
+    private String generateEnrichmentNote(HistoricalContext historical, GEXProfile gex,
+                                           MaxPainProfile maxPain, TimeContext time,
+                                           ExpiryContext expiry, TechnicalContext tech,
+                                           ConfluenceCalculator.ConfluenceResult confluence,
+                                           List<DetectedEvent> events) {
+        StringBuilder note = new StringBuilder();
+
+        // Time context
+        if (time != null) {
+            note.append(String.format("[Session: %s (%.0f%%)] ",
+                    time.getSession(), time.getSessionQuality() * 100));
+
+            if (!time.isGoodTimeToTrade()) {
+                note.append("AVOID: ").append(time.getLowConfidenceReason()).append(". ");
+            }
+        }
+
+        // Expiry context
+        if (expiry != null && expiry.getDaysToExpiry() >= 0) {
+            note.append(String.format("[DTE: %d - %s] ",
+                    expiry.getDaysToExpiry(),
+                    expiry.getCategory() != null ? expiry.getCategory().name() : "UNKNOWN"));
+
+            if (expiry.isExpiryDay()) {
+                note.append("EXPIRY DAY - reduced confidence. ");
+            }
+        }
+
+        // GEX regime
+        if (gex != null && gex.getRegime() != null) {
+            note.append(String.format("[GEX: %s] ", gex.getRegime().name()));
+
+            if (gex.isNearGammaFlip()) {
+                note.append("Near gamma flip level. ");
+            }
+        }
+
+        // Max Pain
+        if (maxPain != null && maxPain.getMaxPainStrike() > 0) {
+            note.append(String.format("[MaxPain: %.0f (%.1f%% away)] ",
+                    maxPain.getMaxPainStrike(), maxPain.getAbsDistancePct()));
+
+            if (maxPain.isInPinZone()) {
+                note.append("IN PIN ZONE. ");
+            }
+        }
+
+        // Historical context
+        if (historical != null) {
+            if (historical.isInLearningMode()) {
+                note.append("[LEARNING MODE - %.0f%% complete] ".formatted(historical.getDataCompleteness() * 100));
+            } else {
+                note.append(String.format("[Regime: %s] ", historical.getDominantRegime()));
+
+                if (historical.getTotalFlipsDetected() > 0) {
+                    note.append("FLIP detected. ");
+                }
+            }
+        }
+
+        // Phase 3: Technical context
+        if (tech != null) {
+            // SuperTrend
+            if (tech.isSuperTrendFlip()) {
+                String direction = tech.isSuperTrendBullish() ? "BULLISH" : "BEARISH";
+                note.append(String.format("[SuperTrend: %s FLIP] ", direction));
+            } else if (tech.getSuperTrendValue() > 0) {
+                String direction = tech.isSuperTrendBullish() ? "BULLISH" : "BEARISH";
+                note.append(String.format("[SuperTrend: %s] ", direction));
+            }
+
+            // Bollinger Bands
+            double bbPctB = tech.getBbPercentB();
+            if (bbPctB >= 0) {
+                if (bbPctB <= 0.05) {
+                    note.append("[BB: LOWER TOUCH] ");
+                } else if (bbPctB >= 0.95) {
+                    note.append("[BB: UPPER TOUCH] ");
+                } else if (tech.isBbSqueezing()) {
+                    note.append("[BB: SQUEEZE] ");
+                }
+            }
+
+            // Volatility
+            if (tech.isVolatilityExpanding()) {
+                note.append("[VOL: EXPANDING] ");
+            }
+        }
+
+        // Confluence zones
+        if (confluence != null) {
+            if (confluence.isInConfluenceZone() && confluence.getCurrentZone() != null) {
+                note.append(String.format("[IN %s ZONE: %.2f (%d sources)] ",
+                        confluence.getCurrentZone().getType(),
+                        confluence.getCurrentZone().getCenterPrice(),
+                        confluence.getCurrentZone().getSourceCount()));
+            } else {
+                if (confluence.getNearestSupport() != null) {
+                    note.append(String.format("[Support: %.2f (%.1f%%)] ",
+                            confluence.getNearestSupportPrice(),
+                            confluence.getSupportDistance()));
+                }
+                if (confluence.getNearestResistance() != null) {
+                    note.append(String.format("[Resistance: %.2f (%.1f%%)] ",
+                            confluence.getNearestResistancePrice(),
+                            confluence.getResistanceDistance()));
+                }
+            }
+        }
+
+        // Events
+        if (events != null && !events.isEmpty()) {
+            int eventCount = events.size();
+            note.append(String.format("[%d EVENT%s: ", eventCount, eventCount > 1 ? "S" : ""));
+            note.append(events.stream()
+                    .map(e -> e.getEventType().name())
+                    .limit(3)
+                    .collect(java.util.stream.Collectors.joining(", ")));
+            if (events.size() > 3) {
+                note.append("...");
+            }
+            note.append("] ");
+        }
+
+        return note.length() > 0 ? note.toString().trim() : "No enrichment context";
+    }
+
+    /**
+     * Enriched QuantScore wrapper with Phase 1 + Phase 2 + Phase 3 + Phase 4 contexts
+     */
+    @lombok.Data
+    @lombok.Builder
+    @lombok.NoArgsConstructor
+    @lombok.AllArgsConstructor
+    public static class EnrichedQuantScore {
+        // Base score
+        private QuantScore baseScore;
+
+        // Instrument context (for PatternSignal generation)
+        private String scripCode;
+        private String companyName;
+        private double close;
+
+        // Phase 1: Historical Context
+        private HistoricalContext historicalContext;
+
+        // Phase 2: Options Intelligence
+        private GEXProfile gexProfile;
+        private MaxPainProfile maxPainProfile;
+        private TimeContext timeContext;
+        private ExpiryContext expiryContext;
+
+        // Phase 3: Signal Intelligence
+        private TechnicalContext technicalContext;
+        private ConfluenceCalculator.ConfluenceResult confluenceResult;
+        private List<DetectedEvent> detectedEvents;
+
+        // Phase 4: Pattern Recognition
+        private List<PatternSignal> patternSignals;
+
+        // Adjusted scores
+        private double adjustedQuantScore;
+        private double adjustedConfidence;
+
+        // Individual modifiers
+        private double adaptiveModifier;      // Phase 1 modifier
+        private double gexModifier;           // GEX regime modifier
+        private double maxPainModifier;       // Max pain modifier
+        private double timeModifier;          // Session quality modifier
+        private double expiryModifier;        // DTE modifier
+        private double technicalModifier;     // Phase 3: Technical indicator modifier
+        private double confluenceModifier;    // Phase 3: Confluence zone modifier
+        private double eventModifier;         // Phase 3: Event-based modifier
+        private double combinedModifier;      // All modifiers combined
+
+        // Actionable moment
+        private boolean isActionableMoment;
+        private String actionableMomentReason;
+
+        // Summary note
+        private String enrichmentNote;
+
+        public static EnrichedQuantScore empty() {
+            return EnrichedQuantScore.builder()
+                    .adjustedQuantScore(0)
+                    .adjustedConfidence(0)
+                    .adaptiveModifier(1.0)
+                    .gexModifier(1.0)
+                    .maxPainModifier(1.0)
+                    .timeModifier(1.0)
+                    .expiryModifier(1.0)
+                    .technicalModifier(1.0)
+                    .confluenceModifier(1.0)
+                    .eventModifier(1.0)
+                    .combinedModifier(1.0)
+                    .isActionableMoment(false)
+                    .detectedEvents(Collections.emptyList())
+                    .patternSignals(Collections.emptyList())
+                    .build();
+        }
+
+        /**
+         * Get final score to use for signal generation
+         */
+        public double getFinalScore() {
+            return adjustedQuantScore;
+        }
+
+        /**
+         * Get final confidence
+         */
+        public double getFinalConfidence() {
+            return adjustedConfidence;
+        }
+
+        /**
+         * Check if historical context is available
+         */
+        public boolean hasHistoricalContext() {
+            return historicalContext != null && !historicalContext.isInLearningMode();
+        }
+
+        /**
+         * Check if options intelligence is available
+         */
+        public boolean hasOptionsIntelligence() {
+            return gexProfile != null || maxPainProfile != null;
+        }
+
+        /**
+         * Get GEX regime if available
+         */
+        public GEXProfile.GEXRegime getGexRegime() {
+            return gexProfile != null ? gexProfile.getRegime() : null;
+        }
+
+        /**
+         * Get max pain bias if available
+         */
+        public MaxPainProfile.MaxPainBias getMaxPainBias() {
+            return maxPainProfile != null ? maxPainProfile.getBias() : null;
+        }
+
+        /**
+         * Check if currently in good trading session
+         */
+        public boolean isGoodSession() {
+            return timeContext != null && timeContext.isGoodTimeToTrade();
+        }
+
+        /**
+         * Check if expiry day
+         */
+        public boolean isExpiryDay() {
+            return expiryContext != null && expiryContext.isExpiryDay();
+        }
+
+        /**
+         * Get days to expiry
+         */
+        public int getDaysToExpiry() {
+            return expiryContext != null ? expiryContext.getDaysToExpiry() : -1;
+        }
+
+        // ======================== PHASE 3 HELPERS ========================
+
+        /**
+         * Check if technical context is available
+         */
+        public boolean hasTechnicalContext() {
+            return technicalContext != null;
+        }
+
+        /**
+         * Check if SuperTrend is bullish
+         */
+        public boolean isSuperTrendBullish() {
+            return technicalContext != null && technicalContext.isSuperTrendBullish();
+        }
+
+        /**
+         * Check if SuperTrend just flipped
+         */
+        public boolean hasSuperTrendFlip() {
+            return technicalContext != null && technicalContext.isSuperTrendFlip();
+        }
+
+        /**
+         * Check if price is in a confluence zone
+         */
+        public boolean isInConfluenceZone() {
+            return confluenceResult != null && confluenceResult.isInConfluenceZone();
+        }
+
+        /**
+         * Check if at support
+         */
+        public boolean isAtSupport() {
+            return confluenceResult != null && confluenceResult.isAtSupport();
+        }
+
+        /**
+         * Check if at resistance
+         */
+        public boolean isAtResistance() {
+            return confluenceResult != null && confluenceResult.isAtResistance();
+        }
+
+        /**
+         * Get nearest support price
+         */
+        public Double getNearestSupportPrice() {
+            return confluenceResult != null ? confluenceResult.getNearestSupportPrice() : null;
+        }
+
+        /**
+         * Get nearest resistance price
+         */
+        public Double getNearestResistancePrice() {
+            return confluenceResult != null ? confluenceResult.getNearestResistancePrice() : null;
+        }
+
+        /**
+         * Check if any events were detected
+         */
+        public boolean hasEvents() {
+            return detectedEvents != null && !detectedEvents.isEmpty();
+        }
+
+        /**
+         * Get count of detected events
+         */
+        public int getEventCount() {
+            return detectedEvents != null ? detectedEvents.size() : 0;
+        }
+
+        /**
+         * Get high-confidence events (confidence >= 0.75)
+         */
+        public List<DetectedEvent> getHighConfidenceEvents() {
+            if (detectedEvents == null) return java.util.Collections.emptyList();
+            return detectedEvents.stream()
+                    .filter(e -> e.getStrength() >= 0.75)
+                    .collect(java.util.stream.Collectors.toList());
+        }
+
+        /**
+         * Check if signal intelligence (Phase 3) is fully available
+         */
+        public boolean hasSignalIntelligence() {
+            return technicalContext != null || confluenceResult != null ||
+                    (detectedEvents != null && !detectedEvents.isEmpty());
+        }
+
+        /**
+         * Get Bollinger Band %B if available
+         */
+        public Double getBbPercentB() {
+            return technicalContext != null ? technicalContext.getBbPercentB() : null;
+        }
+
+        /**
+         * Check if BB is squeezing (low volatility)
+         */
+        public boolean isBbSqueezing() {
+            return technicalContext != null && technicalContext.isBbSqueezing();
+        }
+
+        /**
+         * Check if volatility is expanding
+         */
+        public boolean isVolatilityExpanding() {
+            return technicalContext != null && technicalContext.isVolatilityExpanding();
+        }
+
+        /**
+         * Get ATR percentage if available
+         */
+        public Double getAtrPct() {
+            return technicalContext != null ? technicalContext.getAtrPct() : null;
+        }
+
+        // ======================== PHASE 4 HELPERS ========================
+
+        /**
+         * Check if any pattern signals were generated
+         */
+        public boolean hasPatternSignals() {
+            return patternSignals != null && !patternSignals.isEmpty();
+        }
+
+        /**
+         * Get count of pattern signals
+         */
+        public int getPatternSignalCount() {
+            return patternSignals != null ? patternSignals.size() : 0;
+        }
+
+        /**
+         * Get high-confidence pattern signals (confidence >= 0.70)
+         */
+        public List<PatternSignal> getHighConfidencePatternSignals() {
+            if (patternSignals == null) return Collections.emptyList();
+            return patternSignals.stream()
+                    .filter(s -> s.getConfidence() >= 0.70)
+                    .collect(java.util.stream.Collectors.toList());
+        }
+
+        /**
+         * Get the best pattern signal by confidence
+         */
+        public PatternSignal getBestPatternSignal() {
+            if (patternSignals == null || patternSignals.isEmpty()) return null;
+            return patternSignals.stream()
+                    .max(java.util.Comparator.comparingDouble(PatternSignal::getConfidence))
+                    .orElse(null);
+        }
+
+        /**
+         * Check if pattern recognition (Phase 4) is active
+         */
+        public boolean hasPatternRecognition() {
+            return patternSignals != null;
+        }
+
+        /**
+         * Get confluence score from zones
+         */
+        public double getConfluenceScore() {
+            if (confluenceResult == null) return 0;
+            return confluenceResult.isInConfluenceZone() ? 0.8 : 0.4;
+        }
+
+        /**
+         * Get confluence zones for pattern signal generation
+         */
+        public List<ConfluenceZone> getConfluenceZones() {
+            if (confluenceResult == null || confluenceResult.getZones() == null) {
+                return Collections.emptyList();
+            }
+            return confluenceResult.getZones().stream()
+                    .map(z -> new ConfluenceZone(z.getCenterPrice(), z.getType().name(), z.getStrength()))
+                    .collect(java.util.stream.Collectors.toList());
+        }
+
+        /**
+         * Simple confluence zone representation for pattern signals
+         */
+        @lombok.Data
+        @lombok.AllArgsConstructor
+        public static class ConfluenceZone {
+            private double centerPrice;
+            private String type;
+            private double strength;
+        }
+    }
+}
