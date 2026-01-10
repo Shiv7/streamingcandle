@@ -125,8 +125,8 @@ public class MTISCalculator {
                 .breakdown(breakdown)
                 .build();
 
-        // Calculate each category
-        double priceScore = calculatePriceScore(family, state);
+        // Calculate each category - pass primary (equity or future for commodities)
+        double priceScore = calculatePriceScore(family, state, equity);
         double foScore = calculateFOAlignmentScore(foAlignment);
         double ipuScore = calculateIPUScore(ipu, score);
         double fudkiiBonus = calculateFUDKIIBonus(fudkii, score);
@@ -228,9 +228,11 @@ public class MTISCalculator {
     /**
      * Category 1: Price Score (±12)
      * FIX: Added volatility normalization for fair scoring across instruments
+     * FIX: Accept primary candle (equity or future for commodities) instead of calling getEquity()
      */
-    private double calculatePriceScore(FamilyCandle family, FamilyIntelligenceState state) {
-        InstrumentCandle equity = family.getEquity();
+    private double calculatePriceScore(FamilyCandle family, FamilyIntelligenceState state, InstrumentCandle primary) {
+        if (primary == null) return 0;
+        InstrumentCandle equity = primary;  // Use passed primary (equity or future for commodities)
         double score = 0;
 
         // 1A. Close vs current TF VWAP (±4) - FIX: Normalized by volatility
