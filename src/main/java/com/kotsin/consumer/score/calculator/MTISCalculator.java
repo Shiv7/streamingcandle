@@ -74,14 +74,27 @@ public class MTISCalculator {
             MultiTimeframeLevels levels,
             double vcpScore
     ) {
-        if (family == null || family.getEquity() == null) {
-            log.warn("Cannot calculate MTIS: null family or equity");
+        if (family == null) {
+            log.warn("Cannot calculate MTIS: null family");
             return null;
+        }
+
+        // FIX: Use primary instrument - equity for NSE, future for MCX commodities
+        InstrumentCandle primary = family.getEquity();
+        boolean isCommodity = false;
+        if (primary == null) {
+            primary = family.getFuture();
+            if (primary == null) {
+                log.debug("Cannot calculate MTIS: no equity or future in family {}", family.getFamilyId());
+                return null;
+            }
+            isCommodity = true;
+            log.debug("MTIS: Using futures as primary for commodity {}", family.getFamilyId());
         }
 
         String familyId = family.getFamilyId();
         String symbol = family.getSymbol();
-        InstrumentCandle equity = family.getEquity();
+        InstrumentCandle equity = primary;  // Use primary (equity or future for commodities)
 
         // Initialize score breakdown
         FamilyScore.ScoreBreakdown breakdown = FamilyScore.ScoreBreakdown.builder()

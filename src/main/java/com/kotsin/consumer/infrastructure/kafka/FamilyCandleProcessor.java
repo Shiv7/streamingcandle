@@ -4,7 +4,9 @@ import com.kotsin.consumer.config.KafkaConfig;
 import com.kotsin.consumer.domain.calculator.FuturesBuildupDetector;
 import com.kotsin.consumer.domain.calculator.OISignalDetector;
 import com.kotsin.consumer.domain.calculator.PCRCalculator;
+import com.kotsin.consumer.domain.calculator.ReversalSignalCalculator;
 import com.kotsin.consumer.domain.model.*;
+import com.kotsin.consumer.service.ReversalSignalStateStore;
 import com.kotsin.consumer.domain.service.IFamilyDataProvider;
 import jakarta.annotation.PostConstruct;
 import jakarta.annotation.PreDestroy;
@@ -63,6 +65,10 @@ public class FamilyCandleProcessor {
     // PHASE 2: MTF Distribution Calculator
     @Autowired
     private com.kotsin.consumer.service.MTFDistributionCalculator mtfDistributionCalculator;
+
+    // PHASE 3: Reversal Signal State Store
+    @Autowired
+    private ReversalSignalStateStore reversalSignalStateStore;
 
     // FIX: Increased default grace period from 5 to 30 seconds
     // BEFORE: 5 seconds - options arriving late would miss family window
@@ -188,6 +194,19 @@ public class FamilyCandleProcessor {
             Duration.ofSeconds(graceSeconds)
         );
 
+        // 🛡️ CRITICAL FIX: Use wall-clock based emission instead of suppress(untilWindowCloses)
+        //
+        // PROBLEM: suppress(untilWindowCloses) uses "stream-time" which only advances when
+        // new records arrive. During low-activity periods or market close, this causes
+        // multi-minute delays (e.g., 2+ minutes delay observed).
+        //
+        // SOLUTION: WallClockWindowEmitter uses WALL_CLOCK_TIME punctuation to emit windows
+        // when real wall-clock time exceeds window_end + grace_period, regardless of stream-time.
+        // This ensures consistent ~2-3 second latency after window close.
+        //
+        // BEFORE: suppress(untilWindowCloses) -> delayed by stream-time gaps
+        // AFTER:  WallClockWindowEmitter -> emits on wall clock, max delay = grace period + 1s
+
         KTable<Windowed<String>, FamilyCandleCollector> collected = keyedByFamily
             .groupByKey(Grouped.with(Serdes.String(), InstrumentCandle.serde()))
             .windowedBy(windows)
@@ -197,13 +216,18 @@ public class FamilyCandleProcessor {
                 Materialized.<String, FamilyCandleCollector, org.apache.kafka.streams.state.WindowStore<org.apache.kafka.common.utils.Bytes, byte[]>>as(stateStoreName)
                     .withKeySerde(Serdes.String())
                     .withValueSerde(FamilyCandleCollector.serde())
-            )
-            .suppress(Suppressed.untilWindowCloses(Suppressed.BufferConfig.unbounded()));
+            );
+            // REMOVED: .suppress(Suppressed.untilWindowCloses(...)) - replaced with WallClockWindowEmitter
 
         // Convert to FamilyCandle and emit with metrics tracking
         // FIX: Allow futures-only families (for commodities like MCX Gold, Crude, etc.)
         // Commodities don't have underlying equity - future IS the primary instrument
+        //
+        // Wall-clock emitter replaces suppress() - emits once per window based on real time
+        long graceMsForEmitter = graceSeconds * 1000L;
+
         collected.toStream()
+            .process(() -> new WallClockWindowEmitter<>(graceMsForEmitter))  // Wall-clock based emission
             .filter((windowedKey, collector) -> collector != null && collector.hasPrimaryInstrument())
             .mapValues((windowedKey, collector) -> {
                 FamilyCandle familyCandle = buildFamilyCandle(windowedKey, collector);
@@ -757,6 +781,75 @@ public class FamilyCandleProcessor {
             .quality(familyQuality)
             .build();
 
+        // ========== PHASE 3: REVERSAL SIGNAL DETECTION ==========
+        // Calculate OFI velocity, exhaustion, delta divergence, OI interpretation, and reversal score
+        // This requires previous candle state from ReversalSignalStateStore
+        if (reversalSignalStateStore != null) {
+            try {
+                ReversalSignalStateStore.FamilyState prevState = reversalSignalStateStore.getOrCreateState(familyId);
+
+                // Get ATM option premiums for options flow analysis
+                Double atmCallPremium = null;
+                Double atmPutPremium = null;
+                if (options != null) {
+                    for (OptionCandle opt : options) {
+                        if (opt.isATM()) {
+                            if ("CE".equals(opt.getOptionType())) {
+                                atmCallPremium = opt.getClose();
+                            } else if ("PE".equals(opt.getOptionType())) {
+                                atmPutPremium = opt.getClose();
+                            }
+                        }
+                    }
+                }
+
+                // Calculate all reversal signals
+                ReversalSignalCalculator.calculate(
+                    familyCandle,
+                    prevState.previousOfi,
+                    prevState.previousOfiVelocity,
+                    prevState.previousVolume,
+                    prevState.previousCallPremium,
+                    prevState.previousPutPremium,
+                    prevState.sessionLow,
+                    prevState.sessionHigh
+                );
+
+                // Update state for next candle
+                InstrumentCandle primaryForState = familyCandle.getPrimaryInstrumentOrFallback();
+                if (primaryForState != null) {
+                    reversalSignalStateStore.updateState(
+                        familyId,
+                        primaryForState.getOfi(),
+                        familyCandle.getOfiVelocity(),
+                        primaryForState.getVolume(),
+                        atmCallPremium,
+                        atmPutPremium,
+                        primaryForState.getHigh(),
+                        primaryForState.getLow(),
+                        familyCandle.getWindowStartMillis()
+                    );
+                }
+
+                // Log high-confidence reversals
+                if (familyCandle.isHighConfidenceReversal()) {
+                    log.info("[REVERSAL-HIGH-CONFIDENCE] {} | Score: {} | Signals: {} | OFI: {} vel={} | OI: {} | Exhaustion: {}",
+                        familyId,
+                        String.format("%.1f", familyCandle.getReversalScore()),
+                        familyCandle.getReversalSignals(),
+                        primaryForState != null && primaryForState.getOfi() != null ?
+                            String.format("%.0f", primaryForState.getOfi()) : "N/A",
+                        familyCandle.getOfiVelocity() != null ?
+                            String.format("%.0f", familyCandle.getOfiVelocity()) : "N/A",
+                        familyCandle.getOiInterpretation(),
+                        familyCandle.getExhaustionType());
+                }
+            } catch (Exception e) {
+                log.warn("[REVERSAL-CALC-ERROR] {} | Failed to calculate reversal signals: {}",
+                    familyId, e.getMessage());
+            }
+        }
+
         // 🔴 NOTE: Options already limited to 200 in FamilyCandleCollector.add()
         // No need for additional compaction - 200 options × ~1KB = ~200KB (safe for Kafka)
         // The compactForEmission() method is kept as backup but not called
@@ -974,8 +1067,9 @@ public class FamilyCandleProcessor {
                         mergeInstrumentCandle(this.equity, candle);
                         equityMergeCount++;
                     }
-                    // PHASE 2: Track sub-candle for MTF distribution
-                    equitySubCandles.add(com.kotsin.consumer.model.UnifiedCandle.from(candle));
+                    // MTF Distribution Fix: Extract embedded sub-candle snapshots from InstrumentCandle
+                    // These are created every 10 seconds during tick aggregation
+                    extractAndAddSubCandles(candle, equitySubCandles, "equity");
                     break;
                 case FUTURE:
                     if (this.future == null) {
@@ -985,8 +1079,9 @@ public class FamilyCandleProcessor {
                         mergeInstrumentCandle(this.future, candle);
                         futureMergeCount++;
                     }
-                    // FIX: Track future sub-candles for MTF distribution (commodities)
-                    futureSubCandles.add(com.kotsin.consumer.model.UnifiedCandle.from(candle));
+                    // MTF Distribution Fix: Extract embedded sub-candle snapshots from InstrumentCandle
+                    // This enables MTF distribution for commodities (MCX) where future is primary
+                    extractAndAddSubCandles(candle, futureSubCandles, "future");
                     break;
                 case OPTION_CE:
                 case OPTION_PE:
@@ -1160,6 +1255,57 @@ public class FamilyCandleProcessor {
             double oiBonus = oi > 0 ? Math.min(20, Math.log10(oi) * 3) : 0;
 
             return atmScore + oiBonus;
+        }
+
+        /**
+         * MTF Distribution Fix: Extract embedded sub-candle snapshots from InstrumentCandle
+         * and convert them to UnifiedCandle objects for MTF pattern analysis.
+         *
+         * Before this fix: Only 1 sub-candle per window (the final aggregated InstrumentCandle)
+         * After this fix: Multiple sub-candles (one every ~10 seconds during tick aggregation)
+         *
+         * @param candle InstrumentCandle with embedded sub-candle snapshots
+         * @param targetList List to add the converted UnifiedCandle objects
+         * @param type Type string for logging ("equity" or "future")
+         */
+        private void extractAndAddSubCandles(InstrumentCandle candle,
+                                              List<com.kotsin.consumer.model.UnifiedCandle> targetList,
+                                              String type) {
+            java.util.List<InstrumentCandle.SubCandleSnapshot> snapshots = candle.getSubCandleSnapshots();
+
+            if (snapshots != null && !snapshots.isEmpty()) {
+                // Convert each SubCandleSnapshot to UnifiedCandle
+                for (InstrumentCandle.SubCandleSnapshot snapshot : snapshots) {
+                    com.kotsin.consumer.model.UnifiedCandle uc = com.kotsin.consumer.model.UnifiedCandle.builder()
+                        .scripCode(candle.getScripCode())
+                        .companyName(candle.getCompanyName())
+                        .exchange(candle.getExchange())
+                        .exchangeType(candle.getExchangeType())
+                        .windowStartMillis(snapshot.getEventTime() - 10_000L)  // Approximate start (10s before snapshot)
+                        .windowEndMillis(snapshot.getEventTime())
+                        .open(snapshot.getOpen())
+                        .high(snapshot.getHigh())
+                        .low(snapshot.getLow())
+                        .close(snapshot.getClose())
+                        .volume(snapshot.getVolume())
+                        .buyVolume(snapshot.getBuyVolume())
+                        .sellVolume(snapshot.getSellVolume())
+                        .vwap(snapshot.getVwap())
+                        .tickCount(snapshot.getTickCount())
+                        .oiClose(snapshot.getOiClose())
+                        .build();
+                    targetList.add(uc);
+                }
+
+                log.debug("[MTF-SUB-CANDLE] {} {} | Extracted {} sub-candle snapshots from InstrumentCandle",
+                    candle.getScripCode(), type, snapshots.size());
+            } else {
+                // Fallback: No embedded snapshots, use the candle itself as single sub-candle
+                // This maintains backward compatibility with older data that doesn't have snapshots
+                targetList.add(com.kotsin.consumer.model.UnifiedCandle.from(candle));
+                log.debug("[MTF-SUB-CANDLE] {} {} | No embedded snapshots, using candle as single sub-candle",
+                    candle.getScripCode(), type);
+            }
         }
 
         public boolean hasEquity() {

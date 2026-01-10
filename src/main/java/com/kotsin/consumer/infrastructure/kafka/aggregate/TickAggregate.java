@@ -45,8 +45,10 @@ public class TickAggregate {
     private double low;
     private double close;
     // FIX: Track event time of OHLC to handle out-of-order ticks correctly
-    // Close = price at LATEST event time (end of window)
+    // Open = price at EARLIEST event time (first trade in window)
+    // Close = price at LATEST event time (last trade in window)
     // High/Low = track when extremes occurred for analytics
+    private long openEventTime = Long.MAX_VALUE;  // Start high so first tick is always earlier
     private long closeEventTime = 0;
     private long highEventTime = 0;
     private long lowEventTime = 0;
@@ -74,8 +76,13 @@ public class TickAggregate {
     private int spreadCount = 0;
     private double minSpread = Double.MAX_VALUE;
     private double maxSpread = 0.0;
-    @JsonIgnore private transient List<Double> spreadHistory;  // For volatility calculation
+    @JsonIgnore private transient List<Double> spreadHistory;  // For volatility calculation (transient - backup only)
     private int tightSpreadCount = 0;  // Count of spreads <= 1 tick
+
+    // FIX: Welford's online algorithm for spread volatility (persisted - survives serialization)
+    private double spreadWelfordMean = 0.0;
+    private double spreadWelfordM2 = 0.0;
+    private int spreadWelfordCount = 0;
 
     // ==================== EFFECTIVE SPREAD (ACTUAL EXECUTION COST) ====================
     // Effective spread = 2 * |trade_price - midpoint|
@@ -93,7 +100,12 @@ public class TickAggregate {
 
     // ==================== VWAP BANDS (Trading Signals) ====================
     // Track price history for VWAP standard deviation calculation
-    @JsonIgnore private transient List<Double> priceHistory;  // For std dev around VWAP
+    @JsonIgnore private transient List<Double> priceHistory;  // For std dev around VWAP (transient - backup only)
+
+    // FIX: Welford's online algorithm for VWAP std dev (persisted - survives serialization)
+    private double priceWelfordMean = 0.0;
+    private double priceWelfordM2 = 0.0;
+    private int priceWelfordCount = 0;
 
     // ==================== VOLUME DELTA TRACKING (Phase 1.1) ====================
     private long previousTotalQty = 0;
@@ -112,7 +124,7 @@ public class TickAggregate {
     private long lastTickTimestamp;
     private long firstTickEventTime;
     private long lastTickEventTime;
-    @JsonIgnore private transient List<Long> tickTimestamps;
+    @JsonIgnore private transient List<Long> tickTimestamps;  // Transient - backup only
     private long minTickGap = Long.MAX_VALUE;
     private long maxTickGap = 0;
     private double avgTickGap = 0.0;
@@ -121,8 +133,12 @@ public class TickAggregate {
     private long previousTickTimestamp = 0;
     private int previousTicksPerSecond = 0;
 
+    // FIX: Incremental tick gap calculation (persisted - survives serialization)
+    private long sumTickGaps = 0;
+    private int tickGapCount = 0;
+
     // ==================== TRADE-LEVEL TRACKING (Phase 4) ====================
-    @JsonIgnore private transient List<TradeInfo> tradeHistory;
+    @JsonIgnore private transient List<TradeInfo> tradeHistory;  // Transient - backup only
     private static final int MAX_TRADE_HISTORY = 100;
     private long maxTradeSize = 0;
     private long minTradeSize = Long.MAX_VALUE;
@@ -130,6 +146,10 @@ public class TickAggregate {
     private double medianTradeSize = 0.0;
     private int largeTradeCount = 0;
     private double priceImpactPerUnit = 0.0;
+
+    // FIX: Incremental trade size calculation (persisted - survives serialization)
+    private long totalTradeVolume = 0;
+    private int tradeCount = 0;
 
     // ==================== IMBALANCE BAR TRACKING ====================
     private long volumeImbalance = 0L;
@@ -173,9 +193,22 @@ public class TickAggregate {
     private double exchangeVwap = 0.0;
 
     // ==================== P2: TICK INTENSITY ZONES ====================
-    @JsonIgnore private transient Map<Long, Integer> tickCountPerSecond;
+    @JsonIgnore private transient Map<Long, Integer> tickCountPerSecond;  // Transient - backup only
     private int maxTicksInAnySecond = 0;
     private int secondsWithTicks = 0;
+
+    // FIX: Incremental tick intensity tracking (persisted - survives serialization)
+    private long currentSecondBucket = 0;
+    private int currentSecondTickCount = 0;
+    private long lastSeenSecondBucket = -1;
+
+    // ==================== SUB-CANDLE TRACKING (MTF Distribution Fix) ====================
+    // Track sub-candle snapshots every 10 seconds for MTF pattern analysis
+    // This allows FamilyCandleProcessor to analyze intra-window patterns even though
+    // WallClockWindowEmitter only emits once per window
+    private static final long SUB_CANDLE_INTERVAL_MS = 10_000L;  // 10 seconds
+    private List<SubCandleSnapshot> subCandleSnapshots = new ArrayList<>();
+    private long lastSubCandleSnapshotTime = 0;
 
     /**
      * Update aggregate with new tick data.
@@ -194,12 +227,14 @@ public class TickAggregate {
             companyName = tick.getCompanyName();
             exchange = tick.getExchange();
             exchangeType = tick.getExchangeType();
+            // Initialize OHLC with first tick (will be corrected by event-time logic below)
+            long firstEventTime = tick.getTimestamp() > 0 ? tick.getTimestamp() : kafkaTimestamp;
             open = tick.getLastRate();
             high = tick.getLastRate();
             low = tick.getLastRate();
             close = tick.getLastRate();
-            // Initialize event times with first tick's event time
-            long firstEventTime = tick.getTimestamp() > 0 ? tick.getTimestamp() : kafkaTimestamp;
+            // Initialize all event times
+            openEventTime = firstEventTime;
             closeEventTime = firstEventTime;
             highEventTime = firstEventTime;
             lowEventTime = firstEventTime;
@@ -210,8 +245,13 @@ public class TickAggregate {
             tradeHistory = new ArrayList<>(MAX_TRADE_HISTORY);
             previousClose = tick.getPreviousClose();
             tickCountPerSecond = new HashMap<>();
-            
-            log.debug("[TICK-AGG-INIT] {} | open={} kafkaTs={}", 
+
+            // FIX: Initialize tick intensity tracking (first tick will be counted in regular logic below)
+            currentSecondBucket = kafkaTimestamp / 1000;
+            currentSecondTickCount = 0;  // Will be incremented to 1 below
+            lastSeenSecondBucket = -1;  // Mark as uninitialized so first second gets counted
+
+            log.debug("[TICK-AGG-INIT] {} | open={} kafkaTs={}",
                 scripCode, open, kafkaTimestamp);
         }
 
@@ -232,6 +272,12 @@ public class TickAggregate {
         long secondBucket = kafkaTimestamp / 1000;
         tickCountPerSecond.merge(secondBucket, 1, Integer::sum);
 
+        // ========== SUB-CANDLE SNAPSHOT TRACKING (MTF Distribution Fix) ==========
+        // Create snapshots every 10 seconds of event time for MTF pattern analysis
+        // This allows MTFDistributionCalculator to analyze intra-window patterns
+        long tickEventTimeForSnapshot = tick.getTimestamp() > 0 ? tick.getTimestamp() : kafkaTimestamp;
+        createSubCandleSnapshotIfNeeded(tickEventTimeForSnapshot);
+
         // ========== UPDATE OHLC ==========
         // FIX: Get tick event time from TickDt (parsed during deserialization)
         // Fallback to Kafka timestamp if TickDt not available
@@ -240,16 +286,23 @@ public class TickAggregate {
             tickEventTime = kafkaTimestamp;
         }
 
-        // FIX: Close should be price of tick with LATEST event time, NOT last processed!
+        double price = tick.getLastRate();
+
+        // FIX: Open should be price of tick with EARLIEST event time (first trade in window)
+        // Out-of-order ticks can arrive with earlier event times than first processed tick
+        if (tickEventTime < openEventTime) {
+            open = price;
+            openEventTime = tickEventTime;
+        }
+
+        // FIX: Close should be price of tick with LATEST event time (last trade in window)
         // Out-of-order ticks due to network latency can cause wrong Close otherwise.
-        // Close represents the price at END of the time window.
         if (tickEventTime >= closeEventTime) {
-            close = tick.getLastRate();
+            close = price;
             closeEventTime = tickEventTime;
         }
 
         // High: Update if new high found, track when it occurred
-        double price = tick.getLastRate();
         if (price > high) {
             high = price;
             highEventTime = tickEventTime;
@@ -291,7 +344,14 @@ public class TickAggregate {
             minSpread = Math.min(minSpread, spread);
             maxSpread = Math.max(maxSpread, spread);
 
-            // Lazy init spread history
+            // FIX: Welford's online algorithm for spread volatility (survives serialization)
+            spreadWelfordCount++;
+            double spreadDelta = spread - spreadWelfordMean;
+            spreadWelfordMean += spreadDelta / spreadWelfordCount;
+            double spreadDelta2 = spread - spreadWelfordMean;
+            spreadWelfordM2 += spreadDelta * spreadDelta2;
+
+            // Lazy init spread history (backup - may be null after deserialization)
             if (spreadHistory == null) {
                 spreadHistory = new ArrayList<>(100);
             }
@@ -300,8 +360,8 @@ public class TickAggregate {
                 spreadHistory.remove(0);
             }
 
-            // Count tight spreads (<=1 tick)
-            if (spread <= tickSizeForProfile) {
+            // Count tight spreads (<=1 tick) - FIX: use tolerance for floating point comparison
+            if (spread <= tickSizeForProfile + 0.0001) {
                 tightSpreadCount++;
             }
 
@@ -329,11 +389,18 @@ public class TickAggregate {
         }
 
         // ========== VWAP BANDS: TRACK PRICE HISTORY ==========
-        // Track all prices for VWAP standard deviation calculation
+        // FIX: Welford's online algorithm for VWAP std dev (survives serialization)
+        priceWelfordCount++;
+        double priceDelta = price - priceWelfordMean;
+        priceWelfordMean += priceDelta / priceWelfordCount;
+        double priceDelta2 = price - priceWelfordMean;
+        priceWelfordM2 += priceDelta * priceDelta2;
+
+        // Track all prices (backup - may be null after deserialization)
         if (priceHistory == null) {
             priceHistory = new ArrayList<>(500);
         }
-        priceHistory.add(tick.getLastRate());
+        priceHistory.add(price);
         // Keep last 500 prices (sufficient for 1-minute window)
         if (priceHistory.size() > 500) {
             priceHistory.remove(0);
@@ -346,7 +413,7 @@ public class TickAggregate {
         lastTickTimestamp = kafkaTimestamp;
         lastTickEventTime = tick.getTimestamp();
 
-        // FIX: Lazy init transient lists after deserialization
+        // Lazy init transient lists (backup - may be null after deserialization)
         if (tickTimestamps == null) {
             tickTimestamps = new ArrayList<>(100);
         }
@@ -359,8 +426,28 @@ public class TickAggregate {
             long gap = kafkaTimestamp - previousTickTimestamp;
             minTickGap = Math.min(minTickGap, gap);
             maxTickGap = Math.max(maxTickGap, gap);
+            // FIX: Incremental tick gap tracking (survives serialization)
+            sumTickGaps += gap;
+            tickGapCount++;
         }
         previousTickTimestamp = kafkaTimestamp;
+
+        // FIX: Incremental tick intensity tracking (survives serialization)
+        long secondBucketNow = kafkaTimestamp / 1000;
+        if (secondBucketNow == currentSecondBucket) {
+            currentSecondTickCount++;
+        } else {
+            // New second - finalize previous second stats
+            if (currentSecondBucket > 0) {
+                maxTicksInAnySecond = Math.max(maxTicksInAnySecond, currentSecondTickCount);
+                if (lastSeenSecondBucket != currentSecondBucket) {
+                    secondsWithTicks++;
+                    lastSeenSecondBucket = currentSecondBucket;
+                }
+            }
+            currentSecondBucket = secondBucketNow;
+            currentSecondTickCount = 1;
+        }
 
         // ========== TRADE HISTORY ==========
         if (deltaVol > 0) {
@@ -368,7 +455,7 @@ public class TickAggregate {
                 kafkaTimestamp, tick.getTimestamp(), tick.getLastRate(),
                 deltaVol, classification, tick.getBidRate(), tick.getOfferRate()
             );
-            // FIX: Lazy init after deserialization
+            // Lazy init (backup - may be null after deserialization)
             if (tradeHistory == null) {
                 tradeHistory = new ArrayList<>(MAX_TRADE_HISTORY);
             }
@@ -379,6 +466,10 @@ public class TickAggregate {
 
             maxTradeSize = Math.max(maxTradeSize, deltaVol);
             minTradeSize = Math.min(minTradeSize, deltaVol);
+
+            // FIX: Incremental trade size tracking (survives serialization)
+            totalTradeVolume += deltaVol;
+            tradeCount++;
 
             // ========== IMBALANCE BAR TRACKING ==========
             boolean isBuy = "AGGRESSIVE_BUY".equals(classification);
@@ -597,63 +688,91 @@ public class TickAggregate {
 
     /**
      * Calculate temporal metrics at end of window.
+     * FIX: Uses persisted incremental fields that survive serialization.
      */
     public void calculateTemporalMetrics() {
-        if (tickTimestamps == null || tickTimestamps.size() < 2) {
+        // FIX: Use persisted incremental fields instead of transient list
+        // tickGapCount and sumTickGaps are persisted, tickTimestamps is transient
+        if (tickGapCount > 0) {
+            avgTickGap = (double) sumTickGaps / tickGapCount;
+        } else if (tickTimestamps != null && tickTimestamps.size() >= 2) {
+            // Fallback to transient list if available
+            long totalGap = 0;
+            for (int i = 1; i < tickTimestamps.size(); i++) {
+                totalGap += tickTimestamps.get(i) - tickTimestamps.get(i - 1);
+            }
+            avgTickGap = (double) totalGap / (tickTimestamps.size() - 1);
+        } else {
             avgTickGap = 0.0;
-            ticksPerSecond = 0;
-            tickAcceleration = 0.0;
-            return;
         }
 
-        long totalGap = 0;
-        for (int i = 1; i < tickTimestamps.size(); i++) {
-            totalGap += tickTimestamps.get(i) - tickTimestamps.get(i - 1);
-        }
-        avgTickGap = (double) totalGap / (tickTimestamps.size() - 1);
-
+        // Calculate ticksPerSecond from persisted timestamps
+        // FIX: Avoid integer division returning 0 when ticks < 1 per second
         long windowDurationMs = lastTickTimestamp - firstTickTimestamp;
-        ticksPerSecond = windowDurationMs > 0 ? 
-            (int) (tickCount * 1000L / windowDurationMs) : tickCount;
-        
+        if (windowDurationMs > 0 && tickCount > 0) {
+            // Calculate as ticks per second, minimum 1 if any ticks exist
+            double tps = (double) tickCount * 1000.0 / windowDurationMs;
+            ticksPerSecond = (int) Math.ceil(tps);  // Round up - if 0.5 tps, report 1
+        } else {
+            ticksPerSecond = tickCount;  // All ticks in same millisecond
+        }
+
         tickAcceleration = ticksPerSecond - previousTicksPerSecond;
         previousTicksPerSecond = ticksPerSecond;
+
+        // FIX: Finalize current second bucket for tick intensity stats
+        if (currentSecondBucket > 0 && currentSecondTickCount > 0) {
+            maxTicksInAnySecond = Math.max(maxTicksInAnySecond, currentSecondTickCount);
+            if (lastSeenSecondBucket != currentSecondBucket) {
+                secondsWithTicks++;
+            }
+        }
     }
 
     /**
      * Calculate trade size distribution at end of window.
+     * FIX: Uses persisted incremental fields that survive serialization.
      */
     public void calculateTradeSizeDistribution() {
-        if (tradeHistory == null || tradeHistory.isEmpty()) {
-            avgTradeSize = 0.0;
-            medianTradeSize = 0.0;
-            largeTradeCount = 0;
-            return;
-        }
-
-        long totalVol = 0;
-        for (TradeInfo trade : tradeHistory) {
-            totalVol += trade.quantity;
-        }
-        avgTradeSize = (double) totalVol / tradeHistory.size();
-
-        List<Long> sizes = new ArrayList<>();
-        for (TradeInfo trade : tradeHistory) {
-            sizes.add(trade.quantity);
-        }
-        sizes.sort(Long::compareTo);
-        int mid = sizes.size() / 2;
-        medianTradeSize = sizes.size() % 2 == 0 ? 
-            (sizes.get(mid - 1) + sizes.get(mid)) / 2.0 : sizes.get(mid);
-
-        double largeThreshold = avgTradeSize * 10;
-        largeTradeCount = 0;
-        for (TradeInfo trade : tradeHistory) {
-            if (trade.quantity > largeThreshold) {
-                largeTradeCount++;
-                log.debug("[LARGE-TRADE] {} | size={} threshold={}",
-                    scripCode, trade.quantity, String.format("%.0f", largeThreshold));
+        // FIX: Use persisted incremental fields instead of transient list
+        // tradeCount and totalTradeVolume are persisted, tradeHistory is transient
+        if (tradeCount > 0) {
+            avgTradeSize = (double) totalTradeVolume / tradeCount;
+        } else if (tradeHistory != null && !tradeHistory.isEmpty()) {
+            // Fallback to transient list if available
+            long totalVol = 0;
+            for (TradeInfo trade : tradeHistory) {
+                totalVol += trade.quantity;
             }
+            avgTradeSize = (double) totalVol / tradeHistory.size();
+        } else {
+            avgTradeSize = 0.0;
+        }
+
+        // Median calculation - only possible with history
+        if (tradeHistory != null && !tradeHistory.isEmpty()) {
+            List<Long> sizes = new ArrayList<>();
+            for (TradeInfo trade : tradeHistory) {
+                sizes.add(trade.quantity);
+            }
+            sizes.sort(Long::compareTo);
+            int mid = sizes.size() / 2;
+            medianTradeSize = sizes.size() % 2 == 0 ?
+                (sizes.get(mid - 1) + sizes.get(mid)) / 2.0 : sizes.get(mid);
+
+            double largeThreshold = avgTradeSize * 10;
+            largeTradeCount = 0;
+            for (TradeInfo trade : tradeHistory) {
+                if (trade.quantity > largeThreshold) {
+                    largeTradeCount++;
+                    log.debug("[LARGE-TRADE] {} | size={} threshold={}",
+                        scripCode, trade.quantity, String.format("%.0f", largeThreshold));
+                }
+            }
+        } else {
+            // FIX: Approximate median from min/max/avg when history unavailable
+            // Use avgTradeSize as approximation (better than 0)
+            medianTradeSize = avgTradeSize;
         }
 
         if (volume > 0) {
@@ -672,7 +791,8 @@ public class TickAggregate {
     public long getMinTickGap() { return minTickGap == Long.MAX_VALUE ? 0 : minTickGap; }
     public long getMinTradeSize() { return minTradeSize == Long.MAX_VALUE ? 0 : minTradeSize; }
 
-    // Event time getters for OHLC (useful for analytics - when did high/low occur?)
+    // Event time getters for OHLC (useful for analytics - when did open/high/low/close occur?)
+    public long getOpenEventTime() { return openEventTime == Long.MAX_VALUE ? 0 : openEventTime; }
     public long getHighEventTime() { return highEventTime; }
     public long getLowEventTime() { return lowEventTime; }
     public long getCloseEventTime() { return closeEventTime; }
@@ -769,17 +889,24 @@ public class TickAggregate {
 
     /**
      * Calculate spread volatility (standard deviation)
+     * FIX: Uses Welford's algorithm (persisted) that survives serialization.
      */
     public double getSpreadVolatility() {
-        if (spreadHistory == null || spreadHistory.size() < 2) return 0.0;
-
-        double mean = getAverageTickSpread();
-        double variance = spreadHistory.stream()
-            .mapToDouble(s -> Math.pow(s - mean, 2))
-            .average()
-            .orElse(0.0);
-
-        return Math.sqrt(variance);
+        // FIX: Use Welford's algorithm (persisted) instead of transient list
+        if (spreadWelfordCount >= 2) {
+            double variance = spreadWelfordM2 / (spreadWelfordCount - 1);
+            return Math.sqrt(variance);
+        }
+        // Fallback to transient list if available
+        if (spreadHistory != null && spreadHistory.size() >= 2) {
+            double mean = getAverageTickSpread();
+            double variance = spreadHistory.stream()
+                .mapToDouble(s -> Math.pow(s - mean, 2))
+                .average()
+                .orElse(0.0);
+            return Math.sqrt(variance);
+        }
+        return 0.0;
     }
 
     /**
@@ -843,17 +970,24 @@ public class TickAggregate {
 
     /**
      * Calculate VWAP standard deviation (price volatility around VWAP)
+     * FIX: Uses Welford's algorithm (persisted) that survives serialization.
      */
     public double getVWAPStdDev() {
-        if (priceHistory == null || priceHistory.size() < 2) return 0.0;
-
-        double mean = vwap;  // Use VWAP as the mean
-        double variance = priceHistory.stream()
-            .mapToDouble(p -> Math.pow(p - mean, 2))
-            .average()
-            .orElse(0.0);
-
-        return Math.sqrt(variance);
+        // FIX: Use Welford's algorithm (persisted) instead of transient list
+        if (priceWelfordCount >= 2) {
+            double variance = priceWelfordM2 / (priceWelfordCount - 1);
+            return Math.sqrt(variance);
+        }
+        // Fallback to transient list if available
+        if (priceHistory != null && priceHistory.size() >= 2) {
+            double mean = vwap;  // Use VWAP as the mean
+            double variance = priceHistory.stream()
+                .mapToDouble(p -> Math.pow(p - mean, 2))
+                .average()
+                .orElse(0.0);
+            return Math.sqrt(variance);
+        }
+        return 0.0;
     }
 
     /**
@@ -901,6 +1035,121 @@ public class TickAggregate {
         private String classification;
         private double bidPrice;
         private double askPrice;
+    }
+
+    // ==================== SUB-CANDLE SNAPSHOT (MTF Distribution Fix) ====================
+
+    /**
+     * Sub-candle snapshot for MTF Distribution analysis.
+     * Created every 10 seconds during tick aggregation.
+     *
+     * This allows FamilyCandleProcessor to analyze intra-window patterns
+     * (V-patterns, momentum acceleration, volume distribution) even though
+     * WallClockWindowEmitter only emits ONE final InstrumentCandle per window.
+     */
+    @Data
+    @NoArgsConstructor
+    @AllArgsConstructor
+    public static class SubCandleSnapshot {
+        private long eventTime;       // Event time when snapshot was created
+        private double open;
+        private double high;
+        private double low;
+        private double close;
+        private long volume;
+        private long buyVolume;
+        private long sellVolume;
+        private double vwap;
+        private int tickCount;
+        private Long oiClose;         // OI at snapshot time (if available)
+    }
+
+    /**
+     * Create a sub-candle snapshot if enough time has passed since last snapshot.
+     * Called during tick aggregation to track intra-window patterns.
+     *
+     * @param eventTime Current tick event time
+     */
+    private void createSubCandleSnapshotIfNeeded(long eventTime) {
+        // Initialize snapshot time on first call
+        if (lastSubCandleSnapshotTime == 0) {
+            lastSubCandleSnapshotTime = eventTime;
+            return;
+        }
+
+        // Check if enough time has passed for a new snapshot
+        if (eventTime - lastSubCandleSnapshotTime >= SUB_CANDLE_INTERVAL_MS) {
+            // Create snapshot with current OHLCV state
+            SubCandleSnapshot snapshot = new SubCandleSnapshot(
+                lastSubCandleSnapshotTime,  // Snapshot represents period UP TO this time
+                open,
+                high,
+                low,
+                close,
+                volume,
+                buyVolume,
+                sellVolume,
+                vwap,
+                tickCount,
+                null  // OI populated later if available
+            );
+
+            if (subCandleSnapshots == null) {
+                subCandleSnapshots = new ArrayList<>();
+            }
+            subCandleSnapshots.add(snapshot);
+            lastSubCandleSnapshotTime = eventTime;
+
+            if (log.isDebugEnabled()) {
+                log.debug("[SUB-CANDLE] {} | Created snapshot #{} at {} | OHLC={}/{}/{}/{} vol={}",
+                    scripCode, subCandleSnapshots.size(), eventTime,
+                    String.format("%.2f", open), String.format("%.2f", high),
+                    String.format("%.2f", low), String.format("%.2f", close), volume);
+            }
+        }
+    }
+
+    /**
+     * Finalize sub-candle snapshots at end of window.
+     * Creates a final snapshot for remaining data not yet captured.
+     *
+     * @param windowEndTime End time of the aggregation window
+     */
+    public void finalizeSubCandleSnapshots(long windowEndTime) {
+        // Always create a final snapshot for remaining data
+        if (tickCount > 0) {
+            SubCandleSnapshot finalSnapshot = new SubCandleSnapshot(
+                windowEndTime,
+                open,
+                high,
+                low,
+                close,
+                volume,
+                buyVolume,
+                sellVolume,
+                vwap,
+                tickCount,
+                null
+            );
+
+            if (subCandleSnapshots == null) {
+                subCandleSnapshots = new ArrayList<>();
+            }
+            subCandleSnapshots.add(finalSnapshot);
+
+            if (log.isDebugEnabled()) {
+                log.debug("[SUB-CANDLE-FINAL] {} | Total snapshots: {} | Window end: {}",
+                    scripCode, subCandleSnapshots.size(), windowEndTime);
+            }
+        }
+    }
+
+    /**
+     * Get sub-candle snapshots for MTF Distribution analysis.
+     * @return List of sub-candle snapshots (may be empty if window had no ticks)
+     */
+    public List<SubCandleSnapshot> getSubCandleSnapshots() {
+        return subCandleSnapshots != null ? new ArrayList<>(subCandleSnapshots) : new ArrayList<>();
     }
 
     public static Serde<TickAggregate> serde() {

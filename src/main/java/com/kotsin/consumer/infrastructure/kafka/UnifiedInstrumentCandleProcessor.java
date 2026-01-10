@@ -373,11 +373,11 @@ public class UnifiedInstrumentCandleProcessor {
                     .withKeySerde(Serdes.String())
                     .withValueSerde(TickAggregate.serde())
                     .withRetention(Duration.ofDays(14))  // 2 weeks retention for replay scenarios
-            )
-            // FIX: Suppress intermediate emissions - emit only when window closes
-            // BEFORE: Emitted on EVERY tick update during grace period (duplicate candles)
-            // AFTER: Emit exactly ONCE per window at close (correct behavior)
-            .suppress(Suppressed.untilWindowCloses(Suppressed.BufferConfig.unbounded()));
+            );
+            // REMOVED: .suppress(Suppressed.untilWindowCloses(...))
+            // REASON: suppress() uses stream-time which only advances when records arrive.
+            // During low activity, this causes multi-minute delays.
+            // REPLACED BY: WallClockWindowEmitter applied after the join (see below)
 
         // ========== 5. AGGREGATE ORDERBOOK INTO OFI/LAMBDA ==========
         // Repartition orderbooks to 20 partitions for co-partitioning
@@ -400,10 +400,10 @@ public class UnifiedInstrumentCandleProcessor {
                     .withKeySerde(Serdes.String())
                     .withValueSerde(OrderbookAggregate.serde())
                     .withRetention(Duration.ofDays(14))  // 2 weeks retention for replay scenarios
-            )
-            // FIX: Suppress intermediate emissions - emit only when window closes
-            // Matches tickCandles suppress for consistent join behavior
-            .suppress(Suppressed.untilWindowCloses(Suppressed.BufferConfig.unbounded()));
+            );
+            // REMOVED: .suppress(Suppressed.untilWindowCloses(...))
+            // REASON: suppress() uses stream-time which only advances when records arrive.
+            // REPLACED BY: WallClockWindowEmitter applied after the join (see below)
 
         // ========== 5.5. CREATE NON-WINDOWED ORDERBOOK LATEST STORE (FALLBACK) ==========
         // This store keeps the latest orderbook aggregate for each instrument
@@ -455,9 +455,10 @@ public class UnifiedInstrumentCandleProcessor {
             );
 
         // ========== 7. LEFT JOIN: TICK (mandatory) + ORDERBOOK (optional) ==========
-        // NOTE: Both tickCandles and obAggregates already have suppress() applied
-        // The join may emit multiple times if tick and orderbook windows close at different times,
-        // but deduplication happens downstream via the unique window key
+        // NOTE: suppress() has been REMOVED from both tickCandles and obAggregates.
+        // Without suppress(), KTables emit on EVERY update during the window.
+        // The join fires on each update, which means multiple emissions per window.
+        // Deduplication and wall-clock emission timing is handled by WallClockWindowEmitter (see below)
         KTable<Windowed<String>, TickWithOrderbook> tickCandlesWithOb = tickCandles.leftJoin(
             obAggregates,
             (tick, ob) -> {
@@ -554,15 +555,15 @@ public class UnifiedInstrumentCandleProcessor {
                             }
                             
                             if (oi == null && tickExchType.equals("D")) {
-                                log.warn("[JOIN-MISS] {} | OI missing for derivative! tickExch={} tickExchType={} scripCode={} | OI key used: {}", 
+                                log.warn("[JOIN-MISS] {} | OI missing for derivative! tickExch={} tickExchType={} scripCode={} | OI key used: {}",
                                     scripCode, tickExch, tickExchType, scripCode, oiKey);
                             } else if (oi != null) {
                                 if (log.isDebugEnabled()) {
-                                    log.debug("[JOIN-SUCCESS] {} | OI joined! OI={} OIChange={} OIChangePct={}", 
-                                        scripCode, 
-                                        oi.getOiClose(), 
-                                        oi.getOiChange() != null ? oi.getOiChange() : 0,
-                                        oi.getOiChangePercent() != null ? String.format("%.2f%%", oi.getOiChangePercent()) : "N/A");
+                                    // Note: Cross-window OI change is calculated later in buildInstrumentCandle()
+                                    // using previousOICloseCache. This log shows current OI close only.
+                                    log.debug("[JOIN-SUCCESS] {} | OI joined! OI={}",
+                                        scripCode,
+                                        oi.getOiClose());
                                 }
                             }
                         }
@@ -645,50 +646,41 @@ public class UnifiedInstrumentCandleProcessor {
                 "orderbook-latest-store"  // State store name for orderbook fallback lookup
             );
         
-        // ========== 9. EMIT ON WINDOW CLOSE ==========
-        // Note: We work directly with the stream since we need to convert to stream anyway
-        // The windowed key is preserved through the join
+        // ========== 9. EMIT ON WINDOW CLOSE (WALL CLOCK BASED) ==========
+        //
+        // 🛡️ CRITICAL FIX: Use wall-clock based emission instead of stream-time
+        //
+        // PROBLEM (BEFORE):
+        // - suppress(untilWindowCloses) uses "stream-time" which only advances when records arrive
+        // - During low activity periods, stream-time doesn't advance, causing multi-minute delays
+        // - Caffeine cache deduplication kept FIRST emission (incomplete) instead of LAST (complete)
+        //
+        // SOLUTION (AFTER):
+        // - Removed suppress() from both tickCandles and obAggregates
+        // - KTable-KTable join fires on EVERY update (multiple times per window)
+        // - WallClockWindowEmitter buffers updates and emits the LATEST (most complete) value
+        // - Emission happens when WALL CLOCK time > window_end + grace (consistent ~2-3s latency)
+        //
+        // BENEFITS:
+        // - Consistent low latency regardless of data arrival patterns
+        // - Emits LATEST value (most complete data) instead of FIRST (incomplete)
+        // - Works correctly during market close, low activity, and replay scenarios
 
-        // FIX: Deduplicate KTable-KTable join outputs
-        // KTable-KTable joins emit when EITHER side changes. With both tickCandles and obAggregates
-        // suppressed, each emits once per window, but the join still fires TWICE (once per emission).
-        // Use a cache to deduplicate based on window key (key + windowStart).
-        // Cache TTL is 2 minutes (longer than any window + grace period)
-        final Cache<String, Boolean> emittedWindows = Caffeine.newBuilder()
-            .expireAfterWrite(2, TimeUnit.MINUTES)
-            .maximumSize(100000)
-            .build();
+        long graceMsForEmitter = graceSeconds * 1000L;
 
         fullDataStream
-            .filter((windowedKey, data) -> {
-                if (data == null || data.tick == null) {
-                    return false;
+            // Filter out null data first
+            .filter((windowedKey, data) -> data != null && data.tick != null)
+            // Wall-clock based emission: buffers updates, emits once per window at close time
+            .process(() -> new WallClockWindowEmitter<>(graceMsForEmitter))
+            // Log OI misses for derivatives (informational, after deduplication)
+            .peek((windowedKey, data) -> {
+                if (log.isDebugEnabled() && data.tick != null && "D".equals(data.tick.getExchangeType()) && data.oi == null) {
+                    log.debug("[OI-MISS-DEBUG] {} | window=[{} - {}] | OI not found in KTable lookup",
+                        data.tick.getScripCode(),
+                        new java.util.Date(windowedKey.window().start()),
+                        new java.util.Date(windowedKey.window().end()));
                 }
-
-                // Deduplicate: only emit first record per window key
-                String dedupeKey = windowedKey.key() + "@" + windowedKey.window().start();
-                Boolean alreadyEmitted = emittedWindows.getIfPresent(dedupeKey);
-                if (alreadyEmitted != null) {
-                    if (log.isDebugEnabled()) {
-                        log.debug("[DEDUPE] Skipping duplicate for {} window=[{} - {}]",
-                            data.tick.getScripCode(),
-                            new java.util.Date(windowedKey.window().start()),
-                            new java.util.Date(windowedKey.window().end()));
-                    }
-                    return false;  // Skip duplicate
-                }
-                emittedWindows.put(dedupeKey, Boolean.TRUE);
-
-                // Additional validation: log if OI is missing for derivatives
-                if (data.tick != null && "D".equals(data.tick.getExchangeType()) && data.oi == null) {
-                    if (log.isDebugEnabled()) {
-                        log.debug("[OI-MISS-DEBUG] {} | window=[{} - {}] | OI not found in KTable lookup",
-                            data.tick.getScripCode(),
-                            new java.util.Date(windowedKey.window().start()),
-                            new java.util.Date(windowedKey.window().end()));
-                    }
-                }
-                return true;
             })
             .mapValues((windowedKey, data) -> buildInstrumentCandle(windowedKey, data))
             .map((windowedKey, candle) -> KeyValue.pair(windowedKey.key(), candle))
@@ -1233,7 +1225,12 @@ public class UnifiedInstrumentCandleProcessor {
                 builder.oiChange(oiChange);
                 builder.oiChangePercent(oiChangePercent);
 
-                if (log.isDebugEnabled()) {
+                // Log significant OI changes at INFO level for visibility
+                if (Math.abs(oiChangePercent) >= 0.5) {
+                    log.info("[OI-CHANGE] {} | prevOI={} currOI={} change={} changePct={}%",
+                        oiKey, previousOIClose, oi.getOiClose(), oiChange,
+                        String.format("%.2f", oiChangePercent));
+                } else if (log.isDebugEnabled()) {
                     log.debug("[OI-CHANGE] {} | prevOI={} currOI={} change={} changePct={}%",
                         oiKey, previousOIClose, oi.getOiClose(), oiChange,
                         String.format("%.2f", oiChangePercent));
@@ -1246,7 +1243,7 @@ public class UnifiedInstrumentCandleProcessor {
                 builder.oiChangePercent(null);
 
                 if (log.isDebugEnabled() && oi.getOiClose() != null) {
-                    log.debug("[OI-CHANGE-INIT] {} | currOI={} | No previous OI - change set to null (first window)",
+                    log.debug("[OI-CHANGE-INIT] {} | currOI={} | No previous OI - first window",
                         oiKey, oi.getOiClose());
                 }
             }
@@ -1527,7 +1524,10 @@ public class UnifiedInstrumentCandleProcessor {
         // If processing historical data (window end is far in past), use window-relative age
         boolean isReplay = (currentTime - windowEndTime) > 60000; // Window end > 1 min ago = replay
         long effectiveTickAge = isReplay ? tickAgeFromWindow : tickAge;
-        builder.tickStale(effectiveTickAge > 5000);  // 5 seconds threshold
+        // FIX: Increased from 5s to 10s - 5s was too tight for market close + grace period
+        // With 2s grace period + processing time, candles emit 3-5s after window close
+        // At market close, last tick could be several seconds before window end
+        builder.tickStale(effectiveTickAge > 10000);  // 10 seconds threshold
 
         // Initialize effective ages (will be set in if blocks)
         long effectiveObAge = 0;
@@ -1553,7 +1553,7 @@ public class UnifiedInstrumentCandleProcessor {
             long obAgeFromWindow = orderbook.getWindowEndMillis() > 0 ?
                 windowEndTime - orderbook.getWindowEndMillis() : 0;
             effectiveObAge = isReplay ? obAgeFromWindow : obAge;
-            builder.orderbookStale(effectiveObAge > 5000);
+            builder.orderbookStale(effectiveObAge > 10000);  // Match 10s threshold
             maxAge = Math.max(maxAge, effectiveObAge);
         }
 
@@ -1578,12 +1578,12 @@ public class UnifiedInstrumentCandleProcessor {
 
         // Determine staleness reason (use effective ages) - MUST be before first log that uses it
         StringBuilder stalenessReason = new StringBuilder();
-        if (effectiveTickAge > 5000) {
-            stalenessReason.append("Tick stale (").append(effectiveTickAge).append("ms"); 
+        if (effectiveTickAge > 10000) {  // Match 10s threshold
+            stalenessReason.append("Tick stale (").append(effectiveTickAge).append("ms");
             if (isReplay) stalenessReason.append(" from window");
             stalenessReason.append("); ");
         }
-        if (orderbook != null && effectiveObAge > 5000) {
+        if (orderbook != null && effectiveObAge > 10000) {  // Match 10s threshold
             stalenessReason.append("Orderbook stale (").append(effectiveObAge).append("ms");
             if (isReplay) stalenessReason.append(" from window");
             stalenessReason.append("); ");
@@ -1609,6 +1609,35 @@ public class UnifiedInstrumentCandleProcessor {
                     tick.getScripCode(),
                     stalenessReason.toString(),
                     maxAge);
+            }
+        }
+
+        // ========== SUB-CANDLE SNAPSHOTS (MTF Distribution Fix) ==========
+        // Finalize and copy sub-candle snapshots from TickAggregate to InstrumentCandle
+        // This allows FamilyCandleProcessor to analyze intra-window patterns
+        tick.finalizeSubCandleSnapshots(windowedKey.window().end());
+        List<TickAggregate.SubCandleSnapshot> tickSnapshots = tick.getSubCandleSnapshots();
+        if (tickSnapshots != null && !tickSnapshots.isEmpty()) {
+            List<InstrumentCandle.SubCandleSnapshot> candleSnapshots = new ArrayList<>(tickSnapshots.size());
+            for (TickAggregate.SubCandleSnapshot ts : tickSnapshots) {
+                candleSnapshots.add(new InstrumentCandle.SubCandleSnapshot(
+                    ts.getEventTime(),
+                    ts.getOpen(),
+                    ts.getHigh(),
+                    ts.getLow(),
+                    ts.getClose(),
+                    ts.getVolume(),
+                    ts.getBuyVolume(),
+                    ts.getSellVolume(),
+                    ts.getVwap(),
+                    ts.getTickCount(),
+                    ts.getOiClose()
+                ));
+            }
+            builder.subCandleSnapshots(candleSnapshots);
+            if (log.isDebugEnabled()) {
+                log.debug("[SUB-CANDLE-TRANSFER] {} | Transferred {} sub-candle snapshots to InstrumentCandle",
+                    tick.getScripCode(), candleSnapshots.size());
             }
         }
 

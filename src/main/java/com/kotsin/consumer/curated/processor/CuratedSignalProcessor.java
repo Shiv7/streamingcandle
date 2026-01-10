@@ -301,15 +301,24 @@ public class CuratedSignalProcessor {
         try {
             if (familyCandle == null) return;
 
-            // Extract equity InstrumentCandle
-            InstrumentCandle equity = familyCandle.getEquity();
-            if (equity == null) {
-                log.warn("No equity data in FamilyCandle");
-                return;
+            // FIX: Use primary instrument - equity for NSE, future for MCX commodities
+            // Commodities don't have equity, they use futures as the primary instrument
+            InstrumentCandle primary = familyCandle.getEquity();
+            boolean isCommodity = false;
+
+            if (primary == null) {
+                // No equity - check if it's a commodity with futures
+                primary = familyCandle.getFuture();
+                if (primary == null) {
+                    log.debug("No equity or future data in FamilyCandle - skipping");
+                    return;
+                }
+                isCommodity = true;
+                log.debug("Processing commodity {} using futures as primary instrument", primary.getScripCode());
             }
 
             // Convert to UnifiedCandle for backwards compatibility
-            UnifiedCandle candle = convertToUnifiedCandle(equity);
+            UnifiedCandle candle = convertToUnifiedCandle(primary);
 
             String scripCode = candle.getScripCode();
             // BUG-FIX: Use FamilyCandle's timeframe, NOT equity's timeframe!
