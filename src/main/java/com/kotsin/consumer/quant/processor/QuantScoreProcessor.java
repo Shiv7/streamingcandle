@@ -5,6 +5,7 @@ import com.github.benmanes.caffeine.cache.Caffeine;
 import com.kotsin.consumer.domain.model.FamilyCandle;
 import com.kotsin.consumer.enrichment.EnrichedQuantScoreCalculator;
 import com.kotsin.consumer.enrichment.EnrichedQuantScoreCalculator.EnrichedQuantScore;
+import com.kotsin.consumer.enrichment.EnrichmentPipeline;
 import com.kotsin.consumer.enrichment.enricher.HistoricalContextEnricher;
 import com.kotsin.consumer.enrichment.model.HistoricalContext;
 import com.kotsin.consumer.quant.calculator.QuantScoreCalculator;
@@ -48,6 +49,14 @@ public class QuantScoreProcessor {
 
     @Autowired(required = false)
     private HistoricalContextEnricher historicalEnricher;
+
+    // Phase 5-6: Full enrichment pipeline with intelligence, narrative, signals
+    @Autowired(required = false)
+    private EnrichmentPipeline enrichmentPipeline;
+
+    // Feature flag for Phase 5-6 full pipeline
+    @Value("${smtis.pipeline.enabled:true}")
+    private boolean pipelineEnabled;
 
     // Feature flag for Phase 1 enrichment
     @Value("${smtis.enrichment.enabled:true}")
@@ -181,6 +190,22 @@ public class QuantScoreProcessor {
 
             // Emit score to dashboard topic
             emitScore(score);
+
+            // Phase 5-6: Run full enrichment pipeline for intelligence, narrative, and enhanced signals
+            if (pipelineEnabled && enrichmentPipeline != null) {
+                try {
+                    EnrichmentPipeline.PipelineResult pipelineResult = enrichmentPipeline.process(family);
+                    if (pipelineResult != null && pipelineResult.getSignalsPublished() > 0) {
+                        log.info("[PIPELINE] {} {} | signals={} narrative={} setups={}",
+                            familyId, timeframe,
+                            pipelineResult.getSignalsPublished(),
+                            pipelineResult.getIntelligence() != null ? "yes" : "no",
+                            pipelineResult.getIntelligence() != null && pipelineResult.getIntelligence().hasReadySetups());
+                    }
+                } catch (Exception e) {
+                    log.debug("[PIPELINE] Error in Phase 5-6 for {}: {}", familyId, e.getMessage());
+                }
+            }
 
             // Check if we should emit a trading signal
             // Boost signal emission for actionable moments
