@@ -200,7 +200,7 @@ public class QuantScoreProcessor {
                             familyId, timeframe,
                             pipelineResult.getSignalsPublished(),
                             pipelineResult.getIntelligence() != null ? "yes" : "no",
-                            pipelineResult.getIntelligence() != null && pipelineResult.getIntelligence().hasReadySetups());
+                            pipelineResult.getIntelligence() != null && pipelineResult.getIntelligence().isHasReadySetups());
                     }
                 } catch (Exception e) {
                     log.debug("[PIPELINE] Error in Phase 5-6 for {}: {}", familyId, e.getMessage());
