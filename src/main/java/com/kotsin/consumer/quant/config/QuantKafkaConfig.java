@@ -103,38 +103,8 @@ public class QuantKafkaConfig {
         return template;
     }
 
-    /**
-     * ProducerFactory for String messages (intelligence, narratives, etc.)
-     */
-    @Bean
-    public ProducerFactory<String, String> stringProducerFactory() {
-        Map<String, Object> props = new HashMap<>();
-        props.put(ProducerConfig.BOOTSTRAP_SERVERS_CONFIG, bootstrapServers);
-        props.put(ProducerConfig.KEY_SERIALIZER_CLASS_CONFIG, StringSerializer.class);
-        props.put(ProducerConfig.VALUE_SERIALIZER_CLASS_CONFIG, StringSerializer.class);
-
-        // Large message support for JSON payloads
-        props.put(ProducerConfig.MAX_REQUEST_SIZE_CONFIG, 10485760); // 10MB
-        props.put(ProducerConfig.BUFFER_MEMORY_CONFIG, 33554432L); // 32MB buffer
-        props.put(ProducerConfig.COMPRESSION_TYPE_CONFIG, "lz4");
-
-        // Reliability settings
-        props.put(ProducerConfig.ACKS_CONFIG, "all");
-        props.put(ProducerConfig.RETRIES_CONFIG, 3);
-
-        return new DefaultKafkaProducerFactory<>(props);
-    }
-
-    /**
-     * KafkaTemplate for sending String messages (JSON)
-     * Used by EnrichmentPipeline for market-narrative, market-intelligence, active-setups topics
-     */
-    @Bean
-    public KafkaTemplate<String, String> stringKafkaTemplate() {
-        KafkaTemplate<String, String> template = new KafkaTemplate<>(stringProducerFactory());
-        log.info("Created KafkaTemplate for String messages (intelligence/narratives)");
-        return template;
-    }
+    // Note: KafkaTemplate<String, String> for intelligence/narrative publishing
+    // is provided by MasterArchKafkaConfig.stringKafkaTemplate - no need to duplicate
 
     // ========== Consumer Configuration ==========
 
