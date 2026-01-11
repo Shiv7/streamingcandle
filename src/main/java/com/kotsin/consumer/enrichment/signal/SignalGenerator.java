@@ -883,13 +883,16 @@ public class SignalGenerator {
                     .build());
         }
 
-        if (quantScore.getGexProfile() != null && quantScore.getGexProfile().getGammaFlipLevel() > 0) {
-            levels.add(KeyLevel.builder()
-                    .price(quantScore.getGexProfile().getGammaFlipLevel())
-                    .type("GEX_FLIP")
-                    .significance("Gamma flip level")
-                    .strength(0.8)
-                    .build());
+        if (quantScore.getGexProfile() != null) {
+            Double gammaFlipLevel = quantScore.getGexProfile().getGammaFlipLevel();
+            if (gammaFlipLevel != null && gammaFlipLevel > 0) {
+                levels.add(KeyLevel.builder()
+                        .price(gammaFlipLevel)
+                        .type("GEX_FLIP")
+                        .significance("Gamma flip level")
+                        .strength(0.8)
+                        .build());
+            }
         }
 
         return levels;
