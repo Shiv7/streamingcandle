@@ -10,7 +10,9 @@ import org.springframework.stereotype.Component;
 import java.time.Instant;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Map;
 import java.util.UUID;
+import java.util.concurrent.ConcurrentHashMap;
 
 /**
  * EventDetector - Detects significant market events from enriched candle data
@@ -36,6 +38,10 @@ public class EventDetector {
     private static final double VOLUME_SURGE_PERCENTILE = 90;   // 90th percentile = surge
     private static final double OI_SURGE_Z_SCORE = 2.0;         // OI surge threshold
     private static final double VPIN_INFORMED_THRESHOLD = 0.7;  // High VPIN = informed flow
+
+    // FIX: Exhaustion cooldown to prevent signal spam
+    private static final long EXHAUSTION_COOLDOWN_MS = 5 * 60 * 1000; // 5 minutes (5 bars for 1-min candles)
+    private final Map<String, Long> lastExhaustionTime = new ConcurrentHashMap<>();
 
     /**
      * Detect all events from FamilyCandle and its contexts
@@ -128,8 +134,8 @@ public class EventDetector {
              .withContext("currentValue", ofiCtx.getCurrentValue()));
         }
 
-        // Selling Exhaustion detection
-        if (ofiCtx != null && isSellExhaustion(ofiCtx)) {
+        // Selling Exhaustion detection with cooldown
+        if (ofiCtx != null && isSellExhaustion(ofiCtx) && isExhaustionCooldownExpired(familyId, now)) {
             double velocity = calculateVelocity(ofiCtx);
             events.add(createEvent(
                     DetectedEvent.EventType.SELLING_EXHAUSTION,
@@ -140,10 +146,12 @@ public class EventDetector {
                     ofiCtx.getPercentile()
             ).withContext("ofiVelocity", velocity)
              .withContext("ofiRegime", ofiCtx.getRegime()));
+            // Update last exhaustion time
+            lastExhaustionTime.put(familyId, now.toEpochMilli());
         }
 
-        // Buying Exhaustion detection
-        if (ofiCtx != null && isBuyExhaustion(ofiCtx)) {
+        // Buying Exhaustion detection with cooldown
+        if (ofiCtx != null && isBuyExhaustion(ofiCtx) && isExhaustionCooldownExpired(familyId, now)) {
             double velocity = calculateVelocity(ofiCtx);
             events.add(createEvent(
                     DetectedEvent.EventType.BUYING_EXHAUSTION,
@@ -154,6 +162,8 @@ public class EventDetector {
                     ofiCtx.getPercentile()
             ).withContext("ofiVelocity", velocity)
              .withContext("ofiRegime", ofiCtx.getRegime()));
+            // Update last exhaustion time
+            lastExhaustionTime.put(familyId, now.toEpochMilli());
         }
 
         // Absorption detection
@@ -577,6 +587,16 @@ public class EventDetector {
         double velocity = calculateVelocity(ofi);
 
         return ofiPositive && velocity < -EXHAUSTION_VELOCITY_FLIP;
+    }
+
+    /**
+     * Check if exhaustion cooldown has expired for a family
+     * Prevents signal spam from repeated exhaustion events within 5 minutes
+     */
+    private boolean isExhaustionCooldownExpired(String familyId, Instant now) {
+        Long lastTime = lastExhaustionTime.get(familyId);
+        if (lastTime == null) return true;
+        return (now.toEpochMilli() - lastTime) > EXHAUSTION_COOLDOWN_MS;
     }
 
     private DetectedEvent.EventDirection determineAbsorptionDirection(HistoricalContext ctx) {

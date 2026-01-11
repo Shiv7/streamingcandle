@@ -127,13 +127,29 @@ public class PatternMatcher {
         PatternSignal.Direction direction = mapDirection(template.getDirection());
         double stopLoss, target1, target2, target3;
 
+        // FIX: Use ATR-normalized stops instead of fixed percentage
+        // This prevents premature stopouts in volatile instruments
+        Double atrPct = quantScore != null ? quantScore.getAtrPct() : null;
+        double stopDistancePct;
+
+        if (atrPct != null && atrPct > 0) {
+            // ATR-based stop: use max of (template stop, 1.5 * ATR)
+            double atrBasedStop = 1.5 * atrPct;
+            stopDistancePct = Math.max(outcome.getStopLossPct(), atrBasedStop);
+            log.debug("[PATTERN_MATCHER] ATR-based stop: templateStop={}%, atrStop={}%, using={}%",
+                    outcome.getStopLossPct(), atrBasedStop, stopDistancePct);
+        } else {
+            // Fallback to template stop if ATR not available
+            stopDistancePct = outcome.getStopLossPct();
+        }
+
         if (direction == PatternSignal.Direction.LONG) {
-            stopLoss = entryPrice * (1 - outcome.getStopLossPct() / 100);
+            stopLoss = entryPrice * (1 - stopDistancePct / 100);
             target1 = entryPrice * (1 + outcome.getTarget1Pct() / 100);
             target2 = entryPrice * (1 + outcome.getTarget2Pct() / 100);
             target3 = entryPrice * (1 + outcome.getTarget3Pct() / 100);
         } else {
-            stopLoss = entryPrice * (1 + outcome.getStopLossPct() / 100);
+            stopLoss = entryPrice * (1 + stopDistancePct / 100);
             target1 = entryPrice * (1 - outcome.getTarget1Pct() / 100);
             target2 = entryPrice * (1 - outcome.getTarget2Pct() / 100);
             target3 = entryPrice * (1 - outcome.getTarget3Pct() / 100);

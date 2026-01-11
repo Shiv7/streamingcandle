@@ -174,11 +174,28 @@ public class EnrichedQuantScoreCalculator {
             double confluenceModifier = calculateConfluenceModifier(confluenceResult, baseScore);
             double eventModifier = calculateEventModifier(detectedEvents);
 
-            // Combine all modifiers
-            double combinedModifier = adaptiveModifier * gexModifier * maxPainModifier
-                    * timeModifier * expiryModifier
-                    * technicalModifier * confluenceModifier * eventModifier;
-            combinedModifier = Math.max(0.3, Math.min(2.0, combinedModifier)); // Clamp to reasonable range
+            // Combine all modifiers using geometric mean to prevent extreme swings
+            // FIX: Pure multiplication (0.8^8 = 0.17) creates unstable outputs
+            // Using sqrt(product * average) provides balanced combination
+            double[] modifiers = {adaptiveModifier, gexModifier, maxPainModifier,
+                    timeModifier, expiryModifier, technicalModifier, confluenceModifier, eventModifier};
+
+            double product = 1.0;
+            double sum = 0.0;
+            int count = 0;
+            for (double m : modifiers) {
+                if (m > 0) {
+                    product *= m;
+                    sum += m;
+                    count++;
+                }
+            }
+
+            // Geometric mean approach: sqrt(product * average) balances extremes
+            double average = count > 0 ? sum / count : 1.0;
+            double geometricMean = count > 0 ? Math.pow(product, 1.0 / count) : 1.0;
+            double combinedModifier = Math.sqrt(geometricMean * average);
+            combinedModifier = Math.max(0.5, Math.min(1.5, combinedModifier)); // Tighter clamp range
 
             double adjustedScore = Math.min(100, baseScore.getQuantScore() * combinedModifier);
 
