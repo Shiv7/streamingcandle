@@ -25,6 +25,8 @@ import org.springframework.stereotype.Service;
 
 import java.time.Duration;
 import java.time.Instant;
+import java.time.ZoneId;
+import java.time.format.DateTimeFormatter;
 import java.util.*;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.stream.Collectors;
@@ -51,6 +53,23 @@ import java.util.stream.Collectors;
 public class SignalGenerator {
 
     private final IntelligenceOrchestrator intelligenceOrchestrator;
+
+    /**
+     * IST timezone for human readable time formatting
+     */
+    private static final ZoneId IST_ZONE = ZoneId.of("Asia/Kolkata");
+
+    /**
+     * Formatter for full human readable time (e.g., "11 Jan 2026 12:45:33 IST")
+     */
+    private static final DateTimeFormatter FULL_TIME_FORMATTER =
+            DateTimeFormatter.ofPattern("dd MMM yyyy HH:mm:ss z").withZone(IST_ZONE);
+
+    /**
+     * Formatter for short entry time (e.g., "12:45 PM")
+     */
+    private static final DateTimeFormatter ENTRY_TIME_FORMATTER =
+            DateTimeFormatter.ofPattern("hh:mm a").withZone(IST_ZONE);
 
     /**
      * Cache of recent signals by family
@@ -456,6 +475,11 @@ public class SignalGenerator {
     private void enrichSignalsWithContext(List<TradingSignal> signals, EnrichedQuantScore quantScore,
                                            MarketIntelligence intelligence) {
         for (TradingSignal signal : signals) {
+            // Human readable time in IST
+            Instant signalTime = signal.getGeneratedAt() != null ? signal.getGeneratedAt() : Instant.now();
+            signal.setHumanReadableTime(FULL_TIME_FORMATTER.format(signalTime));
+            signal.setEntryTimeIST(ENTRY_TIME_FORMATTER.format(signalTime));
+
             // Market context
             if (quantScore.getGexProfile() != null) {
                 signal.setGexRegime(quantScore.getGexProfile().getRegime() != null ?

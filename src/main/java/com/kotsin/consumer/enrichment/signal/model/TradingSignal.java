@@ -63,6 +63,16 @@ public class TradingSignal {
      */
     private Instant expiresAt;
 
+    /**
+     * Human readable signal time in IST (e.g., "11 Jan 2026 12:45:33 IST")
+     */
+    private String humanReadableTime;
+
+    /**
+     * Human readable entry time in IST for display (e.g., "12:45 PM")
+     */
+    private String entryTimeIST;
+
     // ======================== SIGNAL TYPE ========================
 
     /**
