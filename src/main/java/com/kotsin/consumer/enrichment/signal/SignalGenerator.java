@@ -460,8 +460,9 @@ public class SignalGenerator {
             if (quantScore.getGexProfile() != null) {
                 signal.setGexRegime(quantScore.getGexProfile().getRegime() != null ?
                         quantScore.getGexProfile().getRegime().name() : null);
-                if (quantScore.getGexProfile().getGammaFlipLevel() > 0) {
-                    signal.setGammaFlipLevel(quantScore.getGexProfile().getGammaFlipLevel());
+                Double gammaFlipLevel = quantScore.getGexProfile().getGammaFlipLevel();
+                if (gammaFlipLevel != null && gammaFlipLevel > 0) {
+                    signal.setGammaFlipLevel(gammaFlipLevel);
                 }
             }
 

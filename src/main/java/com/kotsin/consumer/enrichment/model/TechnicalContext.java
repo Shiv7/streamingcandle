@@ -337,9 +337,10 @@ public class TechnicalContext {
 
     /**
      * Get all support levels
+     * Note: Using Stream.of() instead of List.of() to handle null values
      */
     public List<Double> getSupportLevels() {
-        return List.of(dailyS1, dailyS2, dailyS3, weeklyS1, monthlyS1).stream()
+        return java.util.stream.Stream.of(dailyS1, dailyS2, dailyS3, weeklyS1, monthlyS1)
                 .filter(l -> l != null && l > 0)
                 .sorted()
                 .toList();
@@ -347,9 +348,10 @@ public class TechnicalContext {
 
     /**
      * Get all resistance levels
+     * Note: Using Stream.of() instead of List.of() to handle null values
      */
     public List<Double> getResistanceLevels() {
-        return List.of(dailyR1, dailyR2, dailyR3, weeklyR1, monthlyR1).stream()
+        return java.util.stream.Stream.of(dailyR1, dailyR2, dailyR3, weeklyR1, monthlyR1)
                 .filter(l -> l != null && l > 0)
                 .sorted()
                 .toList();
