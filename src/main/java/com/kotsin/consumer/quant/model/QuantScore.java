@@ -224,6 +224,7 @@ public class QuantScore {
         private double avgVPIN;
         private double avgDepthImbalance;
         private double avgKyleLambda;
+        private double avgSpread;         // Average bid-ask spread
 
         private double aggressiveBuyRatio;
         private double aggressiveSellRatio;
