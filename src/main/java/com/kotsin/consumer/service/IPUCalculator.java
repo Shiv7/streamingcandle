@@ -158,8 +158,8 @@ public class IPUCalculator {
         }
 
         if (vpinRaw > 0.5) {
-            log.warn("⚠️ HIGH VPIN for {}: {:.3f} - TOXIC FLOW DETECTED! Confidence reduced to {:.1f}%",
-                     current.getScripCode(), vpinRaw, vpinConfidence * 100);
+            log.warn("⚠️ HIGH VPIN for {}: {} - TOXIC FLOW DETECTED! Confidence reduced to {}%",
+                     current.getScripCode(), String.format("%.3f", vpinRaw), String.format("%.1f", vpinConfidence * 100));
         }
 
         // Agreement check (3 core signals - VPIN is applied separately as confidence)
