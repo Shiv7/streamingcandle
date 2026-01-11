@@ -75,7 +75,7 @@ public class SetupTracker {
 
         // Return ready setups
         List<ActiveSetup> readySetups = getReadySetups(familyId);
-        int activeCount = activeSetups.getOrDefault(familyId, new ConcurrentHashMap<>()).size();
+        int activeCount = activeSetupsByFamily.getOrDefault(familyId, Collections.emptyList()).size();
 
         // Log summary
         log.info("[SETUP_TRACKER] {} | definitions={}, active={}, ready={} | events={}",
