@@ -45,17 +45,24 @@ public class PatternMatcher {
     public List<PatternSignal> processEvents(String familyId, List<DetectedEvent> events,
                                               EnrichedQuantScore quantScore) {
         if (events == null || events.isEmpty()) {
+            log.debug("[PATTERN_MATCHER] {} | No events to process", familyId);
             return Collections.emptyList();
         }
 
         List<PatternSignal> signals = new ArrayList<>();
+        int sequencesStarted = 0;
+        int sequencesCompleted = 0;
 
         for (DetectedEvent event : events) {
             // 1. Try to start new sequences
+            int beforeStart = sequenceTracker.getActiveSequences(familyId).size();
             startNewSequences(familyId, event);
+            int afterStart = sequenceTracker.getActiveSequences(familyId).size();
+            sequencesStarted += (afterStart - beforeStart);
 
             // 2. Progress existing sequences
             List<ActiveSequence> completedSequences = sequenceTracker.processEvent(familyId, event);
+            sequencesCompleted += completedSequences.size();
 
             // 3. Generate signals for completed sequences
             for (ActiveSequence completed : completedSequences) {
@@ -64,9 +71,17 @@ public class PatternMatcher {
                     signals.add(signal);
                     sequenceTracker.markSignalEmitted(completed.getSequenceId(), signal.getSignalId());
                     log.info("[PATTERN_MATCHER] Generated signal: {}", signal);
+                } else if (signal != null) {
+                    log.debug("[PATTERN_MATCHER] Signal not actionable for {}: conf={:.1f}%, isActionable={}",
+                            familyId, signal.getConfidence() * 100, signal.isActionable());
                 }
             }
         }
+
+        // Log summary
+        int activeSequences = sequenceTracker.getActiveSequences(familyId).size();
+        log.info("[PATTERN_MATCHER] {} | events={}, started={}, completed={}, active={}, signals={}",
+                familyId, events.size(), sequencesStarted, sequencesCompleted, activeSequences, signals.size());
 
         return signals;
     }

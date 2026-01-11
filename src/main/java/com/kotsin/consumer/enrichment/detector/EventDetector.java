@@ -84,6 +84,18 @@ public class EventDetector {
             log.info("[EVENT] Detected {} events for {} @ {}: {}",
                     events.size(), familyId, price,
                     events.stream().map(e -> e.getEventType().name()).toList());
+        } else {
+            // Log why no events detected for debugging
+            boolean hasOfi = historicalContext != null && historicalContext.getOfiContext() != null;
+            boolean hasFlip = hasOfi && historicalContext.getOfiContext().getFlipType() != null &&
+                              historicalContext.getOfiContext().getFlipType() != MetricContext.FlipType.NONE;
+            boolean hasGex = gexProfile != null;
+            boolean hasTech = technicalContext != null;
+            boolean inLearning = historicalContext != null && historicalContext.isInLearningMode();
+            double dataCompleteness = historicalContext != null ? historicalContext.getDataCompleteness() : 0;
+
+            log.debug("[EVENT] {} @ {} | No events | ofi={}, flip={}, gex={}, tech={}, learning={}, complete={:.0f}%",
+                    familyId, price, hasOfi, hasFlip, hasGex, hasTech, inLearning, dataCompleteness * 100);
         }
 
         return events;

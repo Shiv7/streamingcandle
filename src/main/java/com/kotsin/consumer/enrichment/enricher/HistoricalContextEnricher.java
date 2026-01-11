@@ -108,7 +108,7 @@ public class HistoricalContextEnricher {
                     ofiContext, volumeDeltaContext, oiChangeContext, lambdaContext, vpinContext);
             double dataCompleteness = calculateDataCompleteness(
                     ofiContext, volumeDeltaContext, oiChangeContext, lambdaContext, vpinContext);
-            boolean inLearningMode = dataCompleteness < 0.8;
+            boolean inLearningMode = dataCompleteness < 0.5; // Lowered from 0.8 to allow faster signal generation
 
             // Calculate overall confidence
             double historicalConfidence = calculateHistoricalConfidence(

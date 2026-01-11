@@ -126,7 +126,7 @@ public class SequenceTemplateRegistry {
                 .expectedOutcome(ExpectedOutcome.reversal(1.0))
                 .baseConfidence(0.65)
                 .maxConfidence(0.85)
-                .minConfidenceToSignal(0.55)
+                .minConfidenceToSignal(0.45) // Lowered from 0.55
                 .build();
     }
 

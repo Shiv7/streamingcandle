@@ -155,7 +155,7 @@ public class IntelligenceOrchestrator {
                     .max((a, b) -> Double.compare(a.getCurrentConfidence(), b.getCurrentConfidence()))
                     .orElse(null);
 
-            if (bestSetup != null && bestSetup.getCurrentConfidence() >= 0.65) {
+            if (bestSetup != null && bestSetup.getCurrentConfidence() >= 0.55) { // Lowered from 0.65
                 String direction = bestSetup.getDirection().name();
                 return ActionRecommendation.builder()
                         .action(ActionType.TRADE)

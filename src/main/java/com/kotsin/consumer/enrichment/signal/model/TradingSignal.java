@@ -513,8 +513,8 @@ public class TradingSignal {
      * Check if signal is actionable
      */
     public boolean isActionable() {
-        return confidence >= 0.55 &&
-                getRiskRewardRatio() >= 1.5 &&
+        return confidence >= 0.45 && // Lowered from 0.55
+                getRiskRewardRatio() >= 1.2 && // Lowered from 1.5
                 entryPrice > 0 &&
                 stopLoss > 0 &&
                 target1 > 0 &&

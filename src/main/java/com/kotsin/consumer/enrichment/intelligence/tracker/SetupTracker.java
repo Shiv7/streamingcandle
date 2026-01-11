@@ -63,6 +63,7 @@ public class SetupTracker {
         }
 
         double currentPrice = quantScore.getClose();
+        int totalDefinitions = setupRegistry.getAllSetups().size();
 
         // Evaluate each setup definition
         for (SetupDefinition definition : setupRegistry.getAllSetups()) {
@@ -73,7 +74,22 @@ public class SetupTracker {
         checkInvalidationsAndExpirations(familyId, quantScore, events);
 
         // Return ready setups
-        return getReadySetups(familyId);
+        List<ActiveSetup> readySetups = getReadySetups(familyId);
+        int activeCount = activeSetups.getOrDefault(familyId, new ConcurrentHashMap<>()).size();
+
+        // Log summary
+        log.info("[SETUP_TRACKER] {} | definitions={}, active={}, ready={} | events={}",
+                familyId, totalDefinitions, activeCount, readySetups.size(),
+                events != null ? events.size() : 0);
+
+        // Log ready setup details
+        for (ActiveSetup setup : readySetups) {
+            log.info("[SETUP_TRACKER] {} | READY: {} {} | conf={:.1f}% | progress={:.0f}%",
+                    familyId, setup.getSetupId(), setup.getDirection(),
+                    setup.getCurrentConfidence() * 100, setup.getProgress() * 100);
+        }
+
+        return readySetups;
     }
 
     /**

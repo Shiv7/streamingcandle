@@ -98,12 +98,27 @@ public class SignalGenerator {
     public List<TradingSignal> generateSignals(String familyId, EnrichedQuantScore quantScore,
                                                  MarketIntelligence intelligence) {
         if (quantScore == null || intelligence == null) {
+            log.warn("[SIGNAL_GEN] Null input for {}: quantScore={}, intelligence={}",
+                    familyId, quantScore != null, intelligence != null);
             return Collections.emptyList();
         }
 
         List<TradingSignal> signals = new ArrayList<>();
 
         try {
+            // Debug: Log input state
+            boolean hasPatternSignals = quantScore.hasPatternSignals();
+            int patternCount = quantScore.getPatternSignalCount();
+            int readySetupCount = intelligence.getReadySetups() != null ? intelligence.getReadySetups().size() : 0;
+            int forecastPredictions = intelligence.getForecast() != null &&
+                                      intelligence.getForecast().getHighConfidencePredictions() != null ?
+                                      intelligence.getForecast().getHighConfidencePredictions().size() : 0;
+            ActionType actionType = intelligence.getRecommendation() != null ?
+                                    intelligence.getRecommendation().getAction() : null;
+
+            log.info("[SIGNAL_GEN] {} | Inputs: patternSignals={}, readySetups={}, highConfForecasts={}, action={}",
+                    familyId, patternCount, readySetupCount, forecastPredictions, actionType);
+
             // 1. Convert pattern signals to trading signals
             List<TradingSignal> patternTradingSignals = convertPatternSignals(familyId, quantScore);
             signals.addAll(patternTradingSignals);
@@ -125,6 +140,8 @@ public class SignalGenerator {
                 }
             }
 
+            int preFilterCount = signals.size();
+
             // 5. Enrich all signals with common context
             enrichSignalsWithContext(signals, quantScore, intelligence);
 
@@ -138,9 +155,26 @@ public class SignalGenerator {
             updateStatistics(signals, patternTradingSignals.size(), setupTradingSignals.size(),
                     forecastTradingSignals.size());
 
-            log.debug("[SIGNAL_GEN] Generated {} signals for {}: {} pattern, {} setup, {} forecast",
-                    signals.size(), familyId, patternTradingSignals.size(),
-                    setupTradingSignals.size(), forecastTradingSignals.size());
+            // Debug: Log output state
+            log.info("[SIGNAL_GEN] {} | Output: {} pattern, {} setup, {} forecast | preFilter={}, postFilter={}",
+                    familyId, patternTradingSignals.size(), setupTradingSignals.size(),
+                    forecastTradingSignals.size(), preFilterCount, signals.size());
+
+            // Additional debug if 0 signals
+            if (signals.isEmpty() && preFilterCount == 0) {
+                StringBuilder reason = new StringBuilder();
+                if (!hasPatternSignals) reason.append("NoPatterns ");
+                if (readySetupCount == 0) reason.append("NoSetups ");
+                else {
+                    // Log setup confidences
+                    intelligence.getReadySetups().forEach(s ->
+                        log.debug("[SIGNAL_GEN] {} setup {} conf={:.1f}% (need 55%)",
+                            familyId, s.getSetupId(), s.getCurrentConfidence() * 100));
+                }
+                if (forecastPredictions == 0) reason.append("NoForecasts ");
+                if (actionType != ActionType.TRADE) reason.append("NotTradeAction(" + actionType + ") ");
+                log.info("[SIGNAL_GEN] {} | Zero signals reason: {}", familyId, reason.toString().trim());
+            }
 
             return signals;
 
@@ -242,7 +276,7 @@ public class SignalGenerator {
         }
 
         return intelligence.getReadySetups().stream()
-                .filter(setup -> setup.isActionable(0.55))
+                .filter(setup -> setup.isActionable(0.45)) // Lowered from 0.55 for more signals
                 .map(setup -> generateSetupSignal(setup, quantScore, intelligence))
                 .filter(Objects::nonNull)
                 .collect(Collectors.toList());
@@ -332,7 +366,7 @@ public class SignalGenerator {
 
         // Only generate from high-confidence predictions that are actionable
         List<PredictedEvent> actionablePredictions = forecast.getHighConfidencePredictions().stream()
-                .filter(p -> p.getConfidence() >= 0.70)
+                .filter(p -> p.getConfidence() >= 0.60) // Lowered from 0.70 for more signals
                 .filter(p -> p.getTimeFrame() == PredictedEvent.TimeFrame.IMMEDIATE ||
                         p.getTimeFrame() == PredictedEvent.TimeFrame.SHORT_TERM)
                 .limit(2) // Max 2 forecast signals
@@ -539,7 +573,7 @@ public class SignalGenerator {
                 // Remove expired
                 .filter(s -> !s.hasExpired())
                 // Minimum quality score
-                .filter(s -> s.getQualityScore() >= 40)
+                .filter(s -> s.getQualityScore() >= 30) // Lowered from 40 for more signals
                 // Remove duplicates
                 .collect(Collectors.toMap(
                         s -> s.getFamilyId() + "_" + s.getDirection() + "_" + s.getCategory(),
