@@ -168,8 +168,8 @@ public class SignalGenerator {
                 else {
                     // Log setup confidences
                     intelligence.getReadySetups().forEach(s ->
-                        log.debug("[SIGNAL_GEN] {} setup {} conf={:.1f}% (need 55%)",
-                            familyId, s.getSetupId(), s.getCurrentConfidence() * 100));
+                        log.debug("[SIGNAL_GEN] {} setup {} conf={}% (need 55%)",
+                            familyId, s.getSetupId(), String.format("%.1f", s.getCurrentConfidence() * 100)));
                 }
                 if (forecastPredictions == 0) reason.append("NoForecasts ");
                 if (actionType != ActionType.TRADE) reason.append("NotTradeAction(" + actionType + ") ");

@@ -6,19 +6,18 @@ import org.apache.kafka.streams.processor.TimestampExtractor;
 
 /**
  * Custom timestamp extractor that gracefully handles out-of-range timestamps
- * by clamping them to acceptable values instead of crashing the stream.
+ * by falling back to partitionTime instead of crashing the stream.
  *
  * This prevents InvalidTimestampException when replaying historical data
- * that may have large time gaps or future timestamps.
+ * that may have large time gaps or future timestamps. Using partitionTime
+ * as fallback guarantees broker acceptance since it's maintained by Kafka Streams.
  */
 @Slf4j
 public class GracefulTimestampExtractor implements TimestampExtractor {
 
-    // Maximum allowed timestamp drift (1 hour = 3600000 ms)
-    private static final long MAX_FUTURE_DRIFT_MS = 3600000L;
-
-    // Track stream time
-    private long lastObservedTimestamp = -1L;
+    // Maximum allowed future drift before falling back to partitionTime
+    // Using conservative 5 minutes to stay well within broker limits
+    private static final long MAX_FUTURE_DRIFT_MS = 300000L;
 
     @Override
     public long extract(ConsumerRecord<Object, Object> record, long partitionTime) {
@@ -26,36 +25,26 @@ public class GracefulTimestampExtractor implements TimestampExtractor {
 
         // If record has no timestamp, use partition time
         if (recordTimestamp < 0) {
-            log.warn("Record has invalid timestamp {}, using partition time {}",
-                recordTimestamp, partitionTime);
             return partitionTime > 0 ? partitionTime : System.currentTimeMillis();
         }
 
-        // Update stream time tracking
-        if (lastObservedTimestamp < 0) {
-            lastObservedTimestamp = recordTimestamp;
-        }
-
-        // Check if timestamp is too far in the future
-        long currentStreamTime = Math.max(lastObservedTimestamp, partitionTime);
-        long drift = recordTimestamp - currentStreamTime;
+        // Use partitionTime as reference - it's maintained by Kafka Streams
+        // and is guaranteed to be valid for the broker
+        long referenceTime = partitionTime > 0 ? partitionTime : System.currentTimeMillis();
+        long drift = recordTimestamp - referenceTime;
 
         if (drift > MAX_FUTURE_DRIFT_MS) {
-            // Timestamp is too far ahead - clamp it to acceptable range
-            long clampedTimestamp = currentStreamTime + MAX_FUTURE_DRIFT_MS;
-
-            log.warn("Record timestamp {} is {}ms ahead of stream time {}. " +
-                    "Clamping to {} to prevent InvalidTimestampException. " +
+            // Fall back to partitionTime to prevent InvalidTimestampException
+            log.debug("Record timestamp {} is {}ms ahead of partitionTime {}. " +
+                    "Using partitionTime to prevent InvalidTimestampException. " +
                     "Topic: {}, Partition: {}, Offset: {}",
-                recordTimestamp, drift, currentStreamTime, clampedTimestamp,
+                recordTimestamp, drift, referenceTime,
                 record.topic(), record.partition(), record.offset());
 
-            lastObservedTimestamp = clampedTimestamp;
-            return clampedTimestamp;
+            return partitionTime > 0 ? partitionTime : referenceTime;
         }
 
         // Timestamp is acceptable - use as-is
-        lastObservedTimestamp = Math.max(lastObservedTimestamp, recordTimestamp);
         return recordTimestamp;
     }
 }

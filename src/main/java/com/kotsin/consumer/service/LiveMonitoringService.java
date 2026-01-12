@@ -141,7 +141,7 @@ public class LiveMonitoringService {
         long hits = cacheHits.get();
         long misses = cacheMisses.get();
         double hitRate = (hits + misses) > 0 ? (double) hits / (hits + misses) * 100 : 0;
-        log.info("📈 CACHE EFFICIENCY | hits={} misses={} hitRate={:.1f}%", hits, misses, hitRate);
+        log.info("CACHE EFFICIENCY | hits={} misses={} hitRate={}%", hits, misses, String.format("%.1f", hitRate));
     }
 
     /**
@@ -189,7 +189,7 @@ public class LiveMonitoringService {
         long hits = cacheHits.get();
         long misses = cacheMisses.get();
         double hitRate = (hits + misses) > 0 ? (double) hits / (hits + misses) * 100 : 0;
-        log.info("  Cache Hit Rate: {:.1f}%", hitRate);
+        log.info("  Cache Hit Rate: {}%", String.format("%.1f", hitRate));
         
         // Message totals
         log.info("  Message Totals:");

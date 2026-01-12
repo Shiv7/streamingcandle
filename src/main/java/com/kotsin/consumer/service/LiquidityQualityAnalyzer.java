@@ -77,8 +77,8 @@ public class LiquidityQualityAnalyzer {
 
         // Log if poor liquidity
         if (liquidityScore < 0.4) {
-            log.warn("⚠️ POOR LIQUIDITY for {}: score={:.2f} | ticks/s={:.2f} | spread={}bps",
-                    current.getScripCode(), liquidityScore, tickDensity, (int)spreadBps);
+            log.warn("POOR LIQUIDITY for {}: score={} | ticks/s={} | spread={}bps",
+                    current.getScripCode(), String.format("%.2f", liquidityScore), String.format("%.2f", tickDensity), (int)spreadBps);
         }
 
         return Math.max(0.0, Math.min(1.0, liquidityScore));
@@ -187,8 +187,8 @@ public class LiquidityQualityAnalyzer {
         }
 
         if (tickDensity < 1.0) {
-            log.warn("🚫 UNSAFE TO TRADE {}: Very low tick density ({:.2f} < 1.0 ticks/s)",
-                    current.getScripCode(), tickDensity);
+            log.warn("UNSAFE TO TRADE {}: Very low tick density ({} < 1.0 ticks/s)",
+                    current.getScripCode(), String.format("%.2f", tickDensity));
             return false;
         }
 
@@ -211,9 +211,9 @@ public class LiquidityQualityAnalyzer {
         double baseSlippage = bidAskSpread / 2.0;  // Half spread
         
         if (baseSlippage > current.getClose() * 0.001) {  // > 0.1% slippage
-            log.debug("High slippage estimate for {}: ₹{:.2f} ({:.2f}%)",
-                     current.getScripCode(), baseSlippage, 
-                     (baseSlippage / current.getClose()) * 100);
+            log.debug("High slippage estimate for {}: {} ({}%)",
+                     current.getScripCode(), String.format("%.2f", baseSlippage),
+                     String.format("%.2f", (baseSlippage / current.getClose()) * 100));
         }
 
         return baseSlippage;

@@ -263,8 +263,8 @@ public class MasterArchOrchestrator {
                     .decision(finalScore.getDecision())
                     .isValid(finalScore.isValid())
                     .build();
-            log.debug("{}: Applied microstructure multiplier {:.2f} → score {:.3f}", 
-                    scripCode, microMultiplier, adjustedScore);
+            log.debug("{}: Applied microstructure multiplier {} -> score {}",
+                    scripCode, String.format("%.2f", microMultiplier), String.format("%.3f", adjustedScore));
         }
         
         // Apply decay if needed

@@ -9,7 +9,7 @@ import org.slf4j.LoggerFactory;
 import java.util.concurrent.atomic.AtomicLong;
 
 /**
- * 🛡️ CRITICAL FIX: Event-Time Processing for TickData
+ * Event-Time Processing for TickData
  *
  * TimestampExtractor for TickData that uses event time (timestamp field)
  * instead of Kafka record timestamp.
@@ -17,28 +17,24 @@ import java.util.concurrent.atomic.AtomicLong;
  * CRITICAL: Ensures consistent windowing behavior for both replay and live data.
  * Without this, replay of historical tick data won't aggregate correctly into candles.
  *
- * TIMESTAMP CLAMPING (ISSUE #1 FIX):
- * Uses max observed STREAM TIME as reference instead of wall clock.
- * This ensures correct behavior during replay of historical data.
- * - During replay: clamps relative to replay stream time
- * - During live: stream time ≈ wall clock anyway
+ * TIMESTAMP SAFETY:
+ * When event timestamp is too far ahead, falls back to partitionTime which is
+ * guaranteed to be accepted by Kafka broker. This prevents InvalidTimestampException
+ * that causes consumer group rebalancing.
  */
 public class TickDataTimestampExtractor implements TimestampExtractor {
 
     private static final Logger LOGGER = LoggerFactory.getLogger(TickDataTimestampExtractor.class);
     private static final long MIN_VALID_TIMESTAMP = 1577836800000L; // Jan 1, 2020
 
-    // Maximum allowed future drift from observed stream time (1 hour = 3600000 ms)
-    private static final long MAX_FUTURE_DRIFT_MS = 3600000L;
+    // Maximum allowed future drift before falling back to partitionTime
+    // Using conservative 5 minutes to stay well within broker limits
+    private static final long MAX_FUTURE_DRIFT_MS = 300000L;
 
-    // ISSUE #1 FIX: Track max observed stream time instead of using wall clock
-    // This enables correct replay of historical data
-    private static final AtomicLong maxObservedStreamTime = new AtomicLong(0);
-
-    // FIX: Rate-limit invalid timestamp warnings to reduce log spam
-    private static final AtomicLong invalidTimestampCount = new AtomicLong(0);
-    private static final AtomicLong lastInvalidTimestampLogTime = new AtomicLong(0);
-    private static final long INVALID_TIMESTAMP_LOG_INTERVAL_MS = 60000; // Log at most once per minute
+    // Rate-limit warnings to reduce log spam
+    private static final AtomicLong futureTimestampCount = new AtomicLong(0);
+    private static final AtomicLong lastFutureTimestampLogTime = new AtomicLong(0);
+    private static final long LOG_INTERVAL_MS = 60000; // Log at most once per minute
 
     @Override
     public long extract(ConsumerRecord<Object, Object> record, long partitionTime) {
@@ -50,61 +46,55 @@ public class TickDataTimestampExtractor implements TimestampExtractor {
 
             // Validate event time is reasonable (after Jan 1, 2020)
             if (eventTime < MIN_VALID_TIMESTAMP) {
-                // FIX: Rate-limit warnings to reduce log spam
-                long count = invalidTimestampCount.incrementAndGet();
-                long now = System.currentTimeMillis();
-                long lastLog = lastInvalidTimestampLogTime.get();
-
-                if (now - lastLog > INVALID_TIMESTAMP_LOG_INTERVAL_MS) {
-                    if (lastInvalidTimestampLogTime.compareAndSet(lastLog, now)) {
-                        LOGGER.warn("[INVALID-TIMESTAMP] {} ticks with invalid timestamp in last {}s. " +
-                                "Latest: token={}, timestamp={}, using record timestamp instead",
-                                count, INVALID_TIMESTAMP_LOG_INTERVAL_MS / 1000,
-                                tick.getToken(), eventTime);
-                        invalidTimestampCount.set(0); // Reset counter after logging
-                    }
-                }
-                return record.timestamp() > 0 ? record.timestamp() : partitionTime;
+                return getSafeTimestamp(record, partitionTime);
             }
 
-            // ISSUE #1 FIX: Use max observed stream time as reference instead of wall clock
-            // This ensures correct behavior during replay of historical data
-            long currentMax = maxObservedStreamTime.get();
+            // Use partitionTime as reference - it's maintained by Kafka Streams
+            // and is guaranteed to be valid for the broker
+            long referenceTime = partitionTime > 0 ? partitionTime : System.currentTimeMillis();
 
-            // Update max observed time if this event is newer (but not too far ahead)
-            if (eventTime > currentMax && eventTime <= currentMax + MAX_FUTURE_DRIFT_MS) {
-                maxObservedStreamTime.updateAndGet(prev -> Math.max(prev, eventTime));
-                currentMax = maxObservedStreamTime.get();
+            // Check if timestamp is too far in the future relative to partition time
+            if (eventTime > referenceTime + MAX_FUTURE_DRIFT_MS) {
+                // Fall back to partitionTime to prevent InvalidTimestampException
+                logFutureTimestamp(tick, eventTime, referenceTime, record, partitionTime);
+                return partitionTime > 0 ? partitionTime : referenceTime;
             }
 
-            // For first few records or cold start, use wall clock as bootstrap reference
-            if (currentMax == 0) {
-                currentMax = System.currentTimeMillis();
-                maxObservedStreamTime.compareAndSet(0, currentMax);
-            }
-
-            long maxAllowedTimestamp = currentMax + MAX_FUTURE_DRIFT_MS;
-
-            // Check if timestamp is too far in the future relative to stream time
-            if (eventTime > maxAllowedTimestamp) {
-                // Clamp to prevent InvalidTimestampException on repartition topics
-                long clampedTimestamp = maxAllowedTimestamp;
-
-                LOGGER.warn("TickData timestamp {} is {}ms ahead of stream time {}. " +
-                        "Clamping to {} to prevent InvalidTimestampException. " +
-                        "Topic: {}, Partition: {}, Offset: {}, Token: {}",
-                    eventTime, eventTime - currentMax, currentMax, clampedTimestamp,
-                    record.topic(), record.partition(), record.offset(), tick.getToken());
-
-                return clampedTimestamp;
-            }
-
-            // Timestamp is acceptable - use as-is
+            // Timestamp is acceptable - use event time
             return eventTime;
         }
 
-        // Fallback to record timestamp or partition time
-        return record.timestamp() > 0 ? record.timestamp() : partitionTime;
+        // Fallback for non-TickData records
+        return getSafeTimestamp(record, partitionTime);
+    }
+
+    private long getSafeTimestamp(ConsumerRecord<Object, Object> record, long partitionTime) {
+        if (partitionTime > 0) {
+            return partitionTime;
+        }
+        if (record.timestamp() > 0) {
+            return record.timestamp();
+        }
+        return System.currentTimeMillis();
+    }
+
+    private void logFutureTimestamp(TickData tick, long eventTime, long referenceTime,
+                                    ConsumerRecord<Object, Object> record, long partitionTime) {
+        long count = futureTimestampCount.incrementAndGet();
+        long now = System.currentTimeMillis();
+        long lastLog = lastFutureTimestampLogTime.get();
+
+        if (now - lastLog > LOG_INTERVAL_MS) {
+            if (lastFutureTimestampLogTime.compareAndSet(lastLog, now)) {
+                LOGGER.warn("[FUTURE-TS] {} records with future timestamps in last {}s. " +
+                        "Latest: token={}, eventTime={}, refTime={}, drift={}ms, using partitionTime={}. " +
+                        "Topic: {}, Partition: {}, Offset: {}",
+                    count, LOG_INTERVAL_MS / 1000,
+                    tick.getToken(), eventTime, referenceTime, eventTime - referenceTime, partitionTime,
+                    record.topic(), record.partition(), record.offset());
+                futureTimestampCount.set(0);
+            }
+        }
     }
 }
 

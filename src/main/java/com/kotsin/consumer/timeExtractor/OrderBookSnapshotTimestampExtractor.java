@@ -9,34 +9,31 @@ import org.slf4j.LoggerFactory;
 import java.util.concurrent.atomic.AtomicLong;
 
 /**
- * 🛡️ CRITICAL FIX: Event-Time Processing for OrderBookSnapshot
+ * Event-Time Processing for OrderBookSnapshot
  *
  * TimestampExtractor for OrderBookSnapshot that uses event time
  * instead of Kafka record timestamp.
  *
  * CRITICAL: Ensures orderbook data aligns with tick data in time-based joins.
- * Without this, orderbook snapshots from replay won't join correctly with tick data.
  *
- * BEFORE (BROKEN):
- * - Used Kafka record timestamp (ingestion time)
- * - Orderbook-tick joins failed during replay due to time misalignment
- * - OFI and Kyle's Lambda calculations missing for replay data
- *
- * AFTER (FIXED):
- * - Uses OrderBookSnapshot.getTimestamp() (actual snapshot time)
- * - Orderbook data correctly joins with tick data in time windows
- * - Microstructure indicators (OFI, lambda) available for all data
+ * TIMESTAMP SAFETY:
+ * When event timestamp is too far ahead, falls back to partitionTime which is
+ * guaranteed to be accepted by Kafka broker. This prevents InvalidTimestampException
+ * that causes consumer group rebalancing.
  */
 public class OrderBookSnapshotTimestampExtractor implements TimestampExtractor {
 
     private static final Logger LOGGER = LoggerFactory.getLogger(OrderBookSnapshotTimestampExtractor.class);
     private static final long MIN_VALID_TIMESTAMP = 1577836800000L; // Jan 1, 2020
 
-    // Maximum allowed timestamp drift (1 hour = 3600000 ms)
-    private static final long MAX_FUTURE_DRIFT_MS = 3600000L;
+    // Maximum allowed future drift before falling back to partitionTime
+    // Using conservative 5 minutes to stay well within broker limits
+    private static final long MAX_FUTURE_DRIFT_MS = 300000L;
 
-    // FIX: Thread-safe track stream time using AtomicLong for concurrent access
-    private final AtomicLong lastObservedTimestamp = new AtomicLong(-1L);
+    // Rate-limit warnings to reduce log spam
+    private static final AtomicLong futureTimestampCount = new AtomicLong(0);
+    private static final AtomicLong lastFutureTimestampLogTime = new AtomicLong(0);
+    private static final long LOG_INTERVAL_MS = 60000;
 
     @Override
     public long extract(ConsumerRecord<Object, Object> record, long partitionTime) {
@@ -48,43 +45,54 @@ public class OrderBookSnapshotTimestampExtractor implements TimestampExtractor {
 
             // Validate event time is reasonable (after Jan 1, 2020)
             if (eventTime < MIN_VALID_TIMESTAMP) {
-                LOGGER.warn("Invalid timestamp {} for token {}, using record timestamp",
-                        eventTime, snapshot.getToken());
-                return record.timestamp() > 0 ? record.timestamp() : partitionTime;
+                return getSafeTimestamp(record, partitionTime);
             }
 
-            // Initialize stream time tracking (thread-safe)
-            long currentObserved = lastObservedTimestamp.get();
-            if (currentObserved < 0) {
-                lastObservedTimestamp.compareAndSet(-1L, eventTime);
-                currentObserved = lastObservedTimestamp.get();
+            // Use partitionTime as reference - it's maintained by Kafka Streams
+            // and is guaranteed to be valid for the broker
+            long referenceTime = partitionTime > 0 ? partitionTime : System.currentTimeMillis();
+
+            // Check if timestamp is too far in the future relative to partition time
+            if (eventTime > referenceTime + MAX_FUTURE_DRIFT_MS) {
+                // Fall back to partitionTime to prevent InvalidTimestampException
+                logFutureTimestamp(snapshot.getToken(), eventTime, referenceTime, record, partitionTime);
+                return partitionTime > 0 ? partitionTime : referenceTime;
             }
 
-            // Check if timestamp is too far in the future
-            long currentStreamTime = Math.max(currentObserved, partitionTime);
-            long drift = eventTime - currentStreamTime;
-
-            if (drift > MAX_FUTURE_DRIFT_MS) {
-                // Timestamp is too far ahead - clamp it to acceptable range
-                long clampedTimestamp = currentStreamTime + MAX_FUTURE_DRIFT_MS;
-
-                LOGGER.warn("OrderBook timestamp {} is {}ms ahead of stream time {}. " +
-                        "Clamping to {} to prevent InvalidTimestampException. " +
-                        "Topic: {}, Partition: {}, Offset: {}, Token: {}",
-                    eventTime, drift, currentStreamTime, clampedTimestamp,
-                    record.topic(), record.partition(), record.offset(), snapshot.getToken());
-
-                lastObservedTimestamp.set(clampedTimestamp);
-                return clampedTimestamp;
-            }
-
-            // Timestamp is acceptable - use as-is (thread-safe update to max)
-            long newMax = Math.max(currentObserved, eventTime);
-            lastObservedTimestamp.set(newMax);
+            // Timestamp is acceptable - use event time
             return eventTime;
         }
 
-        // Fallback to record timestamp or partition time
-        return record.timestamp() > 0 ? record.timestamp() : partitionTime;
+        // Fallback for non-OrderBookSnapshot records
+        return getSafeTimestamp(record, partitionTime);
+    }
+
+    private long getSafeTimestamp(ConsumerRecord<Object, Object> record, long partitionTime) {
+        if (partitionTime > 0) {
+            return partitionTime;
+        }
+        if (record.timestamp() > 0) {
+            return record.timestamp();
+        }
+        return System.currentTimeMillis();
+    }
+
+    private void logFutureTimestamp(Object token, long eventTime, long referenceTime,
+                                    ConsumerRecord<Object, Object> record, long partitionTime) {
+        long count = futureTimestampCount.incrementAndGet();
+        long now = System.currentTimeMillis();
+        long lastLog = lastFutureTimestampLogTime.get();
+
+        if (now - lastLog > LOG_INTERVAL_MS) {
+            if (lastFutureTimestampLogTime.compareAndSet(lastLog, now)) {
+                LOGGER.warn("[FUTURE-TS] {} OrderBook records with future timestamps in last {}s. " +
+                        "Latest: token={}, eventTime={}, refTime={}, drift={}ms, using partitionTime={}. " +
+                        "Topic: {}, Partition: {}, Offset: {}",
+                    count, LOG_INTERVAL_MS / 1000,
+                    token, eventTime, referenceTime, eventTime - referenceTime, partitionTime,
+                    record.topic(), record.partition(), record.offset());
+                futureTimestampCount.set(0);
+            }
+        }
     }
 }

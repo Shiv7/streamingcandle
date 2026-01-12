@@ -168,20 +168,20 @@ public class SecurityRegimeCalculator {
         RegimeLabel label = RegimeLabel.fromStrengthAndDirection(securityContextScore, trendDirection);
 
         // Logging at each step
-        log.debug("[SecurityRegime] {} | EMA20={:.2f} EMA50={:.2f} trendDir={} trendPersistence={:.3f} ({} bars)", 
-            scripCode, ema20, ema50, trendDirection, trendPersistence, consecutiveBars);
-        log.debug("[SecurityRegime] {} | relativeStrength={:.3f} atrExpansion={:.3f} structureQuality={:.3f} breakoutQuality={:.3f}", 
-            scripCode, relativeStrength, atrExpansion, structureQuality, breakoutQuality);
-        log.debug("[SecurityRegime] {} | rawStrength={:.3f} indexRegimeStrength={:.3f} flowMult={:.2f}", 
-            scripCode, rawSecurityStrength, indexRegimeStrength, flowAlignmentMultiplier);
-        
+        log.debug("[SecurityRegime] {} | EMA20={} EMA50={} trendDir={} trendPersistence={} ({} bars)",
+            scripCode, String.format("%.2f", ema20), String.format("%.2f", ema50), trendDirection, String.format("%.3f", trendPersistence), consecutiveBars);
+        log.debug("[SecurityRegime] {} | relativeStrength={} atrExpansion={} structureQuality={} breakoutQuality={}",
+            scripCode, String.format("%.3f", relativeStrength), String.format("%.3f", atrExpansion), String.format("%.3f", structureQuality), String.format("%.3f", breakoutQuality));
+        log.debug("[SecurityRegime] {} | rawStrength={} indexRegimeStrength={} flowMult={}",
+            scripCode, String.format("%.3f", rawSecurityStrength), String.format("%.3f", indexRegimeStrength), String.format("%.2f", flowAlignmentMultiplier));
+
         if (microLeaderOverrideApplied) {
-            log.info("[SecurityRegime] {} | MICRO-LEADER OVERRIDE | decouple={:.2f} effectiveCoupling={:.3f}", 
-                scripCode, microLeaderDecoupleFactor, effectiveIndexCoupling);
+            log.info("[SecurityRegime] {} | MICRO-LEADER OVERRIDE | decouple={} effectiveCoupling={}",
+                scripCode, String.format("%.2f", microLeaderDecoupleFactor), String.format("%.3f", effectiveIndexCoupling));
         }
-        
-        log.info("[SecurityRegime] {} | FINAL contextScore={:.3f}", 
-            scripCode, securityContextScore);
+
+        log.info("[SecurityRegime] {} | FINAL contextScore={}",
+            scripCode, String.format("%.3f", securityContextScore));
 
         SecurityRegime result = SecurityRegime.builder()
                 .scripCode(scripCode)
