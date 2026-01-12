@@ -218,8 +218,22 @@ public class EnrichedQuantScoreCalculator {
                     technicalContext, confluenceResult, detectedEvents);
 
             // =============== Build Enriched Score ===============
+            // FIX: Extract scripCode, companyName, and priceTimestamp from FamilyCandle
+            // Previously these were set on tempScore but NOT included in the final build!
+            String scripCode = family.getFuture() != null ? family.getFuture().getScripCode() : null;
+            String companyName = family.getFuture() != null ? family.getFuture().getCompanyName() : null;
+            // FIX: Capture the candle's timestamp for accurate price-time correlation
+            long priceTimestamp = family.getWindowEndMillis() > 0 ? family.getWindowEndMillis() :
+                                  (family.getTimestamp() > 0 ? family.getTimestamp() : System.currentTimeMillis());
+
             return EnrichedQuantScore.builder()
                     .baseScore(baseScore)
+                    // FIX: Include scripCode, companyName, close, and priceTimestamp
+                    // These were previously missing, causing NULL values in TradingSignal
+                    .scripCode(scripCode)
+                    .companyName(companyName)
+                    .close(currentPrice)
+                    .priceTimestamp(priceTimestamp)
                     // Phase 1
                     .historicalContext(historicalContext)
                     // Phase 2
@@ -909,6 +923,14 @@ public class EnrichedQuantScoreCalculator {
         private String scripCode;
         private String companyName;
         private double close;
+
+        /**
+         * FIX: Timestamp when the close price was captured (from FamilyCandle.windowEndMillis).
+         * CRITICAL: This should be used for signal timestamps to ensure price-time correlation.
+         * Previously signals used Instant.now() which caused price/timestamp mismatch.
+         * Example: Signal shows entryPrice=1980 at 12:14:09, but 1980 was actually the price at 12:14:00
+         */
+        private long priceTimestamp;
 
         // Phase 1: Historical Context
         private HistoricalContext historicalContext;

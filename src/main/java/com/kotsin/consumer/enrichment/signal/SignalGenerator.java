@@ -72,6 +72,22 @@ public class SignalGenerator {
             DateTimeFormatter.ofPattern("hh:mm a").withZone(IST_ZONE);
 
     /**
+     * FIX: Get the correct signal timestamp from quantScore.
+     * Uses priceTimestamp (candle end time) instead of Instant.now() to ensure
+     * the entry price and timestamp are correlated.
+     *
+     * Previously: generatedAt = Instant.now() (processing time, delayed)
+     * Now: generatedAt = candle timestamp (when price was actually captured)
+     */
+    private Instant getSignalTimestamp(EnrichedQuantScore quantScore) {
+        if (quantScore != null && quantScore.getPriceTimestamp() > 0) {
+            return Instant.ofEpochMilli(quantScore.getPriceTimestamp());
+        }
+        // Fallback to current time if priceTimestamp not available
+        return Instant.now();
+    }
+
+    /**
      * Cache of recent signals by family
      */
     private final ConcurrentHashMap<String, List<TradingSignal>> signalCache = new ConcurrentHashMap<>();
@@ -205,12 +221,19 @@ public class SignalGenerator {
      * Convert a single PatternSignal to TradingSignal
      */
     private TradingSignal convertPatternSignal(PatternSignal pattern, EnrichedQuantScore quantScore) {
+        // FIX: Use priceTimestamp instead of Instant.now() for accurate price-time correlation
+        Instant signalTime = getSignalTimestamp(quantScore);
+
+        // FIX: Use quantScore fields as fallback if pattern fields are null
+        String scripCode = pattern.getScripCode() != null ? pattern.getScripCode() : quantScore.getScripCode();
+        String companyName = pattern.getCompanyName() != null ? pattern.getCompanyName() : quantScore.getCompanyName();
+
         TradingSignal.TradingSignalBuilder builder = TradingSignal.builder()
                 .signalId(pattern.getSignalId() != null ? pattern.getSignalId() : UUID.randomUUID().toString())
                 .familyId(pattern.getFamilyId())
-                .scripCode(pattern.getScripCode())
-                .companyName(pattern.getCompanyName())
-                .generatedAt(Instant.now())
+                .scripCode(scripCode)
+                .companyName(companyName)
+                .generatedAt(signalTime)
                 .expiresAt(calculateExpiry(pattern.getHorizon()))
                 // Source
                 .source(SignalSource.PATTERN)
@@ -301,12 +324,21 @@ public class SignalGenerator {
         double target2 = isLong ? entryPrice + targetDistance : entryPrice - targetDistance;
         double target3 = isLong ? entryPrice + (targetDistance * 1.5) : entryPrice - (targetDistance * 1.5);
 
+        // FIX: Use priceTimestamp instead of Instant.now() for accurate price-time correlation
+        Instant signalTime = getSignalTimestamp(quantScore);
+
+        // FIX: Log warning if scripCode or companyName is null
+        if (quantScore.getScripCode() == null || quantScore.getCompanyName() == null) {
+            log.warn("[SIGNAL_GEN] Setup signal missing context: scripCode={}, companyName={}, familyId={}",
+                    quantScore.getScripCode(), quantScore.getCompanyName(), setup.getFamilyId());
+        }
+
         TradingSignal.TradingSignalBuilder builder = TradingSignal.builder()
                 .signalId(UUID.randomUUID().toString())
                 .familyId(setup.getFamilyId())
                 .scripCode(quantScore.getScripCode())
                 .companyName(quantScore.getCompanyName())
-                .generatedAt(Instant.now())
+                .generatedAt(signalTime)
                 .expiresAt(setup.getExpiresAt())
                 // Source
                 .source(SignalSource.SETUP)
@@ -399,12 +431,15 @@ public class SignalGenerator {
         double target1 = isLong ? currentPrice + (stopDistance * 0.7) : currentPrice - (stopDistance * 0.7);
         double target3 = isLong ? currentPrice + (stopDistance * 2.5) : currentPrice - (stopDistance * 2.5);
 
+        // FIX: Use priceTimestamp instead of Instant.now() for accurate price-time correlation
+        Instant signalTime = getSignalTimestamp(quantScore);
+
         return TradingSignal.builder()
                 .signalId(UUID.randomUUID().toString())
                 .familyId(prediction.getFamilyId())
                 .scripCode(quantScore.getScripCode())
                 .companyName(quantScore.getCompanyName())
-                .generatedAt(Instant.now())
+                .generatedAt(signalTime)
                 .expiresAt(prediction.getExpiresAt())
                 // Source
                 .source(SignalSource.FORECAST)
@@ -468,13 +503,16 @@ public class SignalGenerator {
         double target1 = isLong ? entryPrice + (stopDistance * 0.7) : entryPrice - (stopDistance * 0.7);
         double target3 = isLong ? entryPrice + (stopDistance * 2.0) : entryPrice - (stopDistance * 2.0);
 
+        // FIX: Use priceTimestamp instead of Instant.now() for accurate price-time correlation
+        Instant signalTime = getSignalTimestamp(quantScore);
+
         return TradingSignal.builder()
                 .signalId(UUID.randomUUID().toString())
                 .familyId(familyId)
                 .scripCode(quantScore.getScripCode())
                 .companyName(quantScore.getCompanyName())
-                .generatedAt(Instant.now())
-                .expiresAt(Instant.now().plus(Duration.ofMinutes(30)))
+                .generatedAt(signalTime)
+                .expiresAt(signalTime.plus(Duration.ofMinutes(30)))
                 // Source
                 .source(SignalSource.INTELLIGENCE)
                 .category(SignalCategory.MOMENTUM)
