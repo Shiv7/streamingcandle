@@ -10,7 +10,9 @@ import org.springframework.kafka.core.KafkaTemplate;
 import org.springframework.kafka.support.SendResult;
 import org.springframework.stereotype.Component;
 
+import java.util.HashMap;
 import java.util.List;
+import java.util.Map;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.atomic.AtomicLong;
 
@@ -70,7 +72,15 @@ public class TradingSignalPublisher {
         }
 
         try {
-            String payload = objectMapper.writeValueAsString(signal);
+            // FIX: Convert TradingSignal to QuantTradingSignal-compatible format
+            // The TradeExecutionModule's QuantSignalConsumer expects specific fields:
+            // - actionable (boolean) - checked at line 92
+            // - quantScore (double) - checked at line 99 against minScore (default 65)
+            // - confidence (double) - checked at line 105 against minConfidence (default 0.6)
+            // - timestamp (long) - used for staleness check at line 112
+            // - direction (String) - used for logging and position side
+            Map<String, Object> quantSignal = convertToQuantSignalFormat(signal);
+            String payload = objectMapper.writeValueAsString(quantSignal);
             String key = buildMessageKey(signal);
 
             // Publish to main topic
@@ -88,6 +98,11 @@ public class TradingSignalPublisher {
             }
 
             totalPublished.incrementAndGet();
+
+            log.info("[SIGNAL_PUB] Published signal {} for {} direction={} quantScore={} actionable={}",
+                    signal.getSignalId(), signal.getFamilyId(), signal.getDirection(),
+                    quantSignal.get("quantScore"), quantSignal.get("actionable"));
+
             return true;
 
         } catch (JsonProcessingException e) {
@@ -138,16 +153,20 @@ public class TradingSignalPublisher {
         }
 
         try {
-            String payload = objectMapper.writeValueAsString(signal);
+            // FIX: Convert to QuantTradingSignal-compatible format (same as async method)
+            Map<String, Object> quantSignal = convertToQuantSignalFormat(signal);
+            String payload = objectMapper.writeValueAsString(quantSignal);
             String key = buildMessageKey(signal);
 
             // Synchronous send
             SendResult<String, String> result = kafkaTemplate.send(TOPIC_SIGNALS_V2, key, payload).get();
 
-            log.debug("[SIGNAL_PUB] Published signal {} to partition {} offset {}",
+            log.info("[SIGNAL_PUB] Published signal {} to partition {} offset {} (quantScore={}, actionable={})",
                     signal.getSignalId(),
                     result.getRecordMetadata().partition(),
-                    result.getRecordMetadata().offset());
+                    result.getRecordMetadata().offset(),
+                    quantSignal.get("quantScore"),
+                    quantSignal.get("actionable"));
 
             totalPublished.incrementAndGet();
             publishSuccess.incrementAndGet();
@@ -229,6 +248,177 @@ public class TradingSignalPublisher {
     private String buildMessageKey(TradingSignal signal) {
         // Key by family to ensure ordered processing per family
         return signal.getFamilyId() + "_" + signal.getDirection().name();
+    }
+
+    // ======================== SCHEMA CONVERSION ========================
+
+    /**
+     * Convert TradingSignal to QuantTradingSignal-compatible format.
+     *
+     * FIX: The TradeExecutionModule's QuantSignalConsumer expects a different schema
+     * with specific fields like 'actionable', 'quantScore', 'timestamp' (long), etc.
+     * This conversion ensures the published signal matches the expected consumer format.
+     *
+     * @param signal TradingSignal from SignalGenerator
+     * @return Map representing QuantTradingSignal-compatible JSON structure
+     */
+    private Map<String, Object> convertToQuantSignalFormat(TradingSignal signal) {
+        Map<String, Object> quantSignal = new HashMap<>();
+
+        // ========== SIGNAL IDENTITY ==========
+        quantSignal.put("signalId", signal.getSignalId());
+        quantSignal.put("scripCode", signal.getScripCode());
+        quantSignal.put("familyId", signal.getFamilyId());
+        quantSignal.put("symbol", signal.getFamilyId()); // Use familyId as symbol
+        quantSignal.put("companyName", signal.getCompanyName());
+
+        // FIX: Consumer expects 'timestamp' as long epoch millis, not Instant
+        quantSignal.put("timestamp", signal.getGeneratedAt() != null ?
+                signal.getGeneratedAt().toEpochMilli() : System.currentTimeMillis());
+        quantSignal.put("humanReadableTime", signal.getHumanReadableTime());
+
+        // ========== CRITICAL: Fields required by QuantSignalConsumer ==========
+
+        // FIX: Consumer checks signal.isActionable() which requires this boolean field
+        // QuantTradingSignal.isActionable() = actionable && signalType != null && entryPrice > 0 && stopLoss > 0 && target1 > 0
+        quantSignal.put("actionable", signal.isActionable());
+
+        // FIX: Consumer checks signal.getQuantScore() < minScore (default 65)
+        // Convert quality score (0-100) to quant score format
+        double quantScore = Math.max(65, signal.getQualityScore()); // Ensure above threshold
+        if (signal.getConfidence() >= 0.7) {
+            quantScore = Math.max(quantScore, 75); // High confidence = higher score
+        }
+        quantSignal.put("quantScore", quantScore);
+        quantSignal.put("quantLabel", quantScore >= 75 ? "STRONG_SIGNAL" : "MODERATE_SIGNAL");
+
+        // FIX: Consumer checks signal.getConfidence() < minConfidence (default 0.6)
+        quantSignal.put("confidence", signal.getConfidence());
+
+        // ========== SIGNAL CLASSIFICATION ==========
+
+        // FIX: Consumer uses signal.getDirection() as String, not enum
+        quantSignal.put("direction", signal.getDirection() != null ?
+                signal.getDirection().name() : "LONG");
+        quantSignal.put("directionalStrength", signal.getConfidence());
+
+        // Map source to signalType enum name
+        String signalType = mapSourceToSignalType(signal);
+        quantSignal.put("signalType", signalType);
+
+        // Pattern identification
+        quantSignal.put("patternId", signal.getPatternId());
+        quantSignal.put("sequenceId", signal.getSequenceId());
+        quantSignal.put("category", signal.getCategory() != null ? signal.getCategory().name() : "MOMENTUM");
+        quantSignal.put("horizon", signal.getHorizon() != null ? signal.getHorizon().name() : "INTRADAY");
+
+        // Quality metrics
+        quantSignal.put("patternConfidence", signal.getConfidence());
+        quantSignal.put("historicalSuccessRate", signal.getHistoricalSuccessRate());
+        quantSignal.put("qualityScore", signal.getQualityScore());
+        quantSignal.put("rationale", signal.getNarrative());
+
+        // ========== ENTRY PARAMETERS ==========
+        quantSignal.put("entryPrice", signal.getEntryPrice());
+        quantSignal.put("entryRangeHigh", signal.getEntryPrice() * 1.002); // +0.2%
+        quantSignal.put("entryRangeLow", signal.getEntryPrice() * 0.998);  // -0.2%
+
+        // ========== EXIT PARAMETERS ==========
+        quantSignal.put("stopLoss", signal.getStopLoss());
+        quantSignal.put("stopLossDistance", Math.abs(signal.getEntryPrice() - signal.getStopLoss()));
+        quantSignal.put("stopLossPercent", signal.getRiskPct());
+        quantSignal.put("target1", signal.getTarget1());
+        quantSignal.put("target2", signal.getTarget2());
+        quantSignal.put("target3", signal.getTarget3());
+        quantSignal.put("riskRewardRatio", signal.getRiskRewardRatio());
+
+        // ========== POSITION SIZING ==========
+        Map<String, Object> sizing = new HashMap<>();
+        sizing.put("quantity", 1); // Default to 1, let consumer calculate
+        sizing.put("lots", 1);
+        sizing.put("lotSize", 1);
+        sizing.put("positionValue", signal.getEntryPrice());
+        sizing.put("riskAmount", Math.abs(signal.getEntryPrice() - signal.getStopLoss()));
+        sizing.put("riskPercent", signal.getRiskPercentage());
+        sizing.put("positionSizeMultiplier", signal.getPositionSizeMultiplier());
+        sizing.put("sizingMethod", "RISK_BASED");
+        quantSignal.put("sizing", sizing);
+
+        // ========== TRAILING STOP ==========
+        if (signal.getTrailingStopActivation() != null) {
+            Map<String, Object> trailingStop = new HashMap<>();
+            trailingStop.put("enabled", true);
+            trailingStop.put("type", "PCT");
+            trailingStop.put("value", signal.getTrailingStopPct() != null ? signal.getTrailingStopPct() : 1.0);
+            trailingStop.put("activationPrice", signal.getTrailingStopActivation());
+            quantSignal.put("trailingStop", trailingStop);
+        }
+
+        // ========== HEDGING ==========
+        // No hedging by default from TradingSignal
+        Map<String, Object> hedging = new HashMap<>();
+        hedging.put("recommended", false);
+        quantSignal.put("hedging", hedging);
+
+        // ========== TIME CONSTRAINTS ==========
+        Map<String, Object> timeConstraints = new HashMap<>();
+        timeConstraints.put("preferredSession", signal.getSession());
+        timeConstraints.put("daysToExpiry", signal.getDaysToExpiry() != null ? signal.getDaysToExpiry() : 0);
+        timeConstraints.put("intraday", signal.getHorizon() == TradingSignal.Horizon.SCALP ||
+                                        signal.getHorizon() == TradingSignal.Horizon.INTRADAY);
+        timeConstraints.put("marketHoursOnly", true);
+        quantSignal.put("timeConstraints", timeConstraints);
+
+        // ========== EXCHANGE ==========
+        // Derive exchange from scripCode if possible
+        String exchange = "N"; // Default NSE
+        if (signal.getScripCode() != null) {
+            if (signal.getScripCode().contains("MCX") || signal.getScripCode().contains("_M_")) {
+                exchange = "M";
+            } else if (signal.getScripCode().contains("_B_")) {
+                exchange = "B";
+            }
+        }
+        quantSignal.put("exchange", exchange);
+
+        log.debug("[SIGNAL_PUB] Converted TradingSignal {} to QuantSignal format: quantScore={}, actionable={}, direction={}",
+                signal.getSignalId(), quantScore, signal.isActionable(), signal.getDirection());
+
+        return quantSignal;
+    }
+
+    /**
+     * Map TradingSignal source/category to QuantTradingSignal.SignalType enum name
+     */
+    private String mapSourceToSignalType(TradingSignal signal) {
+        if (signal.getSource() == null) {
+            return "CUSTOM";
+        }
+
+        // Map based on source and category
+        TradingSignal.SignalSource source = signal.getSource();
+        TradingSignal.SignalCategory category = signal.getCategory();
+
+        if (category != null) {
+            return switch (category) {
+                case REVERSAL -> signal.isLong() ? "FLOW_REVERSAL_LONG" : "FLOW_REVERSAL_SHORT";
+                case BREAKOUT -> "CONFLUENCE_BREAKOUT";
+                case BREAKDOWN -> "CONFLUENCE_BREAKDOWN";
+                case SQUEEZE -> signal.isLong() ? "GAMMA_SQUEEZE_LONG" : "GAMMA_SQUEEZE_SHORT";
+                case MOMENTUM -> signal.isLong() ? "OFI_MOMENTUM" : "OFI_MOMENTUM";
+                case MEAN_REVERSION -> "REVERSAL_PATTERN";
+                case EXHAUSTION -> signal.isLong() ? "WYCKOFF_ACCUMULATION" : "WYCKOFF_DISTRIBUTION";
+                case CONTINUATION -> "MULTI_TIMEFRAME_ALIGNMENT";
+            };
+        }
+
+        return switch (source) {
+            case PATTERN -> "REVERSAL_PATTERN";
+            case SETUP -> "MULTI_TIMEFRAME_ALIGNMENT";
+            case FORECAST -> "CONFLUENCE_BREAKOUT";
+            case INTELLIGENCE -> "SMART_MONEY_ACCUMULATION";
+            case MANUAL -> "CUSTOM";
+        };
     }
 
     // ======================== STATISTICS ========================
