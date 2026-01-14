@@ -50,21 +50,31 @@ public class IVSurfaceScoreCalculator {
 
     /**
      * Calculate IV rank signal score (0-4)
+     * FIX: Added guards against division by zero when thresholds are misconfigured
      */
     private double calculateIVRankScore(IVSurface iv) {
         double maxPoints = 4.0;
         double ivRank = iv.getIvRank();
+        double highThreshold = config.getIv().getRankHighThreshold();
+        double lowThreshold = config.getIv().getRankLowThreshold();
 
         // Extreme IV ranks are actionable
-        if (ivRank > config.getIv().getRankHighThreshold()) {
+        if (ivRank > highThreshold) {
             // High IV - sell vol opportunity
-            double excess = (ivRank - config.getIv().getRankHighThreshold()) /
-                           (100 - config.getIv().getRankHighThreshold());
+            // FIX: Guard against division by zero when highThreshold = 100
+            double divisor = 100 - highThreshold;
+            if (divisor <= 0) {
+                return maxPoints * 0.7;  // Can't calculate excess, use base score
+            }
+            double excess = (ivRank - highThreshold) / divisor;
             return maxPoints * (0.7 + 0.3 * excess);
-        } else if (ivRank < config.getIv().getRankLowThreshold()) {
+        } else if (ivRank < lowThreshold) {
             // Low IV - buy vol opportunity
-            double deficit = (config.getIv().getRankLowThreshold() - ivRank) /
-                            config.getIv().getRankLowThreshold();
+            // FIX: Guard against division by zero when lowThreshold = 0
+            if (lowThreshold <= 0) {
+                return maxPoints * 0.7;  // Can't calculate deficit, use base score
+            }
+            double deficit = (lowThreshold - ivRank) / lowThreshold;
             return maxPoints * (0.7 + 0.3 * deficit);
         }
 
@@ -74,16 +84,21 @@ public class IVSurfaceScoreCalculator {
 
     /**
      * Calculate skew analysis score (0-4)
+     * FIX: Added guard against division by zero when extremeSkewThreshold = 0
      */
     private double calculateSkewScore(IVSurface iv) {
         double maxPoints = 4.0;
         double skew = Math.abs(iv.getSkew25Delta());
+        double extremeThreshold = config.getIv().getExtremeSkewThreshold();
 
         // Extreme skew is actionable
-        if (skew > config.getIv().getExtremeSkewThreshold()) {
+        if (skew > extremeThreshold) {
             // High skew - directional opportunity
-            double excess = (skew - config.getIv().getExtremeSkewThreshold()) /
-                           config.getIv().getExtremeSkewThreshold();
+            // FIX: Guard against division by zero when extremeSkewThreshold = 0
+            if (extremeThreshold <= 0) {
+                return maxPoints * 0.7;  // Can't calculate excess, use base score
+            }
+            double excess = (skew - extremeThreshold) / extremeThreshold;
             return maxPoints * Math.min(1.0, 0.7 + 0.3 * excess);
         }
 

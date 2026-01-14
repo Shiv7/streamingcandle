@@ -135,7 +135,8 @@ public class MTISCalculator {
         double regimeScore = calculateMTFRegimeScore(indexRegime, securityRegime, state, score);
         double patternBonus = calculatePatternBonus(vcpScore, state);
         double levelBonus = calculateLevelRetestBonus(family, levels);
-        double rsBonus = calculateRelativeStrength(family, indexRegime);
+        // FIX: Pass the primary instrument (equity or future for commodities) to avoid NPE
+        double rsBonus = calculateRelativeStrength(family, indexRegime, equity);
         double momentumBonus = calculateMTISMomentum(state);
 
         // Set breakdown
@@ -532,17 +533,21 @@ public class MTISCalculator {
     /**
      * Category 10: Relative Strength (±5)
      * FIX: Use same base for both security and index (both vs VWAP or both intraday)
+     * FIX: Accept primary instrument parameter to support MCX commodities (no equity)
      */
-    private double calculateRelativeStrength(FamilyCandle family, IndexRegime indexRegime) {
+    private double calculateRelativeStrength(FamilyCandle family, IndexRegime indexRegime, InstrumentCandle primary) {
         if (indexRegime == null || indexRegime.getTf5m() == null) {
             return 0;
         }
 
-        InstrumentCandle equity = family.getEquity();
-        
+        // FIX: Use passed primary instrument instead of family.getEquity() to avoid NPE for MCX commodities
+        if (primary == null) {
+            return 0;
+        }
+
         // FIX: Use same base - both vs VWAP for consistency
-        double securityVwap = equity.getVwap();
-        double securityClose = equity.getClose();
+        double securityVwap = primary.getVwap();
+        double securityClose = primary.getClose();
         double securityReturn = securityVwap > 0 ? (securityClose / securityVwap - 1) * 100 : 0;
         
         double indexVwap = indexRegime.getTf5m().getVwap();

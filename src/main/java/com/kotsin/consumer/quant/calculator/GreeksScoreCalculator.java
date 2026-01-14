@@ -50,11 +50,20 @@ public class GreeksScoreCalculator {
     /**
      * Calculate delta bias alignment score (0-5)
      * Higher score when delta direction matches price direction
+     * FIX: Added guard against division by zero when deltaSignificantThreshold = 0
      */
     private double calculateDeltaBiasScore(GreeksPortfolio gp, double priceDirection) {
         double maxPoints = 5.0;
         double totalDelta = gp.getTotalDelta();
         double threshold = config.getGreeks().getDeltaSignificantThreshold();
+
+        // FIX: Guard against division by zero when threshold = 0
+        if (threshold <= 0) {
+            // Can't normalize, return neutral score based on direction match
+            boolean deltaPositive = totalDelta > 0;
+            boolean pricePositive = priceDirection > 0;
+            return (deltaPositive == pricePositive) ? maxPoints * 0.5 : maxPoints * 0.25;
+        }
 
         // Normalize delta
         double normalizedDelta = Math.tanh(totalDelta / threshold);
