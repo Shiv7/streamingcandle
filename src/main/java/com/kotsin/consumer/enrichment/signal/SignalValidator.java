@@ -8,6 +8,8 @@ import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.stereotype.Component;
 
+import java.time.Duration;
+import java.time.Instant;
 import java.util.ArrayList;
 import java.util.List;
 
@@ -33,6 +35,10 @@ public class SignalValidator {
     private static final double MAX_RISK_REWARD = 20.0;
     private static final double MAX_RISK_PCT = 3.0;
     private static final int MIN_QUALITY_SCORE = 30;
+
+    // FIX: Staleness threshold - signals older than this are rejected
+    // Prevents publishing outdated signals from replayed/backfilled data
+    private static final Duration MAX_SIGNAL_AGE = Duration.ofMinutes(5);
 
     // ======================== MAIN VALIDATION ========================
 
@@ -85,11 +91,43 @@ public class SignalValidator {
     }
 
     /**
-     * Check if signal is publishable (valid and meets quality threshold)
+     * Check if signal is publishable (valid, meets quality threshold, and not stale)
+     * FIX: Added staleness check to prevent publishing outdated signals
      */
     public boolean isPublishable(TradingSignal signal) {
         ValidationResult result = validate(signal);
+
+        // FIX: Staleness check - reject signals older than MAX_SIGNAL_AGE
+        if (isStale(signal)) {
+            log.warn("[VALIDATOR] Signal {} rejected as stale - generated at {}",
+                    signal.getSignalId(), signal.getGeneratedAt());
+            return false;
+        }
+
         return result.isValid() && signal.getQualityScore() >= MIN_QUALITY_SCORE;
+    }
+
+    /**
+     * FIX: Check if signal is stale (generated too long ago)
+     * This prevents publishing outdated signals from replayed/backfilled data
+     */
+    private boolean isStale(TradingSignal signal) {
+        if (signal.getGeneratedAt() == null) {
+            return false;  // Can't determine staleness without timestamp
+        }
+
+        Instant now = Instant.now();
+        Instant generatedAt = signal.getGeneratedAt();
+        Duration age = Duration.between(generatedAt, now);
+
+        // Signal is stale if it was generated more than MAX_SIGNAL_AGE ago
+        // Also check if signal is from the future (clock skew) - treat as not stale
+        if (age.isNegative()) {
+            log.debug("[VALIDATOR] Signal {} has future timestamp - possible clock skew", signal.getSignalId());
+            return false;
+        }
+
+        return age.compareTo(MAX_SIGNAL_AGE) > 0;
     }
 
     /**

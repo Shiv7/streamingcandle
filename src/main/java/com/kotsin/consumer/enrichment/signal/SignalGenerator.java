@@ -72,14 +72,13 @@ public class SignalGenerator {
             DateTimeFormatter.ofPattern("hh:mm a").withZone(IST_ZONE);
 
     /**
-     * FIX: Get the correct signal timestamp from quantScore.
-     * Uses priceTimestamp (candle end time) instead of Instant.now() to ensure
-     * the entry price and timestamp are correlated.
+     * FIX: Get the data timestamp (candle time) from quantScore for price-time correlation.
+     * This is used for dataTimestamp field, NOT for generatedAt.
      *
-     * Previously: generatedAt = Instant.now() (processing time, delayed)
-     * Now: generatedAt = candle timestamp (when price was actually captured)
+     * generatedAt = Instant.now() (for staleness checking)
+     * dataTimestamp = candle timestamp (for price-time correlation display)
      */
-    private Instant getSignalTimestamp(EnrichedQuantScore quantScore) {
+    private Instant getDataTimestamp(EnrichedQuantScore quantScore) {
         if (quantScore != null && quantScore.getPriceTimestamp() > 0) {
             return Instant.ofEpochMilli(quantScore.getPriceTimestamp());
         }
@@ -221,8 +220,10 @@ public class SignalGenerator {
      * Convert a single PatternSignal to TradingSignal
      */
     private TradingSignal convertPatternSignal(PatternSignal pattern, EnrichedQuantScore quantScore) {
-        // FIX: Use priceTimestamp instead of Instant.now() for accurate price-time correlation
-        Instant signalTime = getSignalTimestamp(quantScore);
+        // FIX: Separate timestamps for staleness check vs price-time correlation
+        // generatedAt = now (for staleness checking)
+        // dataTimestamp = candle time (for price-time correlation display)
+        Instant dataTime = getDataTimestamp(quantScore);
 
         // FIX: Use quantScore fields as fallback if pattern fields are null
         String scripCode = pattern.getScripCode() != null ? pattern.getScripCode() : quantScore.getScripCode();
@@ -233,7 +234,8 @@ public class SignalGenerator {
                 .familyId(pattern.getFamilyId())
                 .scripCode(scripCode)
                 .companyName(companyName)
-                .generatedAt(signalTime)
+                .generatedAt(Instant.now())  // FIX: Signal generation time for staleness check
+                .dataTimestamp(dataTime)     // FIX: Market data time for price-time correlation
                 .expiresAt(calculateExpiry(pattern.getHorizon()))
                 // Source
                 .source(SignalSource.PATTERN)
@@ -324,8 +326,8 @@ public class SignalGenerator {
         double target2 = isLong ? entryPrice + targetDistance : entryPrice - targetDistance;
         double target3 = isLong ? entryPrice + (targetDistance * 1.5) : entryPrice - (targetDistance * 1.5);
 
-        // FIX: Use priceTimestamp instead of Instant.now() for accurate price-time correlation
-        Instant signalTime = getSignalTimestamp(quantScore);
+        // FIX: Separate timestamps for staleness check vs price-time correlation
+        Instant dataTime = getDataTimestamp(quantScore);
 
         // FIX: Log warning if scripCode or companyName is null
         if (quantScore.getScripCode() == null || quantScore.getCompanyName() == null) {
@@ -338,7 +340,8 @@ public class SignalGenerator {
                 .familyId(setup.getFamilyId())
                 .scripCode(quantScore.getScripCode())
                 .companyName(quantScore.getCompanyName())
-                .generatedAt(signalTime)
+                .generatedAt(Instant.now())  // FIX: Signal generation time for staleness check
+                .dataTimestamp(dataTime)     // FIX: Market data time for price-time correlation
                 .expiresAt(setup.getExpiresAt())
                 // Source
                 .source(SignalSource.SETUP)
@@ -431,15 +434,16 @@ public class SignalGenerator {
         double target1 = isLong ? currentPrice + (stopDistance * 0.7) : currentPrice - (stopDistance * 0.7);
         double target3 = isLong ? currentPrice + (stopDistance * 2.5) : currentPrice - (stopDistance * 2.5);
 
-        // FIX: Use priceTimestamp instead of Instant.now() for accurate price-time correlation
-        Instant signalTime = getSignalTimestamp(quantScore);
+        // FIX: Separate timestamps for staleness check vs price-time correlation
+        Instant dataTime = getDataTimestamp(quantScore);
 
         return TradingSignal.builder()
                 .signalId(UUID.randomUUID().toString())
                 .familyId(prediction.getFamilyId())
                 .scripCode(quantScore.getScripCode())
                 .companyName(quantScore.getCompanyName())
-                .generatedAt(signalTime)
+                .generatedAt(Instant.now())  // FIX: Signal generation time for staleness check
+                .dataTimestamp(dataTime)     // FIX: Market data time for price-time correlation
                 .expiresAt(prediction.getExpiresAt())
                 // Source
                 .source(SignalSource.FORECAST)
@@ -503,16 +507,18 @@ public class SignalGenerator {
         double target1 = isLong ? entryPrice + (stopDistance * 0.7) : entryPrice - (stopDistance * 0.7);
         double target3 = isLong ? entryPrice + (stopDistance * 2.0) : entryPrice - (stopDistance * 2.0);
 
-        // FIX: Use priceTimestamp instead of Instant.now() for accurate price-time correlation
-        Instant signalTime = getSignalTimestamp(quantScore);
+        // FIX: Separate timestamps for staleness check vs price-time correlation
+        Instant dataTime = getDataTimestamp(quantScore);
+        Instant now = Instant.now();
 
         return TradingSignal.builder()
                 .signalId(UUID.randomUUID().toString())
                 .familyId(familyId)
                 .scripCode(quantScore.getScripCode())
                 .companyName(quantScore.getCompanyName())
-                .generatedAt(signalTime)
-                .expiresAt(signalTime.plus(Duration.ofMinutes(30)))
+                .generatedAt(now)        // FIX: Signal generation time for staleness check
+                .dataTimestamp(dataTime) // FIX: Market data time for price-time correlation
+                .expiresAt(now.plus(Duration.ofMinutes(30)))
                 // Source
                 .source(SignalSource.INTELLIGENCE)
                 .category(SignalCategory.MOMENTUM)
@@ -547,10 +553,12 @@ public class SignalGenerator {
     private void enrichSignalsWithContext(List<TradingSignal> signals, EnrichedQuantScore quantScore,
                                            MarketIntelligence intelligence) {
         for (TradingSignal signal : signals) {
-            // Human readable time in IST
-            Instant signalTime = signal.getGeneratedAt() != null ? signal.getGeneratedAt() : Instant.now();
-            signal.setHumanReadableTime(FULL_TIME_FORMATTER.format(signalTime));
-            signal.setEntryTimeIST(ENTRY_TIME_FORMATTER.format(signalTime));
+            // FIX: Human readable time should use dataTimestamp (market data time) for price-time correlation
+            // This ensures the displayed time matches when the price data was captured
+            Instant displayTime = signal.getDataTimestamp() != null ? signal.getDataTimestamp() :
+                                  signal.getGeneratedAt() != null ? signal.getGeneratedAt() : Instant.now();
+            signal.setHumanReadableTime(FULL_TIME_FORMATTER.format(displayTime));
+            signal.setEntryTimeIST(ENTRY_TIME_FORMATTER.format(displayTime));
 
             // Market context
             if (quantScore.getGexProfile() != null) {

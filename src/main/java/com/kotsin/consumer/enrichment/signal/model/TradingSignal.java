@@ -53,10 +53,18 @@ public class TradingSignal {
     private String companyName;
 
     /**
-     * Signal generation timestamp
+     * Signal generation timestamp - when this signal was created by the system
+     * FIX: This should always be Instant.now() for staleness checking
      */
     @Builder.Default
     private Instant generatedAt = Instant.now();
+
+    /**
+     * FIX: Market data timestamp - the time of the candle/price data used for this signal
+     * This separates "when was signal generated" from "what time is the market data from"
+     * Critical for accurate price-time correlation when displaying signals
+     */
+    private Instant dataTimestamp;
 
     /**
      * Signal expiry timestamp
@@ -65,6 +73,7 @@ public class TradingSignal {
 
     /**
      * Human readable signal time in IST (e.g., "11 Jan 2026 12:45:33 IST")
+     * FIX: This should reflect dataTimestamp (market data time), not generatedAt
      */
     private String humanReadableTime;
 
