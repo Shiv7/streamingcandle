@@ -321,7 +321,80 @@ public class DetectedEvent {
         /**
          * Breakout pattern forming
          */
-        BREAKOUT_SETUP
+        BREAKOUT_SETUP,
+
+        // ===== Session Structure Events (Context-Aware) =====
+        /**
+         * Failed breakout at resistance - price broke above then closed back below.
+         * HIGH probability reversal signal (60-80% of breakouts fail).
+         * Direction: BEARISH (failed bull breakout = sell signal)
+         */
+        FAILED_BREAKOUT_BULL,
+
+        /**
+         * Failed breakdown at support - price broke below then closed back above.
+         * HIGH probability reversal signal (trapped shorts must cover).
+         * Direction: BULLISH (failed bear breakdown = buy signal)
+         */
+        FAILED_BREAKOUT_BEAR,
+
+        /**
+         * Reversal detected at session low with multi-instrument confirmation.
+         * Requires: position in range < 15% + (exhaustion OR OFI flip) + options confirmation
+         * This is the "V-bottom" signal the system was missing.
+         */
+        SESSION_LOW_REVERSAL,
+
+        /**
+         * Reversal detected at session high with multi-instrument confirmation.
+         * Requires: position in range > 85% + (exhaustion OR OFI flip) + options confirmation
+         * This is the "inverted-V" distribution signal.
+         */
+        SESSION_HIGH_REVERSAL,
+
+        // ===== Family Confluence Events (Multi-Instrument) =====
+        /**
+         * All family instruments aligned bullish:
+         * - Equity: bullish candle
+         * - Futures: long buildup (price up + OI up)
+         * - Options: call OI up + put OI down + PCR falling
+         * STRONGEST bullish signal when at support or after pullback.
+         */
+        FAMILY_BULLISH_ALIGNMENT,
+
+        /**
+         * All family instruments aligned bearish:
+         * - Equity: bearish candle
+         * - Futures: short buildup (price down + OI up)
+         * - Options: put OI up + call OI down + PCR rising
+         * STRONGEST bearish signal when at resistance or after rally.
+         */
+        FAMILY_BEARISH_ALIGNMENT,
+
+        /**
+         * Options flow diverging from price action - potential reversal.
+         * Example: Price making new low but call OI surging + put OI dropping.
+         * This often precedes V-bottom reversals.
+         */
+        OPTIONS_PRICE_DIVERGENCE,
+
+        /**
+         * Short squeeze fuel accumulating at session lows:
+         * - Position in range < 20%
+         * - Short buildup in futures (shorts entering at support)
+         * - High put/call ratio (fear extreme)
+         * When support holds, these shorts become buyers = squeeze.
+         */
+        SHORT_SQUEEZE_SETUP,
+
+        /**
+         * Long squeeze fuel accumulating at session highs:
+         * - Position in range > 80%
+         * - Long buildup in futures (longs entering at resistance)
+         * - Low put/call ratio (greed extreme)
+         * When resistance holds, these longs become sellers = dump.
+         */
+        LONG_SQUEEZE_SETUP
     }
 
     /**
@@ -498,6 +571,16 @@ public class DetectedEvent {
                  GAMMA_SQUEEZE_SETUP, IV_SPIKE, MAX_PAIN_CONVERGENCE, GEX_REGIME_CHANGE ->
                     EventCategory.OPTIONS;
 
+            // Session structure events are composite (use multiple data sources)
+            case FAILED_BREAKOUT_BULL, FAILED_BREAKOUT_BEAR,
+                 SESSION_LOW_REVERSAL, SESSION_HIGH_REVERSAL ->
+                    EventCategory.COMPOSITE;
+
+            // Family alignment events use all instruments
+            case FAMILY_BULLISH_ALIGNMENT, FAMILY_BEARISH_ALIGNMENT,
+                 OPTIONS_PRICE_DIVERGENCE, SHORT_SQUEEZE_SETUP, LONG_SQUEEZE_SETUP ->
+                    EventCategory.COMPOSITE;
+
             case BULLISH_CONFLUENCE, BEARISH_CONFLUENCE, REVERSAL_SETUP, BREAKOUT_SETUP ->
                     EventCategory.COMPOSITE;
         };
@@ -508,19 +591,24 @@ public class DetectedEvent {
      */
     public static long getDefaultConfirmationWindow(EventType type) {
         return switch (type) {
-            // Quick confirmation events (15 min)
-            case OFI_FLIP, SUPERTREND_FLIP, BB_MIDDLE_CROSS ->
+            // Quick confirmation events (15 min) - fast-moving signals
+            case OFI_FLIP, SUPERTREND_FLIP, BB_MIDDLE_CROSS,
+                 FAILED_BREAKOUT_BULL, FAILED_BREAKOUT_BEAR ->  // Failed breakouts resolve quickly
                     15 * 60 * 1000L;
 
             // Medium confirmation (30 min)
             case SELLING_EXHAUSTION, BUYING_EXHAUSTION, ABSORPTION,
                  BB_LOWER_TOUCH, BB_UPPER_TOUCH, VOLUME_SURGE,
-                 CALL_OI_SURGE, PUT_OI_SURGE, GAMMA_SQUEEZE_SETUP ->
+                 CALL_OI_SURGE, PUT_OI_SURGE, GAMMA_SQUEEZE_SETUP,
+                 SESSION_LOW_REVERSAL, SESSION_HIGH_REVERSAL,  // Session reversals need time to develop
+                 OPTIONS_PRICE_DIVERGENCE ->
                     30 * 60 * 1000L;
 
-            // Longer confirmation (60 min)
+            // Longer confirmation (60 min) - structural events
             case PIVOT_SUPPORT_TEST, PIVOT_RESISTANCE_TEST,
-                 RESISTANCE_BREAK, SUPPORT_BREAK, MAX_PAIN_CONVERGENCE ->
+                 RESISTANCE_BREAK, SUPPORT_BREAK, MAX_PAIN_CONVERGENCE,
+                 FAMILY_BULLISH_ALIGNMENT, FAMILY_BEARISH_ALIGNMENT,  // Multi-instrument alignment
+                 SHORT_SQUEEZE_SETUP, LONG_SQUEEZE_SETUP ->  // Squeeze setups need time to build
                     60 * 60 * 1000L;
 
             // Default (30 min)

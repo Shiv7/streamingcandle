@@ -109,8 +109,8 @@ public class PatternOutcomeStore {
      * Called when PaperTradeOutcome is received via Kafka
      */
     public void recordOutcome(PatternOutcome outcome) {
-        log.debug("[PATTERN_STORE] Recording outcome for pattern {}: success={}, pnl={:.2f}%",
-                outcome.patternId, outcome.success, outcome.pnlPct);
+        log.debug("[PATTERN_STORE] Recording outcome for pattern {}: success={}, pnl={}%",
+                outcome.patternId, outcome.success, String.format("%.2f", outcome.pnlPct));
 
         // Update global stats
         updateGlobalStats(outcome);
@@ -234,8 +234,9 @@ public class PatternOutcomeStore {
             // Update cache
             statsCache.put(outcome.patternId, stats);
 
-            log.debug("[PATTERN_STORE] Updated global stats for {}: {} trades, {:.0f}% win rate",
-                    outcome.patternId, stats.getOccurrences(), stats.getSuccessRate() * 100);
+            log.debug("[PATTERN_STORE] Updated global stats for {}: {} trades, {}% win rate",
+                    outcome.patternId, stats.getOccurrences(),
+                    String.format("%.0f", stats.getSuccessRate() * 100));
 
         } catch (Exception e) {
             log.error("[PATTERN_STORE] Failed to update global stats: {}", e.getMessage());

@@ -3,6 +3,7 @@ package com.kotsin.consumer.domain.calculator;
 import com.kotsin.consumer.domain.model.FamilyCandle;
 import com.kotsin.consumer.domain.model.InstrumentCandle;
 import com.kotsin.consumer.domain.model.OptionCandle;
+import com.kotsin.consumer.enrichment.model.SessionStructure;
 import lombok.extern.slf4j.Slf4j;
 
 import java.util.List;
@@ -459,5 +460,290 @@ public class OISignalDetector {
             default:
                 return "No clear signal from OI analysis";
         }
+    }
+
+    // ==================== CONTEXT-AWARE OI INTERPRETATION ====================
+    // CRITICAL: The same OI signal means OPPOSITE at session extremes!
+    //
+    // At SESSION LOW (positionInRange < 0.15):
+    //   - SHORT_BUILDUP = trapped shorts = SQUEEZE FUEL = BULLISH!
+    //   - BEARISH signals at support = reversal setup, not continuation
+    //
+    // At SESSION HIGH (positionInRange > 0.85):
+    //   - LONG_BUILDUP = trapped longs = DISTRIBUTION = BEARISH!
+    //   - BULLISH signals at resistance = exhaustion, not continuation
+    //
+    // WITHOUT THIS CONTEXT, signals are BLIND to session position and give
+    // WRONG interpretations at exactly the most important moments!
+
+    /**
+     * Context-aware interpretation result
+     */
+    public static class ContextAwareSignal {
+        private final OISignalType rawSignal;
+        private final OISignalType contextSignal;  // May be flipped based on session position
+        private final boolean wasFlipped;
+        private final String interpretation;
+        private final double confidenceModifier;
+        private final String positionContext;
+
+        public ContextAwareSignal(OISignalType rawSignal, OISignalType contextSignal,
+                                   boolean wasFlipped, String interpretation,
+                                   double confidenceModifier, String positionContext) {
+            this.rawSignal = rawSignal;
+            this.contextSignal = contextSignal;
+            this.wasFlipped = wasFlipped;
+            this.interpretation = interpretation;
+            this.confidenceModifier = confidenceModifier;
+            this.positionContext = positionContext;
+        }
+
+        public OISignalType getRawSignal() { return rawSignal; }
+        public OISignalType getContextSignal() { return contextSignal; }
+        public boolean wasFlipped() { return wasFlipped; }
+        public String getInterpretation() { return interpretation; }
+        public double getConfidenceModifier() { return confidenceModifier; }
+        public String getPositionContext() { return positionContext; }
+
+        public boolean isBullish() { return OISignalDetector.isBullish(contextSignal); }
+        public boolean isBearish() { return OISignalDetector.isBearish(contextSignal); }
+
+        @Override
+        public String toString() {
+            return String.format("ContextAwareSignal[raw=%s, context=%s, flipped=%s, pos=%s] %s",
+                    rawSignal, contextSignal, wasFlipped, positionContext, interpretation);
+        }
+    }
+
+    /**
+     * Detect OI signal with session context awareness.
+     *
+     * CRITICAL: This method FLIPS signal interpretation at session extremes!
+     *
+     * @param family FamilyCandle to analyze
+     * @param sessionStructure Current session structure (position in range)
+     * @return ContextAwareSignal with possibly flipped interpretation
+     */
+    public static ContextAwareSignal detectWithContext(FamilyCandle family, SessionStructure sessionStructure) {
+        // First, get the raw signal using dynamic thresholds
+        OISignalType rawSignal = detectWithDynamicThresholds(family);
+
+        // If no session structure, return raw signal
+        if (sessionStructure == null) {
+            return new ContextAwareSignal(
+                    rawSignal, rawSignal, false,
+                    describe(rawSignal), 1.0, "NO_SESSION_DATA");
+        }
+
+        double positionInRange = sessionStructure.getPositionInRange();
+        String positionDesc = sessionStructure.getPositionDescription();
+        boolean atLow = sessionStructure.isAtSessionLow();
+        boolean atHigh = sessionStructure.isAtSessionHigh();
+
+        // If not at extremes, return raw signal with position context
+        if (!atLow && !atHigh) {
+            double modifier = 1.0;
+            // Slightly boost signals aligned with position
+            if (positionInRange < 0.35 && isBullish(rawSignal)) {
+                modifier = 1.1;  // Bullish in lower range = good
+            } else if (positionInRange > 0.65 && isBearish(rawSignal)) {
+                modifier = 1.1;  // Bearish in upper range = good
+            }
+
+            return new ContextAwareSignal(
+                    rawSignal, rawSignal, false,
+                    describe(rawSignal) + " [" + positionDesc + "]",
+                    modifier, positionDesc);
+        }
+
+        // === AT SESSION EXTREME - FLIP INTERPRETATION ===
+        OISignalType contextSignal = rawSignal;
+        boolean wasFlipped = false;
+        String interpretation = describe(rawSignal);  // Default initialization
+        double confidenceModifier = 1.0;
+
+        if (atLow) {
+            // At session LOW - bearish signals often mean reversal setup
+            switch (rawSignal) {
+                case BEARISH_DISTRIBUTION:
+                case PUT_BUYING:
+                    // Bearish at low = potential V-bottom setup
+                    // Shorts building at support = squeeze fuel!
+                    contextSignal = OISignalType.SHORT_COVERING_RALLY;  // Interpret as potential reversal
+                    wasFlipped = true;
+                    interpretation = "SHORT SQUEEZE SETUP: Bearish OI at session LOW = trapped shorts! " +
+                            "If support holds, shorts must cover → squeeze rally";
+                    confidenceModifier = 1.3;  // Boost confidence for reversal setup
+                    log.info("[OI-CONTEXT] {} FLIP at session LOW: {} → {} | {}",
+                            family.getFamilyId(), rawSignal, contextSignal, interpretation);
+                    break;
+
+                case CALL_WRITING:
+                    // Call writing at low = aggressive bearishness at support
+                    contextSignal = OISignalType.SHORT_COVERING_RALLY;  // Contrarian bullish
+                    wasFlipped = true;
+                    interpretation = "CONTRARIAN BULLISH: Aggressive call writing at session LOW = " +
+                            "extreme bearishness at support. Often precedes reversal.";
+                    confidenceModifier = 1.2;
+                    log.info("[OI-CONTEXT] {} FLIP at session LOW: {} → contrarian bullish | {}",
+                            family.getFamilyId(), rawSignal, interpretation);
+                    break;
+
+                case BULLISH_ACCUMULATION:
+                case CALL_BUYING:
+                case PUT_WRITING:
+                    // Bullish at low = CONFIRMATION of support
+                    interpretation = "SUPPORT CONFIRMATION: Bullish OI at session LOW = " +
+                            "smart money buying at support. Strong long setup.";
+                    confidenceModifier = 1.4;  // Strong boost for confirmed support
+                    log.info("[OI-CONTEXT] {} CONFIRMED at session LOW: {} | {}",
+                            family.getFamilyId(), rawSignal, interpretation);
+                    break;
+
+                default:
+                    interpretation = describe(rawSignal) + " [AT SESSION LOW - watch for reversal]";
+            }
+
+            // Additional boost if V-bottom detected
+            if (sessionStructure.isVBottomDetected()) {
+                interpretation += " V-BOTTOM DETECTED!";
+                confidenceModifier *= 1.2;
+            }
+
+            // Additional boost if failed breakdown detected
+            if (sessionStructure.getFailedBreakdownCount() > 0) {
+                interpretation += String.format(" (Failed breakdowns: %d)",
+                        sessionStructure.getFailedBreakdownCount());
+                confidenceModifier *= 1.15;
+            }
+
+        } else if (atHigh) {
+            // At session HIGH - bullish signals often mean exhaustion/distribution
+            switch (rawSignal) {
+                case BULLISH_ACCUMULATION:
+                case CALL_BUYING:
+                    // Bullish at high = potential distribution/exhaustion
+                    // Longs building at resistance = trapped longs!
+                    contextSignal = OISignalType.LONG_UNWINDING;  // Interpret as potential reversal
+                    wasFlipped = true;
+                    interpretation = "DISTRIBUTION SETUP: Bullish OI at session HIGH = trapped longs! " +
+                            "If resistance holds, longs must exit → pullback";
+                    confidenceModifier = 1.3;  // Boost confidence for reversal setup
+                    log.info("[OI-CONTEXT] {} FLIP at session HIGH: {} → {} | {}",
+                            family.getFamilyId(), rawSignal, contextSignal, interpretation);
+                    break;
+
+                case PUT_WRITING:
+                    // Put writing at high = aggressive bullishness at resistance
+                    contextSignal = OISignalType.LONG_UNWINDING;  // Contrarian bearish
+                    wasFlipped = true;
+                    interpretation = "CONTRARIAN BEARISH: Aggressive put writing at session HIGH = " +
+                            "extreme bullishness at resistance. Often precedes reversal.";
+                    confidenceModifier = 1.2;
+                    log.info("[OI-CONTEXT] {} FLIP at session HIGH: {} → contrarian bearish | {}",
+                            family.getFamilyId(), rawSignal, interpretation);
+                    break;
+
+                case BEARISH_DISTRIBUTION:
+                case PUT_BUYING:
+                case CALL_WRITING:
+                    // Bearish at high = CONFIRMATION of resistance
+                    interpretation = "RESISTANCE CONFIRMATION: Bearish OI at session HIGH = " +
+                            "smart money selling at resistance. Strong short setup.";
+                    confidenceModifier = 1.4;  // Strong boost for confirmed resistance
+                    log.info("[OI-CONTEXT] {} CONFIRMED at session HIGH: {} | {}",
+                            family.getFamilyId(), rawSignal, interpretation);
+                    break;
+
+                default:
+                    interpretation = describe(rawSignal) + " [AT SESSION HIGH - watch for reversal]";
+            }
+
+            // Additional boost if V-top detected
+            if (sessionStructure.isVTopDetected()) {
+                interpretation += " V-TOP DETECTED!";
+                confidenceModifier *= 1.2;
+            }
+
+            // Additional boost if failed breakout detected
+            if (sessionStructure.getFailedBreakoutCount() > 0) {
+                interpretation += String.format(" (Failed breakouts: %d)",
+                        sessionStructure.getFailedBreakoutCount());
+                confidenceModifier *= 1.15;
+            }
+        }
+
+        return new ContextAwareSignal(
+                rawSignal, contextSignal, wasFlipped,
+                interpretation, confidenceModifier, positionDesc);
+    }
+
+    /**
+     * Get context-aware directional bias considering session position
+     *
+     * @param rawSignal The raw OI signal
+     * @param sessionStructure Current session structure
+     * @return +1 for bullish, -1 for bearish, 0 for neutral (after context adjustment)
+     */
+    public static int getContextAwareDirectionalBias(OISignalType rawSignal, SessionStructure sessionStructure) {
+        if (sessionStructure == null) {
+            return getDirectionalBias(rawSignal);
+        }
+
+        ContextAwareSignal contextSignal = detectWithContext(null, sessionStructure);
+        // Note: We can't call detectWithContext without family, so use simple logic
+
+        int rawBias = getDirectionalBias(rawSignal);
+
+        // Flip bias at extremes
+        if (sessionStructure.isAtSessionLow() && rawBias < 0) {
+            // Bearish at low = potential bullish reversal
+            return 1;
+        }
+        if (sessionStructure.isAtSessionHigh() && rawBias > 0) {
+            // Bullish at high = potential bearish reversal
+            return -1;
+        }
+
+        return rawBias;
+    }
+
+    /**
+     * Describe signal with session context
+     *
+     * @param signal OISignalType
+     * @param sessionStructure Current session structure
+     * @return Context-aware description
+     */
+    public static String describeWithContext(OISignalType signal, SessionStructure sessionStructure) {
+        String baseDesc = describe(signal);
+
+        if (sessionStructure == null) {
+            return baseDesc;
+        }
+
+        String position = sessionStructure.getPositionDescription();
+        double positionInRange = sessionStructure.getPositionInRange();
+
+        StringBuilder sb = new StringBuilder(baseDesc);
+        sb.append(" [Session: ").append(position);
+        sb.append(", pos=").append(String.format("%.0f%%", positionInRange * 100)).append("]");
+
+        // Add warning if signal might mean opposite
+        if (sessionStructure.isAtSessionLow() && isBearish(signal)) {
+            sb.append(" ⚠️ CAUTION: Bearish at session LOW may indicate squeeze setup!");
+        } else if (sessionStructure.isAtSessionHigh() && isBullish(signal)) {
+            sb.append(" ⚠️ CAUTION: Bullish at session HIGH may indicate distribution!");
+        }
+
+        // Add pattern info
+        if (sessionStructure.isVBottomDetected()) {
+            sb.append(" [V-BOTTOM DETECTED]");
+        }
+        if (sessionStructure.isVTopDetected()) {
+            sb.append(" [V-TOP DETECTED]");
+        }
+
+        return sb.toString();
     }
 }

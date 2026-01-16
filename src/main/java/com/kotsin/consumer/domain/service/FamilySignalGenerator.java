@@ -84,11 +84,11 @@ public class FamilySignalGenerator {
         if (priceChange > 0.3) {
             bullishFactors++;
             reasons.append("price_up;");
-            log.trace("[{}] Bullish factor: price up {:.2f}%", symbol, priceChange);
+            log.trace("[{}] Bullish factor: price up {}%", symbol, String.format("%.2f", priceChange));
         } else if (priceChange < -0.3) {
             bearishFactors++;
             reasons.append("price_down;");
-            log.trace("[{}] Bearish factor: price down {:.2f}%", symbol, priceChange);
+            log.trace("[{}] Bearish factor: price down {}%", symbol, String.format("%.2f", priceChange));
         }
 
         // 2. OI Signal (most important)
@@ -128,12 +128,12 @@ public class FamilySignalGenerator {
                 // Extreme bearishness at falling price - contrarian bullish
                 bullishFactors++;
                 reasons.append("pcr_contrarian_bullish;");
-                log.debug("[{}] Contrarian bullish: PCR={:.2f} at falling price", symbol, pcr);
+                log.debug("[{}] Contrarian bullish: PCR={} at falling price", symbol, String.format("%.2f", pcr));
             } else if (pcr <= PCR_EXTREME_LOW && priceChange > 0) {
                 // Extreme bullishness at rising price - contrarian bearish
                 bearishFactors++;
                 reasons.append("pcr_contrarian_bearish;");
-                log.debug("[{}] Contrarian bearish: PCR={:.2f} at rising price", symbol, pcr);
+                log.debug("[{}] Contrarian bearish: PCR={} at rising price", symbol, String.format("%.2f", pcr));
             }
         }
 
@@ -167,7 +167,7 @@ public class FamilySignalGenerator {
         double confidence = calculateConfidence(bullishFactors, bearishFactors, family);
 
         if (confidence < MIN_SIGNAL_CONFIDENCE) {
-            log.trace("[{}] No signal: confidence {:.2f} below threshold", symbol, confidence);
+            log.trace("[{}] No signal: confidence {} below threshold", symbol, String.format("%.2f", confidence));
             return null;
         }
 
@@ -179,14 +179,14 @@ public class FamilySignalGenerator {
             signalType = "BUY";
             signalStrength = confidence >= STRONG_SIGNAL_CONFIDENCE ? "STRONG" : "MODERATE";
             primaryReason = determinePrimaryReason(true, oiSignal, futuresBuildup, pcr);
-            log.info("🟢 [{}] {} {} signal - confidence={:.2f}, factors: {} bullish, {} bearish", 
-                symbol, signalStrength, signalType, confidence, bullishFactors, bearishFactors);
+            log.info("[{}] {} {} signal - confidence={}, factors: {} bullish, {} bearish",
+                symbol, signalStrength, signalType, String.format("%.2f", confidence), bullishFactors, bearishFactors);
         } else if (netScore <= -3) {
             signalType = "SELL";
             signalStrength = confidence >= STRONG_SIGNAL_CONFIDENCE ? "STRONG" : "MODERATE";
             primaryReason = determinePrimaryReason(false, oiSignal, futuresBuildup, pcr);
-            log.info("🔴 [{}] {} {} signal - confidence={:.2f}, factors: {} bullish, {} bearish", 
-                symbol, signalStrength, signalType, confidence, bullishFactors, bearishFactors);
+            log.info("[{}] {} {} signal - confidence={}, factors: {} bullish, {} bearish",
+                symbol, signalStrength, signalType, String.format("%.2f", confidence), bullishFactors, bearishFactors);
         } else {
             log.trace("[{}] No clear signal: netScore={}", symbol, netScore);
             return null;

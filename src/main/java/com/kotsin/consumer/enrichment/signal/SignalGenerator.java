@@ -1,6 +1,8 @@
 package com.kotsin.consumer.enrichment.signal;
 
 import com.kotsin.consumer.enrichment.EnrichedQuantScoreCalculator.EnrichedQuantScore;
+import com.kotsin.consumer.enrichment.analyzer.FamilyContextAnalyzer.FamilyContext;
+import com.kotsin.consumer.enrichment.analyzer.FamilyContextAnalyzer.FamilyBias;
 import com.kotsin.consumer.enrichment.intelligence.IntelligenceOrchestrator;
 import com.kotsin.consumer.enrichment.intelligence.IntelligenceOrchestrator.ActionRecommendation;
 import com.kotsin.consumer.enrichment.intelligence.IntelligenceOrchestrator.ActionType;
@@ -14,6 +16,7 @@ import com.kotsin.consumer.enrichment.model.GEXProfile;
 import com.kotsin.consumer.enrichment.model.HistoricalContext;
 import com.kotsin.consumer.enrichment.model.MaxPainProfile;
 import com.kotsin.consumer.enrichment.model.MetricContext;
+import com.kotsin.consumer.enrichment.model.SessionStructure;
 import com.kotsin.consumer.enrichment.model.TechnicalContext;
 import com.kotsin.consumer.enrichment.model.TimeContext;
 import com.kotsin.consumer.enrichment.pattern.model.PatternSignal;
@@ -157,6 +160,11 @@ public class SignalGenerator {
             // 5. Enrich all signals with common context
             enrichSignalsWithContext(signals, quantScore, intelligence);
 
+            // 5.5 CRITICAL: Apply context-aware modifiers to adjust confidence/direction
+            // This is where SessionStructure and FamilyContext actually MODIFY the signals
+            // Without this, all the context we built is just display data, not used for interpretation
+            applyContextAwareModifiers(signals, quantScore);
+
             // 6. Filter and validate signals
             signals = filterAndValidateSignals(signals);
 
@@ -294,12 +302,36 @@ public class SignalGenerator {
             return Collections.emptyList();
         }
 
-        return intelligence.getReadySetups().stream()
-                .filter(setup -> setup.isActionable(0.65)) // Raised to 0.65 - quality over quantity
-                .filter(setup -> setup.getBoosterConditionsMet() >= 2) // Require minimum 2 boosters
-                .map(setup -> generateSetupSignal(setup, quantScore, intelligence))
-                .filter(Objects::nonNull)
-                .collect(Collectors.toList());
+        List<TradingSignal> signals = new ArrayList<>();
+
+        for (ActiveSetup setup : intelligence.getReadySetups()) {
+            double confidence = setup.getCurrentConfidence();
+            int boosters = setup.getBoosterConditionsMet();
+
+            // Check confidence threshold (0.65 = 65%)
+            if (!setup.isActionable(0.65)) {
+                log.debug("[SIGNAL_GEN] {} setup {} FILTERED: conf={}% < 65% required",
+                        familyId, setup.getSetupId(), String.format("%.1f", confidence * 100));
+                continue;
+            }
+
+            // Check booster requirement (minimum 2)
+            if (boosters < 2) {
+                log.debug("[SIGNAL_GEN] {} setup {} FILTERED: boosters={} < 2 required | metConditions={}",
+                        familyId, setup.getSetupId(), boosters, setup.getMetConditions());
+                continue;
+            }
+
+            // Generate signal
+            TradingSignal signal = generateSetupSignal(setup, quantScore, intelligence);
+            if (signal != null) {
+                signals.add(signal);
+                log.debug("[SIGNAL_GEN] {} setup {} ACCEPTED: conf={}%, boosters={}",
+                        familyId, setup.getSetupId(), String.format("%.1f", confidence * 100), boosters);
+            }
+        }
+
+        return signals;
     }
 
     /**
@@ -603,6 +635,363 @@ public class SignalGenerator {
         }
     }
 
+    // ======================== CONTEXT-AWARE MODIFIERS ========================
+
+    /**
+     * CRITICAL: Apply context-aware modifiers to signal confidence and direction.
+     *
+     * THIS IS THE KEY MISSING PIECE that makes all the context useful.
+     *
+     * Without this method:
+     * - SessionStructure is just display data
+     * - FamilyContext alignment/divergence is ignored
+     * - Same signal at session low vs session high has same confidence (WRONG!)
+     *
+     * With this method:
+     * - LONG signal at session LOW gets boosted (buying support)
+     * - LONG signal at session HIGH gets reduced (buying resistance)
+     * - Family alignment boosts confidence
+     * - Divergence can flip signal direction
+     * - Special events (FAILED_BREAKOUT, SESSION_REVERSAL) modify confidence
+     */
+    private void applyContextAwareModifiers(List<TradingSignal> signals, EnrichedQuantScore quantScore) {
+        if (signals == null || signals.isEmpty()) {
+            log.trace("[CONTEXT_MOD] No signals to modify");
+            return;
+        }
+
+        boolean hasSession = quantScore.hasSessionStructure();
+        boolean hasFamily = quantScore.hasFamilyContext();
+        boolean hasEvents = quantScore.hasEvents();
+
+        log.debug("[CONTEXT_MOD] Applying modifiers to {} signals | hasSession={} | hasFamily={} | hasEvents={}",
+                signals.size(), hasSession, hasFamily, hasEvents);
+
+        for (TradingSignal signal : signals) {
+            double originalConfidence = signal.getConfidence();
+            double modifiedConfidence = originalConfidence;
+            StringBuilder modifierLog = new StringBuilder();
+
+            // 1. Apply Session Structure modifier (position in range)
+            if (quantScore.hasSessionStructure()) {
+                double sessionModifier = applySessionStructureModifier(signal, quantScore.getSessionStructure(), modifierLog);
+                modifiedConfidence *= sessionModifier;
+            }
+
+            // 2. Apply Family Context modifier (alignment/divergence)
+            if (quantScore.hasFamilyContext()) {
+                double familyModifier = applyFamilyContextModifier(signal, quantScore.getFamilyContext(), modifierLog);
+                modifiedConfidence *= familyModifier;
+            }
+
+            // 3. Apply Event-based modifier (special events like FAILED_BREAKOUT)
+            if (quantScore.hasEvents()) {
+                double eventModifier = applyEventBasedModifier(signal, quantScore.getDetectedEvents(), modifierLog);
+                modifiedConfidence *= eventModifier;
+            }
+
+            // Clamp confidence to valid range
+            modifiedConfidence = Math.max(0.1, Math.min(1.0, modifiedConfidence));
+
+            // Update signal confidence - quality score is calculated dynamically
+            // based on confidence, so it will automatically reflect the new value
+            signal.setConfidence(modifiedConfidence);
+
+            // Log modifications
+            double change = modifiedConfidence - originalConfidence;
+            if (Math.abs(change) > 0.05) {
+                log.info("[CONTEXT_MOD] {} {} | conf: {:.0f}% → {:.0f}% ({:+.0f}%) | {}",
+                        signal.getFamilyId(), signal.getDirection(),
+                        originalConfidence * 100, modifiedConfidence * 100, change * 100,
+                        modifierLog.toString().trim());
+            } else {
+                log.trace("[CONTEXT_MOD] {} {} | conf unchanged at {:.0f}% | {}",
+                        signal.getFamilyId(), signal.getDirection(),
+                        originalConfidence * 100,
+                        modifierLog.length() > 0 ? modifierLog.toString().trim() : "no modifiers applied");
+            }
+        }
+    }
+
+    /**
+     * Apply session structure modifier based on position in session range.
+     *
+     * KEY INSIGHT: The same signal means DIFFERENT things at different positions:
+     * - LONG at session LOW (pos < 0.15) = buying support = GOOD → boost 1.3x
+     * - LONG at session HIGH (pos > 0.85) = buying resistance = RISKY → reduce 0.6x
+     * - SHORT at session HIGH = selling resistance = GOOD → boost 1.3x
+     * - SHORT at session LOW = selling support = RISKY → reduce 0.6x
+     */
+    private double applySessionStructureModifier(TradingSignal signal, SessionStructure session,
+                                                   StringBuilder modLog) {
+        double modifier = 1.0;
+        double positionInRange = session.getPositionInRange();
+        boolean isLong = signal.getDirection() == Direction.LONG;
+
+        // Use SessionStructure's built-in modifier calculation
+        modifier = session.getStructureModifier(isLong);
+
+        log.trace("[CONTEXT_MOD:SESSION] {} | pos={:.0f}% | isLong={} | baseModifier={:.2f}",
+                signal.getFamilyId(), positionInRange * 100, isLong, modifier);
+
+        // Additional boost for V-pattern detection
+        if (session.isVBottomDetected() && isLong) {
+            modifier *= 1.15;
+            modLog.append("V-BOTTOM +15% ");
+        }
+        if (session.isVTopDetected() && !isLong) {
+            modifier *= 1.15;
+            modLog.append("V-TOP +15% ");
+        }
+
+        // Failed breakout/breakdown adjustments
+        if (session.getFailedBreakoutCount() >= 2 && !isLong) {
+            modifier *= 1.1;
+            modLog.append("FAILED_BREAKOUTS +10% ");
+        }
+        if (session.getFailedBreakdownCount() >= 2 && isLong) {
+            modifier *= 1.1;
+            modLog.append("FAILED_BREAKDOWNS +10% ");
+        }
+
+        // Log position context
+        if (session.isAtSessionLow()) {
+            modLog.append(String.format("AT_LOW(%.0f%%) ", positionInRange * 100));
+            modLog.append(isLong ? "ALIGNED " : "COUNTER ");
+        } else if (session.isAtSessionHigh()) {
+            modLog.append(String.format("AT_HIGH(%.0f%%) ", positionInRange * 100));
+            modLog.append(!isLong ? "ALIGNED " : "COUNTER ");
+        }
+
+        return Math.max(0.5, Math.min(1.5, modifier));
+    }
+
+    /**
+     * Apply family context modifier based on multi-instrument alignment.
+     *
+     * FAMILY ALIGNMENT = STRONGEST SIGNALS
+     * When equity + futures + options all agree:
+     * - Bullish alignment + LONG signal = boost confidence
+     * - Bearish alignment + SHORT signal = boost confidence
+     * - Alignment opposite to signal = reduce confidence
+     *
+     * DIVERGENCE = REVERSAL WARNING
+     * When options flow contradicts price:
+     * - Price falling + call accumulation = bullish divergence
+     * - Price rising + put accumulation = bearish divergence
+     */
+    private double applyFamilyContextModifier(TradingSignal signal, FamilyContext familyContext,
+                                                StringBuilder modLog) {
+        double modifier = 1.0;
+        boolean isLong = signal.getDirection() == Direction.LONG;
+
+        // Alignment check
+        double bullishAlignment = familyContext.getBullishAlignment();
+        double bearishAlignment = familyContext.getBearishAlignment();
+
+        log.trace("[CONTEXT_MOD:FAMILY] {} | bullAlign={:.0f}% | bearAlign={:.0f}% | bias={} | isLong={}",
+                signal.getFamilyId(), bullishAlignment * 100, bearishAlignment * 100,
+                familyContext.getOverallBias(), isLong);
+
+        if (isLong && bullishAlignment >= 0.6) {
+            // Long signal with bullish family alignment = boost
+            modifier *= 1.0 + (bullishAlignment - 0.5) * 0.4; // Up to 1.2x boost
+            modLog.append(String.format("BULLISH_ALIGN(%.0f%%) +%.0f%% ",
+                    bullishAlignment * 100, (modifier - 1) * 100));
+        } else if (isLong && bearishAlignment >= 0.6) {
+            // Long signal with bearish family alignment = reduce
+            modifier *= 1.0 - (bearishAlignment - 0.5) * 0.4; // Down to 0.8x
+            modLog.append(String.format("BEARISH_ALIGN(%.0f%%) %.0f%% ",
+                    bearishAlignment * 100, (modifier - 1) * 100));
+        }
+
+        if (!isLong && bearishAlignment >= 0.6) {
+            // Short signal with bearish family alignment = boost
+            modifier *= 1.0 + (bearishAlignment - 0.5) * 0.4;
+            modLog.append(String.format("BEARISH_ALIGN(%.0f%%) +%.0f%% ",
+                    bearishAlignment * 100, (modifier - 1) * 100));
+        } else if (!isLong && bullishAlignment >= 0.6) {
+            // Short signal with bullish family alignment = reduce
+            modifier *= 1.0 - (bullishAlignment - 0.5) * 0.4;
+            modLog.append(String.format("BULLISH_ALIGN(%.0f%%) %.0f%% ",
+                    bullishAlignment * 100, (modifier - 1) * 100));
+        }
+
+        // Full alignment = extra boost
+        if (familyContext.isFullyAlignedBullish() && isLong) {
+            modifier *= 1.1;
+            modLog.append("FULL_BULL +10% ");
+        }
+        if (familyContext.isFullyAlignedBearish() && !isLong) {
+            modifier *= 1.1;
+            modLog.append("FULL_BEAR +10% ");
+        }
+
+        // Divergence handling
+        if (familyContext.isHasDivergence()) {
+            List<String> divergences = familyContext.getDivergences();
+            boolean hasBullishDivergence = divergences.stream()
+                    .anyMatch(d -> d.contains("BULLISH"));
+            boolean hasBearishDivergence = divergences.stream()
+                    .anyMatch(d -> d.contains("BEARISH"));
+
+            // Bullish divergence supports long signals
+            if (hasBullishDivergence && isLong) {
+                modifier *= 1.15;
+                modLog.append("BULL_DIVERGENCE +15% ");
+            } else if (hasBullishDivergence && !isLong) {
+                modifier *= 0.85;
+                modLog.append("BULL_DIVERGENCE -15% ");
+            }
+
+            // Bearish divergence supports short signals
+            if (hasBearishDivergence && !isLong) {
+                modifier *= 1.15;
+                modLog.append("BEAR_DIVERGENCE +15% ");
+            } else if (hasBearishDivergence && isLong) {
+                modifier *= 0.85;
+                modLog.append("BEAR_DIVERGENCE -15% ");
+            }
+        }
+
+        // Squeeze setups
+        if (familyContext.isShortSqueezeSetup() && isLong) {
+            modifier *= 1.2;
+            modLog.append("SHORT_SQUEEZE_SETUP +20% ");
+        }
+        if (familyContext.isLongSqueezeSetup() && !isLong) {
+            modifier *= 1.2;
+            modLog.append("LONG_SQUEEZE_SETUP +20% ");
+        }
+
+        return Math.max(0.5, Math.min(1.5, modifier));
+    }
+
+    /**
+     * Apply event-based modifier for special context-aware events.
+     *
+     * These events are HIGH-CONFIDENCE reversal signals:
+     * - FAILED_BREAKOUT_BULL → 60-80% probability of bearish reversal
+     * - FAILED_BREAKOUT_BEAR → 60-80% probability of bullish reversal
+     * - SESSION_LOW_REVERSAL → V-bottom confirmed with multi-instrument
+     * - SESSION_HIGH_REVERSAL → V-top confirmed with multi-instrument
+     */
+    private double applyEventBasedModifier(TradingSignal signal, List<DetectedEvent> events,
+                                            StringBuilder modLog) {
+        double modifier = 1.0;
+        boolean isLong = signal.getDirection() == Direction.LONG;
+
+        log.trace("[CONTEXT_MOD:EVENTS] {} | eventCount={} | isLong={}",
+                signal.getFamilyId(), events.size(), isLong);
+
+        for (DetectedEvent event : events) {
+            switch (event.getEventType()) {
+                case FAILED_BREAKOUT_BULL:
+                    // Failed bull breakout = bearish reversal
+                    if (!isLong) {
+                        modifier *= 1.25;
+                        modLog.append("FAILED_BREAKOUT_BULL +25% ");
+                    } else {
+                        modifier *= 0.7;
+                        modLog.append("FAILED_BREAKOUT_BULL -30% ");
+                    }
+                    break;
+
+                case FAILED_BREAKOUT_BEAR:
+                    // Failed bear breakdown = bullish reversal
+                    if (isLong) {
+                        modifier *= 1.25;
+                        modLog.append("FAILED_BREAKOUT_BEAR +25% ");
+                    } else {
+                        modifier *= 0.7;
+                        modLog.append("FAILED_BREAKOUT_BEAR -30% ");
+                    }
+                    break;
+
+                case SESSION_LOW_REVERSAL:
+                    // V-bottom = bullish
+                    if (isLong) {
+                        modifier *= 1.3;
+                        modLog.append("SESSION_LOW_REVERSAL +30% ");
+                    } else {
+                        modifier *= 0.6;
+                        modLog.append("SESSION_LOW_REVERSAL -40% ");
+                    }
+                    break;
+
+                case SESSION_HIGH_REVERSAL:
+                    // V-top = bearish
+                    if (!isLong) {
+                        modifier *= 1.3;
+                        modLog.append("SESSION_HIGH_REVERSAL +30% ");
+                    } else {
+                        modifier *= 0.6;
+                        modLog.append("SESSION_HIGH_REVERSAL -40% ");
+                    }
+                    break;
+
+                case FAMILY_BULLISH_ALIGNMENT:
+                    if (isLong) {
+                        modifier *= 1.15;
+                        modLog.append("FAMILY_BULL +15% ");
+                    }
+                    break;
+
+                case FAMILY_BEARISH_ALIGNMENT:
+                    if (!isLong) {
+                        modifier *= 1.15;
+                        modLog.append("FAMILY_BEAR +15% ");
+                    }
+                    break;
+
+                case SHORT_SQUEEZE_SETUP:
+                    if (isLong) {
+                        modifier *= 1.2;
+                        modLog.append("SQUEEZE_SETUP +20% ");
+                    }
+                    break;
+
+                case LONG_SQUEEZE_SETUP:
+                    if (!isLong) {
+                        modifier *= 1.2;
+                        modLog.append("SQUEEZE_SETUP +20% ");
+                    }
+                    break;
+
+                case OPTIONS_PRICE_DIVERGENCE:
+                    // Direction based on event direction
+                    if (event.isBullish() && isLong) {
+                        modifier *= 1.15;
+                        modLog.append("OPT_DIVERGENCE_BULL +15% ");
+                    } else if (event.isBearish() && !isLong) {
+                        modifier *= 1.15;
+                        modLog.append("OPT_DIVERGENCE_BEAR +15% ");
+                    }
+                    break;
+
+                case SELLING_EXHAUSTION:
+                    if (isLong) {
+                        modifier *= 1.1;
+                        modLog.append("SELL_EXHAUSTION +10% ");
+                    }
+                    break;
+
+                case BUYING_EXHAUSTION:
+                    if (!isLong) {
+                        modifier *= 1.1;
+                        modLog.append("BUY_EXHAUSTION +10% ");
+                    }
+                    break;
+
+                default:
+                    // Other events don't modify confidence
+                    break;
+            }
+        }
+
+        return Math.max(0.4, Math.min(1.6, modifier));
+    }
+
     // ======================== SIGNAL FILTERING ========================
 
     /**
@@ -832,19 +1221,94 @@ public class SignalGenerator {
     }
 
     /**
-     * Build comprehensive data-driven narrative with actual market data numbers
-     * This replaces generic text like "Exhaustion at extremes" with real values
+     * Build comprehensive data-driven narrative with actual market data numbers.
+     *
+     * THIS IS THE KEY TO ACTIONABLE SIGNALS - no generic text, only real values.
+     *
+     * BEFORE: "Exhaustion at extremes often precedes reversal"
+     * AFTER:  "SELLING_EXHAUSTION: OFI flipped from -2847 to +1523 (velocity: +4370).
+     *          Position: 8% of session range (AT_SESSION_LOW).
+     *          Family: 85% BULLISH aligned. PCR: 1.72 (extreme fear)."
      */
     private String buildDataDrivenNarrative(EnrichedQuantScore quantScore, ActiveSetup setup) {
         StringBuilder sb = new StringBuilder();
+        Double close = quantScore.getClose();
 
         // Direction and setup
         sb.append(String.format("%s %s SIGNAL\n\n", setup.getDirection().name(), setup.getSetupId()));
 
-        // === WHY NOW ===
-        sb.append("WHY NOW:\n");
+        // ========== SECTION 1: SESSION CONTEXT (CRITICAL) ==========
+        sb.append("SESSION CONTEXT:\n");
 
-        // OFI data from HistoricalContext
+        if (quantScore.hasSessionStructure()) {
+            double positionInRange = quantScore.getPositionInRange() * 100;
+            String positionDesc = quantScore.getSessionPositionDescription();
+            sb.append(String.format("- Position in Range: %.0f%% [%s]\n", positionInRange, positionDesc));
+
+            if (quantScore.isAtSessionLow()) {
+                sb.append("- AT SESSION LOW - bullish context for longs\n");
+            } else if (quantScore.isAtSessionHigh()) {
+                sb.append("- AT SESSION HIGH - bearish context for shorts\n");
+            }
+
+            if (quantScore.hasVBottomDetected()) {
+                sb.append("- V-BOTTOM DETECTED - reversal signal\n");
+            }
+            if (quantScore.hasVTopDetected()) {
+                sb.append("- V-TOP DETECTED - distribution signal\n");
+            }
+
+            int failedBreakouts = quantScore.getFailedBreakoutCount();
+            int failedBreakdowns = quantScore.getFailedBreakdownCount();
+            if (failedBreakouts > 0) {
+                sb.append(String.format("- Failed Breakouts: %d (resistance holding)\n", failedBreakouts));
+            }
+            if (failedBreakdowns > 0) {
+                sb.append(String.format("- Failed Breakdowns: %d (support holding)\n", failedBreakdowns));
+            }
+        }
+
+        // ========== SECTION 2: FAMILY ALIGNMENT ==========
+        if (quantScore.hasFamilyContext()) {
+            sb.append("\nFAMILY ALIGNMENT:\n");
+
+            double bullishAlign = quantScore.getFamilyBullishAlignment() * 100;
+            double bearishAlign = quantScore.getFamilyBearishAlignment() * 100;
+
+            if (bullishAlign > bearishAlign) {
+                sb.append(String.format("- Bullish Alignment: %.0f%%", bullishAlign));
+                if (quantScore.isFamilyFullyBullish()) sb.append(" [FULLY ALIGNED]");
+                sb.append("\n");
+            } else if (bearishAlign > bullishAlign) {
+                sb.append(String.format("- Bearish Alignment: %.0f%%", bearishAlign));
+                if (quantScore.isFamilyFullyBearish()) sb.append(" [FULLY ALIGNED]");
+                sb.append("\n");
+            } else {
+                sb.append("- Mixed alignment (neutral)\n");
+            }
+
+            if (quantScore.hasFamilyDivergence()) {
+                sb.append("- DIVERGENCE DETECTED: ");
+                sb.append(String.join(", ", quantScore.getFamilyDivergences()));
+                sb.append("\n");
+            }
+
+            if (quantScore.hasShortSqueezeSetup()) {
+                sb.append("- SHORT SQUEEZE SETUP: Trapped shorts at support\n");
+            }
+            if (quantScore.hasLongSqueezeSetup()) {
+                sb.append("- LONG SQUEEZE SETUP: Trapped longs at resistance\n");
+            }
+
+            String interpretation = quantScore.getFamilyContextInterpretation();
+            if (interpretation != null && !interpretation.isEmpty()) {
+                sb.append(String.format("- Interpretation: %s\n", interpretation));
+            }
+        }
+
+        // ========== SECTION 3: ORDER FLOW ==========
+        sb.append("\nORDER FLOW:\n");
+
         HistoricalContext ctx = quantScore.getHistoricalContext();
         if (ctx != null && ctx.getOfiContext() != null) {
             MetricContext ofiCtx = ctx.getOfiContext();
@@ -863,38 +1327,63 @@ public class SignalGenerator {
             else sb.append(" [NEUTRAL]");
             sb.append("\n");
 
-            // Add percentile if available
             if (ofiCtx.getPercentile() > 0) {
                 sb.append(String.format("- OFI Percentile: %.0f%%\n", ofiCtx.getPercentile() * 100));
             }
         }
 
-        // Volume delta from HistoricalContext
         if (ctx != null && ctx.getVolumeDeltaContext() != null) {
             MetricContext vdCtx = ctx.getVolumeDeltaContext();
             double volumeDelta = vdCtx.getCurrentValue();
             sb.append(String.format("- Volume Delta: %+.1f%%\n", volumeDelta * 100));
         }
 
-        // Support/Resistance from TechnicalContext
+        if (ctx != null) {
+            if (ctx.isSellingExhaustion()) {
+                sb.append("- EXHAUSTION: SELLING_EXHAUSTION (sellers giving up)\n");
+            } else if (ctx.isBuyingExhaustion()) {
+                sb.append("- EXHAUSTION: BUYING_EXHAUSTION (buyers giving up)\n");
+            }
+            if (ctx.isAbsorptionDetected()) {
+                sb.append("- ABSORPTION: Institutional accumulation detected\n");
+            }
+        }
+
+        // ========== SECTION 4: SWING STRUCTURE ==========
+        if (quantScore.hasSwingAnalysis()) {
+            sb.append("\nSWING STRUCTURE:\n");
+            sb.append(String.format("- Trend: %s\n", quantScore.getSwingTrendStructure()));
+
+            Double swingSupport = quantScore.getSwingSupport();
+            Double swingResistance = quantScore.getSwingResistance();
+
+            if (swingSupport != null && close != null) {
+                double distPct = (close - swingSupport) / close * 100;
+                sb.append(String.format("- Swing Support: %.2f (%.1f%% away)\n", swingSupport, distPct));
+            }
+            if (swingResistance != null && close != null) {
+                double distPct = (swingResistance - close) / close * 100;
+                sb.append(String.format("- Swing Resistance: %.2f (%.1f%% away)\n", swingResistance, distPct));
+            }
+
+            if (quantScore.isSwingHighBroken()) {
+                sb.append("- SWING HIGH BROKEN - bullish breakout\n");
+            }
+            if (quantScore.isSwingLowBroken()) {
+                sb.append("- SWING LOW BROKEN - bearish breakdown\n");
+            }
+        }
+
+        // ========== SECTION 5: TECHNICAL LEVELS ==========
+        sb.append("\nTECHNICAL LEVELS:\n");
+
         TechnicalContext tech = quantScore.getTechnicalContext();
-        Double close = quantScore.getClose();
         if (tech != null && close != null && close > 0) {
-            Double support = tech.getNearestSupport();
-            Double resistance = tech.getNearestResistance();
-
-            if (support != null && support > 0) {
-                double distPct = (close - support) / close * 100;
-                sb.append(String.format("- Support: %.2f (%.1f%% away)\n", support, distPct));
-            }
-            if (resistance != null && resistance > 0) {
-                double distPct = (resistance - close) / close * 100;
-                sb.append(String.format("- Resistance: %.2f (%.1f%% away)\n", resistance, distPct));
-            }
-
             // SuperTrend
             String superTrend = tech.isSuperTrendBullish() ? "BULLISH" : "BEARISH";
-            sb.append(String.format("- SuperTrend: %s\n", superTrend));
+            sb.append(String.format("- SuperTrend: %s", superTrend));
+            if (tech.isSuperTrendFlip()) sb.append(" [JUST FLIPPED]");
+            sb.append("\n");
 
             // Bollinger Band position
             Double bbPctB = tech.getBbPercentB();
@@ -905,26 +1394,68 @@ public class SignalGenerator {
                 else bbZone = "MIDDLE";
                 sb.append(String.format("- BB %%B: %.2f [%s]\n", bbPctB, bbZone));
             }
-        }
 
-        // GEX Regime
-        if (quantScore.getGexProfile() != null && quantScore.getGexProfile().getRegime() != null) {
-            sb.append(String.format("- GEX Regime: %s\n", quantScore.getGexProfile().getRegime().name()));
-        }
-
-        // Exhaustion flags from HistoricalContext
-        if (ctx != null) {
-            if (ctx.isSellingExhaustion()) {
-                sb.append("- EXHAUSTION DETECTED: SELLING_EXHAUSTION\n");
-            } else if (ctx.isBuyingExhaustion()) {
-                sb.append("- EXHAUSTION DETECTED: BUYING_EXHAUSTION\n");
+            if (tech.isBbSqueezing()) {
+                sb.append("- BB SQUEEZE: Low volatility, breakout expected\n");
             }
         }
 
-        // === CONDITIONS MET ===
-        sb.append(String.format("\nCONDITIONS:\n"));
+        // MTF Levels
+        if (quantScore.hasMtfLevels()) {
+            Double mtfSupport = quantScore.getMtfNearestSupport();
+            Double mtfResistance = quantScore.getMtfNearestResistance();
+
+            if (mtfSupport != null && close != null) {
+                Double distPct = quantScore.getMtfSupportDistancePct();
+                sb.append(String.format("- MTF Support: %.2f (%.1f%% away)\n", mtfSupport, distPct));
+            }
+            if (mtfResistance != null && close != null) {
+                Double distPct = quantScore.getMtfResistanceDistancePct();
+                sb.append(String.format("- MTF Resistance: %.2f (%.1f%% away)\n", mtfResistance, distPct));
+            }
+
+            if (quantScore.isNearMtfLevel()) {
+                sb.append("- NEAR MTF LEVEL: Price at significant level\n");
+            }
+
+            Double dailyPivot = quantScore.getDailyPivot();
+            if (dailyPivot != null) {
+                sb.append(String.format("- Daily Pivot: %.2f\n", dailyPivot));
+            }
+
+            if (quantScore.isDailyCprNarrow()) {
+                sb.append("- NARROW CPR: Breakout expected today\n");
+            }
+        }
+
+        // ========== SECTION 6: GEX & OPTIONS ==========
+        if (quantScore.getGexProfile() != null && quantScore.getGexProfile().getRegime() != null) {
+            sb.append("\nOPTIONS CONTEXT:\n");
+            sb.append(String.format("- GEX Regime: %s\n", quantScore.getGexProfile().getRegime().name()));
+
+            if (quantScore.getGexProfile().isNearGammaFlip()) {
+                Double flipLevel = quantScore.getGexProfile().getGammaFlipLevel();
+                sb.append(String.format("- NEAR GAMMA FLIP: %.2f\n", flipLevel != null ? flipLevel : 0));
+            }
+        }
+
+        if (quantScore.getMaxPainProfile() != null && quantScore.getMaxPainProfile().getMaxPainStrike() > 0) {
+            sb.append(String.format("- Max Pain: %.2f (%.1f%% away)\n",
+                    quantScore.getMaxPainProfile().getMaxPainStrike(),
+                    quantScore.getMaxPainProfile().getAbsDistancePct()));
+
+            if (quantScore.getMaxPainProfile().isInPinZone()) {
+                sb.append("- IN PIN ZONE: Price may gravitate to max pain\n");
+            }
+        }
+
+        // ========== SECTION 7: SETUP CONDITIONS ==========
+        sb.append("\nSETUP CONDITIONS:\n");
         sb.append(String.format("- Required: %d met\n", setup.getRequiredConditionsMet()));
         sb.append(String.format("- Boosters: %d active\n", setup.getBoosterConditionsMet()));
+        sb.append(String.format("- Confidence: %.0f%%\n", setup.getCurrentConfidence() * 100));
+        sb.append(String.format("- R:R Ratio: %.1f:1\n", setup.getRiskRewardRatio()));
+
         if (setup.getMetConditions() != null && !setup.getMetConditions().isEmpty()) {
             sb.append("- Triggers: ");
             sb.append(String.join(", ", setup.getMetConditions()));

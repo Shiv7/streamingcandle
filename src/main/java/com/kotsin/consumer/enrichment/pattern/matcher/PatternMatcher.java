@@ -72,8 +72,8 @@ public class PatternMatcher {
                     sequenceTracker.markSignalEmitted(completed.getSequenceId(), signal.getSignalId());
                     log.info("[PATTERN_MATCHER] Generated signal: {}", signal);
                 } else if (signal != null) {
-                    log.debug("[PATTERN_MATCHER] Signal not actionable for {}: conf={:.1f}%, isActionable={}",
-                            familyId, signal.getConfidence() * 100, signal.isActionable());
+                    log.debug("[PATTERN_MATCHER] Signal not actionable for {}: conf={}%, isActionable={}",
+                            familyId, String.format("%.1f", signal.getConfidence() * 100), signal.isActionable());
                 }
             }
         }

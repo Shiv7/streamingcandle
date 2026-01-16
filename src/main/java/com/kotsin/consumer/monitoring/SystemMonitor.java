@@ -44,10 +44,10 @@ public class SystemMonitor {
         // Memory metrics
         MemoryUsage heapUsage = memoryBean.getHeapMemoryUsage();
         double heapUsedPercent = (double) heapUsage.getUsed() / heapUsage.getMax() * 100;
-        log.info("💾 Memory: Used={}MB, Max={}MB, Usage={:.2f}%", 
+        log.info("Memory: Used={}MB, Max={}MB, Usage={}%",
             heapUsage.getUsed() / 1024 / 1024,
             heapUsage.getMax() / 1024 / 1024,
-            heapUsedPercent);
+            String.format("%.2f", heapUsedPercent));
         
         // System health
         boolean isHealthy = isSystemHealthy();

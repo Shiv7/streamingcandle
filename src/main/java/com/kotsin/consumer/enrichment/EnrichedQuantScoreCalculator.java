@@ -1,6 +1,8 @@
 package com.kotsin.consumer.enrichment;
 
 import com.kotsin.consumer.domain.model.FamilyCandle;
+import com.kotsin.consumer.enrichment.analyzer.FamilyContextAnalyzer;
+import com.kotsin.consumer.enrichment.analyzer.FamilyContextAnalyzer.FamilyContext;
 import com.kotsin.consumer.enrichment.calculator.ConfluenceCalculator;
 import com.kotsin.consumer.enrichment.calculator.GEXCalculator;
 import com.kotsin.consumer.enrichment.calculator.MaxPainCalculator;
@@ -12,6 +14,11 @@ import com.kotsin.consumer.enrichment.enricher.HistoricalContextEnricher;
 import com.kotsin.consumer.enrichment.enricher.TechnicalIndicatorEnricher;
 import com.kotsin.consumer.enrichment.enricher.TimeContextEnricher;
 import com.kotsin.consumer.enrichment.model.*;
+import com.kotsin.consumer.enrichment.tracker.SessionStructureTracker;
+import com.kotsin.consumer.enrichment.tracker.SwingPointTracker;
+import com.kotsin.consumer.enrichment.tracker.SwingPointTracker.SwingAnalysis;
+import com.kotsin.consumer.curated.model.MultiTimeframeLevels;
+import com.kotsin.consumer.curated.service.MultiTimeframeLevelCalculator;
 import com.kotsin.consumer.enrichment.pattern.matcher.PatternMatcher;
 import com.kotsin.consumer.enrichment.pattern.model.PatternSignal;
 import com.kotsin.consumer.enrichment.pattern.publisher.PatternSignalPublisher;
@@ -76,6 +83,18 @@ public class EnrichedQuantScoreCalculator {
     private final PatternMatcher patternMatcher;
     private final PatternSignalPublisher patternSignalPublisher;
 
+    // Session Structure Tracking (CRITICAL for context-aware signals)
+    private final SessionStructureTracker sessionStructureTracker;
+
+    // Family Context Analyzer (unified equity + futures + options analysis)
+    private final FamilyContextAnalyzer familyContextAnalyzer;
+
+    // Swing Point Tracker (swing highs/lows for structure analysis)
+    private final SwingPointTracker swingPointTracker;
+
+    // Multi-Timeframe Level Calculator (daily/weekly/monthly pivots and Fibonacci)
+    private final MultiTimeframeLevelCalculator mtfLevelCalculator;
+
     /**
      * Calculate enriched QuantScore with historical context and Phase 2, 3, 4 enrichments
      *
@@ -83,16 +102,62 @@ public class EnrichedQuantScoreCalculator {
      * @return QuantScore with historical context and options intelligence integration
      */
     public EnrichedQuantScore calculate(FamilyCandle family) {
+        long startTime = System.nanoTime();
+
         if (family == null) {
+            log.trace("[ENRICH] Received null family, returning empty score");
             return EnrichedQuantScore.empty();
         }
 
+        String familyId = family.getFamilyId();
+        double price = family.getPrimaryPrice();
+
+        log.debug("[ENRICH] {} Starting enrichment pipeline | price={:.2f} | hasEquity={} | hasFuture={} | optionCount={}",
+                familyId, price, family.getEquity() != null, family.getFuture() != null,
+                family.getOptions() != null ? family.getOptions().size() : 0);
+
         try {
+            // =============== SESSION STRUCTURE (CRITICAL for context-aware signals) ===============
+            // Must be done BEFORE any signal interpretation to know WHERE we are in the session
+            long t0 = System.nanoTime();
+            SessionStructure sessionStructure = sessionStructureTracker.update(family);
+            long sessionMs = (System.nanoTime() - t0) / 1_000_000;
+
             // =============== PHASE 1: Historical Context ===============
+            t0 = System.nanoTime();
             HistoricalContext historicalContext = historicalEnricher.enrich(family);
+            long histMs = (System.nanoTime() - t0) / 1_000_000;
+
+            // =============== FAMILY CONTEXT (unified equity + futures + options) ===============
+            // This analyzes ALL instruments together for alignment/divergence detection
+            t0 = System.nanoTime();
+            FamilyContext familyContext = familyContextAnalyzer.analyze(family, sessionStructure);
+            long familyMs = (System.nanoTime() - t0) / 1_000_000;
+
+            // =============== SWING POINT TRACKING ===============
+            // Track swing highs/lows for structure analysis (trend, support, resistance)
+            t0 = System.nanoTime();
+            SwingAnalysis swingAnalysis = swingPointTracker.update(family);
+            long swingMs = (System.nanoTime() - t0) / 1_000_000;
+
+            // =============== MULTI-TIMEFRAME LEVELS ===============
+            // Get daily/weekly/monthly pivot and Fibonacci levels
+            // These provide key support/resistance levels across timeframes
+            String mtfScripCode = family.getFuture() != null ? family.getFuture().getScripCode() :
+                               family.getEquity() != null ? family.getEquity().getScripCode() : null;
+            MultiTimeframeLevels mtfLevels = null;
+            if (mtfScripCode != null && mtfLevelCalculator != null) {
+                mtfLevels = mtfLevelCalculator.calculateLevels(mtfScripCode, family.getPrimaryPrice());
+            }
+
             applyHistoricalModifiers(family, historicalContext);
 
+            log.trace("[ENRICH] {} Phase 1 complete | sessionMs={} | histMs={} | familyMs={} | swingMs={}",
+                    familyId, sessionMs, histMs, familyMs, swingMs);
+
             // =============== PHASE 2: Options Intelligence ===============
+            t0 = System.nanoTime();
+
             // GEX Analysis (market regime detection)
             GEXProfile gexProfile = gexCalculator.calculate(family);
 
@@ -105,7 +170,18 @@ public class EnrichedQuantScoreCalculator {
             // Expiry Context (DTE awareness)
             ExpiryContext expiryContext = expiryContextEnricher.enrich(family);
 
+            long phase2Ms = (System.nanoTime() - t0) / 1_000_000;
+            log.trace("[ENRICH] {} Phase 2 complete | gexRegime={} | maxPainBias={} | session={} | dte={} | timeMs={}",
+                    familyId,
+                    gexProfile != null ? gexProfile.getRegime() : "none",
+                    maxPainProfile != null ? maxPainProfile.getBias() : "none",
+                    timeContext != null ? timeContext.getSession() : "none",
+                    expiryContext != null ? expiryContext.getDaysToExpiry() : -1,
+                    phase2Ms);
+
             // =============== PHASE 3: Signal Intelligence ===============
+            t0 = System.nanoTime();
+
             // Technical Indicators (SuperTrend, BB, Pivots, ATR)
             TechnicalContext technicalContext = technicalEnricher.enrich(family);
 
@@ -115,13 +191,27 @@ public class EnrichedQuantScoreCalculator {
                     currentPrice, technicalContext, gexProfile, maxPainProfile);
 
             // Event Detection (OFI flip, exhaustion, absorption, etc.)
-            List<DetectedEvent> detectedEvents = eventDetector.detectEvents(
+            // ENHANCED: Now uses context-aware detection with session structure and family context
+            // This enables:
+            // 1. Position-aware exhaustion (lower threshold at session extremes)
+            // 2. Failed breakout detection
+            // 3. Family alignment events (all instruments agreeing)
+            // 4. Session reversal events (V-bottom, V-top)
+            // 5. Divergence events (price vs options flow)
+            List<DetectedEvent> detectedEvents = eventDetector.detectEventsWithContext(
                     family,
                     historicalContext,
                     gexProfile,
                     maxPainProfile,
-                    technicalContext
+                    technicalContext,
+                    sessionStructure,
+                    familyContext
             );
+
+            // Add swing events to detected events
+            if (swingAnalysis != null && swingAnalysis.getEvents() != null) {
+                detectedEvents.addAll(swingAnalysis.getEvents());
+            }
 
             // Store detected events for lifecycle management
             for (DetectedEvent event : detectedEvents) {
@@ -130,6 +220,15 @@ public class EnrichedQuantScoreCalculator {
 
             // Check and update lifecycle of existing events
             eventStore.checkEventLifecycles(family.getFamilyId(), currentPrice);
+
+            long phase3Ms = (System.nanoTime() - t0) / 1_000_000;
+            log.trace("[ENRICH] {} Phase 3 complete | techAvail={} | stFlip={} | confluence={} | events={} | timeMs={}",
+                    familyId,
+                    technicalContext != null,
+                    technicalContext != null && technicalContext.isSuperTrendFlip(),
+                    confluenceResult != null && confluenceResult.isInConfluenceZone(),
+                    detectedEvents.size(),
+                    phase3Ms);
 
             // =============== Calculate Base Score ===============
             QuantScore baseScore = baseCalculator.calculate(family);
@@ -226,7 +325,7 @@ public class EnrichedQuantScoreCalculator {
             long priceTimestamp = family.getWindowEndMillis() > 0 ? family.getWindowEndMillis() :
                                   (family.getTimestamp() > 0 ? family.getTimestamp() : System.currentTimeMillis());
 
-            return EnrichedQuantScore.builder()
+            EnrichedQuantScore enrichedScore = EnrichedQuantScore.builder()
                     .baseScore(baseScore)
                     // FIX: Include scripCode, companyName, close, and priceTimestamp
                     // These were previously missing, causing NULL values in TradingSignal
@@ -234,6 +333,14 @@ public class EnrichedQuantScoreCalculator {
                     .companyName(companyName)
                     .close(currentPrice)
                     .priceTimestamp(priceTimestamp)
+                    // Session Structure (CRITICAL for context-aware signals)
+                    .sessionStructure(sessionStructure)
+                    // Family Context (unified equity + futures + options analysis)
+                    .familyContext(familyContext)
+                    // Swing Analysis (swing highs/lows for structure)
+                    .swingAnalysis(swingAnalysis)
+                    // Multi-Timeframe Levels (daily/weekly/monthly pivots and Fibonacci)
+                    .mtfLevels(mtfLevels)
                     // Phase 1
                     .historicalContext(historicalContext)
                     // Phase 2
@@ -267,6 +374,29 @@ public class EnrichedQuantScoreCalculator {
                             technicalContext, confluenceResult, detectedEvents, baseScore))
                     .enrichmentNote(enrichmentNote)
                     .build();
+
+            long totalMs = (System.nanoTime() - startTime) / 1_000_000;
+
+            // Summary logging
+            if (isActionableMoment || !patternSignals.isEmpty()) {
+                log.info("[ENRICH] {} COMPLETE | price={:.2f} | score={:.0f} | conf={:.0f}% | " +
+                                "actionable={} | patterns={} | events={} | " +
+                                "pos={:.0f}% | familyBias={} | combinedMod={:.2f} | totalMs={}",
+                        familyId, currentPrice, adjustedScore, adjustedConfidence * 100,
+                        isActionableMoment, patternSignals.size(), detectedEvents.size(),
+                        sessionStructure != null ? sessionStructure.getPositionInRange() * 100 : 50,
+                        familyContext != null ? familyContext.getOverallBias() : "UNKNOWN",
+                        combinedModifier, totalMs);
+            } else {
+                log.debug("[ENRICH] {} Complete | price={:.2f} | score={:.0f} | conf={:.0f}% | " +
+                                "events={} | pos={:.0f}% | totalMs={}",
+                        familyId, currentPrice, adjustedScore, adjustedConfidence * 100,
+                        detectedEvents.size(),
+                        sessionStructure != null ? sessionStructure.getPositionInRange() * 100 : 50,
+                        totalMs);
+            }
+
+            return enrichedScore;
 
         } catch (Exception e) {
             log.error("Error calculating enriched score for {}: {}",
@@ -932,6 +1062,72 @@ public class EnrichedQuantScoreCalculator {
          */
         private long priceTimestamp;
 
+        /**
+         * Session Structure - CRITICAL for context-aware signal interpretation.
+         *
+         * Contains:
+         * - positionInRange: 0.0 = at session low, 1.0 = at session high
+         * - Opening range high/low
+         * - Level test counts
+         * - V-bottom/V-top detection
+         * - Failed breakout/breakdown counts
+         *
+         * WHY THIS MATTERS:
+         * The same OI signal means OPPOSITE at session extremes:
+         * - SHORT_BUILDUP at session LOW = trapped shorts = BULLISH (squeeze fuel)
+         * - SHORT_BUILDUP at session HIGH = continuation = BEARISH
+         *
+         * Without this context, OI signals are BLIND to position in session.
+         */
+        private SessionStructure sessionStructure;
+
+        /**
+         * Family Context - Unified analysis of equity + futures + options.
+         *
+         * THE POWER OF FAMILY CANDLE:
+         * Having all instruments in ONE place allows detection of:
+         * - ALIGNMENT: All instruments agreeing (strongest signal)
+         * - DIVERGENCE: Options flow contradicting price (reversal signal)
+         * - SQUEEZE SETUPS: Shorts trapped at support, longs trapped at resistance
+         *
+         * Contains:
+         * - bullishAlignment / bearishAlignment scores
+         * - equitySignal, futuresSignal, optionsSignal
+         * - divergences detected
+         * - shortSqueezeSetup / longSqueezeSetup flags
+         */
+        private FamilyContext familyContext;
+
+        /**
+         * Swing Analysis - Tracks swing highs/lows for structure analysis.
+         *
+         * WHY SWINGS MATTER:
+         * - Trend structure: HH+HL = uptrend, LH+LL = downtrend
+         * - Key levels: Swing points become support/resistance
+         * - Pattern entry: Many patterns trigger on swing reversals
+         *
+         * Contains:
+         * - lastSwingHigh / lastSwingLow
+         * - trendStructure (UPTREND, DOWNTREND, RANGE, CONVERGING)
+         * - swingHighBroken / swingLowBroken flags
+         * - recentSwings list
+         */
+        private SwingAnalysis swingAnalysis;
+
+        /**
+         * Multi-Timeframe Levels - Daily/Weekly/Monthly pivot and Fibonacci levels.
+         *
+         * MTF LEVELS PROVIDE:
+         * - Key support/resistance across timeframes
+         * - Confluence when multiple TF levels align
+         * - Higher TF levels = stronger levels
+         *
+         * Contains:
+         * - dailyPivot, weeklyPivot, monthlyPivot (S1-S4, R1-R4, CPR)
+         * - dailyFib, weeklyFib, monthlyFib (0.236, 0.382, 0.5, 0.618, 0.786)
+         */
+        private MultiTimeframeLevels mtfLevels;
+
         // Phase 1: Historical Context
         private HistoricalContext historicalContext;
 
@@ -1243,6 +1439,376 @@ public class EnrichedQuantScoreCalculator {
             private double centerPrice;
             private String type;
             private double strength;
+        }
+
+        // ======================== SESSION STRUCTURE HELPERS ========================
+
+        /**
+         * Check if session structure is available
+         */
+        public boolean hasSessionStructure() {
+            return sessionStructure != null;
+        }
+
+        /**
+         * Get position in session range (0.0 = at low, 1.0 = at high)
+         * CRITICAL for context-aware OI interpretation
+         */
+        public double getPositionInRange() {
+            return sessionStructure != null ? sessionStructure.getPositionInRange() : 0.5;
+        }
+
+        /**
+         * Check if price is at session extreme (top/bottom 10%)
+         * IMPORTANT: Signal interpretation should be FLIPPED at extremes
+         */
+        public boolean isAtSessionExtreme() {
+            return sessionStructure != null && sessionStructure.isAtSessionExtreme();
+        }
+
+        /**
+         * Check if at session low zone (bottom 15%)
+         */
+        public boolean isAtSessionLow() {
+            return sessionStructure != null && sessionStructure.isAtSessionLow();
+        }
+
+        /**
+         * Check if at session high zone (top 15%)
+         */
+        public boolean isAtSessionHigh() {
+            return sessionStructure != null && sessionStructure.isAtSessionHigh();
+        }
+
+        /**
+         * Should OI interpretation be flipped based on session position?
+         * At session low: SHORT_BUILDUP = trapped shorts = BULLISH
+         * At session high: LONG_BUILDUP = trapped longs = BEARISH
+         */
+        public boolean shouldFlipOIInterpretation() {
+            return sessionStructure != null && sessionStructure.shouldFlipOIInterpretation();
+        }
+
+        /**
+         * Get position bias for signal modification
+         * Returns: 1.0 for bullish context (at low), -1.0 for bearish (at high), 0 for neutral
+         */
+        public double getPositionBias() {
+            return sessionStructure != null ? sessionStructure.getPositionBias() : 0.0;
+        }
+
+        /**
+         * Get structure modifier for signal confidence
+         */
+        public double getStructureModifier(boolean isLongSignal) {
+            return sessionStructure != null ? sessionStructure.getStructureModifier(isLongSignal) : 1.0;
+        }
+
+        /**
+         * Check if V-bottom pattern detected at session low
+         */
+        public boolean hasVBottomDetected() {
+            return sessionStructure != null && sessionStructure.isVBottomDetected();
+        }
+
+        /**
+         * Check if V-top pattern detected at session high
+         */
+        public boolean hasVTopDetected() {
+            return sessionStructure != null && sessionStructure.isVTopDetected();
+        }
+
+        /**
+         * Get number of failed breakouts at session high
+         */
+        public int getFailedBreakoutCount() {
+            return sessionStructure != null ? sessionStructure.getFailedBreakoutCount() : 0;
+        }
+
+        /**
+         * Get number of failed breakdowns at session low
+         */
+        public int getFailedBreakdownCount() {
+            return sessionStructure != null ? sessionStructure.getFailedBreakdownCount() : 0;
+        }
+
+        /**
+         * Check if opening range is established
+         */
+        public boolean isOpeningRangeEstablished() {
+            return sessionStructure != null && sessionStructure.isOpeningRangeEstablished();
+        }
+
+        /**
+         * Get opening range high
+         */
+        public Double getOpeningRangeHigh() {
+            return sessionStructure != null ? sessionStructure.getOpeningRangeHigh() : null;
+        }
+
+        /**
+         * Get opening range low
+         */
+        public Double getOpeningRangeLow() {
+            return sessionStructure != null ? sessionStructure.getOpeningRangeLow() : null;
+        }
+
+        /**
+         * Get session position description for logging
+         */
+        public String getSessionPositionDescription() {
+            return sessionStructure != null ? sessionStructure.getPositionDescription() : "UNKNOWN";
+        }
+
+        // ======================== FAMILY CONTEXT HELPERS ========================
+
+        /**
+         * Check if family context is available
+         */
+        public boolean hasFamilyContext() {
+            return familyContext != null;
+        }
+
+        /**
+         * Get family bullish alignment score (0.0 - 1.0)
+         * Score > 0.6 = aligned, > 0.8 = fully aligned
+         */
+        public double getFamilyBullishAlignment() {
+            return familyContext != null ? familyContext.getBullishAlignment() : 0;
+        }
+
+        /**
+         * Get family bearish alignment score (0.0 - 1.0)
+         * Score > 0.6 = aligned, > 0.8 = fully aligned
+         */
+        public double getFamilyBearishAlignment() {
+            return familyContext != null ? familyContext.getBearishAlignment() : 0;
+        }
+
+        /**
+         * Check if all family instruments are bullish aligned (equity + futures + options)
+         */
+        public boolean isFamilyFullyBullish() {
+            return familyContext != null && familyContext.isFullyAlignedBullish();
+        }
+
+        /**
+         * Check if all family instruments are bearish aligned
+         */
+        public boolean isFamilyFullyBearish() {
+            return familyContext != null && familyContext.isFullyAlignedBearish();
+        }
+
+        /**
+         * Check if there's a divergence between price and options flow
+         * Divergence = potential reversal signal
+         */
+        public boolean hasFamilyDivergence() {
+            return familyContext != null && familyContext.isHasDivergence();
+        }
+
+        /**
+         * Get divergence descriptions
+         */
+        public List<String> getFamilyDivergences() {
+            return familyContext != null && familyContext.getDivergences() != null ?
+                    familyContext.getDivergences() : Collections.emptyList();
+        }
+
+        /**
+         * Check if short squeeze setup detected
+         * (shorts building at session low with high PCR)
+         */
+        public boolean hasShortSqueezeSetup() {
+            return familyContext != null && familyContext.isShortSqueezeSetup();
+        }
+
+        /**
+         * Check if long squeeze setup detected
+         * (longs building at session high with low PCR)
+         */
+        public boolean hasLongSqueezeSetup() {
+            return familyContext != null && familyContext.isLongSqueezeSetup();
+        }
+
+        /**
+         * Get overall family bias
+         */
+        public FamilyContextAnalyzer.FamilyBias getFamilyBias() {
+            return familyContext != null ? familyContext.getOverallBias() : null;
+        }
+
+        /**
+         * Get context interpretation (human-readable explanation)
+         */
+        public String getFamilyContextInterpretation() {
+            return familyContext != null ? familyContext.getContextInterpretation() : null;
+        }
+
+        /**
+         * Get confidence from family analysis
+         */
+        public double getFamilyConfidence() {
+            return familyContext != null ? familyContext.getConfidence() : 0.5;
+        }
+
+        // ======================== SWING ANALYSIS HELPERS ========================
+
+        /**
+         * Check if swing analysis is available
+         */
+        public boolean hasSwingAnalysis() {
+            return swingAnalysis != null && swingAnalysis.hasSwings();
+        }
+
+        /**
+         * Get swing-based resistance level
+         */
+        public Double getSwingResistance() {
+            return swingAnalysis != null ? swingAnalysis.getSwingResistance() : null;
+        }
+
+        /**
+         * Get swing-based support level
+         */
+        public Double getSwingSupport() {
+            return swingAnalysis != null ? swingAnalysis.getSwingSupport() : null;
+        }
+
+        /**
+         * Check if in uptrend (higher highs + higher lows)
+         */
+        public boolean isSwingUptrend() {
+            return swingAnalysis != null && swingAnalysis.isUptrend();
+        }
+
+        /**
+         * Check if in downtrend (lower highs + lower lows)
+         */
+        public boolean isSwingDowntrend() {
+            return swingAnalysis != null && swingAnalysis.isDowntrend();
+        }
+
+        /**
+         * Check if consolidating (converging or range)
+         */
+        public boolean isSwingConsolidating() {
+            return swingAnalysis != null && swingAnalysis.isConsolidating();
+        }
+
+        /**
+         * Check if swing high was broken (bullish breakout)
+         */
+        public boolean isSwingHighBroken() {
+            return swingAnalysis != null && swingAnalysis.isSwingHighBroken();
+        }
+
+        /**
+         * Check if swing low was broken (bearish breakdown)
+         */
+        public boolean isSwingLowBroken() {
+            return swingAnalysis != null && swingAnalysis.isSwingLowBroken();
+        }
+
+        /**
+         * Get trend structure description
+         */
+        public String getSwingTrendStructure() {
+            if (swingAnalysis == null) return "UNKNOWN";
+            return swingAnalysis.getTrendStructure().name();
+        }
+
+        // ======================== MTF LEVELS HELPERS ========================
+
+        /**
+         * Check if MTF levels are available
+         */
+        public boolean hasMtfLevels() {
+            return mtfLevels != null;
+        }
+
+        /**
+         * Get nearest MTF support level across all timeframes
+         */
+        public Double getMtfNearestSupport() {
+            if (mtfLevels == null || close <= 0) return null;
+            double support = mtfLevels.getNearestSupport(close);
+            return support > 0 ? support : null;
+        }
+
+        /**
+         * Get nearest MTF resistance level across all timeframes
+         */
+        public Double getMtfNearestResistance() {
+            if (mtfLevels == null || close <= 0) return null;
+            double resistance = mtfLevels.getNearestResistance(close);
+            return resistance > 0 ? resistance : null;
+        }
+
+        /**
+         * Check if price is near a significant MTF level (within 0.5%)
+         */
+        public boolean isNearMtfLevel() {
+            return mtfLevels != null && close > 0 && mtfLevels.isNearSignificantLevel(close);
+        }
+
+        /**
+         * Get daily pivot level
+         */
+        public Double getDailyPivot() {
+            if (mtfLevels == null || mtfLevels.getDailyPivot() == null) return null;
+            return mtfLevels.getDailyPivot().getPivot();
+        }
+
+        /**
+         * Get weekly pivot level
+         */
+        public Double getWeeklyPivot() {
+            if (mtfLevels == null || mtfLevels.getWeeklyPivot() == null) return null;
+            return mtfLevels.getWeeklyPivot().getPivot();
+        }
+
+        /**
+         * Get monthly pivot level
+         */
+        public Double getMonthlyPivot() {
+            if (mtfLevels == null || mtfLevels.getMonthlyPivot() == null) return null;
+            return mtfLevels.getMonthlyPivot().getPivot();
+        }
+
+        /**
+         * Get daily Fibonacci 61.8% level (golden ratio)
+         */
+        public Double getDailyFib618() {
+            if (mtfLevels == null || mtfLevels.getDailyFib() == null) return null;
+            return mtfLevels.getDailyFib().getFib618();
+        }
+
+        /**
+         * Check if CPR (Central Pivot Range) is narrow (expect breakout)
+         */
+        public boolean isDailyCprNarrow() {
+            if (mtfLevels == null || mtfLevels.getDailyPivot() == null) return false;
+            return mtfLevels.getDailyPivot().getCprType() ==
+                   MultiTimeframeLevels.PivotLevels.CPRWidth.NARROW;
+        }
+
+        /**
+         * Get distance to nearest MTF support as percentage
+         */
+        public Double getMtfSupportDistancePct() {
+            Double support = getMtfNearestSupport();
+            if (support == null || close <= 0) return null;
+            return (close - support) / close * 100;
+        }
+
+        /**
+         * Get distance to nearest MTF resistance as percentage
+         */
+        public Double getMtfResistanceDistancePct() {
+            Double resistance = getMtfNearestResistance();
+            if (resistance == null || close <= 0) return null;
+            return (resistance - close) / close * 100;
         }
     }
 }

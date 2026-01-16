@@ -95,8 +95,9 @@ public class SignalOutcomeStore {
                 familyPerformanceCache.remove(outcome.getFamilyId());
             }
 
-            log.info("[OUTCOME_STORE] Recorded outcome for signal {}: {} {:.2f}%",
-                    outcome.getSignalId(), outcome.getOutcome(), outcome.getPnlPct());
+            log.info("[OUTCOME_STORE] Recorded outcome for signal {}: {} {}%",
+                    outcome.getSignalId(), outcome.getOutcome(),
+                    String.format("%.2f", outcome.getPnlPct()));
 
         } catch (Exception e) {
             log.error("[OUTCOME_STORE] Failed to record outcome for signal {}: {}",

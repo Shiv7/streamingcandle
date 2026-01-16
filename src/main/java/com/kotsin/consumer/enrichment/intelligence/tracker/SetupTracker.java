@@ -82,11 +82,13 @@ public class SetupTracker {
                 familyId, totalDefinitions, activeCount, readySetups.size(),
                 events != null ? events.size() : 0);
 
-        // Log ready setup details
+        // Log ready setup details with booster info for debugging
         for (ActiveSetup setup : readySetups) {
-            log.info("[SETUP_TRACKER] {} | READY: {} {} | conf={:.1f}% | progress={:.0f}%",
+            log.info("[SETUP_TRACKER] {} | READY: {} {} | conf={}% | progress={}% | boosters={}/2",
                     familyId, setup.getSetupId(), setup.getDirection(),
-                    setup.getCurrentConfidence() * 100, setup.getProgress() * 100);
+                    String.format("%.1f", setup.getCurrentConfidence() * 100),
+                    String.format("%.0f", setup.getProgress() * 100),
+                    setup.getBoosterConditionsMet());
         }
 
         return readySetups;
@@ -201,8 +203,9 @@ public class SetupTracker {
             setup.setStatus(ActiveSetup.SetupStatus.READY);
             setup.setReadyAt(Instant.now());
             setup.setCurrentConfidence(Math.max(setup.getCurrentConfidence(), setup.getBaseConfidence()));
-            log.info("[SETUP_TRACKER] Setup {} READY for family {}: confidence={:.0f}%",
-                    setup.getSetupId(), setup.getFamilyId(), setup.getCurrentConfidence() * 100);
+            log.info("[SETUP_TRACKER] Setup {} READY for family {}: confidence={}%",
+                    setup.getSetupId(), setup.getFamilyId(),
+                    String.format("%.0f", setup.getCurrentConfidence() * 100));
         }
     }
 
