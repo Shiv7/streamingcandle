@@ -25,13 +25,13 @@ import java.util.concurrent.TimeoutException;
  * - GET /getRequiredFuture?equityScripCode={scripCode} -> Returns future info
  * - GET /getRequiredOptions?equityScripCode={scripCode} -> Returns 4 ATM options
  * 
- * API Base: http://13.203.60.173:8102
+ * API Base: http://localhost:8102
  */
 @Component
 @Slf4j
 public class ScripFinderClient {
 
-    @Value("${scripfinder.api.base-url:http://13.203.60.173:8102}")
+    @Value("${scripfinder.api.base-url:http://localhost:8102}")
     private String baseUrl;
 
     @Value("${scripfinder.api.timeout.ms:3000}")

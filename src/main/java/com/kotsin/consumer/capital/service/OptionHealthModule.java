@@ -36,7 +36,7 @@ public class OptionHealthModule {
     private final RestTemplate restTemplate = new RestTemplate();
     private final ObjectMapper objectMapper = new ObjectMapper();
 
-    @Value("${options.api.url:http://13.203.60.173:8102/getRequiredOptions}")
+    @Value("${options.api.url:http://localhost:8102/getRequiredOptions}")
     private String optionsApiUrl;
 
     @Value("${options.api.enabled:true}")
