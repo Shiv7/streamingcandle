@@ -11,7 +11,9 @@ import com.kotsin.consumer.enrichment.intelligence.model.PredictedEvent;
 import com.kotsin.consumer.enrichment.intelligence.narrative.NarrativeGenerator.MarketNarrative;
 import com.kotsin.consumer.enrichment.model.DetectedEvent;
 import com.kotsin.consumer.enrichment.model.GEXProfile;
+import com.kotsin.consumer.enrichment.model.HistoricalContext;
 import com.kotsin.consumer.enrichment.model.MaxPainProfile;
+import com.kotsin.consumer.enrichment.model.MetricContext;
 import com.kotsin.consumer.enrichment.model.TechnicalContext;
 import com.kotsin.consumer.enrichment.model.TimeContext;
 import com.kotsin.consumer.enrichment.pattern.model.PatternSignal;
@@ -19,8 +21,10 @@ import com.kotsin.consumer.enrichment.signal.model.SignalRationale;
 import com.kotsin.consumer.enrichment.signal.model.SignalRationale.*;
 import com.kotsin.consumer.enrichment.signal.model.TradingSignal;
 import com.kotsin.consumer.enrichment.signal.model.TradingSignal.*;
+import com.kotsin.consumer.enrichment.signal.outcome.SignalOutcomeStore;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
+import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.stereotype.Service;
 
 import java.time.Duration;
@@ -53,6 +57,9 @@ import java.util.stream.Collectors;
 public class SignalGenerator {
 
     private final IntelligenceOrchestrator intelligenceOrchestrator;
+
+    @Autowired(required = false)
+    private SignalOutcomeStore signalOutcomeStore;
 
     /**
      * IST timezone for human readable time formatting
@@ -134,26 +141,16 @@ public class SignalGenerator {
             log.info("[SIGNAL_GEN] {} | Inputs: patternSignals={}, readySetups={}, highConfForecasts={}, action={}",
                     familyId, patternCount, readySetupCount, forecastPredictions, actionType);
 
-            // 1. Convert pattern signals to trading signals
+            // 1. Convert pattern signals to trading signals (proven sequences only)
             List<TradingSignal> patternTradingSignals = convertPatternSignals(familyId, quantScore);
             signals.addAll(patternTradingSignals);
 
-            // 2. Generate signals from ready setups
+            // 2. Generate signals from ready setups (defined conditions met)
             List<TradingSignal> setupTradingSignals = generateSetupSignals(familyId, quantScore, intelligence);
             signals.addAll(setupTradingSignals);
 
-            // 3. Generate signals from forecaster predictions
-            List<TradingSignal> forecastTradingSignals = generateForecastSignals(familyId, quantScore, intelligence);
-            signals.addAll(forecastTradingSignals);
-
-            // 4. Generate signal from action recommendation if warranted
-            if (intelligence.getRecommendation() != null &&
-                intelligence.getRecommendation().getAction() == ActionType.TRADE) {
-                TradingSignal recommendationSignal = generateRecommendationSignal(familyId, quantScore, intelligence);
-                if (recommendationSignal != null && !isDuplicateSignal(signals, recommendationSignal)) {
-                    signals.add(recommendationSignal);
-                }
-            }
+            // REMOVED: Forecast signals - too speculative, no proven edge
+            // REMOVED: Recommendation signals - redundant with setups
 
             int preFilterCount = signals.size();
 
@@ -167,13 +164,12 @@ public class SignalGenerator {
             updateSignalCache(familyId, signals);
 
             // 8. Update statistics
-            updateStatistics(signals, patternTradingSignals.size(), setupTradingSignals.size(),
-                    forecastTradingSignals.size());
+            updateStatistics(signals, patternTradingSignals.size(), setupTradingSignals.size(), 0);
 
             // Debug: Log output state
-            log.info("[SIGNAL_GEN] {} | Output: {} pattern, {} setup, {} forecast | preFilter={}, postFilter={}",
+            log.info("[SIGNAL_GEN] {} | Output: {} pattern, {} setup | preFilter={}, postFilter={}",
                     familyId, patternTradingSignals.size(), setupTradingSignals.size(),
-                    forecastTradingSignals.size(), preFilterCount, signals.size());
+                    preFilterCount, signals.size());
 
             // Additional debug if 0 signals
             if (signals.isEmpty() && preFilterCount == 0) {
@@ -183,12 +179,10 @@ public class SignalGenerator {
                 else {
                     // Log setup confidences
                     intelligence.getReadySetups().forEach(s ->
-                        log.debug("[SIGNAL_GEN] {} setup {} conf={}% (need 55%)",
+                        log.debug("[SIGNAL_GEN] {} setup {} conf={}% (need 65%)",
                             familyId, s.getSetupId(), String.format("%.1f", s.getCurrentConfidence() * 100)));
                 }
-                if (forecastPredictions == 0) reason.append("NoForecasts ");
-                if (actionType != ActionType.TRADE) reason.append("NotTradeAction(" + actionType + ") ");
-                log.info("[SIGNAL_GEN] {} | Zero signals reason: {}", familyId, reason.toString().trim());
+                log.debug("[SIGNAL_GEN] {} | Zero signals - patterns={}, setups={}", familyId, hasPatternSignals, readySetupCount);
             }
 
             return signals;
@@ -301,7 +295,8 @@ public class SignalGenerator {
         }
 
         return intelligence.getReadySetups().stream()
-                .filter(setup -> setup.isActionable(0.45)) // Lowered from 0.55 for more signals
+                .filter(setup -> setup.isActionable(0.65)) // Raised to 0.65 - quality over quantity
+                .filter(setup -> setup.getBoosterConditionsMet() >= 2) // Require minimum 2 boosters
                 .map(setup -> generateSetupSignal(setup, quantScore, intelligence))
                 .filter(Objects::nonNull)
                 .collect(Collectors.toList());
@@ -366,10 +361,13 @@ public class SignalGenerator {
                 .setupId(setup.getSetupId())
                 .matchedEvents(setup.getMetConditions())
                 .patternProgress(setup.getProgress())
-                // Narrative
+                // Narrative - now with actual data instead of generic text
                 .headline(generateSetupHeadline(setup))
-                .narrative(generateSetupNarrative(setup, intelligence))
+                .narrative(buildDataDrivenNarrative(quantScore, setup))
                 .entryReasons(generateSetupEntryReasons(setup))
+                // Historical performance - REAL data from outcome tracking
+                .historicalSuccessRate(getActualSuccessRate(setup.getSetupId()))
+                .historicalSampleCount(getActualSampleCount(setup.getSetupId()))
                 // Position sizing
                 .positionSizeMultiplier(calculatePositionSize(setup.getCurrentConfidence()))
                 .riskPercentage(1.0);
@@ -609,18 +607,23 @@ public class SignalGenerator {
 
     /**
      * Filter and validate signals
+     *
+     * FIX: Added conflict resolution to prevent generating both LONG and SHORT
+     * signals for the same instrument. This was causing contradictory signals
+     * like MOMENTUM LONG + REVERSAL SHORT for the same familyId.
      */
     private List<TradingSignal> filterAndValidateSignals(List<TradingSignal> signals) {
         int originalCount = signals.size();
 
-        List<TradingSignal> filtered = signals.stream()
-                // Must be actionable
+        // Step 1: Basic filtering
+        List<TradingSignal> basicFiltered = signals.stream()
                 .filter(TradingSignal::isActionable)
-                // Remove expired
                 .filter(s -> !s.hasExpired())
-                // Minimum quality score
-                .filter(s -> s.getQualityScore() >= 30) // Lowered from 40 for more signals
-                // Remove duplicates
+                .filter(s -> s.getQualityScore() >= 50) // Raised from 30 - quality over quantity
+                .collect(Collectors.toList());
+
+        // Step 2: Remove same-direction duplicates (keep highest confidence)
+        List<TradingSignal> deduped = basicFiltered.stream()
                 .collect(Collectors.toMap(
                         s -> s.getFamilyId() + "_" + s.getDirection() + "_" + s.getCategory(),
                         s -> s,
@@ -628,9 +631,40 @@ public class SignalGenerator {
                 ))
                 .values()
                 .stream()
-                // Sort by quality
+                .collect(Collectors.toList());
+
+        // Step 3: FIX - Resolve direction conflicts per family
+        // If both LONG and SHORT signals exist for same familyId, keep only the highest confidence one
+        Map<String, TradingSignal> bestPerFamily = new HashMap<>();
+        for (TradingSignal signal : deduped) {
+            String familyId = signal.getFamilyId();
+            TradingSignal existing = bestPerFamily.get(familyId);
+
+            if (existing == null) {
+                bestPerFamily.put(familyId, signal);
+            } else if (existing.getDirection() != signal.getDirection()) {
+                // Conflict! Same family, opposite directions
+                // Keep the one with higher confidence
+                if (signal.getConfidence() > existing.getConfidence()) {
+                    log.info("[SIGNAL_GEN] Conflict resolution: {} {} (conf={}) beats {} (conf={}) for {}",
+                            signal.getDirection(), signal.getCategory(), signal.getConfidence(),
+                            existing.getDirection(), existing.getConfidence(), familyId);
+                    bestPerFamily.put(familyId, signal);
+                } else {
+                    log.info("[SIGNAL_GEN] Conflict resolution: {} {} (conf={}) beats {} (conf={}) for {}",
+                            existing.getDirection(), existing.getCategory(), existing.getConfidence(),
+                            signal.getDirection(), signal.getConfidence(), familyId);
+                }
+            } else {
+                // Same direction - keep higher confidence
+                if (signal.getConfidence() > existing.getConfidence()) {
+                    bestPerFamily.put(familyId, signal);
+                }
+            }
+        }
+
+        List<TradingSignal> filtered = bestPerFamily.values().stream()
                 .sorted((a, b) -> Integer.compare(b.getQualityScore(), a.getQualityScore()))
-                // Limit to top signals
                 .limit(5)
                 .collect(Collectors.toList());
 
@@ -685,6 +719,38 @@ public class SignalGenerator {
         if (setupId.contains("SQUEEZE")) return SignalCategory.SQUEEZE;
         if (setupId.contains("CONTINUATION")) return SignalCategory.CONTINUATION;
         return SignalCategory.MOMENTUM;
+    }
+
+    /**
+     * Get ACTUAL historical success rate from outcome tracking
+     * Returns 0.5 (no edge) if insufficient data or store not available
+     */
+    private double getActualSuccessRate(String setupId) {
+        if (signalOutcomeStore == null || setupId == null) {
+            return 0.5; // No data - neutral assumption
+        }
+        try {
+            return signalOutcomeStore.getHistoricalSuccessRate(setupId);
+        } catch (Exception e) {
+            log.debug("[SIGNAL_GEN] Could not get historical success rate for {}: {}", setupId, e.getMessage());
+            return 0.5;
+        }
+    }
+
+    /**
+     * Get ACTUAL historical sample count from outcome tracking
+     * Returns 0 if store not available
+     */
+    private int getActualSampleCount(String setupId) {
+        if (signalOutcomeStore == null || setupId == null) {
+            return 0;
+        }
+        try {
+            return signalOutcomeStore.getHistoricalSampleCount(setupId);
+        } catch (Exception e) {
+            log.debug("[SIGNAL_GEN] Could not get sample count for {}: {}", setupId, e.getMessage());
+            return 0;
+        }
     }
 
     private Horizon mapSetupHorizon(com.kotsin.consumer.enrichment.intelligence.model.SetupDefinition.SetupHorizon horizon) {
@@ -751,18 +817,121 @@ public class SignalGenerator {
                 setup.getCurrentConfidence() * 100);
     }
 
+    /**
+     * Generate data-driven narrative with actual numbers instead of generic text
+     */
     private String generateSetupNarrative(ActiveSetup setup, MarketIntelligence intelligence) {
+        // This is a stub - actual data comes from buildDataDrivenNarrative which uses quantScore
         StringBuilder narrative = new StringBuilder();
-        narrative.append(String.format("Setup %s has become ready with %.0f%% confidence. ",
-                setup.getSetupId(), setup.getCurrentConfidence() * 100));
-        narrative.append(String.format("All %d required conditions met. ", setup.getRequiredConditionsMet()));
-        if (setup.getBoosterConditionsMet() > 0) {
-            narrative.append(String.format("%d booster conditions active. ", setup.getBoosterConditionsMet()));
-        }
-        if (intelligence.getNarrative() != null) {
-            narrative.append(intelligence.getNarrative().getOneLiner());
-        }
+        narrative.append(String.format("%s %s | ", setup.getSetupId(), setup.getDirection().name()));
+        narrative.append(String.format("Confidence: %.0f%% | ", setup.getCurrentConfidence() * 100));
+        narrative.append(String.format("Required: %d/%d | ", setup.getRequiredConditionsMet(), setup.getRequiredConditionsMet()));
+        narrative.append(String.format("Boosters: %d | ", setup.getBoosterConditionsMet()));
+        narrative.append(String.format("R:R %.1f:1", setup.getRiskRewardRatio()));
         return narrative.toString();
+    }
+
+    /**
+     * Build comprehensive data-driven narrative with actual market data numbers
+     * This replaces generic text like "Exhaustion at extremes" with real values
+     */
+    private String buildDataDrivenNarrative(EnrichedQuantScore quantScore, ActiveSetup setup) {
+        StringBuilder sb = new StringBuilder();
+
+        // Direction and setup
+        sb.append(String.format("%s %s SIGNAL\n\n", setup.getDirection().name(), setup.getSetupId()));
+
+        // === WHY NOW ===
+        sb.append("WHY NOW:\n");
+
+        // OFI data from HistoricalContext
+        HistoricalContext ctx = quantScore.getHistoricalContext();
+        if (ctx != null && ctx.getOfiContext() != null) {
+            MetricContext ofiCtx = ctx.getOfiContext();
+            double ofi = ofiCtx.getCurrentValue();
+            double prevOfi = ofiCtx.getPreviousValue();
+            sb.append(String.format("- OFI: %.0f", ofi));
+            if (prevOfi != 0) {
+                double velocity = ofi - prevOfi;
+                sb.append(String.format(" (prev: %.0f, velocity: %+.0f)", prevOfi, velocity));
+            }
+            // Classify OFI
+            if (ofi > 1000) sb.append(" [STRONG BUY FLOW]");
+            else if (ofi > 500) sb.append(" [MODERATE BUY]");
+            else if (ofi < -1000) sb.append(" [STRONG SELL FLOW]");
+            else if (ofi < -500) sb.append(" [MODERATE SELL]");
+            else sb.append(" [NEUTRAL]");
+            sb.append("\n");
+
+            // Add percentile if available
+            if (ofiCtx.getPercentile() > 0) {
+                sb.append(String.format("- OFI Percentile: %.0f%%\n", ofiCtx.getPercentile() * 100));
+            }
+        }
+
+        // Volume delta from HistoricalContext
+        if (ctx != null && ctx.getVolumeDeltaContext() != null) {
+            MetricContext vdCtx = ctx.getVolumeDeltaContext();
+            double volumeDelta = vdCtx.getCurrentValue();
+            sb.append(String.format("- Volume Delta: %+.1f%%\n", volumeDelta * 100));
+        }
+
+        // Support/Resistance from TechnicalContext
+        TechnicalContext tech = quantScore.getTechnicalContext();
+        Double close = quantScore.getClose();
+        if (tech != null && close != null && close > 0) {
+            Double support = tech.getNearestSupport();
+            Double resistance = tech.getNearestResistance();
+
+            if (support != null && support > 0) {
+                double distPct = (close - support) / close * 100;
+                sb.append(String.format("- Support: %.2f (%.1f%% away)\n", support, distPct));
+            }
+            if (resistance != null && resistance > 0) {
+                double distPct = (resistance - close) / close * 100;
+                sb.append(String.format("- Resistance: %.2f (%.1f%% away)\n", resistance, distPct));
+            }
+
+            // SuperTrend
+            String superTrend = tech.isSuperTrendBullish() ? "BULLISH" : "BEARISH";
+            sb.append(String.format("- SuperTrend: %s\n", superTrend));
+
+            // Bollinger Band position
+            Double bbPctB = tech.getBbPercentB();
+            if (bbPctB != null) {
+                String bbZone;
+                if (bbPctB < 0.2) bbZone = "OVERSOLD";
+                else if (bbPctB > 0.8) bbZone = "OVERBOUGHT";
+                else bbZone = "MIDDLE";
+                sb.append(String.format("- BB %%B: %.2f [%s]\n", bbPctB, bbZone));
+            }
+        }
+
+        // GEX Regime
+        if (quantScore.getGexProfile() != null && quantScore.getGexProfile().getRegime() != null) {
+            sb.append(String.format("- GEX Regime: %s\n", quantScore.getGexProfile().getRegime().name()));
+        }
+
+        // Exhaustion flags from HistoricalContext
+        if (ctx != null) {
+            if (ctx.isSellingExhaustion()) {
+                sb.append("- EXHAUSTION DETECTED: SELLING_EXHAUSTION\n");
+            } else if (ctx.isBuyingExhaustion()) {
+                sb.append("- EXHAUSTION DETECTED: BUYING_EXHAUSTION\n");
+            }
+        }
+
+        // === CONDITIONS MET ===
+        sb.append(String.format("\nCONDITIONS:\n"));
+        sb.append(String.format("- Required: %d met\n", setup.getRequiredConditionsMet()));
+        sb.append(String.format("- Boosters: %d active\n", setup.getBoosterConditionsMet()));
+        if (setup.getMetConditions() != null && !setup.getMetConditions().isEmpty()) {
+            sb.append("- Triggers: ");
+            sb.append(String.join(", ", setup.getMetConditions()));
+            sb.append("\n");
+        }
+
+        return sb.toString();
     }
 
     private List<String> generateSetupEntryReasons(ActiveSetup setup) {
