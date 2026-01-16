@@ -69,6 +69,9 @@ public class TechnicalIndicatorEnricher {
         // Store current price in history
         storePriceHistory(familyId, timeframe, high, low, close);
 
+        // FIX: Update session data for pivot calculation
+        updateSessionData(familyId, high, low, close);
+
         // Get price history
         List<double[]> history = getPriceHistory(familyId, timeframe, BB_PERIOD + 5);
 
@@ -153,6 +156,15 @@ public class TechnicalIndicatorEnricher {
                 .monthlyPivot(pivots.get("monthlyPP"))
                 .monthlyR1(pivots.get("monthlyR1"))
                 .monthlyS1(pivots.get("monthlyS1"))
+                // Camarilla pivots
+                .camH4(pivots.get("camH4"))
+                .camH3(pivots.get("camH3"))
+                .camH2(pivots.get("camH2"))
+                .camH1(pivots.get("camH1"))
+                .camL1(pivots.get("camL1"))
+                .camL2(pivots.get("camL2"))
+                .camL3(pivots.get("camL3"))
+                .camL4(pivots.get("camL4"))
                 .nearestSupport(nearestSupport)
                 .nearestResistance(nearestResistance)
                 .distanceToSupportPct(distToSupport)
@@ -358,8 +370,154 @@ public class TechnicalIndicatorEnricher {
             });
         }
 
-        // If no cached pivots, return empty (should be populated by scheduled job)
+        // FIX: If no cached pivots, try to calculate from session data
+        if (pivots.isEmpty() || pivots.get("dailyPP") == null) {
+            Map<String, Double> sessionPivots = calculatePivotsFromSessionData(familyId);
+            if (!sessionPivots.isEmpty()) {
+                pivots.putAll(sessionPivots);
+            }
+        }
+
         return pivots;
+    }
+
+    /**
+     * Calculate pivots from accumulated session high/low/close data
+     * This is a fallback when scheduled job hasn't run yet
+     */
+    private Map<String, Double> calculatePivotsFromSessionData(String familyId) {
+        Map<String, Double> pivots = new HashMap<>();
+
+        // Get session data stored during price updates
+        String sessionKey = KEY_PREFIX + ":session:" + familyId;
+        Map<Object, Object> sessionData = redisTemplate.opsForHash().entries(sessionKey);
+
+        if (sessionData == null || sessionData.isEmpty()) {
+            return pivots;
+        }
+
+        try {
+            Double high = sessionData.get("high") != null ?
+                    Double.parseDouble(sessionData.get("high").toString()) : null;
+            Double low = sessionData.get("low") != null ?
+                    Double.parseDouble(sessionData.get("low").toString()) : null;
+            Double close = sessionData.get("close") != null ?
+                    Double.parseDouble(sessionData.get("close").toString()) : null;
+
+            if (high != null && low != null && close != null && high > 0 && low > 0 && close > 0) {
+                // Calculate standard (Floor Trader) pivots
+                calculateStandardPivots(pivots, high, low, close, "daily");
+
+                // Calculate Camarilla pivots
+                calculateCamarillaPivots(pivots, high, low, close);
+
+                // Store in Redis for future use
+                storePivots(familyId, pivots);
+
+                log.debug("[TECH] Auto-calculated pivots for {} from session data: PP={}",
+                        familyId, pivots.get("dailyPP"));
+            }
+        } catch (Exception e) {
+            log.warn("[TECH] Failed to calculate pivots from session data for {}: {}",
+                    familyId, e.getMessage());
+        }
+
+        return pivots;
+    }
+
+    /**
+     * Calculate standard floor trader pivot levels
+     */
+    private void calculateStandardPivots(Map<String, Double> pivots, double high, double low, double close, String prefix) {
+        double pp = (high + low + close) / 3;
+        double r1 = 2 * pp - low;
+        double r2 = pp + (high - low);
+        double r3 = high + 2 * (pp - low);
+        double s1 = 2 * pp - high;
+        double s2 = pp - (high - low);
+        double s3 = low - 2 * (high - pp);
+
+        pivots.put(prefix + "PP", pp);
+        pivots.put(prefix + "R1", r1);
+        pivots.put(prefix + "R2", r2);
+        pivots.put(prefix + "R3", r3);
+        pivots.put(prefix + "S1", s1);
+        pivots.put(prefix + "S2", s2);
+        pivots.put(prefix + "S3", s3);
+    }
+
+    /**
+     * Calculate Camarilla pivot levels
+     * Camarilla pivots are based on the range (H-L) and are tighter than standard pivots
+     */
+    private void calculateCamarillaPivots(Map<String, Double> pivots, double high, double low, double close) {
+        double range = high - low;
+
+        // Camarilla formula uses specific multipliers
+        double h4 = close + (range * 1.1 / 2);   // Strong resistance
+        double h3 = close + (range * 1.1 / 4);   // Resistance
+        double h2 = close + (range * 1.1 / 6);   // Minor resistance
+        double h1 = close + (range * 1.1 / 12);  // Weak resistance
+
+        double l1 = close - (range * 1.1 / 12);  // Weak support
+        double l2 = close - (range * 1.1 / 6);   // Minor support
+        double l3 = close - (range * 1.1 / 4);   // Support
+        double l4 = close - (range * 1.1 / 2);   // Strong support
+
+        pivots.put("camH4", h4);
+        pivots.put("camH3", h3);
+        pivots.put("camH2", h2);
+        pivots.put("camH1", h1);
+        pivots.put("camL1", l1);
+        pivots.put("camL2", l2);
+        pivots.put("camL3", l3);
+        pivots.put("camL4", l4);
+    }
+
+    /**
+     * Store pivots in Redis cache
+     */
+    private void storePivots(String familyId, Map<String, Double> pivots) {
+        String pivotKey = KEY_PREFIX + ":pivots:" + familyId;
+        Map<String, String> pivotStrings = new HashMap<>();
+        pivots.forEach((k, v) -> pivotStrings.put(k, String.valueOf(v)));
+        pivotStrings.put("lastUpdate", LocalDate.now().toString());
+
+        redisTemplate.opsForHash().putAll(pivotKey, pivotStrings);
+        redisTemplate.expire(pivotKey, Duration.ofDays(2));
+    }
+
+    /**
+     * Update session high/low/close as prices come in
+     * This accumulates data for pivot calculation
+     */
+    public void updateSessionData(String familyId, double high, double low, double close) {
+        String sessionKey = KEY_PREFIX + ":session:" + familyId;
+
+        // Get existing session data
+        Double existingHigh = null;
+        Double existingLow = null;
+        try {
+            Object h = redisTemplate.opsForHash().get(sessionKey, "high");
+            Object l = redisTemplate.opsForHash().get(sessionKey, "low");
+            if (h != null) existingHigh = Double.parseDouble(h.toString());
+            if (l != null) existingLow = Double.parseDouble(l.toString());
+        } catch (Exception ignored) {}
+
+        // Update high/low if new extremes
+        Map<String, String> updates = new HashMap<>();
+        if (existingHigh == null || high > existingHigh) {
+            updates.put("high", String.valueOf(high));
+        }
+        if (existingLow == null || low < existingLow) {
+            updates.put("low", String.valueOf(low));
+        }
+        updates.put("close", String.valueOf(close)); // Always update close
+
+        if (!updates.isEmpty()) {
+            redisTemplate.opsForHash().putAll(sessionKey, updates);
+            redisTemplate.expire(sessionKey, Duration.ofDays(1));
+        }
     }
 
     /**
@@ -502,12 +660,16 @@ public class TechnicalIndicatorEnricher {
     private Double findNearestSupport(double price, Map<String, Double> pivots, double bbLower) {
         List<Double> supports = new ArrayList<>();
 
-        // Add pivot supports
+        // Add standard pivot supports
         if (pivots.get("dailyS1") != null) supports.add(pivots.get("dailyS1"));
         if (pivots.get("dailyS2") != null) supports.add(pivots.get("dailyS2"));
         if (pivots.get("dailyS3") != null) supports.add(pivots.get("dailyS3"));
         if (pivots.get("weeklyS1") != null) supports.add(pivots.get("weeklyS1"));
         if (pivots.get("monthlyS1") != null) supports.add(pivots.get("monthlyS1"));
+
+        // Add Camarilla supports (L3 and L4 are key levels)
+        if (pivots.get("camL3") != null) supports.add(pivots.get("camL3"));
+        if (pivots.get("camL4") != null) supports.add(pivots.get("camL4"));
 
         // Add BB lower as support
         supports.add(bbLower);
@@ -522,12 +684,16 @@ public class TechnicalIndicatorEnricher {
     private Double findNearestResistance(double price, Map<String, Double> pivots, double bbUpper) {
         List<Double> resistances = new ArrayList<>();
 
-        // Add pivot resistances
+        // Add standard pivot resistances
         if (pivots.get("dailyR1") != null) resistances.add(pivots.get("dailyR1"));
         if (pivots.get("dailyR2") != null) resistances.add(pivots.get("dailyR2"));
         if (pivots.get("dailyR3") != null) resistances.add(pivots.get("dailyR3"));
         if (pivots.get("weeklyR1") != null) resistances.add(pivots.get("weeklyR1"));
         if (pivots.get("monthlyR1") != null) resistances.add(pivots.get("monthlyR1"));
+
+        // Add Camarilla resistances (H3 and H4 are key levels)
+        if (pivots.get("camH3") != null) resistances.add(pivots.get("camH3"));
+        if (pivots.get("camH4") != null) resistances.add(pivots.get("camH4"));
 
         // Add BB upper as resistance
         resistances.add(bbUpper);

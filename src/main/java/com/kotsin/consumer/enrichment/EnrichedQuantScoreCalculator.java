@@ -317,20 +317,24 @@ public class EnrichedQuantScoreCalculator {
                     technicalContext, confluenceResult, detectedEvents);
 
             // =============== Build Enriched Score ===============
-            // FIX: Extract scripCode, companyName, and priceTimestamp from FamilyCandle
+            // FIX: Extract scripCode, companyName, exchange, and priceTimestamp from FamilyCandle
             // Previously these were set on tempScore but NOT included in the final build!
             String scripCode = family.getFuture() != null ? family.getFuture().getScripCode() : null;
             String companyName = family.getFuture() != null ? family.getFuture().getCompanyName() : null;
+            // FIX: Extract exchange from instrument - critical for MCX vs NSE distinction
+            String exchange = family.getFuture() != null ? family.getFuture().getExchange() :
+                             (family.getEquity() != null ? family.getEquity().getExchange() : "N");
             // FIX: Capture the candle's timestamp for accurate price-time correlation
             long priceTimestamp = family.getWindowEndMillis() > 0 ? family.getWindowEndMillis() :
                                   (family.getTimestamp() > 0 ? family.getTimestamp() : System.currentTimeMillis());
 
             EnrichedQuantScore enrichedScore = EnrichedQuantScore.builder()
                     .baseScore(baseScore)
-                    // FIX: Include scripCode, companyName, close, and priceTimestamp
+                    // FIX: Include scripCode, companyName, exchange, close, and priceTimestamp
                     // These were previously missing, causing NULL values in TradingSignal
                     .scripCode(scripCode)
                     .companyName(companyName)
+                    .exchange(exchange)
                     .close(currentPrice)
                     .priceTimestamp(priceTimestamp)
                     // Session Structure (CRITICAL for context-aware signals)
@@ -1056,6 +1060,7 @@ public class EnrichedQuantScoreCalculator {
         // Instrument context (for PatternSignal generation)
         private String scripCode;
         private String companyName;
+        private String exchange;  // FIX: "N" for NSE, "M" for MCX, "B" for BSE
         private double close;
 
         /**

@@ -368,6 +368,7 @@ public class SignalGenerator {
                 .familyId(setup.getFamilyId())
                 .scripCode(quantScore.getScripCode())
                 .companyName(quantScore.getCompanyName())
+                .exchange(quantScore.getExchange())  // FIX: Propagate exchange for MCX/NSE/BSE
                 .generatedAt(Instant.now())  // FIX: Signal generation time for staleness check
                 .dataTimestamp(dataTime)     // FIX: Market data time for price-time correlation
                 .expiresAt(setup.getExpiresAt())
@@ -405,6 +406,37 @@ public class SignalGenerator {
                 .positionSizeMultiplier(calculatePositionSize(setup.getCurrentConfidence()))
                 .riskPercentage(1.0);
 
+        // FIX: Add technical context fields directly to signal for TradingSignalPublisher
+        TechnicalContext techCtx = quantScore.getTechnicalContext();
+        if (techCtx != null) {
+            // SuperTrend direction (bullish/bearish)
+            builder.superTrendDirection(techCtx.isSuperTrendBullish() ? "BULLISH" : "BEARISH");
+        }
+        // Nearest support/resistance from confluence result
+        Double nearSupport = quantScore.getNearestSupportPrice();
+        if (nearSupport != null && nearSupport > 0) {
+            builder.nearestSupport(nearSupport);
+        }
+        Double nearResistance = quantScore.getNearestResistancePrice();
+        if (nearResistance != null && nearResistance > 0) {
+            builder.nearestResistance(nearResistance);
+        }
+
+        // GEX/Options context
+        GEXProfile gexProfile = quantScore.getGexProfile();
+        if (gexProfile != null) {
+            if (gexProfile.getRegime() != null) {
+                builder.gexRegime(gexProfile.getRegime().name());
+            }
+            if (gexProfile.getGammaFlipLevel() != null && gexProfile.getGammaFlipLevel() > 0) {
+                builder.gammaFlipLevel(gexProfile.getGammaFlipLevel());
+            }
+        }
+        MaxPainProfile mpProfile = quantScore.getMaxPainProfile();
+        if (mpProfile != null && mpProfile.getMaxPainStrike() > 0) {
+            builder.maxPainLevel(mpProfile.getMaxPainStrike());
+        }
+
         // Build rationale
         builder.rationale(buildSetupRationale(setup, quantScore, intelligence));
 
@@ -413,6 +445,112 @@ public class SignalGenerator {
 
         // Add predicted events
         builder.predictedEvents(generateSetupPredictions(setup, intelligence));
+
+        // FIX: Populate metadata map with session/context values for TradingSignalPublisher
+        Map<String, Object> metadata = new HashMap<>();
+
+        // Session Context
+        if (quantScore.hasSessionStructure()) {
+            metadata.put("sessionPosition", quantScore.getPositionInRange() * 100);
+            metadata.put("sessionPositionDesc", quantScore.getSessionPositionDescription());
+            metadata.put("vBottomDetected", quantScore.hasVBottomDetected());
+            metadata.put("vTopDetected", quantScore.hasVTopDetected());
+            metadata.put("failedBreakoutCount", quantScore.getFailedBreakoutCount());
+            metadata.put("failedBreakdownCount", quantScore.getFailedBreakdownCount());
+        }
+
+        // Current session from TimeContext
+        if (quantScore.getTimeContext() != null && quantScore.getTimeContext().getSession() != null) {
+            metadata.put("currentSession", quantScore.getTimeContext().getSession().name());
+        }
+
+        // Family Context
+        if (quantScore.hasFamilyContext()) {
+            double bullishAlign = quantScore.getFamilyBullishAlignment() * 100;
+            double bearishAlign = quantScore.getFamilyBearishAlignment() * 100;
+
+            // Determine family bias
+            String familyBias;
+            if (quantScore.isFamilyFullyBullish()) {
+                familyBias = "BULLISH";
+                metadata.put("fullyAligned", true);
+            } else if (quantScore.isFamilyFullyBearish()) {
+                familyBias = "BEARISH";
+                metadata.put("fullyAligned", true);
+            } else if (bullishAlign > bearishAlign + 20) {
+                familyBias = "WEAK_BULLISH";
+            } else if (bearishAlign > bullishAlign + 20) {
+                familyBias = "WEAK_BEARISH";
+            } else {
+                familyBias = "NEUTRAL";
+            }
+            metadata.put("familyBias", familyBias);
+            metadata.put("familyAlignment", Math.max(bullishAlign, bearishAlign));
+
+            // Divergence
+            metadata.put("hasDivergence", quantScore.hasFamilyDivergence());
+            if (quantScore.hasFamilyDivergence()) {
+                metadata.put("divergences", quantScore.getFamilyDivergences());
+            }
+
+            // Squeeze setups
+            metadata.put("shortSqueezeSetup", quantScore.hasShortSqueezeSetup());
+            metadata.put("longSqueezeSetup", quantScore.hasLongSqueezeSetup());
+
+            // Interpretation
+            String interpretation = quantScore.getFamilyContextInterpretation();
+            if (interpretation != null) {
+                metadata.put("familyInterpretation", interpretation);
+            }
+        }
+
+        // Technical Context (reuse techCtx from above)
+        if (techCtx != null) {
+            metadata.put("superTrendDirection", techCtx.isSuperTrendBullish() ? "BULLISH" : "BEARISH");
+            metadata.put("superTrendFlip", techCtx.isSuperTrendFlip());
+            metadata.put("bbPercentB", techCtx.getBbPercentB());
+            metadata.put("bbSqueeze", techCtx.isBbSqueezing());
+            if (techCtx.getDailyPivot() != null && techCtx.getDailyPivot() > 0) {
+                metadata.put("dailyPivot", techCtx.getDailyPivot());
+            }
+        }
+        // Support/Resistance from confluence
+        if (nearSupport != null && nearSupport > 0) {
+            metadata.put("nearestSupport", nearSupport);
+        }
+        if (nearResistance != null && nearResistance > 0) {
+            metadata.put("nearestResistance", nearResistance);
+        }
+
+        // GEX/Options Context (reuse gexProfile from above)
+        if (gexProfile != null) {
+            if (gexProfile.getRegime() != null) {
+                metadata.put("gexRegime", gexProfile.getRegime().name());
+            }
+            if (gexProfile.getGammaFlipLevel() != null && gexProfile.getGammaFlipLevel() > 0) {
+                metadata.put("gammaFlipLevel", gexProfile.getGammaFlipLevel());
+            }
+        }
+        if (mpProfile != null && mpProfile.getMaxPainStrike() > 0) {
+            metadata.put("maxPainLevel", mpProfile.getMaxPainStrike());
+        }
+
+        // Event Tracking
+        List<DetectedEvent> detectedEvents = quantScore.getDetectedEvents();
+        if (detectedEvents != null && !detectedEvents.isEmpty()) {
+            metadata.put("triggerEvents", detectedEvents.stream()
+                    .map(e -> e.getEventType().name())
+                    .collect(Collectors.toList()));
+            metadata.put("eventCount", detectedEvents.size());
+        }
+
+        // Context modifier (from intelligence action confidence)
+        if (intelligence != null && intelligence.getRecommendation() != null) {
+            ActionRecommendation rec = intelligence.getRecommendation();
+            metadata.put("contextModifier", rec.getConfidence());
+        }
+
+        builder.metadata(metadata);
 
         return builder.build();
     }
@@ -1480,7 +1618,7 @@ public class SignalGenerator {
 
     private SignalRationale buildSetupRationale(ActiveSetup setup, EnrichedQuantScore quantScore,
                                                   MarketIntelligence intelligence) {
-        return SignalRationale.builder()
+        SignalRationale.SignalRationaleBuilder builder = SignalRationale.builder()
                 .headline(generateSetupHeadline(setup))
                 .thesis(generateSetupNarrative(setup, intelligence))
                 .tradeType(setup.getDirection() == com.kotsin.consumer.enrichment.intelligence.model.SetupDefinition.SetupDirection.LONG ?
@@ -1491,8 +1629,57 @@ public class SignalGenerator {
                         .patternName(setup.getSetupId())
                         .triggerEvents(setup.getMetConditions())
                         .build())
-                .confluenceScore(setup.getCurrentConfidence())
-                .build();
+                .confluenceScore(setup.getCurrentConfidence());
+
+        // FIX: Populate family context fields from quantScore
+        if (quantScore.hasFamilyContext()) {
+            double bullishAlign = quantScore.getFamilyBullishAlignment() * 100;
+            double bearishAlign = quantScore.getFamilyBearishAlignment() * 100;
+
+            // Determine family bias
+            if (quantScore.isFamilyFullyBullish()) {
+                builder.familyBias("BULLISH");
+                builder.familyAlignment(bullishAlign);
+                builder.fullyAligned(true);
+            } else if (quantScore.isFamilyFullyBearish()) {
+                builder.familyBias("BEARISH");
+                builder.familyAlignment(bearishAlign);
+                builder.fullyAligned(true);
+            } else if (bullishAlign > bearishAlign + 20) {
+                builder.familyBias("WEAK_BULLISH");
+                builder.familyAlignment(bullishAlign);
+                builder.fullyAligned(false);
+            } else if (bearishAlign > bullishAlign + 20) {
+                builder.familyBias("WEAK_BEARISH");
+                builder.familyAlignment(bearishAlign);
+                builder.fullyAligned(false);
+            } else {
+                builder.familyBias("NEUTRAL");
+                builder.familyAlignment(Math.max(bullishAlign, bearishAlign));
+                builder.fullyAligned(false);
+            }
+
+            // Divergence detection
+            if (quantScore.hasFamilyDivergence()) {
+                builder.hasDivergence(true);
+                List<String> divDetails = quantScore.getFamilyDivergences();
+                if (divDetails != null && !divDetails.isEmpty()) {
+                    builder.divergenceDetails(new ArrayList<>(divDetails));
+                }
+            }
+
+            // Squeeze setups
+            builder.shortSqueezeSetup(quantScore.hasShortSqueezeSetup());
+            builder.longSqueezeSetup(quantScore.hasLongSqueezeSetup());
+
+            // Interpretation
+            String interpretation = quantScore.getFamilyContextInterpretation();
+            if (interpretation != null && !interpretation.isEmpty()) {
+                builder.familyInterpretation(interpretation);
+            }
+        }
+
+        return builder.build();
     }
 
     private SignalRationale buildSignalRationale(TradingSignal signal, EnrichedQuantScore quantScore,

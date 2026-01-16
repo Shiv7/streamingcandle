@@ -377,13 +377,18 @@ public class TradingSignalPublisher {
         quantSignal.put("timeConstraints", timeConstraints);
 
         // ========== EXCHANGE ==========
-        // Derive exchange from scripCode if possible
-        String exchange = "N"; // Default NSE
-        if (signal.getScripCode() != null) {
-            if (signal.getScripCode().contains("MCX") || signal.getScripCode().contains("_M_")) {
-                exchange = "M";
-            } else if (signal.getScripCode().contains("_B_")) {
-                exchange = "B";
+        // FIX: Use exchange field from signal (properly propagated from InstrumentCandle)
+        // Fall back to deriving from scripCode only if exchange is null
+        String exchange = signal.getExchange();
+        if (exchange == null || exchange.isEmpty()) {
+            // Legacy fallback - derive from scripCode patterns
+            exchange = "N"; // Default NSE
+            if (signal.getScripCode() != null) {
+                if (signal.getScripCode().contains("MCX") || signal.getScripCode().contains("_M_")) {
+                    exchange = "M";
+                } else if (signal.getScripCode().contains("_B_")) {
+                    exchange = "B";
+                }
             }
         }
         quantSignal.put("exchange", exchange);

@@ -53,6 +53,12 @@ public class TradingSignal {
     private String companyName;
 
     /**
+     * Exchange code: "N" for NSE, "M" for MCX, "B" for BSE
+     * FIX: Added to properly propagate exchange info for MCX instruments
+     */
+    private String exchange;
+
+    /**
      * Signal generation timestamp - when this signal was created by the system
      * FIX: This should always be Instant.now() for staleness checking
      */

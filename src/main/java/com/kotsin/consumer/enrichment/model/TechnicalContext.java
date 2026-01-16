@@ -151,6 +151,48 @@ public class TechnicalContext {
     private Double monthlyR1;
     private Double monthlyS1;
 
+    // ======================== CAMARILLA PIVOTS ========================
+
+    /**
+     * Camarilla H4 (Strong resistance - potential breakout level)
+     */
+    private Double camH4;
+
+    /**
+     * Camarilla H3 (Resistance - sell zone for shorts)
+     */
+    private Double camH3;
+
+    /**
+     * Camarilla H2 (Minor resistance)
+     */
+    private Double camH2;
+
+    /**
+     * Camarilla H1 (Weak resistance)
+     */
+    private Double camH1;
+
+    /**
+     * Camarilla L1 (Weak support)
+     */
+    private Double camL1;
+
+    /**
+     * Camarilla L2 (Minor support)
+     */
+    private Double camL2;
+
+    /**
+     * Camarilla L3 (Support - buy zone for longs)
+     */
+    private Double camL3;
+
+    /**
+     * Camarilla L4 (Strong support - potential breakdown level)
+     */
+    private Double camL4;
+
     /**
      * Nearest support level (any timeframe)
      */
