@@ -112,8 +112,8 @@ public class EnrichedQuantScoreCalculator {
         String familyId = family.getFamilyId();
         double price = family.getPrimaryPrice();
 
-        log.debug("[ENRICH] {} Starting enrichment pipeline | price={:.2f} | hasEquity={} | hasFuture={} | optionCount={}",
-                familyId, price, family.getEquity() != null, family.getFuture() != null,
+        log.debug("[ENRICH] {} Starting enrichment pipeline | price={} | hasEquity={} | hasFuture={} | optionCount={}",
+                familyId, String.format("%.2f", price), family.getEquity() != null, family.getFuture() != null,
                 family.getOptions() != null ? family.getOptions().size() : 0);
 
         try {
@@ -379,20 +379,24 @@ public class EnrichedQuantScoreCalculator {
 
             // Summary logging
             if (isActionableMoment || !patternSignals.isEmpty()) {
-                log.info("[ENRICH] {} COMPLETE | price={:.2f} | score={:.0f} | conf={:.0f}% | " +
+                log.info("[ENRICH] {} COMPLETE | price={} | score={} | conf={}% | " +
                                 "actionable={} | patterns={} | events={} | " +
-                                "pos={:.0f}% | familyBias={} | combinedMod={:.2f} | totalMs={}",
-                        familyId, currentPrice, adjustedScore, adjustedConfidence * 100,
+                                "pos={}% | familyBias={} | combinedMod={} | totalMs={}",
+                        familyId, String.format("%.2f", currentPrice),
+                        String.format("%.0f", adjustedScore),
+                        String.format("%.0f", adjustedConfidence * 100),
                         isActionableMoment, patternSignals.size(), detectedEvents.size(),
-                        sessionStructure != null ? sessionStructure.getPositionInRange() * 100 : 50,
+                        String.format("%.0f", sessionStructure != null ? sessionStructure.getPositionInRange() * 100 : 50),
                         familyContext != null ? familyContext.getOverallBias() : "UNKNOWN",
-                        combinedModifier, totalMs);
+                        String.format("%.2f", combinedModifier), totalMs);
             } else {
-                log.debug("[ENRICH] {} Complete | price={:.2f} | score={:.0f} | conf={:.0f}% | " +
-                                "events={} | pos={:.0f}% | totalMs={}",
-                        familyId, currentPrice, adjustedScore, adjustedConfidence * 100,
+                log.debug("[ENRICH] {} Complete | price={} | score={} | conf={}% | " +
+                                "events={} | pos={}% | totalMs={}",
+                        familyId, String.format("%.2f", currentPrice),
+                        String.format("%.0f", adjustedScore),
+                        String.format("%.0f", adjustedConfidence * 100),
                         detectedEvents.size(),
-                        sessionStructure != null ? sessionStructure.getPositionInRange() * 100 : 50,
+                        String.format("%.0f", sessionStructure != null ? sessionStructure.getPositionInRange() * 100 : 50),
                         totalMs);
             }
 

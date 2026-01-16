@@ -388,6 +388,66 @@ public class TradingSignalPublisher {
         }
         quantSignal.put("exchange", exchange);
 
+        // ========== CONTEXT-AWARE ENHANCEMENTS (SMTIS v2.0) ==========
+
+        // Session Context - extracted from signal metadata or rationale
+        if (signal.getMetadata() != null) {
+            quantSignal.put("sessionPosition", signal.getMetadata().get("sessionPosition"));
+            quantSignal.put("sessionPositionDesc", signal.getMetadata().get("sessionPositionDesc"));
+            quantSignal.put("vBottomDetected", signal.getMetadata().get("vBottomDetected"));
+            quantSignal.put("vTopDetected", signal.getMetadata().get("vTopDetected"));
+            quantSignal.put("failedBreakoutCount", signal.getMetadata().get("failedBreakoutCount"));
+            quantSignal.put("failedBreakdownCount", signal.getMetadata().get("failedBreakdownCount"));
+        }
+        quantSignal.put("currentSession", signal.getSession());
+
+        // Family Context - from signal rationale metadata
+        if (signal.getRationale() != null) {
+            quantSignal.put("familyBias", signal.getRationale().getFamilyBias());
+            quantSignal.put("familyAlignment", signal.getRationale().getFamilyAlignment());
+            quantSignal.put("fullyAligned", signal.getRationale().isFullyAligned());
+            quantSignal.put("hasDivergence", signal.getRationale().isHasDivergence());
+            quantSignal.put("divergences", signal.getRationale().getDivergenceDetails());
+            quantSignal.put("shortSqueezeSetup", signal.getRationale().isShortSqueezeSetup());
+            quantSignal.put("longSqueezeSetup", signal.getRationale().isLongSqueezeSetup());
+            quantSignal.put("familyInterpretation", signal.getRationale().getFamilyInterpretation());
+        }
+
+        // Event Tracking
+        quantSignal.put("triggerEvents", signal.getMatchedEvents());
+        quantSignal.put("eventCount", signal.getMatchedEvents() != null ? signal.getMatchedEvents().size() : 0);
+        quantSignal.put("matchedEvents", signal.getMatchedEvents());
+        quantSignal.put("eventConfirmationRate",
+                signal.getHistoricalSuccessRate() * 100); // Use historical success as proxy
+
+        // Adaptive Modifiers
+        if (signal.getConfidenceBreakdown() != null) {
+            quantSignal.put("contextModifier", signal.getConfidenceBreakdown().getContextConfidence());
+            quantSignal.put("originalConfidence", signal.getConfidenceBreakdown().getPatternConfidence());
+        }
+
+        // Technical Context
+        quantSignal.put("superTrendDirection", signal.getSuperTrendDirection());
+        quantSignal.put("bbSqueeze", signal.getMetadata() != null ?
+                signal.getMetadata().get("bbSqueeze") : null);
+        quantSignal.put("nearestSupport", signal.getNearestSupport());
+        quantSignal.put("nearestResistance", signal.getNearestResistance());
+        quantSignal.put("dailyPivot", signal.getMetadata() != null ?
+                signal.getMetadata().get("dailyPivot") : null);
+        quantSignal.put("maxPainLevel", signal.getMaxPainLevel());
+        quantSignal.put("gammaFlipLevel", signal.getGammaFlipLevel());
+        quantSignal.put("gexRegime", signal.getGexRegime());
+
+        // Invalidation Monitoring
+        if (signal.getInvalidationWatch() != null && !signal.getInvalidationWatch().isEmpty()) {
+            quantSignal.put("invalidationWatch", signal.getInvalidationWatch());
+        }
+        quantSignal.put("invalidationPrice", signal.getInvalidationPrice());
+
+        // Predictions
+        quantSignal.put("predictedEvents", signal.getPredictedEvents());
+        quantSignal.put("expectedPriceAction", signal.getExpectedPriceAction());
+
         log.debug("[SIGNAL_PUB] Converted TradingSignal {} to QuantSignal format: quantScore={}, actionable={}, direction={}",
                 signal.getSignalId(), quantScore, signal.isActionable(), signal.getDirection());
 

@@ -315,9 +315,10 @@ public class SignalGenerator {
                 continue;
             }
 
-            // Check booster requirement (minimum 2)
-            if (boosters < 2) {
-                log.debug("[SIGNAL_GEN] {} setup {} FILTERED: boosters={} < 2 required | metConditions={}",
+            // Check booster requirement (minimum 1 for testing - was 2 in production)
+            // TEST MODE: Reduced to 1 to capture more signals including failure cases
+            if (boosters < 1) {
+                log.debug("[SIGNAL_GEN] {} setup {} FILTERED: boosters={} < 1 required | metConditions={}",
                         familyId, setup.getSetupId(), boosters, setup.getMetConditions());
                 continue;
             }

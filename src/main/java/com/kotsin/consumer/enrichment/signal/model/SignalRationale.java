@@ -362,6 +362,49 @@ public class SignalRationale {
         }
     }
 
+    // ======================== FAMILY CONTEXT (Multi-Instrument) ========================
+
+    /**
+     * Family bias (from FamilyContextAnalyzer)
+     */
+    private String familyBias;
+
+    /**
+     * Family alignment percentage (0-100)
+     */
+    private Double familyAlignment;
+
+    /**
+     * Is family fully aligned (all instruments agree)
+     */
+    private boolean fullyAligned;
+
+    /**
+     * Has divergence detected (options vs price)
+     */
+    private boolean hasDivergence;
+
+    /**
+     * Divergence details
+     */
+    @Builder.Default
+    private List<String> divergenceDetails = new ArrayList<>();
+
+    /**
+     * Short squeeze setup detected
+     */
+    private boolean shortSqueezeSetup;
+
+    /**
+     * Long squeeze setup detected
+     */
+    private boolean longSqueezeSetup;
+
+    /**
+     * Family context interpretation
+     */
+    private String familyInterpretation;
+
     // ======================== EDGE DEFINITION ========================
 
     /**

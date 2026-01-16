@@ -65,10 +65,10 @@ public class EnrichmentPipeline {
     private long totalSignalsGenerated = 0;
     private long totalSignalsPublished = 0;
 
-    // Minimum timeframe for signal generation (5m = 5 minutes)
-    // 1m signals are pure noise - skip them
+    // TEST MODE: Allow all timeframes including 1m for testing/debugging
+    // In production, 1m signals are noise - keep only 5m+ for live trading
     private static final java.util.Set<String> SIGNAL_ALLOWED_TIMEFRAMES = java.util.Set.of(
-            "5m", "15m", "30m", "1h", "2h", "4h", "1d"
+            "1m", "2m", "3m", "5m", "15m", "30m", "1h", "2h", "4h", "1d"
     );
 
     /**
