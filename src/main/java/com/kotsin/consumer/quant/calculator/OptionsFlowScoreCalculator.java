@@ -42,6 +42,7 @@ public class OptionsFlowScoreCalculator {
 
     /**
      * Calculate PCR signal score (0-5)
+     * FIX: Added guards against division by zero when PCR thresholds = 0
      */
     private double calculatePCRScore(FamilyCandle family) {
         double maxPoints = 5.0;
@@ -51,16 +52,25 @@ public class OptionsFlowScoreCalculator {
             return 0;
         }
 
+        double fearThreshold = config.getOptionsFlow().getPcrExtremeFear();
+        double greedThreshold = config.getOptionsFlow().getPcrExtremeGreed();
+
         // Extreme PCR values are contrarian signals
-        if (pcr > config.getOptionsFlow().getPcrExtremeFear()) {
+        if (pcr > fearThreshold) {
             // Extreme fear (high puts) - contrarian bullish
-            double excess = (pcr - config.getOptionsFlow().getPcrExtremeFear()) /
-                           config.getOptionsFlow().getPcrExtremeFear();
+            // FIX: Guard against division by zero when fearThreshold = 0
+            if (fearThreshold <= 0) {
+                return maxPoints * 0.7;  // Can't calculate excess, use base score
+            }
+            double excess = (pcr - fearThreshold) / fearThreshold;
             return maxPoints * Math.min(1.0, 0.7 + 0.3 * excess);
-        } else if (pcr < config.getOptionsFlow().getPcrExtremeGreed()) {
+        } else if (pcr < greedThreshold) {
             // Extreme greed (low puts) - contrarian bearish
-            double deficit = (config.getOptionsFlow().getPcrExtremeGreed() - pcr) /
-                            config.getOptionsFlow().getPcrExtremeGreed();
+            // FIX: Guard against division by zero when greedThreshold = 0
+            if (greedThreshold <= 0) {
+                return maxPoints * 0.7;  // Can't calculate deficit, use base score
+            }
+            double deficit = (greedThreshold - pcr) / greedThreshold;
             return maxPoints * Math.min(1.0, 0.7 + 0.3 * deficit);
         } else if (pcr < config.getOptionsFlow().getPcrBullishThreshold()) {
             // Normal bullish range

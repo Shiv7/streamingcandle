@@ -130,8 +130,8 @@ public class IndexRegimeCalculator {
         // Index_Context_Score = Index_Trend_Dir × Index_Regime_Strength
         double indexContextScore = direction * (aggregatedStrength * sessionModifier);
 
-        log.info("[IndexRegime] {} | EMA-based formula | trendDir={} strength={:.3f} contextScore={:.3f} session={}",
-            indexName, direction, aggregatedStrength * sessionModifier, indexContextScore, sessionPhase);
+        log.info("[IndexRegime] {} | EMA-based formula | trendDir={} strength={} contextScore={} session={}",
+            indexName, direction, String.format("%.3f", aggregatedStrength * sessionModifier), String.format("%.3f", indexContextScore), sessionPhase);
 
         IndexRegime result = IndexRegime.builder()
                 .indexName(indexName)
@@ -243,12 +243,12 @@ public class IndexRegimeCalculator {
         RegimeLabel label = RegimeLabel.fromStrengthAndDirection(regimeStrength, direction);
         
         // Logging at each step
-        log.debug("[IndexRegime-{}] EMA20={:.2f} EMA50={:.2f} trendDir={} trendStrength={:.3f}", 
-            timeframe, ema20, ema50, indexTrendDir, indexTrendStrength);
-        log.debug("[IndexRegime-{}] persistence={:.3f} ({} bars) atrPct={:.3f} volumeROC5={:.3f}", 
-            timeframe, indexPersistence, consecutiveBars, atrPct, volumeROC5);
-        log.debug("[IndexRegime-{}] NEW EMA-based regimeStrength={:.3f}", 
-            timeframe, regimeStrength);
+        log.debug("[IndexRegime-{}] EMA20={} EMA50={} trendDir={} trendStrength={}",
+            timeframe, String.format("%.2f", ema20), String.format("%.2f", ema50), indexTrendDir, String.format("%.3f", indexTrendStrength));
+        log.debug("[IndexRegime-{}] persistence={} ({} bars) atrPct={} volumeROC5={}",
+            timeframe, String.format("%.3f", indexPersistence), consecutiveBars, String.format("%.3f", atrPct), String.format("%.3f", volumeROC5));
+        log.debug("[IndexRegime-{}] NEW EMA-based regimeStrength={}",
+            timeframe, String.format("%.3f", regimeStrength));
 
         // Get VWAP for legacy fields (still stored but not used in new formula)
         double vwap = current.getVwap() > 0 ? current.getVwap() : current.getClose();

@@ -352,9 +352,10 @@ public class QuantScoreCalculator {
             return MicrostructureSummary.builder().build();
         }
 
-        double totalOFI = 0, totalVPIN = 0, totalDepth = 0, totalLambda = 0;
+        double totalOFI = 0, totalVPIN = 0, totalDepth = 0, totalLambda = 0, totalSpread = 0;
         long totalAggBuy = 0, totalAggSell = 0;
         int count = 0;
+        int spreadCount = 0;
 
         for (OptionCandle opt : options) {
             if (opt == null) continue;
@@ -362,6 +363,10 @@ public class QuantScoreCalculator {
             if (opt.getVpin() != null) totalVPIN += opt.getVpin();
             if (opt.getDepthImbalance() != null) totalDepth += opt.getDepthImbalance();
             if (opt.getKyleLambda() != null) totalLambda += opt.getKyleLambda();
+            if (opt.getBidAskSpread() != null && opt.getBidAskSpread() > 0) {
+                totalSpread += opt.getBidAskSpread();
+                spreadCount++;
+            }
             if (opt.getAggressiveBuyVolume() != null) totalAggBuy += opt.getAggressiveBuyVolume();
             if (opt.getAggressiveSellVolume() != null) totalAggSell += opt.getAggressiveSellVolume();
             count++;
@@ -375,6 +380,7 @@ public class QuantScoreCalculator {
         double avgVPIN = totalVPIN / count;
         double avgDepth = totalDepth / count;
         double avgLambda = totalLambda / count;
+        double avgSpread = spreadCount > 0 ? totalSpread / spreadCount : 0;
 
         long totalAgg = totalAggBuy + totalAggSell;
         double buyRatio = totalAgg > 0 ? (double) totalAggBuy / totalAgg : 0.5;
@@ -388,6 +394,7 @@ public class QuantScoreCalculator {
             .avgVPIN(avgVPIN)
             .avgDepthImbalance(avgDepth)
             .avgKyleLambda(avgLambda)
+            .avgSpread(avgSpread)
             .aggressiveBuyRatio(buyRatio)
             .aggressiveSellRatio(sellRatio)
             .flowDirection(flowDir)

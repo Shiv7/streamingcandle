@@ -103,6 +103,9 @@ public class QuantKafkaConfig {
         return template;
     }
 
+    // Note: KafkaTemplate<String, String> for intelligence/narrative publishing
+    // is provided by MasterArchKafkaConfig.stringKafkaTemplate - no need to duplicate
+
     // ========== Consumer Configuration ==========
 
     /**

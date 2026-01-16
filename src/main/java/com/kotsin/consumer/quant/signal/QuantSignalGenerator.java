@@ -117,14 +117,21 @@ public class QuantSignalGenerator {
         // Time constraints
         TimeConstraints timeConstraints = buildTimeConstraints(family);
 
+        // FIX: Use candle timestamp instead of processing time for accurate price-time correlation
+        long signalTimestamp = family.getWindowEndMillis() > 0
+            ? family.getWindowEndMillis()
+            : family.getTimestamp() > 0
+                ? family.getTimestamp()
+                : System.currentTimeMillis();
+
         return QuantTradingSignal.builder()
             .signalId(UUID.randomUUID().toString())
             .scripCode(score.getScripCode())
             .symbol(score.getSymbol())
             .companyName(family.getSymbol())
             .exchange("NSE")
-            .timestamp(System.currentTimeMillis())
-            .humanReadableTime(TIME_FORMATTER.format(Instant.now()))
+            .timestamp(signalTimestamp)
+            .humanReadableTime(TIME_FORMATTER.format(Instant.ofEpochMilli(signalTimestamp)))
 
             // Quant score reference
             .quantScore(score.getQuantScore())

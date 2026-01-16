@@ -90,6 +90,11 @@ public class CrossInstrumentScoreCalculator {
                          (premium < -threshold && priceDirection < 0);
 
         if (aligned) {
+            // FIX: Guard against division by zero when threshold = 0
+            if (threshold <= 0) {
+                // Can't normalize, return base score for alignment
+                return maxPoints * 0.7;
+            }
             double magnitude = Math.min(1.0, Math.abs(premium) / (threshold * 3));
             return maxPoints * (0.6 + 0.4 * magnitude);
         }

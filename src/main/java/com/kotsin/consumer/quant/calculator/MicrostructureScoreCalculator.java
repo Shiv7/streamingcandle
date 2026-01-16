@@ -81,6 +81,11 @@ public class MicrostructureScoreCalculator {
         if (ofiCount > 0) {
             double avgOFI = totalOFI / ofiCount;
             double threshold = config.getMicrostructure().getOfiSignificantThreshold();
+            // FIX: Guard against division by zero when threshold = 0
+            if (threshold <= 0) {
+                // Can't normalize, return score based on sign of OFI
+                return maxPoints * (avgOFI != 0 ? 0.5 : 0);
+            }
             double normalized = Math.tanh(avgOFI / threshold);
             return maxPoints * Math.abs(normalized);
         }
@@ -150,6 +155,11 @@ public class MicrostructureScoreCalculator {
 
         // Strong imbalance in either direction is actionable
         if (Math.abs(avgImbalance) > threshold) {
+            // FIX: Guard against division by zero when threshold = 0
+            if (threshold <= 0) {
+                // Can't normalize, return base score for significant imbalance
+                return maxPoints * 0.7;
+            }
             double normalized = Math.min(1.0, Math.abs(avgImbalance) / (threshold * 2));
             return maxPoints * normalized;
         }

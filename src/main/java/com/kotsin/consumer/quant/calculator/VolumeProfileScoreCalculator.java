@@ -51,6 +51,7 @@ public class VolumeProfileScoreCalculator {
 
     /**
      * Calculate POC migration score (0-4)
+     * FIX: Added guard against division by zero when pocMigrationSignificant = 0
      */
     private double calculatePOCMigrationScore(EvolutionMetrics.VolumeProfileEvolution vol) {
         double maxPoints = 4.0;
@@ -64,6 +65,11 @@ public class VolumeProfileScoreCalculator {
 
         // Significant POC migration indicates trend
         if (Math.abs(migration) > threshold) {
+            // FIX: Guard against division by zero when threshold = 0
+            if (threshold <= 0) {
+                // Can't normalize, return base score for significant migration
+                return maxPoints * 0.7;
+            }
             double normalized = Math.min(1.0, Math.abs(migration) / (threshold * 2));
             return maxPoints * (0.6 + 0.4 * normalized);
         }

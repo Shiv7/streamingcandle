@@ -54,7 +54,7 @@ public class MultiTimeframeLevelCalculator {
     private static final ZoneId IST = ZoneId.of("Asia/Kolkata");
     private static final DateTimeFormatter DATETIME_FORMATTER = DateTimeFormatter.ISO_LOCAL_DATE_TIME;
 
-    @Value("${curated.levels.api.base-url:http://13.203.60.173:8002}")
+    @Value("${curated.levels.api.base-url:http://localhost:8002}")
     private String historicalApiBaseUrl;
 
     @Value("${curated.levels.api.timeout-ms:5000}")

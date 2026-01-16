@@ -39,6 +39,8 @@ public final class KafkaTopics {
     public static final String WATCHLIST_RANKED = "watchlist-ranked";
 
     // ========== Trading Signal Topics ==========
+    /** @deprecated Use {@link #TRADING_SIGNALS_V2} - unified signal topic for all signal types */
+    @Deprecated
     public static final String TRADING_SIGNALS = "trading-signals";
 
     // ========== NEW: Instrument Candle Topics ==========
@@ -83,7 +85,30 @@ public final class KafkaTopics {
 
     // ========== NEW: Quant Score Topics ==========
     public static final String QUANT_SCORES = "quant-scores";
+    /** @deprecated Use {@link #TRADING_SIGNALS_V2} - unified signal topic for all signal types */
+    @Deprecated
     public static final String QUANT_TRADING_SIGNALS = "quant-trading-signals";
+
+    // ========== NEW: Enrichment Pipeline Topics (SMTIS v2.0) ==========
+    // Signal topics - UNIFIED: All signal types (pattern, quant, enrichment) publish here
+    public static final String TRADING_SIGNALS_V2 = "trading-signals-v2";
+    public static final String TRADING_SIGNALS_HIGH_PRIORITY = "trading-signals-high-priority";
+    public static final String TRADING_SIGNALS_ALERTS = "trading-signals-alerts";
+
+    // Pattern topics
+    public static final String PATTERN_SIGNALS = "pattern-signals";
+    public static final String PATTERN_OUTCOMES = "pattern-outcomes";
+
+    // Intelligence topics (Phase 5-6)
+    public static final String MARKET_NARRATIVE = "market-narrative";
+    public static final String MARKET_INTELLIGENCE = "market-intelligence";
+    public static final String ACTIVE_SETUPS = "active-setups";
+    public static final String OPPORTUNITY_FORECAST = "opportunity-forecast";
+
+    // Outcome topics
+    public static final String TRADE_OUTCOMES = "trade-outcomes";
+    public static final String PAPER_TRADE_OUTCOMES = "paper-trade-outcomes";
+    public static final String SIGNAL_EXPIRATIONS = "signal-expirations";
 
     // ========== State Store Names ==========
     public static final String STORE_FMA_HISTORY = "fma-candle-history";

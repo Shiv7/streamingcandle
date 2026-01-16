@@ -310,6 +310,10 @@ public class QuantTradingSignal {
     private String timeframe;             // 1m, 5m, 15m, etc.
     private int categoriesAboveThreshold; // How many of 8 categories are strong
 
+    // Phase 1 SMTIS: Enrichment context
+    private String enrichmentNote;        // Historical context insights (e.g., "OFI flip detected")
+    private boolean isActionableMoment;   // True if historical context suggests actionable moment
+
     // ========== CONVENIENCE METHODS ==========
 
     public boolean isLong() {

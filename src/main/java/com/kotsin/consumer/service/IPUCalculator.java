@@ -110,8 +110,8 @@ public class IPUCalculator {
             volumeDeltaPct = (aggressiveBuyVol - aggressiveSellVol) / (double) (totalAggressive + cfg.getEpsilon());
             volumeDeltaAbs = Math.abs(volumeDeltaPct);
             usingAggressiveVolume = true;
-            log.debug("{}: Using AGGRESSIVE volume delta: {:.2f}% (buy={} sell={})",
-                     current.getScripCode(), volumeDeltaPct * 100, aggressiveBuyVol, aggressiveSellVol);
+            log.debug("{}: Using AGGRESSIVE volume delta: {}% (buy={} sell={})",
+                     current.getScripCode(), String.format("%.2f", volumeDeltaPct * 100), aggressiveBuyVol, aggressiveSellVol);
         } else {
             // Fallback to REGULAR volume (but flag as lower confidence)
             double totalVolume = current.getBuyVolume() + current.getSellVolume() + cfg.getEpsilon();
@@ -158,8 +158,8 @@ public class IPUCalculator {
         }
 
         if (vpinRaw > 0.5) {
-            log.warn("⚠️ HIGH VPIN for {}: {:.3f} - TOXIC FLOW DETECTED! Confidence reduced to {:.1f}%",
-                     current.getScripCode(), vpinRaw, vpinConfidence * 100);
+            log.warn("⚠️ HIGH VPIN for {}: {} - TOXIC FLOW DETECTED! Confidence reduced to {}%",
+                     current.getScripCode(), String.format("%.3f", vpinRaw), String.format("%.1f", vpinConfidence * 100));
         }
 
         // Agreement check (3 core signals - VPIN is applied separately as confidence)
@@ -190,8 +190,8 @@ public class IPUCalculator {
         // PHASE 1 ENHANCEMENT: Reduce confidence if using passive volume instead of aggressive
         if (!usingAggressiveVolume && ofQuality > 0) {
             ofQuality *= 0.7;  // 30% confidence penalty for passive flow
-            log.debug("{}: Applied passive volume penalty, adjusted ofQuality: {:.3f}",
-                     current.getScripCode(), ofQuality);
+            log.debug("{}: Applied passive volume penalty, adjusted ofQuality: {}",
+                     current.getScripCode(), String.format("%.3f", ofQuality));
         }
 
         // ========== STEP 4: Institutional Proxy Score ==========
@@ -394,11 +394,11 @@ public class IPUCalculator {
             double originalConviction = directionalConviction;
             directionalConviction *= gapAdjustment;
             
-            log.debug("{}: Gap adjustment | {} | conviction: {:.3f} -> {:.3f} ({}x)",
+            log.debug("{}: Gap adjustment | {} | conviction: {} -> {} ({}x)",
                      current.getScripCode(),
                      gapContext.name(),
-                     originalConviction,
-                     directionalConviction,
+                     String.format("%.3f", originalConviction),
+                     String.format("%.3f", directionalConviction),
                      gapAdjustment);
             
             // Gap fill = reversal signal! Flip direction if gap filled
@@ -482,8 +482,8 @@ public class IPUCalculator {
 
         if (liquidityScore < 0.2) {
             // VERY POOR liquidity = DON'T TRADE AT ALL!
-            log.warn("🚫 {} has VERY POOR liquidity ({:.2f}) - returning EMPTY IPU (avoid trading!)",
-                     current.getScripCode(), liquidityScore);
+            log.warn("{} has VERY POOR liquidity ({}) - returning EMPTY IPU (avoid trading!)",
+                     current.getScripCode(), String.format("%.2f", liquidityScore));
             return emptyOutput(timeframe);
         }
 
@@ -494,8 +494,8 @@ public class IPUCalculator {
 
         if (spreadPct > 0.01) {
             spreadQuality = 0.50;  // Spread > 1% = very poor execution
-            log.warn("⚠️ WIDE SPREAD {}: {:.2f}% - reducing IPU",
-                     current.getScripCode(), spreadPct * 100);
+            log.warn("WIDE SPREAD {}: {}% - reducing IPU",
+                     current.getScripCode(), String.format("%.2f", spreadPct * 100));
         } else if (spreadPct > 0.005) {
             spreadQuality = 0.75;  // Moderate spread
         } else if (spreadPct > 0.002) {
@@ -522,11 +522,11 @@ public class IPUCalculator {
         if (liquidityScore < 0.7) {
             double originalScore = finalIpuScore;
             finalIpuScore *= liquidityScore;
-            log.debug("{}: Liquidity adjustment | tier={} | score: {:.3f} -> {:.3f} ({}x)",
+            log.debug("{}: Liquidity adjustment | tier={} | score: {} -> {} ({}x)",
                      current.getScripCode(),
                      liquidityTier.name(),
-                     originalScore,
-                     finalIpuScore,
+                     String.format("%.3f", originalScore),
+                     String.format("%.3f", finalIpuScore),
                      liquidityScore);
         }
         

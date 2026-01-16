@@ -53,7 +53,9 @@ public class BlackScholesGreeks {
             timeToExpiryYears = MIN_TIME_TO_EXPIRY_YEARS;
         }
         
-        if (volatility < 0 || volatility > 2.0) {
+        // FIX: Changed volatility < 0 to volatility <= 0 to catch zero volatility
+        // Zero volatility causes division by zero in gamma calculation
+        if (volatility <= 0 || volatility > 2.0) {
             // Unreasonable volatility - use 30% as default
             log.warn("Invalid volatility: {}, using 0.30", volatility);
             volatility = 0.30;

@@ -74,8 +74,8 @@ public class GapFieldPopulator {
         // Log significant gaps
         if (Math.abs(gapPercent) > GAP_THRESHOLD) {
             String direction = gapPercent > 0 ? "UP" : "DOWN";
-            log.info("📊 GAP {} for {}: {:.2f}% (open={:.2f}, prevClose={:.2f})",
-                     direction, scripCode, gapPercent, open, previousDayClose);
+            log.info("GAP {} for {}: {}% (open={}, prevClose={})",
+                     direction, scripCode, String.format("%.2f", gapPercent), String.format("%.2f", open), String.format("%.2f", previousDayClose));
         }
     }
 }

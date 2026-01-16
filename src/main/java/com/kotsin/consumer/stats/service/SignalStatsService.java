@@ -53,11 +53,11 @@ public class SignalStatsService {
                 outcome.getRMultiple()
         );
 
-        log.info("OUTCOME RECORDED | {} | signalType={} | win={} | R={:.2f} | exitReason={}",
+        log.info("OUTCOME RECORDED | {} | signalType={} | win={} | R={} | exitReason={}",
                 outcome.getScripCode(),
                 outcome.getSignalType(),
                 outcome.isWin(),
-                outcome.getRMultiple(),
+                String.format("%.2f", outcome.getRMultiple()),
                 outcome.getExitReason());
     }
 
@@ -83,11 +83,11 @@ public class SignalStatsService {
         // Save updated stats
         statsRepo.save(stats);
 
-        log.debug("STATS UPDATED | {} | trades={} | winRate={:.1f}% | avgR={:.2f} | todayLosses={}",
+        log.debug("STATS UPDATED | {} | trades={} | winRate={}% | avgR={} | todayLosses={}",
                 key,
                 stats.getTotalTrades(),
-                stats.getWinRate() * 100,
-                stats.getAvgR(),
+                String.format("%.1f", stats.getWinRate() * 100),
+                String.format("%.2f", stats.getAvgR()),
                 stats.getTodayLosses());
     }
 

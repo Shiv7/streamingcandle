@@ -1,11 +1,14 @@
 package com.kotsin.consumer.quant.config;
 
+import com.kotsin.consumer.config.KafkaTopics;
 import lombok.Data;
 import org.springframework.boot.context.properties.ConfigurationProperties;
 import org.springframework.context.annotation.Configuration;
 
 /**
  * Configuration properties for QuantScore calculation and signal emission.
+ *
+ * Note: All trading signals now publish to unified 'trading-signals-v2' topic
  */
 @Data
 @Configuration
@@ -13,8 +16,9 @@ import org.springframework.context.annotation.Configuration;
 public class QuantScoreConfig {
 
     // ========== OUTPUT TOPICS ==========
-    private String outputTopic = "quant-trading-signals";
-    private String scoresTopic = "quant-scores";
+    // Unified signal topic - all signals go to trading-signals-v2
+    private String outputTopic = KafkaTopics.TRADING_SIGNALS_V2;
+    private String scoresTopic = KafkaTopics.QUANT_SCORES;
 
     // ========== EMISSION THRESHOLDS ==========
     private Emission emission = new Emission();

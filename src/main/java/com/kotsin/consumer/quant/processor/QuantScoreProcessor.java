@@ -3,6 +3,11 @@ package com.kotsin.consumer.quant.processor;
 import com.github.benmanes.caffeine.cache.Cache;
 import com.github.benmanes.caffeine.cache.Caffeine;
 import com.kotsin.consumer.domain.model.FamilyCandle;
+import com.kotsin.consumer.enrichment.EnrichedQuantScoreCalculator;
+import com.kotsin.consumer.enrichment.EnrichedQuantScoreCalculator.EnrichedQuantScore;
+import com.kotsin.consumer.enrichment.EnrichmentPipeline;
+import com.kotsin.consumer.enrichment.enricher.HistoricalContextEnricher;
+import com.kotsin.consumer.enrichment.model.HistoricalContext;
 import com.kotsin.consumer.quant.calculator.QuantScoreCalculator;
 import com.kotsin.consumer.quant.config.QuantScoreConfig;
 import com.kotsin.consumer.quant.model.QuantScore;
@@ -12,6 +17,7 @@ import com.kotsin.consumer.service.GreeksAggregator;
 import com.kotsin.consumer.service.IVSurfaceCalculator;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.beans.factory.annotation.Value;
 import org.springframework.kafka.annotation.KafkaListener;
 import org.springframework.kafka.core.KafkaTemplate;
 import org.springframework.scheduling.annotation.Async;
@@ -37,6 +43,25 @@ public class QuantScoreProcessor {
     private final GreeksAggregator greeksAggregator;
     private final IVSurfaceCalculator ivSurfaceCalculator;
 
+    // Phase 1 SMTIS: Enriched calculator with historical context
+    @Autowired(required = false)
+    private EnrichedQuantScoreCalculator enrichedCalculator;
+
+    @Autowired(required = false)
+    private HistoricalContextEnricher historicalEnricher;
+
+    // Phase 5-6: Full enrichment pipeline with intelligence, narrative, signals
+    @Autowired(required = false)
+    private EnrichmentPipeline enrichmentPipeline;
+
+    // Feature flag for Phase 5-6 full pipeline
+    @Value("${smtis.pipeline.enabled:true}")
+    private boolean pipelineEnabled;
+
+    // Feature flag for Phase 1 enrichment
+    @Value("${smtis.enrichment.enabled:true}")
+    private boolean enrichmentEnabled;
+
     @Autowired(required = false)
     private KafkaTemplate<String, QuantScore> scoreProducer;
 
@@ -45,6 +70,9 @@ public class QuantScoreProcessor {
 
     // Cache for score deduplication
     private Cache<String, QuantScore> scoreCache;
+
+    // Cache for enriched scores
+    private Cache<String, EnrichedQuantScore> enrichedScoreCache;
 
     // Cache for signal emission rate limiting
     private Cache<String, Long> emissionCache;
@@ -71,21 +99,40 @@ public class QuantScoreProcessor {
             .maximumSize(config.getCache().getMaxSize())
             .build();
 
+        enrichedScoreCache = Caffeine.newBuilder()
+            .expireAfterWrite(config.getCache().getTtlSeconds(), TimeUnit.SECONDS)
+            .maximumSize(config.getCache().getMaxSize())
+            .build();
+
         emissionCache = Caffeine.newBuilder()
             .expireAfterWrite(config.getEmission().getCooldownSeconds(), TimeUnit.SECONDS)
             .maximumSize(config.getCache().getMaxSize())
             .build();
 
-        log.info("QuantScoreProcessor initialized with config: minScore={}, cooldown={}s",
+        log.info("QuantScoreProcessor initialized with config: minScore={}, cooldown={}s, enrichment={}",
             config.getEmission().getMinScore(),
-            config.getEmission().getCooldownSeconds());
+            config.getEmission().getCooldownSeconds(),
+            enrichmentEnabled && enrichedCalculator != null ? "ENABLED" : "DISABLED");
     }
 
     /**
      * Process FamilyCandle from Kafka and calculate QuantScore
+     *
+     * 🔴 CRITICAL FIX Bug #8 & #10: Listen to ALL timeframe topics, not just 1m.
+     * BEFORE: Only 1m candles got Greeks/IV enrichment → 30m had totalDelta=0, ivrank=50
+     * AFTER: All timeframes get enrichment → proper Greeks/IV for all MTF candles
      */
     @KafkaListener(
-        topics = "family-candle-1m",
+        topics = {
+            "family-candle-1m",
+            "family-candle-5m",
+            "family-candle-15m",
+            "family-candle-30m",
+            "family-candle-1h",
+            "family-candle-2h",
+            "family-candle-4h",
+            "family-candle-1d"
+        },
         groupId = "quant-score-processor-v1",
         containerFactory = "familyCandleListenerContainerFactory"
     )
@@ -96,31 +143,107 @@ public class QuantScoreProcessor {
 
         try {
             String familyId = family.getFamilyId();
+            String timeframe = family.getTimeframe() != null ? family.getTimeframe() : "1m";
+
+            // Include timeframe in cache key to avoid overwriting across timeframes
+            String cacheKey = familyId + ":" + timeframe;
 
             // Enrich with Greeks and IV if not already present
             enrichFamilyCandle(family);
 
-            // Calculate QuantScore
-            QuantScore score = scoreCalculator.calculate(family);
+            QuantScore score;
+            EnrichedQuantScore enrichedScore = null;
+            boolean isActionableMoment = false;
+            String actionableReason = null;
 
-            // Cache the score
-            scoreCache.put(familyId, score);
+            // Phase 1 SMTIS: Use enriched calculator if available and enabled
+            if (enrichmentEnabled && enrichedCalculator != null) {
+                enrichedScore = enrichedCalculator.calculate(family);
+                score = enrichedScore.getBaseScore();
+
+                // Override score with adjusted values from enrichment
+                if (enrichedScore.hasHistoricalContext()) {
+                    isActionableMoment = enrichedScore.isActionableMoment();
+                    actionableReason = enrichedScore.getActionableMomentReason();
+
+                    // Log enrichment details
+                    HistoricalContext ctx = enrichedScore.getHistoricalContext();
+                    log.debug("[SMTIS] {} {} | adjusted={} (base={}) conf={} flips={} absorption={} learning={}",
+                        familyId, timeframe,
+                        String.format("%.1f", enrichedScore.getAdjustedQuantScore()),
+                        String.format("%.1f", score.getQuantScore()),
+                        String.format("%.2f", enrichedScore.getAdjustedConfidence()),
+                        ctx.getTotalFlipsDetected(),
+                        ctx.isAbsorptionDetected(),
+                        ctx.isInLearningMode());
+                }
+
+                // Cache enriched score
+                enrichedScoreCache.put(cacheKey, enrichedScore);
+            } else {
+                // Fallback to base calculator
+                score = scoreCalculator.calculate(family);
+            }
+
+            // Cache the base score
+            scoreCache.put(cacheKey, score);
 
             // Emit score to dashboard topic
             emitScore(score);
 
-            // Check if we should emit a trading signal
-            if (shouldEmitSignal(score)) {
-                QuantTradingSignal signal = signalGenerator.generate(score, family);
-                if (signal.isActionable()) {
-                    emitSignal(signal);
-                    recordEmission(familyId);
+            // Phase 5-6: Run full enrichment pipeline for intelligence, narrative, and enhanced signals
+            if (pipelineEnabled && enrichmentPipeline != null) {
+                try {
+                    EnrichmentPipeline.PipelineResult pipelineResult = enrichmentPipeline.process(family);
+                    if (pipelineResult != null && pipelineResult.getSignalsPublished() > 0) {
+                        log.info("[PIPELINE] {} {} | signals={} narrative={} setups={}",
+                            familyId, timeframe,
+                            pipelineResult.getSignalsPublished(),
+                            pipelineResult.getIntelligence() != null ? "yes" : "no",
+                            pipelineResult.getIntelligence() != null && pipelineResult.getIntelligence().isHasReadySetups());
+                    }
+                } catch (Exception e) {
+                    log.debug("[PIPELINE] Error in Phase 5-6 for {}: {}", familyId, e.getMessage());
                 }
             }
 
+            // Check if we should emit a trading signal
+            // Boost signal emission for actionable moments
+            boolean shouldEmit = shouldEmitSignal(score);
+            if (!shouldEmit && isActionableMoment && enrichedScore != null) {
+                // If it's an actionable moment, lower the threshold slightly
+                if (enrichedScore.getAdjustedQuantScore() >= config.getEmission().getMinScore() * 0.9 &&
+                    enrichedScore.getAdjustedConfidence() >= config.getEmission().getMinConfidence()) {
+                    shouldEmit = true;
+                    log.info("[SMTIS-MOMENT] {} {} - Actionable moment triggered: {}",
+                        familyId, timeframe, actionableReason);
+                }
+            }
+
+            if (shouldEmit) {
+                QuantTradingSignal signal = signalGenerator.generate(score, family);
+
+                // Enhance signal with enrichment context
+                if (enrichedScore != null && isActionableMoment) {
+                    signal.setEnrichmentNote(actionableReason);
+                }
+
+                if (signal.isActionable()) {
+                    emitSignal(signal);
+                    recordEmission(cacheKey);  // Rate limit per timeframe
+                }
+            }
+
+            log.debug("[QUANT-MTF] Processed {} {} | score={} hasGreeks={} hasIV={} enriched={}",
+                familyId, timeframe,
+                String.format("%.1f", score.getQuantScore()),
+                family.hasGreeksPortfolio(),
+                family.hasIVSurface(),
+                enrichedScore != null);
+
         } catch (Exception e) {
-            log.error("Error processing FamilyCandle {}: {}",
-                family.getFamilyId(), e.getMessage(), e);
+            log.error("Error processing FamilyCandle {} ({}): {}",
+                family.getFamilyId(), family.getTimeframe(), e.getMessage(), e);
         }
     }
 
