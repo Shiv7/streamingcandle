@@ -8,7 +8,7 @@
 set -e
 
 # Configuration
-KAFKA_BOOTSTRAP="${KAFKA_BOOTSTRAP_SERVERS:-13.203.60.173:9094}"
+KAFKA_BOOTSTRAP="${KAFKA_BOOTSTRAP_SERVERS:-localhost:9092}"
 STATE_DIR="${KAFKA_STATE_DIR:-/tmp/kafka-streams/streamingcandle}"
 
 # Colors

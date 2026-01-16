@@ -37,7 +37,7 @@ import java.util.Map;
 @EnableKafka
 public class MasterArchKafkaConfig {
 
-    @Value("${spring.kafka.bootstrap-servers:13.203.60.173:9094}")
+    @Value("${spring.kafka.bootstrap-servers:localhost:9092}")
     private String bootstrapServers;
 
     @Value("${masterarch.producer.batch.size:16384}")
