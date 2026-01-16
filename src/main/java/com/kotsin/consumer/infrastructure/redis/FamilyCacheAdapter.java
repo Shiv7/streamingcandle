@@ -111,13 +111,23 @@ public class FamilyCacheAdapter implements IFamilyDataProvider {
                     symbolToEquityMap.put(group.getCompanyName().toUpperCase(), equityScripCode);
                 }
                 
-                // Map all futures to equity
-                if (group.getFutures() != null) {
-                    for (com.kotsin.consumer.entity.Scrip future : group.getFutures()) {
-                        if (future.getScripCode() != null) {
-                            reverseMapping.put(future.getScripCode(), equityScripCode);
-                            futureCount++;
-                        }
+                // Map ONLY near-month future to equity
+                // FIX: ScripGroup.futures contains ALL expiries (JAN, FEB, MAR...)
+                // but FamilyCandle expects only 1 future (near-month).
+                // If we map all futures, they get merged together corrupting data.
+                // Solution: Sort by expiry, map only the earliest (near-month) future.
+                if (group.getFutures() != null && !group.getFutures().isEmpty()) {
+                    com.kotsin.consumer.entity.Scrip nearMonthFuture = group.getFutures().stream()
+                        .filter(f -> f.getScripCode() != null && f.getExpiry() != null && !f.getExpiry().isEmpty())
+                        .min((f1, f2) -> f1.getExpiry().compareTo(f2.getExpiry()))
+                        .orElse(null);
+
+                    if (nearMonthFuture != null) {
+                        reverseMapping.put(nearMonthFuture.getScripCode(), equityScripCode);
+                        futureCount++;
+                        log.debug("[PRELOAD] Family {} mapped near-month future {} (expiry: {}), skipped {} far-month futures",
+                            equityScripCode, nearMonthFuture.getScripCode(), nearMonthFuture.getExpiry(),
+                            group.getFutures().size() - 1);
                     }
                 }
                 
@@ -248,15 +258,37 @@ public class FamilyCacheAdapter implements IFamilyDataProvider {
         }
 
         InstrumentFamily cached = familyCache.get(equityScripCode);
-        
+
         // Check if cached and fresh
         if (cached != null && isFresh(equityScripCode)) {
+            log.debug("[FAMILY-CACHE-HIT] equityScripCode: {} | futureScripCode: {} | optionCount: {} | cached: true",
+                equityScripCode,
+                cached.getFutureScripCode() != null ? cached.getFutureScripCode() : "NULL",
+                cached.getOptionCount());
             return cached;
         }
 
+        // Log cache miss
+        log.info("[FAMILY-CACHE-MISS] equityScripCode: {} | cached: {} | fresh: {} | refreshOnMiss: {}",
+            equityScripCode,
+            cached != null ? "yes" : "no",
+            cached != null ? isFresh(equityScripCode) : "N/A",
+            refreshOnMiss);
+
         // Refresh from API if enabled - use computeIfAbsent pattern for thread safety
         if (refreshOnMiss) {
-            return refreshFamilyThreadSafe(equityScripCode, closePrice);
+            InstrumentFamily refreshed = refreshFamilyThreadSafe(equityScripCode, closePrice);
+            if (refreshed != null) {
+                log.info("[FAMILY-CACHE-REFRESHED] equityScripCode: {} | futureScripCode: {} | optionCount: {} | symbolRoot: {}",
+                    equityScripCode,
+                    refreshed.getFutureScripCode() != null ? refreshed.getFutureScripCode() : "NULL",
+                    refreshed.getOptionCount(),
+                    refreshed.getSymbolRoot() != null ? refreshed.getSymbolRoot() : "NULL");
+            } else {
+                log.warn("[FAMILY-CACHE-REFRESH-FAILED] equityScripCode: {} | refreshFamilyThreadSafe returned NULL",
+                    equityScripCode);
+            }
+            return refreshed;
         }
 
         return cached;  // Return stale data if refresh disabled

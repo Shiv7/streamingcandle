@@ -51,6 +51,11 @@ public class SignalOutcomeStore {
     private final Map<String, FamilyPerformance> familyPerformanceCache = new ConcurrentHashMap<>();
 
     /**
+     * Cache of performance stats by setup type (e.g., SCALP_REVERSAL_LONG)
+     */
+    private final Map<String, SetupPerformance> setupPerformanceCache = new ConcurrentHashMap<>();
+
+    /**
      * Statistics
      */
     private final AtomicLong totalOutcomesRecorded = new AtomicLong(0);
@@ -223,6 +228,38 @@ public class SignalOutcomeStore {
      */
     public FamilyPerformance getFamilyPerformance(String familyId) {
         return familyPerformanceCache.computeIfAbsent(familyId, this::calculateFamilyPerformance);
+    }
+
+    /**
+     * Get performance stats by setup type (e.g., SCALP_REVERSAL_LONG, SWING_SHORT)
+     * This is the key method for calculating actual historicalSuccessRate
+     */
+    public SetupPerformance getSetupPerformance(String setupId) {
+        return setupPerformanceCache.computeIfAbsent(setupId, this::calculateSetupPerformance);
+    }
+
+    /**
+     * Get historical success rate for a setup type
+     * Returns the actual win rate based on recorded outcomes
+     *
+     * @param setupId Setup ID (e.g., "SCALP_REVERSAL_LONG")
+     * @return Win rate between 0.0 and 1.0, or 0.5 if insufficient data
+     */
+    public double getHistoricalSuccessRate(String setupId) {
+        SetupPerformance perf = getSetupPerformance(setupId);
+        if (perf == null || perf.getTotalTrades() < 10) {
+            // Not enough data - return neutral 0.5 (no edge proven)
+            return 0.5;
+        }
+        return perf.getWinRate();
+    }
+
+    /**
+     * Get historical sample count for a setup type
+     */
+    public int getHistoricalSampleCount(String setupId) {
+        SetupPerformance perf = getSetupPerformance(setupId);
+        return perf != null ? perf.getTotalTrades() : 0;
     }
 
     /**
@@ -423,6 +460,56 @@ public class SignalOutcomeStore {
                 .build();
     }
 
+    /**
+     * Calculate performance for a specific setup type
+     * This is used to get actual historical success rate for signals
+     */
+    private SetupPerformance calculateSetupPerformance(String setupId) {
+        Instant cutoff = Instant.now().minus(30, ChronoUnit.DAYS);
+
+        Query query = Query.query(Criteria.where("setupId").is(setupId)
+                .and("closedAt").gte(cutoff)
+                .and("outcome").in(SignalOutcome.Outcome.WIN, SignalOutcome.Outcome.LOSS));
+
+        List<SignalOutcome> outcomes = mongoTemplate.find(query, SignalOutcome.class, COLLECTION);
+
+        if (outcomes.isEmpty()) {
+            return SetupPerformance.empty(setupId);
+        }
+
+        long wins = outcomes.stream().filter(SignalOutcome::isProfitable).count();
+        long losses = outcomes.size() - wins;
+        double totalPnl = outcomes.stream().mapToDouble(SignalOutcome::getPnlPct).sum();
+        double avgWin = outcomes.stream().filter(o -> o.getPnlPct() > 0).mapToDouble(SignalOutcome::getPnlPct).average().orElse(0);
+        double avgLoss = outcomes.stream().filter(o -> o.getPnlPct() < 0).mapToDouble(SignalOutcome::getPnlPct).average().orElse(0);
+        double avgRMultiple = outcomes.stream().mapToDouble(SignalOutcome::getRMultiple).average().orElse(0);
+
+        // Calculate expectancy: (winRate * avgWin) + ((1-winRate) * avgLoss)
+        double winRate = (double) wins / outcomes.size();
+        double expectancy = (winRate * avgWin) + ((1 - winRate) * avgLoss);
+
+        // Calculate profit factor: |grossProfit / grossLoss|
+        double grossProfit = outcomes.stream().filter(o -> o.getPnlPct() > 0).mapToDouble(SignalOutcome::getPnlPct).sum();
+        double grossLoss = Math.abs(outcomes.stream().filter(o -> o.getPnlPct() < 0).mapToDouble(SignalOutcome::getPnlPct).sum());
+        double profitFactor = grossLoss > 0 ? grossProfit / grossLoss : 0;
+
+        return SetupPerformance.builder()
+                .setupId(setupId)
+                .totalTrades(outcomes.size())
+                .wins((int) wins)
+                .losses((int) losses)
+                .winRate(winRate)
+                .totalPnlPct(totalPnl)
+                .avgPnlPct(totalPnl / outcomes.size())
+                .avgWinPct(avgWin)
+                .avgLossPct(avgLoss)
+                .avgRMultiple(avgRMultiple)
+                .expectancy(expectancy)
+                .profitFactor(profitFactor)
+                .calculatedAt(Instant.now())
+                .build();
+    }
+
     // ======================== SCHEDULED TASKS ========================
 
     /**
@@ -433,6 +520,7 @@ public class SignalOutcomeStore {
         log.debug("[OUTCOME_STORE] Refreshing performance caches...");
         sourcePerformanceCache.clear();
         familyPerformanceCache.clear();
+        setupPerformanceCache.clear();
     }
 
     // ======================== STATISTICS ========================
@@ -559,6 +647,61 @@ public class SignalOutcomeStore {
         public String toString() {
             return String.format("OutcomeStore: %d recorded, %d wins, %d losses (%.1f%% win rate)",
                     totalOutcomesRecorded, totalWins, totalLosses, overallWinRate * 100);
+        }
+    }
+
+    /**
+     * Performance statistics for a specific setup type (e.g., SCALP_REVERSAL_LONG)
+     * Used for calculating actual historicalSuccessRate in signals
+     */
+    @Data
+    @Builder
+    @AllArgsConstructor
+    public static class SetupPerformance {
+        private String setupId;
+        private int totalTrades;
+        private int wins;
+        private int losses;
+        private double winRate;           // Wins / Total
+        private double totalPnlPct;
+        private double avgPnlPct;
+        private double avgWinPct;         // Average winning trade %
+        private double avgLossPct;        // Average losing trade % (negative)
+        private double avgRMultiple;
+        private double expectancy;        // Expected value per trade
+        private double profitFactor;      // Gross profit / Gross loss
+        private Instant calculatedAt;
+
+        public static SetupPerformance empty(String setupId) {
+            return SetupPerformance.builder()
+                    .setupId(setupId)
+                    .totalTrades(0)
+                    .wins(0)
+                    .losses(0)
+                    .winRate(0.5)  // Neutral assumption when no data
+                    .calculatedAt(Instant.now())
+                    .build();
+        }
+
+        /**
+         * Check if we have sufficient data for statistical significance
+         * Minimum 30 trades for reliable stats
+         */
+        public boolean hasSignificantData() {
+            return totalTrades >= 30;
+        }
+
+        /**
+         * Check if this setup has proven edge (positive expectancy + good sample)
+         */
+        public boolean hasProvenEdge() {
+            return hasSignificantData() && expectancy > 0 && profitFactor > 1.0;
+        }
+
+        @Override
+        public String toString() {
+            return String.format("Setup[%s]: %d trades, %.1f%% win rate, %.2f expectancy, %.2f PF",
+                    setupId, totalTrades, winRate * 100, expectancy, profitFactor);
         }
     }
 }

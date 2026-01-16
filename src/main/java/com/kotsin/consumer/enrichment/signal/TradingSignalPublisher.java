@@ -283,14 +283,21 @@ public class TradingSignalPublisher {
         // QuantTradingSignal.isActionable() = actionable && signalType != null && entryPrice > 0 && stopLoss > 0 && target1 > 0
         quantSignal.put("actionable", signal.isActionable());
 
-        // FIX: Consumer checks signal.getQuantScore() < minScore (default 65)
-        // Convert quality score (0-100) to quant score format
-        double quantScore = Math.max(65, signal.getQualityScore()); // Ensure above threshold
-        if (signal.getConfidence() >= 0.7) {
-            quantScore = Math.max(quantScore, 75); // High confidence = higher score
+        // Use REAL quality score - no cheating
+        // Signal must earn its score through actual setup/pattern quality
+        double quantScore = signal.getQualityScore();
+        String quantLabel;
+        if (quantScore >= 80) {
+            quantLabel = "STRONG_SIGNAL";
+        } else if (quantScore >= 65) {
+            quantLabel = "MODERATE_SIGNAL";
+        } else if (quantScore >= 50) {
+            quantLabel = "WEAK_SIGNAL";
+        } else {
+            quantLabel = "LOW_QUALITY";
         }
         quantSignal.put("quantScore", quantScore);
-        quantSignal.put("quantLabel", quantScore >= 75 ? "STRONG_SIGNAL" : "MODERATE_SIGNAL");
+        quantSignal.put("quantLabel", quantLabel);
 
         // FIX: Consumer checks signal.getConfidence() < minConfidence (default 0.6)
         quantSignal.put("confidence", signal.getConfidence());

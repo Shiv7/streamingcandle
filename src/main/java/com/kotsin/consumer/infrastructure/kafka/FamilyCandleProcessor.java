@@ -212,7 +212,17 @@ public class FamilyCandleProcessor {
             .windowedBy(windows)
             .aggregate(
                 FamilyCandleCollector::new,
-                (familyId, candle, collector) -> collector.add(candle),
+                (familyId, candle, collector) -> {
+                    // FIX: Validate futures before adding - only accept near-month future
+                    // This prevents merging of multiple expiries (JAN + FEB) which corrupts data
+                    if (isValidFamilyMember(familyId, candle)) {
+                        return collector.add(candle);
+                    } else {
+                        log.debug("[FAMILY-AGGREGATE] Skipping invalid family member | familyId: {} | scripCode: {} | type: {}",
+                            familyId, candle.getScripCode(), candle.getInstrumentType());
+                        return collector;  // Return unchanged collector
+                    }
+                },
                 Materialized.<String, FamilyCandleCollector, org.apache.kafka.streams.state.WindowStore<org.apache.kafka.common.utils.Bytes, byte[]>>as(stateStoreName)
                     .withKeySerde(Serdes.String())
                     .withValueSerde(FamilyCandleCollector.serde())
@@ -467,7 +477,92 @@ public class FamilyCandleProcessor {
      * REMOVED: findEquityScripCode() - now handled by FamilyCacheAdapter
      * REMOVED: prefetchFamily() - now handled by FamilyCacheAdapter
      */
-    
+
+    /**
+     * Validate if an instrument candle is a valid member for the family.
+     *
+     * FIX: For futures, only accept the NEAR-MONTH future (from ScripFinder API).
+     * MongoDB ScripGroup contains ALL expiries (JAN, FEB, MAR...) but FamilyCandle
+     * expects only 1 future. If we accept all futures, they get merged together,
+     * corrupting data (e.g., JAN future OHLC merged with FEB future OHLC).
+     *
+     * @param familyId The equity scripCode (family ID)
+     * @param candle The instrument candle to validate
+     * @return true if valid family member, false to reject
+     */
+    private boolean isValidFamilyMember(String familyId, InstrumentCandle candle) {
+        if (candle == null || familyId == null) return false;
+
+        InstrumentType type = candle.getInstrumentType();
+        if (type == null) {
+            type = InstrumentType.detect(
+                candle.getExchange(),
+                candle.getExchangeType(),
+                candle.getCompanyName()
+            );
+        }
+
+        // Non-futures are always valid
+        if (type != InstrumentType.FUTURE) {
+            return true;
+        }
+
+        // For futures: validate it's the expected near-month future
+        String incomingFutureScripCode = candle.getScripCode();
+
+        // Get the expected near-month future from InstrumentFamily cache
+        // Use a reasonable close price estimate (0 triggers cache-only lookup)
+        try {
+            double closePrice = candle.getClose() > 0 ? candle.getClose() : 1000.0;
+            InstrumentFamily family = familyDataProvider.getFamily(familyId, closePrice);
+
+            // Detailed logging for debugging
+            if (family == null) {
+                log.info("[FUTURE-VALIDATION-DEBUG] familyId: {} | scripCode: {} | getFamily returned NULL | closePrice: {}",
+                    familyId, incomingFutureScripCode, closePrice);
+            } else {
+                log.info("[FUTURE-VALIDATION-DEBUG] familyId: {} | scripCode: {} | family found | " +
+                         "futureScripCode: {} | optionCount: {} | symbolRoot: {}",
+                    familyId, incomingFutureScripCode,
+                    family.getFutureScripCode() != null ? family.getFutureScripCode() : "NULL",
+                    family.getOptionCount(),
+                    family.getSymbolRoot() != null ? family.getSymbolRoot() : "NULL");
+            }
+
+            if (family != null && family.getFutureScripCode() != null) {
+                String expectedFutureScripCode = family.getFutureScripCode();
+                boolean isValid = expectedFutureScripCode.equals(incomingFutureScripCode);
+
+                if (!isValid) {
+                    log.info("[FUTURE-REJECTED] familyId: {} | rejected scripCode: {} | expected near-month: {} | companyName: {}",
+                        familyId, incomingFutureScripCode, expectedFutureScripCode, candle.getCompanyName());
+                } else {
+                    log.debug("[FUTURE-ACCEPTED] familyId: {} | scripCode: {} matches expected near-month",
+                        familyId, incomingFutureScripCode);
+                }
+                return isValid;
+            }
+        } catch (Exception e) {
+            log.warn("[FUTURE-VALIDATION-ERROR] familyId: {} | scripCode: {} | error: {}",
+                familyId, incomingFutureScripCode, e.getMessage(), e);
+        }
+
+        // FIX: If no InstrumentFamily found, REJECT the future for NSE stocks
+        // Only accept for MCX commodities (where there's no underlying equity to validate against)
+        boolean isMCX = "M".equalsIgnoreCase(candle.getExchange());
+        if (isMCX) {
+            log.debug("[FUTURE-FALLBACK-MCX] familyId: {} | scripCode: {} | MCX commodity - accepting future",
+                familyId, incomingFutureScripCode);
+            return true;
+        } else {
+            // For NSE stocks, reject unknown futures to prevent merging JAN+FEB
+            log.info("[FUTURE-REJECTED-NO-FAMILY] familyId: {} | scripCode: {} | companyName: {} | " +
+                     "No InstrumentFamily found - rejecting to prevent duplicate futures merging",
+                familyId, incomingFutureScripCode, candle.getCompanyName());
+            return false;
+        }
+    }
+
     /**
      * Check if instrument is from MCX (Multi Commodity Exchange)
      * MCX instruments don't have underlying equity - futures are the primary instrument
@@ -549,7 +644,10 @@ public class FamilyCandleProcessor {
             // Set primaryInstrument for proper analysis, keep equity=null (no equity for commodities)
             builder.primaryInstrument(future);  // PRIMARY FIX: Use primaryInstrument, not equity
             // NOTE: We intentionally leave equity=null for commodities
-            String symbol = extractSymbolRoot(future.getCompanyName());
+            // COMMODITY FIX: Keep full future name with expiry for commodity symbols
+            // Unlike equities, commodities don't have underlying equity, so the full future name is the symbol
+            // Example: "CRUDEOILM 16 JAN 2026" instead of just "CRUDEOILM"
+            String symbol = future.getCompanyName();
             // Fallback: if symbol is null, try to get from family data or use scripCode
             if (symbol == null || symbol.isEmpty()) {
                 try {
@@ -689,6 +787,44 @@ public class FamilyCandleProcessor {
         Double spotPrice = null;
         if (primary != null) {
             spotPrice = primary.getClose();
+        }
+
+        // DEBUG: Compare expected options (from InstrumentFamily) vs what arrived
+        try {
+            InstrumentFamily expectedFamily = familyDataProvider.getFamily(familyId, spotPrice != null ? spotPrice : 1000.0);
+            if (expectedFamily != null) {
+                List<InstrumentFamily.OptionInfo> expectedOptions = expectedFamily.getOptions();
+                Set<String> arrivedScripCodes = rawOptions.stream()
+                    .map(InstrumentCandle::getScripCode)
+                    .collect(java.util.stream.Collectors.toSet());
+
+                log.info("[OPTIONS-EXPECTED-VS-ARRIVED] FamilyId: {} | Expected: {} options | Arrived: {} options | Symbol: {}",
+                    familyId,
+                    expectedOptions != null ? expectedOptions.size() : 0,
+                    rawOptions.size(),
+                    expectedFamily.getSymbolRoot());
+
+                if (expectedOptions != null && !expectedOptions.isEmpty()) {
+                    for (InstrumentFamily.OptionInfo expected : expectedOptions) {
+                        boolean arrived = arrivedScripCodes.contains(expected.getScripCode());
+                        log.info("[OPTIONS-EXPECTED-VS-ARRIVED] FamilyId: {} | Expected option: {} {} {} | scripCode: {} | ARRIVED: {}",
+                            familyId,
+                            expected.getName(),
+                            expected.getOptionType(),
+                            expected.getStrikePrice(),
+                            expected.getScripCode(),
+                            arrived ? "YES" : "NO - MISSING!");
+                    }
+                } else {
+                    log.warn("[OPTIONS-EXPECTED-VS-ARRIVED] FamilyId: {} | InstrumentFamily has NO expected options! API may have returned empty.",
+                        familyId);
+                }
+            } else {
+                log.warn("[OPTIONS-EXPECTED-VS-ARRIVED] FamilyId: {} | Could not fetch InstrumentFamily to compare expected vs arrived options",
+                    familyId);
+            }
+        } catch (Exception e) {
+            log.debug("[OPTIONS-EXPECTED-VS-ARRIVED] FamilyId: {} | Error fetching expected options: {}", familyId, e.getMessage());
         }
 
         // Convert to OptionCandle and log each conversion

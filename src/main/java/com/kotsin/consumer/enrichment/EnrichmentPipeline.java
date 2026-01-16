@@ -65,6 +65,12 @@ public class EnrichmentPipeline {
     private long totalSignalsGenerated = 0;
     private long totalSignalsPublished = 0;
 
+    // Minimum timeframe for signal generation (5m = 5 minutes)
+    // 1m signals are pure noise - skip them
+    private static final java.util.Set<String> SIGNAL_ALLOWED_TIMEFRAMES = java.util.Set.of(
+            "5m", "15m", "30m", "1h", "2h", "4h", "1d"
+    );
+
     /**
      * Process a FamilyCandle through the complete enrichment pipeline
      *
@@ -77,6 +83,9 @@ public class EnrichmentPipeline {
         }
 
         String familyId = family.getFamilyId();
+        String timeframe = family.getTimeframe() != null ? family.getTimeframe() : "1m";
+        boolean signalGenerationAllowed = SIGNAL_ALLOWED_TIMEFRAMES.contains(timeframe);
+
         long startTime = System.currentTimeMillis();
         long phase1to4Start = startTime;
 
@@ -97,16 +106,26 @@ public class EnrichmentPipeline {
             long phase5Duration = phase5End - phase5Start;
 
             // =============== Phase 6: Signal Generation ===============
+            // Only generate signals for 5m+ timeframes - 1m is pure noise
             long phase6Start = System.currentTimeMillis();
-            List<TradingSignal> signals = signalGenerator.generateSignals(familyId, enrichedScore, intelligence);
+            List<TradingSignal> signals;
+            int publishedCount = 0;
+
+            if (signalGenerationAllowed) {
+                signals = signalGenerator.generateSignals(familyId, enrichedScore, intelligence);
+                // Publish signals if any were generated
+                if (!signals.isEmpty()) {
+                    publishedCount = signalPublisher.publishSignals(signals);
+                }
+            } else {
+                // Skip signal generation for 1m timeframe - just enrichment/learning
+                signals = Collections.emptyList();
+                log.debug("[PIPELINE] Skipping signal generation for {} - timeframe {} not allowed (need 5m+)",
+                        familyId, timeframe);
+            }
+
             long phase6End = System.currentTimeMillis();
             long phase6Duration = phase6End - phase6Start;
-
-            // Publish signals if any were generated
-            int publishedCount = 0;
-            if (!signals.isEmpty()) {
-                publishedCount = signalPublisher.publishSignals(signals);
-            }
 
             // Publish intelligence outputs to Kafka for dashboard
             publishIntelligenceOutputs(familyId, intelligence);
