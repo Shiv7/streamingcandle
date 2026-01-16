@@ -237,8 +237,8 @@ public class SignalHistoryService {
         );
         historyRepo.save(history);
         
-        log.debug("OUTCOME LINKED | signalId={} | win={} | R={:.2f}",
-                outcome.getSignalId(), outcome.isWin(), outcome.getRMultiple());
+        log.debug("OUTCOME LINKED | signalId={} | win={} | R={}",
+                outcome.getSignalId(), outcome.isWin(), String.format("%.2f", outcome.getRMultiple()));
     }
 
     /**

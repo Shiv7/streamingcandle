@@ -211,10 +211,10 @@ public class SequenceTracker {
 
                 if (!alreadyMatched) {
                     sequence.recordBooster(event, booster.getProbabilityBoost());
-                    log.debug("[SEQ_TRACKER] Sequence {} matched booster {} (confidence now {:.1f}%)",
+                    log.debug("[SEQ_TRACKER] Sequence {} matched booster {} (confidence now {}%)",
                             sequence.getSequenceId().substring(0, 8),
                             event.getEventType(),
-                            sequence.getCurrentConfidence() * 100);
+                            String.format("%.1f", sequence.getCurrentConfidence() * 100));
                 }
             }
         }

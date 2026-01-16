@@ -160,10 +160,10 @@ public class SignalOutcomeConsumer {
             }
         }
 
-        log.info("[OUTCOME_CONSUMER] Recorded {} outcome for {} {} {}: {:.2f}% P&L",
+        log.info("[OUTCOME_CONSUMER] Recorded {} outcome for {} {} {}: {}% P&L",
                 isPaperTrade ? "paper" : "live",
                 message.direction, message.category, message.familyId,
-                message.pnlPct);
+                String.format("%.2f", message.pnlPct));
     }
 
     /**

@@ -58,10 +58,10 @@ public class PatternOutcomeConsumer {
             outcomeStore.recordOutcome(outcome);
             outcomesProcessed.incrementAndGet();
 
-            log.info("[OUTCOME_CONSUMER] Processed outcome for pattern {}: {} P&L={:.2f}%",
+            log.info("[OUTCOME_CONSUMER] Processed outcome for pattern {}: {} P&L={}%",
                     outcome.patternId(),
                     outcome.success() ? "WIN" : "LOSS",
-                    outcome.pnlPct());
+                    String.format("%.2f", outcome.pnlPct()));
 
         } catch (Exception e) {
             log.error("[OUTCOME_CONSUMER] Error processing outcome: {}", e.getMessage());

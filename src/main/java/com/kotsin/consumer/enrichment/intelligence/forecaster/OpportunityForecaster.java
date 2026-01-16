@@ -96,9 +96,9 @@ public class OpportunityForecaster {
         // Store predictions for tracking
         storePredictions(familyId, predictions);
 
-        log.debug("[FORECASTER] Generated forecast for {}: {} predictions, direction={}, conf={:.0f}%",
+        log.debug("[FORECASTER] Generated forecast for {}: {} predictions, direction={}, conf={}%",
                 familyId, predictions.size(), forecast.getOverallDirection(),
-                forecast.getOverallConfidence() * 100);
+                String.format("%.0f", forecast.getOverallConfidence() * 100));
 
         return forecast;
     }

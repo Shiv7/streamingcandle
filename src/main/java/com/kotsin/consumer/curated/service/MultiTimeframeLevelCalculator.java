@@ -87,12 +87,13 @@ public class MultiTimeframeLevelCalculator {
 
     public MultiTimeframeLevelCalculator() {
         this.httpClient = new OkHttpClient.Builder()
-                .connectTimeout(5, TimeUnit.SECONDS)
-                .readTimeout(10, TimeUnit.SECONDS)
+                .connectTimeout(10, TimeUnit.SECONDS)
+                .readTimeout(20, TimeUnit.SECONDS)  // Increased for large historical data fetches
                 .build();
         this.objectMapper = new ObjectMapper();
         // Thread pool for async HTTP calls (I/O bound work)
-        this.httpExecutor = Executors.newFixedThreadPool(10, r -> {
+        // Increased to 30 threads to handle concurrent requests for multiple symbols
+        this.httpExecutor = Executors.newFixedThreadPool(30, r -> {
             Thread t = new Thread(r, "level-calc-http");
             t.setDaemon(true);
             return t;
@@ -257,9 +258,10 @@ public class MultiTimeframeLevelCalculator {
             }, httpExecutor);
 
             // Wait for response with timeout
+            // Increased to 20 seconds to handle cold cache scenarios when many requests are queued
             List<OHLCData> candles;
             try {
-                candles = dataFuture.get(8, TimeUnit.SECONDS);
+                candles = dataFuture.get(20, TimeUnit.SECONDS);
             } catch (TimeoutException e) {
                 log.error("HTTP call timed out for {}: timeout", scripCode);
                 // Cancel future and close any pending response
