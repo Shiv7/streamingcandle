@@ -4,6 +4,8 @@ import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.kotsin.consumer.config.KafkaTopics;
 import com.kotsin.consumer.enrichment.signal.model.TradingSignal;
+import com.kotsin.consumer.enrichment.signal.model.TradingSignal.ConfidenceBreakdown;
+import com.kotsin.consumer.enrichment.signal.model.TradingSignal.SignalSource;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.kafka.core.KafkaTemplate;
@@ -320,20 +322,53 @@ public class TradingSignalPublisher {
         quantSignal.put("horizon", signal.getHorizon() != null ? signal.getHorizon().name() : "INTRADAY");
 
         // Quality metrics
-        quantSignal.put("patternConfidence", signal.getConfidence());
+        // FIX: patternConfidence should be the ORIGINAL confidence, not final confidence
+        // The final confidence (signal.getConfidence()) is already in "confidence" field
+        // Use confidenceBreakdown to get the appropriate original value
+        double patternConf = signal.getConfidence(); // Default fallback
+        if (signal.getConfidenceBreakdown() != null) {
+            // Note: ConfidenceBreakdown uses primitive double, so check > 0 instead of != null
+            if (signal.getSource() == SignalSource.SETUP && signal.getConfidenceBreakdown().getSetupConfidence() > 0) {
+                patternConf = signal.getConfidenceBreakdown().getSetupConfidence();
+            } else if (signal.getSource() == SignalSource.PATTERN && signal.getConfidenceBreakdown().getPatternConfidence() > 0) {
+                patternConf = signal.getConfidenceBreakdown().getPatternConfidence();
+            }
+        }
+        quantSignal.put("patternConfidence", patternConf);
         quantSignal.put("historicalSuccessRate", signal.getHistoricalSuccessRate());
         quantSignal.put("qualityScore", signal.getQualityScore());
         quantSignal.put("rationale", signal.getNarrative());
 
         // ========== ENTRY PARAMETERS ==========
         quantSignal.put("entryPrice", signal.getEntryPrice());
-        quantSignal.put("entryRangeHigh", signal.getEntryPrice() * 1.002); // +0.2%
-        quantSignal.put("entryRangeLow", signal.getEntryPrice() * 0.998);  // -0.2%
+
+        // FIX: Entry range should be direction-aware to prevent risk miscalculation
+        // For SHORT: we want to sell HIGHER, so range is [entry, entry+0.4%]
+        // For LONG: we want to buy LOWER, so range is [entry-0.4%, entry]
+        boolean isShort = signal.getDirection() == TradingSignal.Direction.SHORT;
+        double entryRangeHigh, entryRangeLow;
+        if (isShort) {
+            // SHORT: accept entries at or above entry price (better for shorts)
+            entryRangeLow = signal.getEntryPrice();
+            entryRangeHigh = signal.getEntryPrice() * 1.004; // +0.4% above entry
+        } else {
+            // LONG: accept entries at or below entry price (better for longs)
+            entryRangeLow = signal.getEntryPrice() * 0.996;  // -0.4% below entry
+            entryRangeHigh = signal.getEntryPrice();
+        }
+        quantSignal.put("entryRangeHigh", entryRangeHigh);
+        quantSignal.put("entryRangeLow", entryRangeLow);
 
         // ========== EXIT PARAMETERS ==========
         quantSignal.put("stopLoss", signal.getStopLoss());
-        quantSignal.put("stopLossDistance", Math.abs(signal.getEntryPrice() - signal.getStopLoss()));
-        quantSignal.put("stopLossPercent", signal.getRiskPct());
+        // FIX: Calculate stop distance from WORST entry point, not base entry
+        // For SHORT: worst entry is entryRangeLow (lowest sell price)
+        // For LONG: worst entry is entryRangeHigh (highest buy price)
+        double worstEntry = isShort ? entryRangeLow : entryRangeHigh;
+        double stopLossDistance = Math.abs(worstEntry - signal.getStopLoss());
+        quantSignal.put("stopLossDistance", stopLossDistance);
+        double stopLossPercent = (stopLossDistance / worstEntry) * 100;
+        quantSignal.put("stopLossPercent", stopLossPercent);
         quantSignal.put("target1", signal.getTarget1());
         quantSignal.put("target2", signal.getTarget2());
         quantSignal.put("target3", signal.getTarget3());
@@ -345,8 +380,9 @@ public class TradingSignalPublisher {
         sizing.put("lots", 1);
         sizing.put("lotSize", 1);
         sizing.put("positionValue", signal.getEntryPrice());
-        sizing.put("riskAmount", Math.abs(signal.getEntryPrice() - signal.getStopLoss()));
-        sizing.put("riskPercent", signal.getRiskPercentage());
+        // FIX: Use worstEntry-based risk calculation for accurate position sizing
+        sizing.put("riskAmount", stopLossDistance);
+        sizing.put("riskPercent", stopLossPercent);
         sizing.put("positionSizeMultiplier", signal.getPositionSizeMultiplier());
         sizing.put("sizingMethod", "RISK_BASED");
         quantSignal.put("sizing", sizing);
@@ -426,9 +462,29 @@ public class TradingSignalPublisher {
                 signal.getHistoricalSuccessRate() * 100); // Use historical success as proxy
 
         // Adaptive Modifiers
+        // FIX: originalConfidence was using patternConfidence which is null for SETUP signals
+        // Now we use the appropriate confidence based on signal source
+        // Note: ConfidenceBreakdown uses primitive double, so compare with > 0 not != null
         if (signal.getConfidenceBreakdown() != null) {
-            quantSignal.put("contextModifier", signal.getConfidenceBreakdown().getContextConfidence());
-            quantSignal.put("originalConfidence", signal.getConfidenceBreakdown().getPatternConfidence());
+            ConfidenceBreakdown cb = signal.getConfidenceBreakdown();
+            quantSignal.put("contextModifier", cb.getContextConfidence());
+
+            // FIX: Use setupConfidence for SETUP signals, patternConfidence for PATTERN signals
+            double originalConf = 0.0;
+            if (signal.getSource() == SignalSource.SETUP && cb.getSetupConfidence() > 0) {
+                originalConf = cb.getSetupConfidence();
+            } else if (signal.getSource() == SignalSource.PATTERN && cb.getPatternConfidence() > 0) {
+                originalConf = cb.getPatternConfidence();
+            }
+            // Fallback to signal's main confidence if breakdown value is 0
+            if (originalConf == 0.0) {
+                originalConf = signal.getConfidence();
+            }
+            quantSignal.put("originalConfidence", originalConf);
+        } else {
+            // No breakdown available - use signal confidence
+            quantSignal.put("contextModifier", 0.0);
+            quantSignal.put("originalConfidence", signal.getConfidence());
         }
 
         // Technical Context
@@ -442,6 +498,24 @@ public class TradingSignalPublisher {
         quantSignal.put("maxPainLevel", signal.getMaxPainLevel());
         quantSignal.put("gammaFlipLevel", signal.getGammaFlipLevel());
         quantSignal.put("gexRegime", signal.getGexRegime());
+
+        // FIX: Add flag to indicate if options data was available
+        // When false, gammaFlipLevel/maxPainLevel being null means "no options data" not "no level calculated"
+        // This helps frontend show "N/A" instead of empty when appropriate
+        boolean hasOptionsData = (signal.getGammaFlipLevel() != null && signal.getGammaFlipLevel() > 0) ||
+                                 (signal.getMaxPainLevel() != null && signal.getMaxPainLevel() > 0) ||
+                                 (signal.getGexRegime() != null && !"NEUTRAL".equals(signal.getGexRegime()));
+        quantSignal.put("hasOptionsData", hasOptionsData);
+
+        // FIX: Add VPIN and Lambda microstructure data
+        quantSignal.put("vpin", signal.getVpin());
+        quantSignal.put("vpinPercentile", signal.getVpinPercentile());
+        quantSignal.put("kyleLambda", signal.getKyleLambda());
+        quantSignal.put("lambdaPercentile", signal.getLambdaPercentile());
+        // Flag to indicate if microstructure data was available
+        boolean hasMicrostructureData = (signal.getVpin() != null && signal.getVpin() > 0) ||
+                                        (signal.getKyleLambda() != null && signal.getKyleLambda() > 0);
+        quantSignal.put("hasMicrostructureData", hasMicrostructureData);
 
         // Invalidation Monitoring
         if (signal.getInvalidationWatch() != null && !signal.getInvalidationWatch().isEmpty()) {

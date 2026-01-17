@@ -161,6 +161,7 @@ public class GEXCalculator {
                 (gammaFlipLevel - spotPrice) / spotPrice * 100 : null;
 
         return GEXProfile.builder()
+                .hasOptionsData(true)  // FIX: Mark that we have actual options data
                 .familyId(family.getFamilyId())
                 .timeframe(family.getTimeframe())
                 .spotPrice(spotPrice)

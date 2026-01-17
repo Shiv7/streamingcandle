@@ -1,5 +1,6 @@
 package com.kotsin.consumer.enrichment.signal.model;
 
+import com.fasterxml.jackson.annotation.JsonIgnoreProperties;
 import lombok.AllArgsConstructor;
 import lombok.Builder;
 import lombok.Data;
@@ -27,6 +28,7 @@ import java.util.UUID;
 @Builder
 @NoArgsConstructor
 @AllArgsConstructor
+@JsonIgnoreProperties(ignoreUnknown = true)
 public class TradingSignal {
 
     // ======================== IDENTITY ========================
@@ -460,6 +462,32 @@ public class TradingSignal {
      * Gamma flip level
      */
     private Double gammaFlipLevel;
+
+    // ======================== MICROSTRUCTURE (FIX: Added missing VPIN and Lambda) ========================
+
+    /**
+     * VPIN (Volume-Synchronized Probability of Informed Trading)
+     * High VPIN (>0.7) = More informed trading, expect larger moves
+     * Low VPIN (<0.3) = Mostly noise trading, expect mean reversion
+     */
+    private Double vpin;
+
+    /**
+     * Kyle's Lambda (Price Impact coefficient)
+     * High Lambda = Low liquidity, high slippage expected
+     * Low Lambda = High liquidity, easy execution
+     */
+    private Double kyleLambda;
+
+    /**
+     * VPIN percentile (0-100) relative to historical values
+     */
+    private Double vpinPercentile;
+
+    /**
+     * Lambda percentile (0-100) relative to historical values
+     */
+    private Double lambdaPercentile;
 
     // ======================== RISK METRICS ========================
 

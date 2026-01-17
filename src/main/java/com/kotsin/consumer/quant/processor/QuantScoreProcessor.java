@@ -133,7 +133,7 @@ public class QuantScoreProcessor {
             "family-candle-4h",
             "family-candle-1d"
         },
-        groupId = "quant-score-processor-v1",
+        groupId = "${kafka.consumer.quant-group:quant-score-processor-v1}",
         containerFactory = "familyCandleListenerContainerFactory"
     )
     public void processFamilyCandle(FamilyCandle family) {

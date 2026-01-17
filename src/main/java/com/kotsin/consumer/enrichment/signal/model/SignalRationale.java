@@ -1,5 +1,7 @@
 package com.kotsin.consumer.enrichment.signal.model;
 
+import com.fasterxml.jackson.annotation.JsonCreator;
+import com.fasterxml.jackson.annotation.JsonIgnoreProperties;
 import lombok.AllArgsConstructor;
 import lombok.Builder;
 import lombok.Data;
@@ -24,7 +26,16 @@ import java.util.List;
 @Builder
 @NoArgsConstructor
 @AllArgsConstructor
+@JsonIgnoreProperties(ignoreUnknown = true)
 public class SignalRationale {
+
+    /**
+     * Jackson constructor for deserializing from String value (legacy format)
+     */
+    @JsonCreator
+    public SignalRationale(String headline) {
+        this.headline = headline;
+    }
 
     // ======================== HEADLINE ========================
 

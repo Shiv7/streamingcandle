@@ -33,6 +33,13 @@ public class GEXProfile {
     private String timeframe;
     private double spotPrice;
 
+    /**
+     * FIX: Flag to indicate if options data was available for GEX calculation.
+     * When false, GEX values are defaults/empty (not "no gamma flip").
+     * Used by consumers to show "N/A" instead of null when no options data.
+     */
+    private boolean hasOptionsData;
+
     // ======================== CORE GEX METRICS ========================
 
     /**
@@ -243,10 +250,11 @@ public class GEXProfile {
     }
 
     /**
-     * Factory method for empty profile
+     * Factory method for empty profile (no options data available)
      */
     public static GEXProfile empty() {
         return GEXProfile.builder()
+                .hasOptionsData(false)  // FIX: Indicate no options data
                 .totalGex(0)
                 .totalCallGex(0)
                 .totalPutGex(0)
@@ -257,5 +265,12 @@ public class GEXProfile {
                 .keyResistanceLevels(Collections.emptyList())
                 .keySupportLevels(Collections.emptyList())
                 .build();
+    }
+
+    /**
+     * Check if this profile has actual options data
+     */
+    public boolean hasData() {
+        return hasOptionsData;
     }
 }
