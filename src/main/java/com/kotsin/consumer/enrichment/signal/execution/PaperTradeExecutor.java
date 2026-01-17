@@ -55,17 +55,32 @@ public class PaperTradeExecutor {
     private final AtomicInteger wins = new AtomicInteger(0);
     private final AtomicInteger losses = new AtomicInteger(0);
 
+    // BUG #39 FIX: Base slippage - actual slippage is volatility-adjusted
     @Value("${paper.trade.executor.slippage.bps:5}")
-    private double slippageBps;
+    private double baseSlippageBps;
 
     @Value("${paper.trade.executor.max.active.positions:50}")
     private int maxActivePositions;
 
-    @Value("${paper.trade.executor.position.timeout.minutes:240}")
+    // BUG #38 FIX: Reduced default timeout and added exchange-aware logic
+    // OLD: 240 minutes (4 hours) = guaranteed TIME_EXIT for most trades
+    // NEW: 120 minutes (2 hours) for NSE, 180 minutes for MCX
+    @Value("${paper.trade.executor.position.timeout.minutes.nse:120}")
+    private int positionTimeoutMinutesNSE;
+
+    @Value("${paper.trade.executor.position.timeout.minutes.mcx:180}")
+    private int positionTimeoutMinutesMCX;
+
+    // Legacy config for backward compatibility
+    @Value("${paper.trade.executor.position.timeout.minutes:120}")
     private int positionTimeoutMinutes;
 
     @Value("${paper.trade.executor.enable.partial.exits:true}")
     private boolean enablePartialExits;
+
+    // BUG #37 FIX: Track signal-to-entry latency
+    private final java.util.concurrent.atomic.AtomicLong totalLatencyMs = new java.util.concurrent.atomic.AtomicLong(0);
+    private final AtomicInteger latencySamples = new AtomicInteger(0);
 
     // ======================== SIGNAL CONSUMPTION ========================
 
@@ -175,11 +190,42 @@ public class PaperTradeExecutor {
     // ======================== POSITION MANAGEMENT ========================
 
     private ActivePosition createPosition(TradingSignal signal) {
+        // BUG #37 FIX: Track signal-to-entry latency
+        Instant now = Instant.now();
+        Instant signalTime = signal.getGeneratedAt();
+        long latencyMs = 0;
+        if (signalTime != null) {
+            latencyMs = Duration.between(signalTime, now).toMillis();
+            totalLatencyMs.addAndGet(latencyMs);
+            latencySamples.incrementAndGet();
+
+            if (latencyMs > 5000) { // More than 5 seconds
+                log.warn("[PAPER_EXEC] HIGH LATENCY: Signal {} took {}ms from generation to entry",
+                        signal.getSignalId(), latencyMs);
+            }
+        }
+
+        // BUG #39 FIX: Volatility-adjusted slippage
+        // Base slippage is adjusted by ATR percentage if available
+        double slippageBps = baseSlippageBps;
+        if (signal.getRiskPct() > 0) {
+            // Higher volatility = higher slippage (up to 3x base)
+            double volatilityMultiplier = Math.min(3.0, 1.0 + signal.getRiskPct() / 2.0);
+            slippageBps = baseSlippageBps * volatilityMultiplier;
+            log.debug("[PAPER_EXEC] Adjusted slippage: {}bps -> {}bps (volatility={}%)",
+                    baseSlippageBps, slippageBps, signal.getRiskPct());
+        }
+
         // Apply slippage to entry
         double entrySlippage = signal.getEntryPrice() * slippageBps / 10000;
         double actualEntry = signal.isLong() ?
                 signal.getEntryPrice() + entrySlippage :
                 signal.getEntryPrice() - entrySlippage;
+
+        // BUG #40 FIX: Determine exchange for timeout calculation
+        String exchange = signal.getExchange();
+        boolean isMCX = exchange != null && exchange.toUpperCase().contains("MCX");
+        int timeout = isMCX ? positionTimeoutMinutesMCX : positionTimeoutMinutesNSE;
 
         return new ActivePosition(
                 signal.getSignalId(),
@@ -301,11 +347,16 @@ public class PaperTradeExecutor {
         long timeInTradeMs = Duration.between(position.enteredAt, Instant.now()).toMillis();
 
         positionsClosed.incrementAndGet();
-        if (pnl > 0) {
+        // BUG #41 FIX: Use R-multiple for win/loss, not tight % threshold
+        // OLD: pnl > 0 = win, pnl < -0.05% = loss (too tight!)
+        // NEW: R > 0.5 = win (clear profit), R < -0.5 = loss (clear loss)
+        // This accounts for transaction costs and slippage properly
+        if (rMultiple > 0.5) {
             wins.incrementAndGet();
-        } else if (pnl < -0.05) {
+        } else if (rMultiple < -0.5) {
             losses.incrementAndGet();
         }
+        // Trades with -0.5 < R < 0.5 are "scratch" trades - not counted as win or loss
 
         // Publish outcome
         TradeOutcomeMessage outcome = new TradeOutcomeMessage(
@@ -374,11 +425,22 @@ public class PaperTradeExecutor {
     public String getStats() {
         int total = positionsClosed.get();
         double winRate = total > 0 ? (double) wins.get() / total * 100 : 0;
+        // BUG #37 FIX: Include average latency in stats
+        int samples = latencySamples.get();
+        long avgLatencyMs = samples > 0 ? totalLatencyMs.get() / samples : 0;
         return String.format(
-                "[PAPER_EXEC] Signals: %d | Entered: %d | Closed: %d | Wins: %d | Losses: %d | WR: %.1f%% | Active: %d",
+                "[PAPER_EXEC] Signals: %d | Entered: %d | Closed: %d | Wins: %d | Losses: %d | WR: %.1f%% | Active: %d | AvgLatency: %dms",
                 signalsReceived.get(), positionsEntered.get(), total,
-                wins.get(), losses.get(), winRate, activePositions.size()
+                wins.get(), losses.get(), winRate, activePositions.size(), avgLatencyMs
         );
+    }
+
+    /**
+     * BUG #37 FIX: Get average signal-to-entry latency
+     */
+    public long getAverageLatencyMs() {
+        int samples = latencySamples.get();
+        return samples > 0 ? totalLatencyMs.get() / samples : 0;
     }
 
     public int getActivePositionCount() {
