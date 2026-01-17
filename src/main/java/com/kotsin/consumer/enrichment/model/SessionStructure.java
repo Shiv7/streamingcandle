@@ -254,17 +254,21 @@ public class SessionStructure {
     /**
      * Get signal modifier based on structure
      * Boosts signals aligned with structure, reduces counter-structure signals
+     *
+     * BUG #6 FIX: Changed from 0.6x to 0.30x for counter-position signals
+     * OLD: LONG at HIGH got 0.6x (40% reduction) - TOO WEAK
+     * NEW: LONG at HIGH gets 0.30x (70% reduction) - effectively blocks
      */
     public double getStructureModifier(boolean isLongSignal) {
         double modifier = 1.0;
 
-        // At session low, boost long signals, reduce shorts
+        // At session low, boost long signals, SEVERELY reduce shorts
         if (isAtSessionLow()) {
-            modifier = isLongSignal ? 1.3 : 0.6;
+            modifier = isLongSignal ? 1.3 : 0.30; // BUG #6 FIX: 0.30 instead of 0.6
         }
-        // At session high, boost short signals, reduce longs
+        // At session high, boost short signals, SEVERELY reduce longs
         else if (isAtSessionHigh()) {
-            modifier = isLongSignal ? 0.6 : 1.3;
+            modifier = isLongSignal ? 0.30 : 1.3; // BUG #6 FIX: 0.30 instead of 0.6
         }
 
         // V-bottom detection boosts longs

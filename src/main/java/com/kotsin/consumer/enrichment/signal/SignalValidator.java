@@ -30,11 +30,14 @@ import java.util.List;
 public class SignalValidator {
 
     // Configuration thresholds
-    private static final double MIN_CONFIDENCE = 0.50;
+    // BUG #3 FIX: Raised MIN_CONFIDENCE from 0.50 to 0.65
+    // 0.50 was too permissive - allowed weak signals through
+    private static final double MIN_CONFIDENCE = 0.65;
     private static final double MIN_RISK_REWARD = 1.0;
     private static final double MAX_RISK_REWARD = 20.0;
     private static final double MAX_RISK_PCT = 3.0;
-    private static final int MIN_QUALITY_SCORE = 30;
+    // BUG FIX: Raised MIN_QUALITY_SCORE from 30 to 50
+    private static final int MIN_QUALITY_SCORE = 50;
 
     // FIX: Staleness threshold - signals older than this are rejected
     // Prevents publishing outdated signals from replayed/backfilled data

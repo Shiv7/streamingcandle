@@ -64,6 +64,10 @@ public class SignalGenerator {
     @Autowired(required = false)
     private SignalOutcomeStore signalOutcomeStore;
 
+    // BUG #1-2 FIX: Add SignalHardGate for HARD BLOCKS instead of soft modifiers
+    @Autowired(required = false)
+    private com.kotsin.consumer.gate.SignalHardGate signalHardGate;
+
     /**
      * IST timezone for human readable time formatting
      */
@@ -940,6 +944,42 @@ public class SignalGenerator {
                         modifierLog.length() > 0 ? modifierLog.toString().trim() : "no modifiers applied");
             }
         }
+
+        // BUG #1-2 FIX: Apply SignalHardGate AFTER soft modifiers
+        // Hard gate will BLOCK signals that violate critical rules
+        // This replaces the old "warn but don't block" behavior
+        if (signalHardGate != null) {
+            applySignalHardGate(signals, quantScore);
+        }
+    }
+
+    /**
+     * BUG #1-2 FIX: Apply SignalHardGate to filter out signals that should be BLOCKED.
+     *
+     * This replaces the old approach where we detected problems but only reduced confidence.
+     * Now we actually BLOCK signals that violate critical rules.
+     */
+    private void applySignalHardGate(List<TradingSignal> signals, EnrichedQuantScore quantScore) {
+        if (signals == null || signals.isEmpty()) {
+            return;
+        }
+
+        List<TradingSignal> toRemove = new ArrayList<>();
+
+        for (TradingSignal signal : signals) {
+            com.kotsin.consumer.gate.model.GateResult gateResult = signalHardGate.evaluate(signal, quantScore);
+
+            if (!gateResult.isPassed()) {
+                log.warn("[HARD_GATE_BLOCK] {} {} BLOCKED by SignalHardGate: {}",
+                        signal.getFamilyId(), signal.getDirection(), gateResult.getReason());
+                toRemove.add(signal);
+            }
+        }
+
+        if (!toRemove.isEmpty()) {
+            signals.removeAll(toRemove);
+            log.info("[HARD_GATE_BLOCK] Removed {} signals that failed hard gate checks", toRemove.size());
+        }
     }
 
     /**
@@ -1077,30 +1117,32 @@ public class SignalGenerator {
                 signal.getFamilyId(), bullishAlignment * 100, bearishAlignment * 100,
                 familyContext.getOverallBias(), isLong);
 
-        // FIX: Penalize signals when family alignment is VERY LOW (< 30%)
+        // BUG #5 FIX: SEVERE penalty when family alignment is VERY LOW (< 30%)
         // This means only ~30% of instruments agree with any direction - weak conviction
+        // Changed from 0.85x (15% reduction) to 0.50x (50% reduction) - signals will likely fail MIN_CONFIDENCE
         if (maxAlignment < 0.30) {
-            modifier *= 0.85; // 15% reduction for weak family context
-            modLog.append(String.format("WEAK_FAMILY_ALIGN(%.0f%%) -15%% ", maxAlignment * 100));
-            log.warn("[CONTEXT_MOD:FAMILY] {} {} signal has WEAK family alignment ({}%) - reduced confidence",
+            modifier *= 0.50; // 50% reduction - effectively kills the signal
+            modLog.append(String.format("WEAK_FAMILY_ALIGN(%.0f%%) -50%% ", maxAlignment * 100));
+            log.warn("[CONTEXT_MOD:FAMILY] {} {} signal has WEAK family alignment ({}%) - SEVERE confidence penalty",
                     signal.getFamilyId(), signal.getDirection(), String.format("%.0f", maxAlignment * 100));
         }
 
-        // FIX: Additional penalty when signal direction CONFLICTS with family bias
+        // BUG #4 FIX: SEVERE penalty when signal direction CONFLICTS with family bias
+        // Changed from 0.85x (15% reduction) to 0.40x (60% reduction) - effectively blocks the signal
         FamilyBias bias = familyContext.getOverallBias();
         if (bias != null && bias != FamilyBias.NEUTRAL) {
             boolean biasBullish = bias == FamilyBias.BULLISH || bias == FamilyBias.WEAK_BULLISH;
             boolean biasBearish = bias == FamilyBias.BEARISH || bias == FamilyBias.WEAK_BEARISH;
 
             if (isLong && biasBearish) {
-                modifier *= 0.85; // LONG signal vs BEARISH family = reduce
-                modLog.append("LONG_VS_BEAR_BIAS -15% ");
-                log.warn("[CONTEXT_MOD:FAMILY] {} LONG signal conflicts with {} family bias - reduced confidence",
+                modifier *= 0.40; // LONG signal vs BEARISH family = SEVERE penalty (was 0.85)
+                modLog.append("LONG_VS_BEAR_BIAS -60% ");
+                log.warn("[CONTEXT_MOD:FAMILY] {} LONG signal CONFLICTS with {} family bias - SEVERE penalty",
                         signal.getFamilyId(), bias);
             } else if (!isLong && biasBullish) {
-                modifier *= 0.85; // SHORT signal vs BULLISH family = reduce
-                modLog.append("SHORT_VS_BULL_BIAS -15% ");
-                log.warn("[CONTEXT_MOD:FAMILY] {} SHORT signal conflicts with {} family bias - reduced confidence",
+                modifier *= 0.40; // SHORT signal vs BULLISH family = SEVERE penalty (was 0.85)
+                modLog.append("SHORT_VS_BULL_BIAS -60% ");
+                log.warn("[CONTEXT_MOD:FAMILY] {} SHORT signal CONFLICTS with {} family bias - SEVERE penalty",
                         signal.getFamilyId(), bias);
             }
         }
