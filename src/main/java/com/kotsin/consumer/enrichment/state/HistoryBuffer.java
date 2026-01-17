@@ -55,7 +55,10 @@ public class HistoryBuffer {
 
     // Configuration
     private static final int DEFAULT_BUFFER_SIZE = 20;
-    private static final long TTL_HOURS = 24;
+    // BUG #21 FIX: Extended TTL from 24h to 7 days (168h)
+    // Old: Every morning, all percentiles reset = learning mode = garbage signals
+    // New: Keep 7 days of history for stable percentile calculations
+    private static final long TTL_HOURS = 168; // 7 days
 
     // Key prefixes
     private static final String HISTORY_PREFIX = "smtis:history:";

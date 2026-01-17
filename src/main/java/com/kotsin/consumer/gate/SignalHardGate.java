@@ -231,6 +231,22 @@ public class SignalHardGate {
             }
         }
 
+        // === RULE 10: First 30 Minutes Protection (Bug #20) ===
+        // Morning signals are unreliable - need time for indicators to warm up
+        java.time.ZonedDateTime nowIST = java.time.ZonedDateTime.now(java.time.ZoneId.of("Asia/Kolkata"));
+        int hour = nowIST.getHour();
+        int minute = nowIST.getMinute();
+
+        // NSE market opens at 9:15 AM IST
+        if (hour == 9 && minute < 45) { // Before 9:45 AM = first 30 minutes
+            blockReasons.add(String.format("MARKET_WARMUP:%02d:%02d", hour, minute));
+            log.warn("[HARD_GATE] {} BLOCKED: First 30 minutes of market ({}:{}) - indicators warming up",
+                    familyId, hour, String.format("%02d", minute));
+        }
+
+        // MCX market opens at 9:00 AM IST (check if MCX by exchange)
+        // For now, use same logic - can be refined with exchange-specific handling
+
         // === FINAL RESULT ===
         if (!blockReasons.isEmpty()) {
             String reasonStr = String.join(" | ", blockReasons);

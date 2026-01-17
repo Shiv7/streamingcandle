@@ -106,6 +106,14 @@ public class SignalGenerator {
     private final ConcurrentHashMap<String, List<TradingSignal>> signalCache = new ConcurrentHashMap<>();
 
     /**
+     * BUG #24 FIX: Duplicate signal prevention at generation level
+     * Key format: familyId:direction:setupId -> timestamp
+     * Prevents same signal from being generated within SIGNAL_DEDUP_WINDOW_MS
+     */
+    private final ConcurrentHashMap<String, Long> recentSignalKeys = new ConcurrentHashMap<>();
+    private static final long SIGNAL_DEDUP_WINDOW_MS = 5 * 60 * 1000; // 5 minutes
+
+    /**
      * Statistics
      */
     private long totalSignalsGenerated = 0;
@@ -1406,7 +1414,29 @@ public class SignalGenerator {
             }
         }
 
-        List<TradingSignal> filtered = bestPerFamily.values().stream()
+        // Step 4: BUG #24 FIX - Time-based duplicate prevention
+        // Clean up old entries first
+        long now = System.currentTimeMillis();
+        recentSignalKeys.entrySet().removeIf(e -> now - e.getValue() > SIGNAL_DEDUP_WINDOW_MS);
+
+        // Filter out signals that were recently generated
+        List<TradingSignal> nonDuplicate = new ArrayList<>();
+        for (TradingSignal signal : bestPerFamily.values()) {
+            String dedupKey = signal.getFamilyId() + ":" + signal.getDirection() + ":" +
+                    (signal.getSetupId() != null ? signal.getSetupId() : signal.getCategory());
+
+            Long lastGenerated = recentSignalKeys.get(dedupKey);
+            if (lastGenerated == null || now - lastGenerated > SIGNAL_DEDUP_WINDOW_MS) {
+                nonDuplicate.add(signal);
+                recentSignalKeys.put(dedupKey, now);
+            } else {
+                log.debug("[SIGNAL_GEN] Duplicate prevention: {} {} {} was generated {}ms ago, skipping",
+                        signal.getFamilyId(), signal.getDirection(), signal.getSetupId(),
+                        now - lastGenerated);
+            }
+        }
+
+        List<TradingSignal> filtered = nonDuplicate.stream()
                 .sorted((a, b) -> Integer.compare(b.getQualityScore(), a.getQualityScore()))
                 .limit(5)
                 .collect(Collectors.toList());
@@ -1466,17 +1496,22 @@ public class SignalGenerator {
 
     /**
      * Get ACTUAL historical success rate from outcome tracking
-     * Returns 0.5 (no edge) if insufficient data or store not available
+     *
+     * BUG #8 FIX: Changed from 0.5 (neutral) to 0.35 (pessimistic) for unknown setups
+     * Rationale: With no proven edge, assume below break-even
+     * This ensures new/untested setups are penalized until they prove themselves
      */
+    private static final double PESSIMISTIC_SUCCESS_RATE = 0.35; // Below break-even
+
     private double getActualSuccessRate(String setupId) {
         if (signalOutcomeStore == null || setupId == null) {
-            return 0.5; // No data - neutral assumption
+            return PESSIMISTIC_SUCCESS_RATE; // No data - pessimistic assumption
         }
         try {
             return signalOutcomeStore.getHistoricalSuccessRate(setupId);
         } catch (Exception e) {
             log.debug("[SIGNAL_GEN] Could not get historical success rate for {}: {}", setupId, e.getMessage());
-            return 0.5;
+            return PESSIMISTIC_SUCCESS_RATE;
         }
     }
 

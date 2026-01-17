@@ -244,13 +244,16 @@ public class SignalOutcomeStore {
      * Returns the actual win rate based on recorded outcomes
      *
      * @param setupId Setup ID (e.g., "SCALP_REVERSAL_LONG")
-     * @return Win rate between 0.0 and 1.0, or 0.5 if insufficient data
+     * @return Win rate between 0.0 and 1.0, or 0.35 (pessimistic) if insufficient data
      */
+    private static final double PESSIMISTIC_WIN_RATE = 0.35; // BUG #8 FIX: Below break-even
+
     public double getHistoricalSuccessRate(String setupId) {
         SetupPerformance perf = getSetupPerformance(setupId);
         if (perf == null || perf.getTotalTrades() < 10) {
-            // Not enough data - return neutral 0.5 (no edge proven)
-            return 0.5;
+            // BUG #8 FIX: Not enough data - return pessimistic 0.35 (assume no edge)
+            // Changed from 0.5 (neutral) to discourage unproven setups
+            return PESSIMISTIC_WIN_RATE;
         }
         return perf.getWinRate();
     }
