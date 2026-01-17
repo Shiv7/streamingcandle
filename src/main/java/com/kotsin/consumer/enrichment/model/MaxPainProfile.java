@@ -28,6 +28,13 @@ public class MaxPainProfile {
     private String timeframe;
     private double spotPrice;
 
+    /**
+     * FIX: Flag to indicate if options data was available for max pain calculation.
+     * When false, values are defaults/empty (not "no max pain").
+     * Used by consumers to show "N/A" instead of 0 when no options data.
+     */
+    private boolean hasOptionsData;
+
     // ======================== MAX PAIN METRICS ========================
 
     /**
@@ -200,10 +207,11 @@ public class MaxPainProfile {
     }
 
     /**
-     * Factory method for empty profile
+     * Factory method for empty profile (no options data available)
      */
     public static MaxPainProfile empty() {
         return MaxPainProfile.builder()
+                .hasOptionsData(false)  // FIX: Indicate no options data
                 .maxPainStrike(0)
                 .totalPainAtMaxPain(0)
                 .distanceToMaxPainPct(0)
@@ -216,5 +224,12 @@ public class MaxPainProfile {
                 .secondaryPainLevels(Collections.emptyList())
                 .maxPainStrength(0)
                 .build();
+    }
+
+    /**
+     * Check if this profile has actual options data
+     */
+    public boolean hasData() {
+        return hasOptionsData;
     }
 }

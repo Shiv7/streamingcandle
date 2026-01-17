@@ -328,22 +328,35 @@ public class PatternMatcher {
 
     /**
      * Calculate position size multiplier based on confidence and stats
+     * FIX: More conservative sizing - never boost without proven edge
      */
     private double calculatePositionSizeMultiplier(double confidence, HistoricalStats stats) {
-        // Base multiplier from confidence
-        double multiplier = 0.5 + confidence;
+        // FIX: Start with confidence-based multiplier (capped at 1.0 as base)
+        double multiplier;
+        if (confidence >= 0.85) multiplier = 1.0;       // High conf = standard size
+        else if (confidence >= 0.75) multiplier = 0.9;  // Good conf = slightly reduced
+        else if (confidence >= 0.65) multiplier = 0.8;  // Moderate = reduced
+        else multiplier = 0.6;                          // Low conf = significantly reduced
 
-        // Adjust based on historical performance
+        // FIX: Only allow boost > 1.0 if there's PROVEN historical edge
         if (stats != null && stats.hasSufficientData()) {
-            if (stats.hasEdge()) {
-                multiplier *= 1.2; // Increase size for proven patterns
-            } else if (!stats.isProfitable()) {
-                multiplier *= 0.7; // Reduce size for unprofitable patterns
+            if (stats.hasEdge() && stats.getSuccessRate() >= 0.60) {
+                // Proven edge with high win rate: allow small boost
+                multiplier = Math.min(multiplier * 1.2, 1.3);
+            } else if (!stats.isProfitable() || stats.getSuccessRate() < 0.50) {
+                // No profitability or low win rate: reduce significantly
+                multiplier *= 0.6;
+            } else if (stats.getSuccessRate() < 0.55) {
+                // No statistical edge (< 55% win rate): cap at 1.0 and reduce
+                multiplier = Math.min(multiplier, 1.0) * 0.8;
             }
+        } else {
+            // No historical data: be conservative
+            multiplier = Math.min(multiplier, 0.8);
         }
 
-        // Clamp to reasonable range
-        return Math.max(0.5, Math.min(1.5, multiplier));
+        // Clamp to reasonable range (0.3 to 1.3)
+        return Math.max(0.3, Math.min(1.3, multiplier));
     }
 
     /**

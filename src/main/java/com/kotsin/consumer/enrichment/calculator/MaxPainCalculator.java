@@ -139,6 +139,7 @@ public class MaxPainCalculator {
         double maxPainStrength = calculateMaxPainStrength(callOIByStrike, putOIByStrike, maxPainStrike);
 
         return MaxPainProfile.builder()
+                .hasOptionsData(true)  // FIX: Mark that we have actual options data
                 .familyId(family.getFamilyId())
                 .timeframe(family.getTimeframe())
                 .spotPrice(spotPrice)

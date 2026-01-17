@@ -75,7 +75,7 @@ public class FUDKIIProcessor {
 
     @KafkaListener(
         topics = KafkaTopics.FAMILY_CANDLE_30M,
-        groupId = "fudkii-processor-v2",
+        groupId = "${kafka.consumer.fudkii-group:fudkii-processor-v2}",
         containerFactory = "kafkaListenerContainerFactory"
     )
     public void process30mCandle(String message) {

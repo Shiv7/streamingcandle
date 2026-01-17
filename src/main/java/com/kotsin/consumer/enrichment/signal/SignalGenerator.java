@@ -288,6 +288,21 @@ public class SignalGenerator {
                 .positionSizeMultiplier(pattern.getPositionSizeMultiplier())
                 .riskPercentage(pattern.getRiskPercentage());
 
+        // FIX: Add VPIN and Lambda microstructure data from quantScore
+        HistoricalContext histCtx = quantScore.getHistoricalContext();
+        if (histCtx != null) {
+            MetricContext vpinCtx = histCtx.getVpinContext();
+            if (vpinCtx != null && vpinCtx.hasEnoughSamples()) {
+                builder.vpin(vpinCtx.getCurrentValue());
+                builder.vpinPercentile(vpinCtx.getPercentile());
+            }
+            MetricContext lambdaCtx = histCtx.getLambdaContext();
+            if (lambdaCtx != null && lambdaCtx.hasEnoughSamples()) {
+                builder.kyleLambda(lambdaCtx.getCurrentValue());
+                builder.lambdaPercentile(lambdaCtx.getPercentile());
+            }
+        }
+
         return builder.build();
     }
 
@@ -343,12 +358,28 @@ public class SignalGenerator {
         double currentPrice = quantScore.getClose();
         double atrPct = quantScore.getAtrPct() != null ? quantScore.getAtrPct() : 0.5;
 
+        // FIX: Use microprice for entry when available (orderbook-derived fair value)
+        // Microprice is more accurate for real-time/forward testing than candle close
+        // Fallback to close if microprice not available or significantly different (>0.5% ATR)
+        double entryPrice = currentPrice;
+        Double microprice = quantScore.getMicroprice();
+        if (microprice != null && microprice > 0) {
+            double maxDeviation = currentPrice * atrPct / 100 * 0.5; // 50% of ATR
+            if (Math.abs(microprice - currentPrice) <= maxDeviation) {
+                entryPrice = microprice;
+                log.debug("[SIGNAL_GEN] Using microprice {} instead of close {} for entry (diff={})",
+                        String.format("%.2f", microprice), String.format("%.2f", currentPrice),
+                        String.format("%.2f", microprice - currentPrice));
+            } else {
+                log.warn("[SIGNAL_GEN] Microprice {} too far from close {} (diff={:.2f} > maxDev={:.2f}), using close",
+                        microprice, currentPrice, Math.abs(microprice - currentPrice), maxDeviation);
+            }
+        }
+
         // Calculate trade parameters
         boolean isLong = setup.getDirection() == com.kotsin.consumer.enrichment.intelligence.model.SetupDefinition.SetupDirection.LONG;
-        double stopDistance = currentPrice * atrPct / 100 * 1.5;
+        double stopDistance = entryPrice * atrPct / 100 * 1.5;
         double targetDistance = stopDistance * setup.getRiskRewardRatio();
-
-        double entryPrice = currentPrice;
         double stopLoss = isLong ? entryPrice - stopDistance : entryPrice + stopDistance;
         double target1 = isLong ? entryPrice + (targetDistance * 0.5) : entryPrice - (targetDistance * 0.5);
         double target2 = isLong ? entryPrice + targetDistance : entryPrice - targetDistance;
@@ -402,8 +433,11 @@ public class SignalGenerator {
                 // Historical performance - REAL data from outcome tracking
                 .historicalSuccessRate(getActualSuccessRate(setup.getSetupId()))
                 .historicalSampleCount(getActualSampleCount(setup.getSetupId()))
-                // Position sizing
-                .positionSizeMultiplier(calculatePositionSize(setup.getCurrentConfidence()))
+                // Position sizing - FIX: Use context-aware sizing with win rate and family alignment
+                .positionSizeMultiplier(calculatePositionSizeWithContext(
+                        setup.getCurrentConfidence(),
+                        getActualSuccessRate(setup.getSetupId()),
+                        Math.max(quantScore.getFamilyBullishAlignment(), quantScore.getFamilyBearishAlignment())))
                 .riskPercentage(1.0);
 
         // FIX: Add technical context fields directly to signal for TradingSignalPublisher
@@ -435,6 +469,21 @@ public class SignalGenerator {
         MaxPainProfile mpProfile = quantScore.getMaxPainProfile();
         if (mpProfile != null && mpProfile.getMaxPainStrike() > 0) {
             builder.maxPainLevel(mpProfile.getMaxPainStrike());
+        }
+
+        // FIX: Add VPIN and Lambda microstructure data
+        HistoricalContext histCtx = quantScore.getHistoricalContext();
+        if (histCtx != null) {
+            MetricContext vpinCtx = histCtx.getVpinContext();
+            if (vpinCtx != null && vpinCtx.hasEnoughSamples()) {
+                builder.vpin(vpinCtx.getCurrentValue());
+                builder.vpinPercentile(vpinCtx.getPercentile());
+            }
+            MetricContext lambdaCtx = histCtx.getLambdaContext();
+            if (lambdaCtx != null && lambdaCtx.hasEnoughSamples()) {
+                builder.kyleLambda(lambdaCtx.getCurrentValue());
+                builder.lambdaPercentile(lambdaCtx.getPercentile());
+            }
         }
 
         // Build rationale
@@ -470,6 +519,8 @@ public class SignalGenerator {
             double bearishAlign = quantScore.getFamilyBearishAlignment() * 100;
 
             // Determine family bias
+            // FIX: Distinguish between "balanced" neutral and "no conviction" neutral
+            double maxAlign = Math.max(bullishAlign, bearishAlign);
             String familyBias;
             if (quantScore.isFamilyFullyBullish()) {
                 familyBias = "BULLISH";
@@ -477,15 +528,22 @@ public class SignalGenerator {
             } else if (quantScore.isFamilyFullyBearish()) {
                 familyBias = "BEARISH";
                 metadata.put("fullyAligned", true);
+            } else if (maxAlign < 30) {
+                // FIX: Very low alignment = NO CONVICTION (less than 30% of instruments agree on any direction)
+                familyBias = "NO_CONVICTION";
+                metadata.put("lowConviction", true);
+                log.warn("[FAMILY_BIAS] {} has NO_CONVICTION - maxAlignment={}% (very weak signal quality)",
+                        setup.getFamilyId(), String.format("%.0f", maxAlign));
             } else if (bullishAlign > bearishAlign + 20) {
                 familyBias = "WEAK_BULLISH";
             } else if (bearishAlign > bullishAlign + 20) {
                 familyBias = "WEAK_BEARISH";
             } else {
+                // Balanced alignment (neither direction dominates by 20%)
                 familyBias = "NEUTRAL";
             }
             metadata.put("familyBias", familyBias);
-            metadata.put("familyAlignment", Math.max(bullishAlign, bearishAlign));
+            metadata.put("familyAlignment", maxAlign);
 
             // Divergence
             metadata.put("hasDivergence", quantScore.hasFamilyDivergence());
@@ -590,18 +648,28 @@ public class SignalGenerator {
         double currentPrice = quantScore.getClose();
         double atrPct = quantScore.getAtrPct() != null ? quantScore.getAtrPct() : 0.5;
 
+        // FIX: Use microprice for entry when available (orderbook-derived fair value)
+        double entryPrice = currentPrice;
+        Double microprice = quantScore.getMicroprice();
+        if (microprice != null && microprice > 0) {
+            double maxDeviation = currentPrice * atrPct / 100 * 0.5;
+            if (Math.abs(microprice - currentPrice) <= maxDeviation) {
+                entryPrice = microprice;
+            }
+        }
+
         // Determine direction
         boolean isLong = prediction.getDirection() == PredictedEvent.PredictionDirection.BULLISH;
 
         // Use prediction targets if available
         double targetPrice = prediction.getTargetPrice() != null ? prediction.getTargetPrice() :
-                (isLong ? currentPrice * 1.01 : currentPrice * 0.99);
+                (isLong ? entryPrice * 1.01 : entryPrice * 0.99);
         double invalidationPrice = prediction.getInvalidationPrice() != null ? prediction.getInvalidationPrice() :
-                (isLong ? currentPrice * 0.995 : currentPrice * 1.005);
+                (isLong ? entryPrice * 0.995 : entryPrice * 1.005);
 
-        double stopDistance = Math.abs(currentPrice - invalidationPrice);
-        double target1 = isLong ? currentPrice + (stopDistance * 0.7) : currentPrice - (stopDistance * 0.7);
-        double target3 = isLong ? currentPrice + (stopDistance * 2.5) : currentPrice - (stopDistance * 2.5);
+        double stopDistance = Math.abs(entryPrice - invalidationPrice);
+        double target1 = isLong ? entryPrice + (stopDistance * 0.7) : entryPrice - (stopDistance * 0.7);
+        double target3 = isLong ? entryPrice + (stopDistance * 2.5) : entryPrice - (stopDistance * 2.5);
 
         // FIX: Separate timestamps for staleness check vs price-time correlation
         Instant dataTime = getDataTimestamp(quantScore);
@@ -623,7 +691,7 @@ public class SignalGenerator {
                         Urgency.IMMEDIATE : Urgency.NORMAL)
                 // Trade parameters
                 .currentPrice(currentPrice)
-                .entryPrice(currentPrice)
+                .entryPrice(entryPrice)  // FIX: Use microprice-based entry when available
                 .stopLoss(invalidationPrice)
                 .target1(target1)
                 .target2(targetPrice)
@@ -665,8 +733,15 @@ public class SignalGenerator {
         double currentPrice = quantScore.getClose();
         boolean isLong = "LONG".equalsIgnoreCase(rec.getDirection());
 
-        // Use recommended prices if available
-        double entryPrice = rec.getSuggestedEntry() != null ? rec.getSuggestedEntry() : currentPrice;
+        // FIX: Use recommended entry if available, else microprice, else close
+        double entryPrice;
+        if (rec.getSuggestedEntry() != null) {
+            entryPrice = rec.getSuggestedEntry();
+        } else {
+            // Use microprice (orderbook fair value) when available
+            Double microprice = quantScore.getMicroprice();
+            entryPrice = (microprice != null && microprice > 0) ? microprice : currentPrice;
+        }
         double stopLoss = rec.getSuggestedStop() != null ? rec.getSuggestedStop() :
                 (isLong ? currentPrice * 0.99 : currentPrice * 1.01);
         double target2 = rec.getSuggestedTarget() != null ? rec.getSuggestedTarget() :
@@ -817,6 +892,14 @@ public class SignalGenerator {
                 modifiedConfidence *= sessionModifier;
             }
 
+            // 1b. FIX: Apply exhaustion requirement at session extremes
+            // Signals at extremes (>85% or <15%) without exhaustion confirmation are risky
+            if (quantScore.hasSessionStructure() && quantScore.getHistoricalContext() != null) {
+                double exhaustionModifier = applyExhaustionRequirementModifier(
+                        signal, quantScore.getSessionStructure(), quantScore.getHistoricalContext(), modifierLog);
+                modifiedConfidence *= exhaustionModifier;
+            }
+
             // 2. Apply Family Context modifier (alignment/divergence)
             if (quantScore.hasFamilyContext()) {
                 double familyModifier = applyFamilyContextModifier(signal, quantScore.getFamilyContext(), modifierLog);
@@ -835,6 +918,13 @@ public class SignalGenerator {
             // Update signal confidence - quality score is calculated dynamically
             // based on confidence, so it will automatically reflect the new value
             signal.setConfidence(modifiedConfidence);
+
+            // FIX: Update ConfidenceBreakdown with context modifier for proper output
+            // contextConfidence represents the combined effect of all context modifiers
+            double contextModifier = originalConfidence > 0 ? modifiedConfidence / originalConfidence : 1.0;
+            if (signal.getConfidenceBreakdown() != null) {
+                signal.getConfidenceBreakdown().setContextConfidence(contextModifier);
+            }
 
             // Log modifications
             double change = modifiedConfidence - originalConfidence;
@@ -906,6 +996,59 @@ public class SignalGenerator {
     }
 
     /**
+     * FIX: Apply exhaustion requirement at session extremes.
+     *
+     * Signals at session extremes (>85% or <15%) are RISKY without exhaustion confirmation.
+     * - SHORT at session HIGH (>85%) without buying exhaustion → potential short squeeze → reduce
+     * - LONG at session LOW (<15%) without selling exhaustion → potential waterfall → reduce
+     *
+     * Exhaustion = velocity reversal = safer reversal signal
+     * No exhaustion at extreme = chasing price = dangerous
+     */
+    private double applyExhaustionRequirementModifier(TradingSignal signal, SessionStructure session,
+                                                       HistoricalContext histCtx, StringBuilder modLog) {
+        double modifier = 1.0;
+        double positionInRange = session.getPositionInRange();
+        boolean isLong = signal.getDirection() == Direction.LONG;
+
+        // Check if at session extreme
+        boolean atSessionHigh = positionInRange >= 0.85;
+        boolean atSessionLow = positionInRange <= 0.15;
+
+        // Get exhaustion status
+        boolean hasSellingExhaustion = histCtx.isSellingExhaustion();
+        boolean hasBuyingExhaustion = histCtx.isBuyingExhaustion();
+
+        if (atSessionHigh && !isLong) {
+            // SHORT at session high - should have buying exhaustion
+            if (!hasBuyingExhaustion) {
+                modifier *= 0.75; // 25% penalty: shorting at high without exhaustion = risky
+                modLog.append("SHORT_NO_EXHAUST_AT_HIGH -25% ");
+                log.warn("[CONTEXT_MOD:EXHAUST] {} SHORT at {}% session position WITHOUT buying exhaustion - risky!",
+                        signal.getFamilyId(), String.format("%.0f", positionInRange * 100));
+            } else {
+                modifier *= 1.1; // 10% boost: exhaustion confirmed at extreme = good reversal signal
+                modLog.append("SHORT_WITH_EXHAUST +10% ");
+            }
+        }
+
+        if (atSessionLow && isLong) {
+            // LONG at session low - should have selling exhaustion
+            if (!hasSellingExhaustion) {
+                modifier *= 0.75; // 25% penalty: buying at low without exhaustion = risky
+                modLog.append("LONG_NO_EXHAUST_AT_LOW -25% ");
+                log.warn("[CONTEXT_MOD:EXHAUST] {} LONG at {}% session position WITHOUT selling exhaustion - risky!",
+                        signal.getFamilyId(), String.format("%.0f", positionInRange * 100));
+            } else {
+                modifier *= 1.1; // 10% boost: exhaustion confirmed at extreme = good reversal signal
+                modLog.append("LONG_WITH_EXHAUST +10% ");
+            }
+        }
+
+        return modifier;
+    }
+
+    /**
      * Apply family context modifier based on multi-instrument alignment.
      *
      * FAMILY ALIGNMENT = STRONGEST SIGNALS
@@ -913,6 +1056,7 @@ public class SignalGenerator {
      * - Bullish alignment + LONG signal = boost confidence
      * - Bearish alignment + SHORT signal = boost confidence
      * - Alignment opposite to signal = reduce confidence
+     * - LOW alignment (< 30%) = reduce confidence (weak conviction)
      *
      * DIVERGENCE = REVERSAL WARNING
      * When options flow contradicts price:
@@ -927,10 +1071,39 @@ public class SignalGenerator {
         // Alignment check
         double bullishAlignment = familyContext.getBullishAlignment();
         double bearishAlignment = familyContext.getBearishAlignment();
+        double maxAlignment = Math.max(bullishAlignment, bearishAlignment);
 
         log.trace("[CONTEXT_MOD:FAMILY] {} | bullAlign={:.0f}% | bearAlign={:.0f}% | bias={} | isLong={}",
                 signal.getFamilyId(), bullishAlignment * 100, bearishAlignment * 100,
                 familyContext.getOverallBias(), isLong);
+
+        // FIX: Penalize signals when family alignment is VERY LOW (< 30%)
+        // This means only ~30% of instruments agree with any direction - weak conviction
+        if (maxAlignment < 0.30) {
+            modifier *= 0.85; // 15% reduction for weak family context
+            modLog.append(String.format("WEAK_FAMILY_ALIGN(%.0f%%) -15%% ", maxAlignment * 100));
+            log.warn("[CONTEXT_MOD:FAMILY] {} {} signal has WEAK family alignment ({}%) - reduced confidence",
+                    signal.getFamilyId(), signal.getDirection(), String.format("%.0f", maxAlignment * 100));
+        }
+
+        // FIX: Additional penalty when signal direction CONFLICTS with family bias
+        FamilyBias bias = familyContext.getOverallBias();
+        if (bias != null && bias != FamilyBias.NEUTRAL) {
+            boolean biasBullish = bias == FamilyBias.BULLISH || bias == FamilyBias.WEAK_BULLISH;
+            boolean biasBearish = bias == FamilyBias.BEARISH || bias == FamilyBias.WEAK_BEARISH;
+
+            if (isLong && biasBearish) {
+                modifier *= 0.85; // LONG signal vs BEARISH family = reduce
+                modLog.append("LONG_VS_BEAR_BIAS -15% ");
+                log.warn("[CONTEXT_MOD:FAMILY] {} LONG signal conflicts with {} family bias - reduced confidence",
+                        signal.getFamilyId(), bias);
+            } else if (!isLong && biasBullish) {
+                modifier *= 0.85; // SHORT signal vs BULLISH family = reduce
+                modLog.append("SHORT_VS_BULL_BIAS -15% ");
+                log.warn("[CONTEXT_MOD:FAMILY] {} SHORT signal conflicts with {} family bias - reduced confidence",
+                        signal.getFamilyId(), bias);
+            }
+        }
 
         if (isLong && bullishAlignment >= 0.6) {
             // Long signal with bullish family alignment = boost
@@ -1323,12 +1496,38 @@ public class SignalGenerator {
     }
 
     private double calculatePositionSize(double confidence) {
-        // Base size with confidence adjustment
-        if (confidence >= 0.80) return 1.5;
-        if (confidence >= 0.70) return 1.2;
-        if (confidence >= 0.60) return 1.0;
-        if (confidence >= 0.50) return 0.7;
-        return 0.5;
+        // FIX: More conservative position sizing
+        // Only allow multiplier > 1.0 for HIGH confidence signals
+        // This prevents over-sizing on weak signals
+        if (confidence >= 0.85) return 1.3;  // Only very high confidence gets boost
+        if (confidence >= 0.75) return 1.1;  // High confidence gets small boost
+        if (confidence >= 0.65) return 1.0;  // Good confidence = standard size
+        if (confidence >= 0.55) return 0.8;  // Moderate confidence = reduced
+        if (confidence >= 0.45) return 0.6;  // Low confidence = significantly reduced
+        return 0.5;  // Minimum size for lowest confidence
+    }
+
+    /**
+     * Calculate position size with additional context factors
+     * FIX: Consider win rate and family alignment in sizing
+     */
+    private double calculatePositionSizeWithContext(double confidence, double historicalWinRate,
+                                                    double familyAlignment) {
+        double baseSize = calculatePositionSize(confidence);
+
+        // FIX: NEVER allow multiplier > 1.0 if no statistical edge
+        if (historicalWinRate > 0 && historicalWinRate < 0.55) {
+            // No edge: cap at 1.0 and reduce further
+            baseSize = Math.min(baseSize, 1.0) * 0.8;
+        }
+
+        // FIX: Reduce size if family alignment is weak
+        if (familyAlignment > 0 && familyAlignment < 0.30) {
+            baseSize *= 0.85; // 15% reduction for weak context
+        }
+
+        // Ensure reasonable bounds
+        return Math.max(0.3, Math.min(1.5, baseSize));
     }
 
     private String generatePatternHeadline(PatternSignal pattern) {
@@ -1467,14 +1666,18 @@ public class SignalGenerator {
             sb.append("\n");
 
             if (ofiCtx.getPercentile() > 0) {
-                sb.append(String.format("- OFI Percentile: %.0f%%\n", ofiCtx.getPercentile() * 100));
+                // FIX: Percentile is already [0-100], don't multiply by 100 again
+                sb.append(String.format("- OFI Percentile: %.0f%%\n", ofiCtx.getPercentile()));
             }
         }
 
         if (ctx != null && ctx.getVolumeDeltaContext() != null) {
             MetricContext vdCtx = ctx.getVolumeDeltaContext();
             double volumeDelta = vdCtx.getCurrentValue();
-            sb.append(String.format("- Volume Delta: %+.1f%%\n", volumeDelta * 100));
+            // FIX: Volume Delta is raw (buyVol - sellVol), show as z-score and percentile instead
+            String direction = volumeDelta > 0 ? "BUY_DOMINANT" : volumeDelta < 0 ? "SELL_DOMINANT" : "NEUTRAL";
+            sb.append(String.format("- Volume Delta: %s (z=%.2f, P%.0f)\n",
+                    direction, vdCtx.getZscore(), vdCtx.getPercentile()));
         }
 
         if (ctx != null) {
@@ -1637,6 +1840,8 @@ public class SignalGenerator {
             double bearishAlign = quantScore.getFamilyBearishAlignment() * 100;
 
             // Determine family bias
+            // FIX: Distinguish between "balanced" neutral and "no conviction" neutral
+            double maxAlign = Math.max(bullishAlign, bearishAlign);
             if (quantScore.isFamilyFullyBullish()) {
                 builder.familyBias("BULLISH");
                 builder.familyAlignment(bullishAlign);
@@ -1645,6 +1850,11 @@ public class SignalGenerator {
                 builder.familyBias("BEARISH");
                 builder.familyAlignment(bearishAlign);
                 builder.fullyAligned(true);
+            } else if (maxAlign < 30) {
+                // FIX: Very low alignment = NO CONVICTION (less than 30% of instruments agree on any direction)
+                builder.familyBias("NO_CONVICTION");
+                builder.familyAlignment(maxAlign);
+                builder.fullyAligned(false);
             } else if (bullishAlign > bearishAlign + 20) {
                 builder.familyBias("WEAK_BULLISH");
                 builder.familyAlignment(bullishAlign);
@@ -1654,8 +1864,9 @@ public class SignalGenerator {
                 builder.familyAlignment(bearishAlign);
                 builder.fullyAligned(false);
             } else {
+                // Balanced alignment (neither direction dominates by 20%)
                 builder.familyBias("NEUTRAL");
-                builder.familyAlignment(Math.max(bullishAlign, bearishAlign));
+                builder.familyAlignment(maxAlign);
                 builder.fullyAligned(false);
             }
 

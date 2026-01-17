@@ -1,6 +1,7 @@
 package com.kotsin.consumer.enrichment;
 
 import com.kotsin.consumer.domain.model.FamilyCandle;
+import com.kotsin.consumer.domain.model.InstrumentCandle;
 import com.kotsin.consumer.enrichment.analyzer.FamilyContextAnalyzer;
 import com.kotsin.consumer.enrichment.analyzer.FamilyContextAnalyzer.FamilyContext;
 import com.kotsin.consumer.enrichment.calculator.ConfluenceCalculator;
@@ -246,6 +247,15 @@ public class EnrichedQuantScoreCalculator {
             tempScore.setScripCode(family.getFuture() != null ? family.getFuture().getScripCode() : null);
             tempScore.setCompanyName(family.getFuture() != null ? family.getFuture().getCompanyName() : null);
             tempScore.setClose(currentPrice);
+
+            // FIX: Set microprice from primary instrument for better entry price accuracy
+            // Microprice is orderbook-derived fair value, more current than candle close
+            InstrumentCandle primaryInstrument = family.getFuture() != null ? family.getFuture() :
+                                                  family.getEquity() != null ? family.getEquity() :
+                                                  family.getPrimaryInstrument();
+            if (primaryInstrument != null && primaryInstrument.getMicroprice() != null) {
+                tempScore.setMicroprice(primaryInstrument.getMicroprice());
+            }
 
             // Process events through PatternMatcher
             List<PatternSignal> patternSignals = patternMatcher.processEvents(
@@ -1062,6 +1072,13 @@ public class EnrichedQuantScoreCalculator {
         private String companyName;
         private String exchange;  // FIX: "N" for NSE, "M" for MCX, "B" for BSE
         private double close;
+
+        /**
+         * FIX: Microprice - Orderbook-derived fair value.
+         * More accurate than candle close for real-time/forward testing.
+         * Use for entry price when available (with fallback to close).
+         */
+        private Double microprice;
 
         /**
          * FIX: Timestamp when the close price was captured (from FamilyCandle.windowEndMillis).
