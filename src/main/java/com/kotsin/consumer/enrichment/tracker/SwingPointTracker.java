@@ -76,8 +76,8 @@ public class SwingPointTracker {
         long timestamp = family.getWindowEndMillis() > 0 ? family.getWindowEndMillis() :
                          family.getTimestamp() > 0 ? family.getTimestamp() : System.currentTimeMillis();
 
-        log.trace("[SWING] {} Processing candle | H={:.2f} L={:.2f} C={:.2f} V={} | bufferSize={} | barIndex={}",
-                familyId, high, low, close, volume, state.candleBuffer.size(), state.barIndex);
+        log.trace("[SWING] {} Processing candle | H={} L={} C={} V={} | bufferSize={} | barIndex={}",
+                familyId, String.format("%.2f", high), String.format("%.2f", low), String.format("%.2f", close), volume, state.candleBuffer.size(), state.barIndex);
 
         // Add to candle buffer
         CandleData candle = new CandleData(timestamp, high, low, close, volume);
@@ -97,8 +97,8 @@ public class SwingPointTracker {
             int checkIndex = state.candleBuffer.size() - SWING_LOOKBACK - 1;
             CandleData checkCandle = state.candleBuffer.get(checkIndex);
 
-            log.trace("[SWING] {} Checking for swings at index {} | checkHigh={:.2f} checkLow={:.2f}",
-                    familyId, checkIndex, checkCandle.high, checkCandle.low);
+            log.trace("[SWING] {} Checking for swings at index {} | checkHigh={} checkLow={}",
+                    familyId, checkIndex, String.format("%.2f", checkCandle.high), String.format("%.2f", checkCandle.low));
 
             if (isSwingHigh(state.candleBuffer, checkIndex)) {
                 SwingPoint swingHigh = SwingPoint.builder()
@@ -132,8 +132,8 @@ public class SwingPointTracker {
                         isLowerHigh ? "LOWER_HIGH - bearish structure" : "New swing high formed"
                 ));
 
-                log.info("[SWING] {} NEW_SWING_HIGH formed | price={:.2f} | lowerHigh={} | prevSwingHigh={} | barIndex={}",
-                        familyId, checkCandle.high, isLowerHigh,
+                log.info("[SWING] {} NEW_SWING_HIGH formed | price={} | lowerHigh={} | prevSwingHigh={} | barIndex={}",
+                        familyId, String.format("%.2f", checkCandle.high), isLowerHigh,
                         lastHigh != null ? String.format("%.2f", lastHigh.getPrice()) : "none",
                         state.barIndex);
             }
@@ -165,8 +165,8 @@ public class SwingPointTracker {
                         isHigherLow ? "HIGHER_LOW - bullish structure" : "New swing low formed"
                 ));
 
-                log.info("[SWING] {} NEW_SWING_LOW formed | price={:.2f} | higherLow={} | prevSwingLow={} | barIndex={}",
-                        familyId, checkCandle.low, isHigherLow,
+                log.info("[SWING] {} NEW_SWING_LOW formed | price={} | higherLow={} | prevSwingLow={} | barIndex={}",
+                        familyId, String.format("%.2f", checkCandle.low), isHigherLow,
                         lastLow != null ? String.format("%.2f", lastLow.getPrice()) : "none",
                         state.barIndex);
             }
@@ -238,19 +238,19 @@ public class SwingPointTracker {
         // Log summary at debug level (or info if events were detected)
         if (!events.isEmpty()) {
             log.info("[SWING] {} Analysis complete | trend={} | swingHigh={} | swingLow={} | " +
-                            "highBroken={} | lowBroken={} | eventsGenerated={} | timeMs={:.2f}",
+                            "highBroken={} | lowBroken={} | eventsGenerated={} | timeMs={}",
                     familyId, trend,
                     state.lastSwingHigh != null ? String.format("%.2f", state.lastSwingHigh.getPrice()) : "none",
                     state.lastSwingLow != null ? String.format("%.2f", state.lastSwingLow.getPrice()) : "none",
                     state.swingHighBroken, state.swingLowBroken,
-                    events.size(), elapsedNanos / 1_000_000.0);
+                    events.size(), String.format("%.2f", elapsedNanos / 1_000_000.0));
         } else {
             log.debug("[SWING] {} Update complete | trend={} | swingHigh={} | swingLow={} | " +
-                            "totalSwings={} | barIndex={} | timeMs={:.2f}",
+                            "totalSwings={} | barIndex={} | timeMs={}",
                     familyId, trend,
                     state.lastSwingHigh != null ? String.format("%.2f", state.lastSwingHigh.getPrice()) : "none",
                     state.lastSwingLow != null ? String.format("%.2f", state.lastSwingLow.getPrice()) : "none",
-                    state.swingPoints.size(), state.barIndex, elapsedNanos / 1_000_000.0);
+                    state.swingPoints.size(), state.barIndex, String.format("%.2f", elapsedNanos / 1_000_000.0));
         }
 
         return analysis;
@@ -451,10 +451,10 @@ public class SwingPointTracker {
         }
 
         log.trace("[SWING] Trend structure analysis | HH={} HL={} LH={} LL={} | " +
-                        "prevHigh={:.2f} lastHigh={:.2f} | prevLow={:.2f} lastLow={:.2f} | result={}",
+                        "prevHigh={} lastHigh={} | prevLow={} lastLow={} | result={}",
                 higherHigh, higherLow, lowerHigh, lowerLow,
-                prevHigh.getPrice(), lastHigh.getPrice(),
-                prevLow.getPrice(), lastLow.getPrice(), result);
+                String.format("%.2f", prevHigh.getPrice()), String.format("%.2f", lastHigh.getPrice()),
+                String.format("%.2f", prevLow.getPrice()), String.format("%.2f", lastLow.getPrice()), result);
 
         return result;
     }

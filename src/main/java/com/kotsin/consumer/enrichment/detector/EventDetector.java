@@ -172,9 +172,9 @@ public class EventDetector {
         double price = family.getPrimaryPrice();
         Instant now = Instant.now();
 
-        log.debug("[EVENT+] {} Starting context-aware detection | price={:.2f} | " +
+        log.debug("[EVENT+] {} Starting context-aware detection | price={} | " +
                         "hasSession={} | hasFamily={} | baseEvents={}",
-                familyId, price, sessionStructure != null, familyContext != null, baseEventCount);
+                familyId, String.format("%.2f", price), sessionStructure != null, familyContext != null, baseEventCount);
 
         // ========== Context-Aware Microstructure (Position-Aware) ==========
         if (sessionStructure != null && historicalContext != null) {
@@ -209,24 +209,24 @@ public class EventDetector {
         int newEventCount = events.size() - baseEventCount;
 
         if (contextAwareCount > 0) {
-            log.info("[EVENT+] {} @ {:.2f} | {} context-aware events | totalEvents={} | pos={}% | bias={} | timeMs={:.2f}",
-                    familyId, price, contextAwareCount, events.size(),
+            log.info("[EVENT+] {} @ {} | {} context-aware events | totalEvents={} | pos={}% | bias={} | timeMs={}",
+                    familyId, String.format("%.2f", price), contextAwareCount, events.size(),
                     sessionStructure != null ? String.format("%.0f", sessionStructure.getPositionInRange() * 100) : "?",
                     familyContext != null ? familyContext.getOverallBias() : "?",
-                    elapsedNanos / 1_000_000.0);
+                    String.format("%.2f", elapsedNanos / 1_000_000.0));
 
             // Log context-aware event types at debug level
             events.stream()
                     .filter(e -> isContextAwareEventType(e.getEventType()))
-                    .forEach(e -> log.debug("[EVENT+] {} Context event: {} | dir={} | strength={:.2f}",
-                            familyId, e.getEventType(), e.getDirection(), e.getStrength()));
+                    .forEach(e -> log.debug("[EVENT+] {} Context event: {} | dir={} | strength={}",
+                            familyId, e.getEventType(), e.getDirection(), String.format("%.2f", e.getStrength())));
         } else {
             log.debug("[EVENT+] {} Detection complete | totalEvents={} (base={}, ctx={}) | " +
-                            "pos={}% | bias={} | timeMs={:.2f}",
+                            "pos={}% | bias={} | timeMs={}",
                     familyId, events.size(), baseEventCount, newEventCount,
                     sessionStructure != null ? String.format("%.0f", sessionStructure.getPositionInRange() * 100) : "?",
                     familyContext != null ? familyContext.getOverallBias() : "?",
-                    elapsedNanos / 1_000_000.0);
+                    String.format("%.2f", elapsedNanos / 1_000_000.0));
         }
 
         return events;
@@ -266,10 +266,10 @@ public class EventDetector {
         boolean atSessionLow = positionInRange < SESSION_LOW_THRESHOLD;
         boolean atSessionHigh = positionInRange > SESSION_HIGH_THRESHOLD;
 
-        log.trace("[EVENT+POS] {} Checking position-aware events | pos={:.1f}% | atLow={} | atHigh={} | " +
-                        "ofiRegime={} | ofiValue={:.2f}",
-                familyId, positionInRange * 100, atSessionLow, atSessionHigh,
-                ofiCtx.getRegime(), ofiCtx.getCurrentValue());
+        log.trace("[EVENT+POS] {} Checking position-aware events | pos={}% | atLow={} | atHigh={} | " +
+                        "ofiRegime={} | ofiValue={}",
+                familyId, String.format("%.1f", positionInRange * 100), atSessionLow, atSessionHigh,
+                ofiCtx.getRegime(), String.format("%.2f", ofiCtx.getCurrentValue()));
 
         // Position-Aware Selling Exhaustion
         // At session low: ANY positive velocity = exhaustion (use lower threshold)
@@ -366,12 +366,12 @@ public class EventDetector {
         double candleClose = family.getEquity() != null ? family.getEquity().getClose() :
                              family.getFuture() != null ? family.getFuture().getClose() : price;
 
-        log.trace("[EVENT+BREAKOUT] {} Checking failed breakouts | candleH={:.2f} candleL={:.2f} candleC={:.2f} | " +
-                        "prevHigh={} prevLow={} | sessionH={:.2f} sessionL={:.2f}",
-                familyId, candleHigh, candleLow, candleClose,
+        log.trace("[EVENT+BREAKOUT] {} Checking failed breakouts | candleH={} candleL={} candleC={} | " +
+                        "prevHigh={} prevLow={} | sessionH={} sessionL={}",
+                familyId, String.format("%.2f", candleHigh), String.format("%.2f", candleLow), String.format("%.2f", candleClose),
                 prevHigh != null ? String.format("%.2f", prevHigh) : "none",
                 prevLow != null ? String.format("%.2f", prevLow) : "none",
-                sessionHigh, sessionLow);
+                String.format("%.2f", sessionHigh), String.format("%.2f", sessionLow));
 
         // FAILED BREAKOUT BULL: Candle high exceeded session high but closed below
         if (prevHigh != null && candleHigh > prevHigh && candleClose < prevHigh) {
@@ -445,10 +445,10 @@ public class EventDetector {
 
         double positionInRange = session != null ? session.getPositionInRange() : 0.5;
 
-        log.trace("[EVENT+FAMILY] {} Checking family events | bullAlign={:.2f} bearAlign={:.2f} | " +
-                        "bias={} | hasDivergence={} | posInRange={:.1f}%",
-                familyId, familyContext.getBullishAlignment(), familyContext.getBearishAlignment(),
-                familyContext.getOverallBias(), familyContext.isHasDivergence(), positionInRange * 100);
+        log.trace("[EVENT+FAMILY] {} Checking family events | bullAlign={} bearAlign={} | " +
+                        "bias={} | hasDivergence={} | posInRange={}%",
+                familyId, String.format("%.2f", familyContext.getBullishAlignment()), String.format("%.2f", familyContext.getBearishAlignment()),
+                familyContext.getOverallBias(), familyContext.isHasDivergence(), String.format("%.1f", positionInRange * 100));
 
         // FAMILY_BULLISH_ALIGNMENT
         if (familyContext.getBullishAlignment() >= ALIGNMENT_THRESHOLD) {
@@ -600,9 +600,9 @@ public class EventDetector {
 
         double positionInRange = session.getPositionInRange();
 
-        log.trace("[EVENT+REVERSAL] {} Checking session reversal | pos={:.1f}% | " +
+        log.trace("[EVENT+REVERSAL] {} Checking session reversal | pos={}% | " +
                         "vBottom={} vTop={} | optionsFlow={}",
-                familyId, positionInRange * 100, session.isVBottomDetected(), session.isVTopDetected(),
+                familyId, String.format("%.1f", positionInRange * 100), session.isVBottomDetected(), session.isVTopDetected(),
                 familyContext.getOptionsSignal().getFlowSignal());
 
         // SESSION_LOW_REVERSAL (V-bottom)

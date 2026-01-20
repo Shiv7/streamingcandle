@@ -269,19 +269,20 @@ public class EnrichedQuantScoreCalculator {
             }
 
             // =============== Apply All Modifiers ===============
+            // FIX: Clamp each modifier to valid range to prevent NaN/crash from stacking
             // Phase 1 adaptive modifier
-            double adaptiveModifier = calculateAdaptiveModifier(historicalContext, family);
+            double adaptiveModifier = clampModifier(calculateAdaptiveModifier(historicalContext, family));
 
             // Phase 2 modifiers
-            double gexModifier = calculateGEXModifier(gexProfile, baseScore);
-            double maxPainModifier = calculateMaxPainModifier(maxPainProfile, expiryContext, baseScore);
-            double timeModifier = timeContext != null ? timeContext.getConfidenceModifier() : 1.0;
-            double expiryModifier = expiryContext != null ? expiryContext.getConfidenceModifier() : 1.0;
+            double gexModifier = clampModifier(calculateGEXModifier(gexProfile, baseScore));
+            double maxPainModifier = clampModifier(calculateMaxPainModifier(maxPainProfile, expiryContext, baseScore));
+            double timeModifier = clampModifier(timeContext != null ? timeContext.getConfidenceModifier() : 1.0);
+            double expiryModifier = clampModifier(expiryContext != null ? expiryContext.getConfidenceModifier() : 1.0);
 
             // Phase 3 modifiers
-            double technicalModifier = calculateTechnicalModifier(technicalContext, baseScore);
-            double confluenceModifier = calculateConfluenceModifier(confluenceResult, baseScore);
-            double eventModifier = calculateEventModifier(detectedEvents);
+            double technicalModifier = clampModifier(calculateTechnicalModifier(technicalContext, baseScore));
+            double confluenceModifier = clampModifier(calculateConfluenceModifier(confluenceResult, baseScore));
+            double eventModifier = clampModifier(calculateEventModifier(detectedEvents));
 
             // Combine all modifiers using geometric mean to prevent extreme swings
             // FIX: Pure multiplication (0.8^8 = 0.17) creates unstable outputs
@@ -293,7 +294,8 @@ public class EnrichedQuantScoreCalculator {
             double sum = 0.0;
             int count = 0;
             for (double m : modifiers) {
-                if (m > 0) {
+                // FIX: Skip invalid modifiers (NaN, Infinity, 0, negative)
+                if (Double.isFinite(m) && m > 0) {
                     product *= m;
                     sum += m;
                     count++;
@@ -304,6 +306,13 @@ public class EnrichedQuantScoreCalculator {
             double average = count > 0 ? sum / count : 1.0;
             double geometricMean = count > 0 ? Math.pow(product, 1.0 / count) : 1.0;
             double combinedModifier = Math.sqrt(geometricMean * average);
+
+            // FIX: Additional safety check for NaN/Infinity from pow operations
+            if (!Double.isFinite(combinedModifier)) {
+                log.warn("[ENRICH] {} combinedModifier NaN/Inf, resetting to 1.0 | modifiers={}",
+                        familyId, java.util.Arrays.toString(modifiers));
+                combinedModifier = 1.0;
+            }
             combinedModifier = Math.max(0.5, Math.min(1.5, combinedModifier)); // Tighter clamp range
 
             double adjustedScore = Math.min(100, baseScore.getQuantScore() * combinedModifier);
@@ -432,6 +441,21 @@ public class EnrichedQuantScoreCalculator {
                     .enrichmentNote("Enrichment failed - using base score")
                     .build();
         }
+    }
+
+    // ======================== MODIFIER UTILITIES ========================
+
+    /**
+     * FIX: Clamp modifier to valid range to prevent NaN/crash from stacking
+     * Ensures no modifier is 0, negative, NaN, or Infinity
+     */
+    private double clampModifier(double modifier) {
+        // Handle NaN/Infinity
+        if (!Double.isFinite(modifier)) {
+            return 1.0;
+        }
+        // Clamp to valid range [0.5, 2.0] - prevents extreme stacking
+        return Math.max(0.5, Math.min(2.0, modifier));
     }
 
     // ======================== PHASE 2 MODIFIER CALCULATIONS ========================

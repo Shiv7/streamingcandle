@@ -123,6 +123,11 @@ public class DataQualityGate {
             }
         }
 
+        // === ATR VALIDATION (Bug #18) ===
+        // ATR is calculated later in the pipeline (not in InstrumentCandle)
+        // Validation moved to signal generation phase where ATR is available
+        // TODO: Add ATR validation in SignalHardGate when TradingSignal has ATR
+
         // === NaN/Infinity CHECK ===
         if (hasNaNOrInfinity(primary)) {
             errors.add("NAN_OR_INFINITY_IN_DATA");

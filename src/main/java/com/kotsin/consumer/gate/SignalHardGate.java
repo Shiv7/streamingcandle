@@ -47,25 +47,36 @@ public class SignalHardGate {
     @Value("${gate.signal.hard.enabled:true}")
     private boolean enabled;
 
-    // Thresholds for hard blocks - SYMMETRIC for LONG and SHORT
-    private static final double MIN_CONFIDENCE = 0.65;           // Bug #3: Raised from 0.50
-    private static final double MIN_FAMILY_ALIGNMENT = 0.30;     // Bug #5: Block below 30%
-    private static final double SESSION_EXTREME_THRESHOLD = 0.80; // Block at extremes (>80% or <20%)
-    private static final double SESSION_LOW_THRESHOLD = 0.20;    // Symmetric with above
-    private static final double DEFAULT_SUCCESS_RATE = 0.50;     // Bug #8: This means "unknown"
-    private static final int MIN_HISTORICAL_SAMPLES = 10;        // Minimum samples for valid success rate
+    // FIX: Data-driven approach - NO HARDCODED BLOCKS
+    // Let the data speak for itself through per-scrip learning
+    // Only block on absolute fundamentals, not market conditions
 
-    // REMOVED: Hardcoded blocked setups - this was OVERFITTING
-    // Instead, we use dynamic performance tracking with MIN_SETUP_WIN_RATE
-    // A setup is blocked ONLY if: samples >= MIN_HISTORICAL_SAMPLES AND winRate < MIN_SETUP_WIN_RATE
-    private static final double MIN_SETUP_WIN_RATE = 0.35;       // Block setups with <35% win rate (after sufficient samples)
+    // Minimum confidence - reduced to allow more signals through
+    // Data quality will be improved by structural SL and R:R filter
+    private static final double MIN_CONFIDENCE = 0.50;           // REDUCED from 0.65 - let data decide
+
+    // FIX: REMOVED hardcoded thresholds that were causing over-filtering
+    // private static final double MIN_FAMILY_ALIGNMENT = 0.30;  // REMOVED - let data decide
+    // private static final double SESSION_EXTREME_THRESHOLD = 0.80; // REMOVED - let data decide
+    // private static final double MIN_SETUP_WIN_RATE = 0.35;    // REMOVED - let per-scrip learning decide
+
+    // Only block on fundamentals that are universally bad
+    private static final int MIN_HISTORICAL_SAMPLES = 20;        // Need more samples before blocking
 
     /**
-     * Evaluate if a signal should be BLOCKED
+     * FIX: Data-driven gate - MINIMAL blocking, let data speak
      *
-     * @param signal     The trading signal to evaluate
-     * @param quantScore The enriched quant score with context
-     * @return GateResult with block status and reason
+     * PHILOSOPHY CHANGE:
+     * - OLD: Block signals based on hardcoded rules (overfitting)
+     * - NEW: Let signals through, let structural SL + R:R filter handle quality
+     * - Per-scrip learning will handle pattern-specific performance
+     *
+     * Only block on ABSOLUTE fundamentals:
+     * - Null inputs
+     * - Extremely low confidence (<50%)
+     * - First 15 minutes of market (not 30 - reduced)
+     *
+     * Everything else is LOG ONLY for analysis, not blocking
      */
     public GateResult evaluate(TradingSignal signal, EnrichedQuantScore quantScore) {
         if (!enabled) {
@@ -80,167 +91,117 @@ public class SignalHardGate {
         Direction direction = signal.getDirection();
         boolean isLong = direction == Direction.LONG;
         List<String> blockReasons = new ArrayList<>();
+        List<String> warnings = new ArrayList<>(); // FIX: Log but don't block
 
-        // === RULE 1: Minimum Confidence (Bug #3) ===
+        // === HARD BLOCK 1: Minimum Confidence (absolute minimum) ===
         if (signal.getConfidence() < MIN_CONFIDENCE) {
             blockReasons.add(String.format("LOW_CONFIDENCE:%.0f%%<%.0f%%",
                     signal.getConfidence() * 100, MIN_CONFIDENCE * 100));
         }
 
-        // === RULE 2: Dynamic Setup Performance Check (replaces hardcoded blocking) ===
-        // GENERALIZED: Block ANY setup (LONG or SHORT) with poor historical performance
-        // This is NOT overfitting because:
-        // 1. It requires MIN_HISTORICAL_SAMPLES (10) before blocking
-        // 2. It applies symmetrically to all setups
-        // 3. Threshold (35%) is based on trading math, not our specific data
-        String setupId = signal.getSetupId();
-        double setupWinRate = signal.getHistoricalSuccessRate();
-        int setupSamples = signal.getHistoricalSampleCount();
+        // === FIX: First 5 Minutes ONLY (was 15 min - too aggressive) ===
+        // Gap-up breakouts happen in first 15 min - we need to capture them!
+        // Only block first 5 minutes (9:15-9:20) for extreme volatility
+        // OVERRIDE: Allow signals with strong microstructure even in first 5 min
+        java.time.ZonedDateTime nowIST = java.time.ZonedDateTime.now(java.time.ZoneId.of("Asia/Kolkata"));
+        int hour = nowIST.getHour();
+        int minute = nowIST.getMinute();
+        boolean isFirst5Minutes = (hour == 9 && minute < 20); // 9:15-9:20 only
 
-        if (setupId != null && setupSamples >= MIN_HISTORICAL_SAMPLES && setupWinRate < MIN_SETUP_WIN_RATE) {
-            blockReasons.add(String.format("POOR_SETUP_PERFORMANCE:%s(%.0f%%/%d)",
-                    setupId, setupWinRate * 100, setupSamples));
-            log.warn("[HARD_GATE] {} BLOCKED: Setup {} has {}% win rate over {} samples (min {}%)",
-                    familyId, setupId, String.format("%.0f", setupWinRate * 100),
-                    setupSamples, MIN_SETUP_WIN_RATE * 100);
+        // Check if microstructure is strong enough to override warmup block
+        boolean strongMicrostructure = false;
+        if (quantScore.getHistoricalContext() != null &&
+            quantScore.getHistoricalContext().getOfiContext() != null) {
+            var ofiCtx = quantScore.getHistoricalContext().getOfiContext();
+            // Strong OFI (>2 z-score) can override warmup block
+            strongMicrostructure = Math.abs(ofiCtx.getZscore()) > 2.0;
         }
 
-        // === RULE 3: Family Bias Conflict (Bug #4-5) ===
+        if (isFirst5Minutes && !strongMicrostructure) {
+            blockReasons.add(String.format("MARKET_WARMUP:%02d:%02d", hour, minute));
+        } else if (isFirst5Minutes && strongMicrostructure) {
+            warnings.add(String.format("WARMUP_OVERRIDE:strong_OFI@%02d:%02d", hour, minute));
+        }
+
+        // === LOG ONLY (no blocking) - Let data decide ===
+
+        // Log family alignment (but don't block)
         if (quantScore.hasFamilyContext()) {
             FamilyContext familyCtx = quantScore.getFamilyContext();
             FamilyBias bias = familyCtx.getOverallBias();
             double maxAlignment = Math.max(familyCtx.getBullishAlignment(), familyCtx.getBearishAlignment());
 
-            // Block if family alignment is too weak (NO_CONVICTION)
-            if (maxAlignment < MIN_FAMILY_ALIGNMENT) {
-                blockReasons.add(String.format("NO_CONVICTION:%.0f%%<%.0f%%",
-                        maxAlignment * 100, MIN_FAMILY_ALIGNMENT * 100));
-                log.warn("[HARD_GATE] {} BLOCKED: Family alignment {}% too weak (min {}%)",
-                        familyId, String.format("%.0f", maxAlignment * 100), MIN_FAMILY_ALIGNMENT * 100);
+            if (maxAlignment < 0.30) {
+                warnings.add(String.format("LOW_ALIGNMENT:%.0f%%", maxAlignment * 100));
             }
 
-            // Block LONG against BEARISH family bias
             if (isLong && (bias == FamilyBias.BEARISH || bias == FamilyBias.WEAK_BEARISH)) {
-                blockReasons.add("LONG_VS_BEARISH_FAMILY:" + bias);
-                log.warn("[HARD_GATE] {} BLOCKED: LONG signal conflicts with {} family bias",
-                        familyId, bias);
+                warnings.add("LONG_VS_BEARISH_BIAS:" + bias);
             }
-
-            // Block SHORT against BULLISH family bias
             if (!isLong && (bias == FamilyBias.BULLISH || bias == FamilyBias.WEAK_BULLISH)) {
-                blockReasons.add("SHORT_VS_BULLISH_FAMILY:" + bias);
-                log.warn("[HARD_GATE] {} BLOCKED: SHORT signal conflicts with {} family bias",
-                        familyId, bias);
+                warnings.add("SHORT_VS_BULLISH_BIAS:" + bias);
             }
         }
 
-        // === RULE 4: Session Position Extremes (Bug #6) ===
+        // Log session position (but don't block)
         if (quantScore.hasSessionStructure()) {
             SessionStructure session = quantScore.getSessionStructure();
             double position = session.getPositionInRange();
 
-            // Block LONG at session HIGH (buying resistance)
-            if (isLong && position > SESSION_EXTREME_THRESHOLD) {
-                blockReasons.add(String.format("LONG_AT_SESSION_HIGH:%.0f%%>%.0f%%",
-                        position * 100, SESSION_EXTREME_THRESHOLD * 100));
-                log.warn("[HARD_GATE] {} BLOCKED: LONG at {}% session position (resistance zone)",
-                        familyId, String.format("%.0f", position * 100));
+            if (isLong && position > 0.85) {
+                warnings.add(String.format("LONG_AT_HIGH:%.0f%%", position * 100));
             }
-
-            // Block SHORT at session LOW (selling support)
-            if (!isLong && position < SESSION_LOW_THRESHOLD) {
-                blockReasons.add(String.format("SHORT_AT_SESSION_LOW:%.0f%%<%.0f%%",
-                        position * 100, SESSION_LOW_THRESHOLD * 100));
-                log.warn("[HARD_GATE] {} BLOCKED: SHORT at {}% session position (support zone)",
-                        familyId, String.format("%.0f", position * 100));
+            if (!isLong && position < 0.15) {
+                warnings.add(String.format("SHORT_AT_LOW:%.0f%%", position * 100));
             }
         }
 
-        // === RULE 5: Exhaustion Conflict (Bug #7) ===
-        if (quantScore.hasEvents()) {
-            List<DetectedEvent> events = quantScore.getDetectedEvents();
-
-            // Block LONG when BUYING_EXHAUSTION detected (market topping)
-            if (isLong && hasEvent(events, DetectedEvent.EventType.BUYING_EXHAUSTION)) {
-                blockReasons.add("LONG_WITH_BUYING_EXHAUSTION");
-                log.warn("[HARD_GATE] {} BLOCKED: LONG signal while BUYING_EXHAUSTION detected",
-                        familyId);
-            }
-
-            // Block SHORT when SELLING_EXHAUSTION detected (market bottoming)
-            if (!isLong && hasEvent(events, DetectedEvent.EventType.SELLING_EXHAUSTION)) {
-                blockReasons.add("SHORT_WITH_SELLING_EXHAUSTION");
-                log.warn("[HARD_GATE] {} BLOCKED: SHORT signal while SELLING_EXHAUSTION detected",
-                        familyId);
-            }
-        }
-
-        // === RULE 6: Default Success Rate (Bug #8) ===
-        double successRate = signal.getHistoricalSuccessRate();
-        int sampleCount = signal.getHistoricalSampleCount();
-        if (Math.abs(successRate - DEFAULT_SUCCESS_RATE) < 0.01 || sampleCount < MIN_HISTORICAL_SAMPLES) {
-            // Don't hard block, but add significant penalty via confidence
-            // This is a soft block via confidence reduction in later processing
-            log.debug("[HARD_GATE] {} WARNING: Default/insufficient historical data (rate={}%, samples={})",
-                    familyId, String.format("%.0f", successRate * 100), sampleCount);
-        }
-
-        // === RULE 7: Resistance Level for LONG (Bug #9) ===
-        if (isLong) {
-            Double nearestResistance = signal.getNearestResistance();
-            double currentPrice = signal.getCurrentPrice();
-
-            // For LONG, we need headroom to resistance
-            if (nearestResistance != null && nearestResistance > 0) {
-                double headroomPct = (nearestResistance - currentPrice) / currentPrice * 100;
-                if (headroomPct < 0.3) { // Less than 0.3% to resistance
-                    blockReasons.add(String.format("LONG_TOO_CLOSE_TO_RESISTANCE:%.2f%%", headroomPct));
-                    log.warn("[HARD_GATE] {} BLOCKED: LONG only {}% below resistance at {}",
-                            familyId, String.format("%.2f", headroomPct), nearestResistance);
-                }
-            }
-        }
-
-        // === RULE 8: Counter-SuperTrend (Bug #15) ===
+        // Log SuperTrend conflict (but don't block)
         TechnicalContext techCtx = quantScore.getTechnicalContext();
         if (techCtx != null) {
             boolean superTrendBullish = techCtx.isSuperTrendBullish();
-
-            // Block LONG when SuperTrend is BEARISH
             if (isLong && !superTrendBullish) {
-                blockReasons.add("LONG_COUNTER_SUPERTREND_BEARISH");
-                log.warn("[HARD_GATE] {} BLOCKED: LONG signal against BEARISH SuperTrend", familyId);
+                warnings.add("LONG_COUNTER_ST");
             }
-
-            // Block SHORT when SuperTrend is BULLISH
             if (!isLong && superTrendBullish) {
-                blockReasons.add("SHORT_COUNTER_SUPERTREND_BULLISH");
-                log.warn("[HARD_GATE] {} BLOCKED: SHORT signal against BULLISH SuperTrend", familyId);
+                warnings.add("SHORT_COUNTER_ST");
             }
         }
 
-        // === RULE 9: Historical Context Learning Mode ===
-        HistoricalContext histCtx = quantScore.getHistoricalContext();
-        if (histCtx != null && histCtx.isInLearningMode()) {
-            // In learning mode, be extra cautious
-            if (histCtx.getDataCompleteness() < 0.5) {
-                blockReasons.add(String.format("LEARNING_MODE:%.0f%%_COMPLETE",
-                        histCtx.getDataCompleteness() * 100));
-                log.warn("[HARD_GATE] {} BLOCKED: In learning mode with only {}% data completeness",
-                        familyId, String.format("%.0f", histCtx.getDataCompleteness() * 100));
+        // Log exhaustion events (but don't block)
+        if (quantScore.hasEvents()) {
+            List<DetectedEvent> events = quantScore.getDetectedEvents();
+            if (isLong && hasEvent(events, DetectedEvent.EventType.BUYING_EXHAUSTION)) {
+                warnings.add("BUYING_EXHAUSTION");
+            }
+            if (!isLong && hasEvent(events, DetectedEvent.EventType.SELLING_EXHAUSTION)) {
+                warnings.add("SELLING_EXHAUSTION");
             }
         }
 
-        // === FINAL RESULT ===
+        // Log historical performance (but don't block)
+        String setupId = signal.getSetupId();
+        double setupWinRate = signal.getHistoricalSuccessRate();
+        int setupSamples = signal.getHistoricalSampleCount();
+        if (setupId != null && setupSamples >= MIN_HISTORICAL_SAMPLES && setupWinRate < 0.40) {
+            warnings.add(String.format("POOR_HISTORY:%s(%.0f%%/%d)", setupId, setupWinRate * 100, setupSamples));
+        }
+
+        // === LOG WARNINGS (for analysis, not blocking) ===
+        if (!warnings.isEmpty()) {
+            log.info("[HARD_GATE] {} {} WARNINGS (not blocked): {}",
+                    familyId, direction, String.join(" | ", warnings));
+        }
+
+        // === FINAL RESULT - Only block on absolute fundamentals ===
         if (!blockReasons.isEmpty()) {
             String reasonStr = String.join(" | ", blockReasons);
-            log.info("[HARD_GATE] {} {} BLOCKED: {} reason(s): {}",
-                    familyId, direction, blockReasons.size(), reasonStr);
+            log.info("[HARD_GATE] {} {} BLOCKED: {}", familyId, direction, reasonStr);
             return GateResult.fail("SIGNAL_BLOCKED", reasonStr);
         }
 
-        log.debug("[HARD_GATE] {} {} PASSED all hard checks", familyId, direction);
-        GateResult result = GateResult.pass("ALL_HARD_CHECKS_PASSED");
+        log.debug("[HARD_GATE] {} {} PASSED | warnings={}", familyId, direction, warnings.size());
+        GateResult result = GateResult.pass("PASSED");
         result.setGateName("SIGNAL_HARD_GATE");
         return result;
     }
@@ -253,30 +214,24 @@ public class SignalHardGate {
     }
 
     /**
-     * Check if a setup should be blocked based on historical performance
-     * GENERALIZED: Works for any setup, any direction
-     *
-     * @param setupId The setup identifier
-     * @param winRate Historical win rate (0.0 to 1.0)
-     * @param sampleCount Number of historical samples
-     * @return true if setup should be blocked
+     * FIX: No longer blocking setups - let data-driven per-scrip learning handle this
+     * This method returns false always (no blocking)
      */
     public boolean isSetupBlocked(String setupId, double winRate, int sampleCount) {
-        // Only block if we have enough samples AND win rate is below threshold
-        return setupId != null &&
-               sampleCount >= MIN_HISTORICAL_SAMPLES &&
-               winRate < MIN_SETUP_WIN_RATE;
+        // FIX: Don't block setups - let per-scrip learning handle performance
+        // This method is kept for API compatibility but always returns false
+        return false;
     }
 
     /**
-     * Get minimum win rate threshold for setups
+     * FIX: No minimum win rate threshold - let data decide
      */
     public double getMinSetupWinRate() {
-        return MIN_SETUP_WIN_RATE;
+        return 0.0; // No threshold - all setups allowed
     }
 
     /**
-     * Get minimum sample count required before blocking a setup
+     * Get minimum sample count required for statistical significance
      */
     public int getMinHistoricalSamples() {
         return MIN_HISTORICAL_SAMPLES;

@@ -67,9 +67,9 @@ public class FUDKIIProcessor {
 
     @PostConstruct
     public void init() {
-        log.info("📊 FUDKIIProcessor initialized. Enabled: {}, MinStrength: {}", enabled, minStrength);
+        log.info("📊 FUDKIIProcessor initialized. Enabled: {}", enabled);
         log.info("📊 Output topic: {}", KafkaTopics.KOTSIN_FUDKII);
-        log.info("📊 Strategy: Strict BB+ST simultaneity on 30m candles");
+        log.info("📊 Strategy: Strict BB+ST simultaneity on 30m candles (NO strength filter)");
         log.info("📊 [Bug#17 FIX] Cooldown: {} minutes per scripCode+direction", cooldownMinutes);
     }
 
@@ -180,11 +180,8 @@ public class FUDKIIProcessor {
                 candles30m
             );
 
-            // Check minimum strength threshold
-            if (signalStrength < minStrength) {
-                log.debug("FUDKII rejected - strength too low: {} strength={}", scripCode, signalStrength);
-                return;
-            }
+            // Strength check REMOVED - emit all signals that pass simultaneity condition
+            // Signal strength is still calculated and included in the output for informational purposes
 
             // FIX Bug #17: Check cooldown - don't emit duplicate signals within cooldown period
             String cooldownKey = scripCode + ":" + direction;
