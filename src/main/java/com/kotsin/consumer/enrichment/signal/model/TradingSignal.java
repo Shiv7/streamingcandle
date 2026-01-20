@@ -75,6 +75,13 @@ public class TradingSignal {
     private Instant dataTimestamp;
 
     /**
+     * FIX: When this signal was promoted from pending R:R tracking to active
+     * Null if signal was immediately actionable (R:R >= threshold at generation)
+     * Set when PendingRRTracker promotes signal after R:R improvement
+     */
+    private Instant promotedAt;
+
+    /**
      * Signal expiry timestamp
      */
     private Instant expiresAt;

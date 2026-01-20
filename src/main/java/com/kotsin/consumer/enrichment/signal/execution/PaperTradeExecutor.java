@@ -54,6 +54,8 @@ public class PaperTradeExecutor {
     private final AtomicInteger positionsClosed = new AtomicInteger(0);
     private final AtomicInteger wins = new AtomicInteger(0);
     private final AtomicInteger losses = new AtomicInteger(0);
+    private final AtomicInteger signalsDroppedCapacity = new AtomicInteger(0);
+    private final AtomicInteger signalsDroppedDuplicate = new AtomicInteger(0);
 
     // BUG #39 FIX: Base slippage - actual slippage is volatility-adjusted
     @Value("${paper.trade.executor.slippage.bps:5}")
@@ -103,13 +105,18 @@ public class PaperTradeExecutor {
             }
 
             if (activePositions.size() >= maxActivePositions) {
-                log.warn("[PAPER_EXEC] Max active positions reached ({}), skipping signal {}",
-                        maxActivePositions, signal.getSignalId());
+                int dropped = signalsDroppedCapacity.incrementAndGet();
+                log.warn("[PAPER_EXEC] ⚠️ CAPACITY LIMIT: Max positions reached ({}/{}), dropping signal {} for {} | Total dropped: {}",
+                        activePositions.size(), maxActivePositions, signal.getSignalId(),
+                        signal.getFamilyId(), dropped);
+                // Publish dropped signal event for monitoring
+                publishDroppedSignal(signal, "CAPACITY_LIMIT", dropped);
                 return;
             }
 
             // Check for duplicate signal
             if (activePositions.containsKey(signal.getSignalId())) {
+                signalsDroppedDuplicate.incrementAndGet();
                 log.debug("[PAPER_EXEC] Signal {} already tracked", signal.getSignalId());
                 return;
             }
@@ -428,11 +435,40 @@ public class PaperTradeExecutor {
         // BUG #37 FIX: Include average latency in stats
         int samples = latencySamples.get();
         long avgLatencyMs = samples > 0 ? totalLatencyMs.get() / samples : 0;
+        int droppedCapacity = signalsDroppedCapacity.get();
+        int droppedDuplicate = signalsDroppedDuplicate.get();
         return String.format(
-                "[PAPER_EXEC] Signals: %d | Entered: %d | Closed: %d | Wins: %d | Losses: %d | WR: %.1f%% | Active: %d | AvgLatency: %dms",
+                "[PAPER_EXEC] Signals: %d | Entered: %d | Closed: %d | Wins: %d | Losses: %d | WR: %.1f%% | Active: %d | AvgLatency: %dms | DroppedCapacity: %d | DroppedDupe: %d",
                 signalsReceived.get(), positionsEntered.get(), total,
-                wins.get(), losses.get(), winRate, activePositions.size(), avgLatencyMs
+                wins.get(), losses.get(), winRate, activePositions.size(), avgLatencyMs,
+                droppedCapacity, droppedDuplicate
         );
+    }
+
+    /**
+     * Publish dropped signal event for monitoring/alerting
+     */
+    private void publishDroppedSignal(TradingSignal signal, String reason, int totalDropped) {
+        try {
+            String json = objectMapper.writeValueAsString(Map.of(
+                    "event", "SIGNAL_DROPPED",
+                    "signalId", signal.getSignalId(),
+                    "familyId", signal.getFamilyId(),
+                    "direction", signal.getDirection().name(),
+                    "reason", reason,
+                    "activePositions", activePositions.size(),
+                    "maxPositions", maxActivePositions,
+                    "totalDropped", totalDropped,
+                    "timestamp", Instant.now().toString()
+            ));
+            kafkaTemplate.send("paper-trade-events", signal.getFamilyId(), json);
+        } catch (Exception e) {
+            log.debug("[PAPER_EXEC] Failed to publish dropped signal event: {}", e.getMessage());
+        }
+    }
+
+    public int getSignalsDroppedCapacity() {
+        return signalsDroppedCapacity.get();
     }
 
     /**

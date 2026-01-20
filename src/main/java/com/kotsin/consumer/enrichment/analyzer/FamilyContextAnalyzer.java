@@ -86,12 +86,12 @@ public class FamilyContextAnalyzer {
         FuturesSignal futuresSignal = analyzeFutures(family);
         OptionsSignal optionsSignal = analyzeOptions(family);
 
-        log.debug("[FAMILY] {} Signals: equity={}/chg={:.2f}% | futures={}/oiChg={:.2f}% | options={}/pcr={}",
+        log.debug("[FAMILY] {} Signals: equity={}/chg={}% | futures={}/oiChg={}% | options={}/pcr={}",
                 familyId,
                 equitySignal.isBullish() ? "BULL" : equitySignal.isBearish() ? "BEAR" : "NEUTRAL",
-                equitySignal.getPriceChangePct(),
+                String.format("%.2f", equitySignal.getPriceChangePct()),
                 futuresSignal.getSignalType(),
-                futuresSignal.getOiChangePct(),
+                String.format("%.2f", futuresSignal.getOiChangePct()),
                 optionsSignal.getFlowSignal(),
                 optionsSignal.getPcr() != null ? String.format("%.2f", optionsSignal.getPcr()) : "N/A");
 

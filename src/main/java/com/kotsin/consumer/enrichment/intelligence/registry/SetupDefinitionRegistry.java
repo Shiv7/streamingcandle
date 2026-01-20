@@ -262,6 +262,12 @@ public class SetupDefinitionRegistry {
                                 .conditionId("ST_FLIP_BEAR")
                                 .description("SuperTrend flips bearish")
                                 .type(SetupCondition.ConditionType.SUPERTREND_BEARISH)
+                                .build(),
+                        // FIX: Add OFI invalidation - if OFI flips bearish, invalidate SWING_LONG
+                        SetupCondition.builder()
+                                .conditionId("OFI_FLIP_BEAR")
+                                .description("OFI flips to strong sell")
+                                .type(SetupCondition.ConditionType.OFI_STRONG_SELL)
                                 .build()
                 ))
 
@@ -325,6 +331,12 @@ public class SetupDefinitionRegistry {
                                 .conditionId("ST_FLIP_BULL")
                                 .description("SuperTrend flips bullish")
                                 .type(SetupCondition.ConditionType.SUPERTREND_BULLISH)
+                                .build(),
+                        // FIX: Add OFI invalidation - if OFI flips bullish, invalidate SWING_SHORT
+                        SetupCondition.builder()
+                                .conditionId("OFI_FLIP_BULL")
+                                .description("OFI flips to strong buy")
+                                .type(SetupCondition.ConditionType.OFI_STRONG_BUY)
                                 .build()
                 ))
 

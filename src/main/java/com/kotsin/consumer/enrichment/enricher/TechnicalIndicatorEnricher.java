@@ -32,6 +32,7 @@ import java.util.*;
 public class TechnicalIndicatorEnricher {
 
     private final RedisTemplate<String, String> redisTemplate;
+    private final MTFSuperTrendAggregator mtfAggregator;
 
     // SuperTrend parameters
     private static final int SUPERTREND_PERIOD = 10;
@@ -93,6 +94,12 @@ public class TechnicalIndicatorEnricher {
 
         // Calculate SuperTrend
         SuperTrendResult superTrend = calculateSuperTrend(history, familyId, timeframe, SUPERTREND_PERIOD, SUPERTREND_MULTIPLIER);
+
+        // Update MTF aggregator with this timeframe's SuperTrend
+        mtfAggregator.updateState(familyId, timeframe, superTrend.bullish, superTrend.value, superTrend.flipped);
+
+        // Get MTF analysis for this family
+        MTFSuperTrendAggregator.MTFAnalysis mtfAnalysis = mtfAggregator.getAnalysis(familyId);
 
         // Calculate Bollinger Bands
         BollingerBandResult bb = calculateBollingerBands(history, BB_PERIOD, BB_STD_DEV);
@@ -176,6 +183,12 @@ public class TechnicalIndicatorEnricher {
                 .sessionOpen(session.open)
                 .vwapDeviation(session.vwap != null && session.vwap > 0 ?
                         (close - session.vwap) / session.vwap * 100 : null)
+                // MTF SuperTrend Analysis
+                .mtfAggregatedDirection(mtfAnalysis.getAggregatedDirection())
+                .mtfBullishPercentage(mtfAnalysis.getBullishPercentage())
+                .mtfHtfBullish(mtfAnalysis.isHtfBullish())
+                .mtfHasConflict(mtfAnalysis.isHasConflict())
+                .mtfTimeframeDirections(mtfAnalysis.getTimeframeDirections())
                 .build();
     }
 
@@ -249,8 +262,8 @@ public class TechnicalIndicatorEnricher {
         storeSuperTrendState(stateKey, newState);
 
         if (flipped) {
-            log.info("[TECH] SuperTrend FLIP for {} {} -> {}",
-                    familyId, bullish ? "BULLISH" : "BEARISH", superTrend);
+            log.info("[TECH] SuperTrend FLIP for {} [{}] {} -> {}",
+                    familyId, timeframe, bullish ? "BULLISH" : "BEARISH", superTrend);
         }
 
         return new SuperTrendResult(superTrend, bullish, flipped, candlesSinceFlip);

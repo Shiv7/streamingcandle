@@ -22,6 +22,7 @@ import com.kotsin.consumer.enrichment.model.TimeContext;
 import com.kotsin.consumer.enrichment.pattern.model.PatternSignal;
 import com.kotsin.consumer.enrichment.signal.model.SignalRationale;
 import com.kotsin.consumer.enrichment.signal.model.SignalRationale.*;
+import com.kotsin.consumer.enrichment.signal.learning.FailureLearningStore;
 import com.kotsin.consumer.enrichment.signal.model.TradingSignal;
 import com.kotsin.consumer.enrichment.signal.model.TradingSignal.*;
 import com.kotsin.consumer.enrichment.signal.outcome.SignalOutcomeStore;
@@ -67,6 +68,23 @@ public class SignalGenerator {
     // BUG #1-2 FIX: Add SignalHardGate for HARD BLOCKS instead of soft modifiers
     @Autowired(required = false)
     private com.kotsin.consumer.gate.SignalHardGate signalHardGate;
+
+    // FIX: Add SwingPointTracker for structural SL placement
+    @Autowired(required = false)
+    private com.kotsin.consumer.enrichment.tracker.SwingPointTracker swingPointTracker;
+
+    // FIX: Add PendingRRTracker for tracking signals waiting for R:R improvement
+    @Autowired(required = false)
+    private com.kotsin.consumer.enrichment.signal.tracker.PendingRRTracker pendingRRTracker;
+
+    // FIX: Add FailureLearningStore for avoiding signals that match high-failure patterns
+    @Autowired(required = false)
+    private FailureLearningStore failureLearningStore;
+
+    // FIX: Minimum Risk:Reward ratio - REDUCED from 2.0 to 1.5
+    // Many good breakout trades have 1.5-1.8 R:R initially
+    // Let strong microstructure trades through with lower R:R
+    private static final double MIN_RISK_REWARD_RATIO = 1.5;
 
     /**
      * IST timezone for human readable time formatting
@@ -335,19 +353,55 @@ public class SignalGenerator {
             double confidence = setup.getCurrentConfidence();
             int boosters = setup.getBoosterConditionsMet();
 
-            // Check confidence threshold (0.65 = 65%)
-            if (!setup.isActionable(0.65)) {
-                log.debug("[SIGNAL_GEN] {} setup {} FILTERED: conf={}% < 65% required",
-                        familyId, setup.getSetupId(), String.format("%.1f", confidence * 100));
+            // FIX: Check if microstructure is strong enough to override thresholds
+            boolean strongMicrostructure = false;
+            boolean mtfAligned = false;
+            if (quantScore.getHistoricalContext() != null &&
+                quantScore.getHistoricalContext().getOfiContext() != null) {
+                var ofiCtx = quantScore.getHistoricalContext().getOfiContext();
+                // Strong OFI (z-score > 1.5) indicates institutional activity
+                strongMicrostructure = Math.abs(ofiCtx.getZscore()) > 1.5;
+            }
+            if (quantScore.getTechnicalContext() != null) {
+                // MTF aligned means higher timeframes agree with direction
+                mtfAligned = quantScore.getTechnicalContext().isMtfSupportingLong() ||
+                             quantScore.getTechnicalContext().isMtfSupportingShort();
+            }
+
+            // Check confidence threshold - REDUCED from 0.65 to 0.55
+            // Override: Strong microstructure OR MTF aligned allows 0.50 minimum
+            double minConfidence = (strongMicrostructure || mtfAligned) ? 0.50 : 0.55;
+            if (!setup.isActionable(minConfidence)) {
+                log.debug("[SIGNAL_GEN] {} setup {} FILTERED: conf={}% < {}% required (strongMicro={}, mtfAlign={})",
+                        familyId, setup.getSetupId(), String.format("%.1f", confidence * 100),
+                        String.format("%.0f", minConfidence * 100), strongMicrostructure, mtfAligned);
                 continue;
             }
 
-            // Check booster requirement (minimum 1 for testing - was 2 in production)
-            // TEST MODE: Reduced to 1 to capture more signals including failure cases
-            if (boosters < 1) {
-                log.debug("[SIGNAL_GEN] {} setup {} FILTERED: boosters={} < 1 required | metConditions={}",
-                        familyId, setup.getSetupId(), boosters, setup.getMetConditions());
+            // Check booster requirement - REMOVED for strong microstructure
+            // If all required conditions met AND microstructure confirms, boosters optional
+            if (boosters < 1 && !strongMicrostructure) {
+                log.debug("[SIGNAL_GEN] {} setup {} FILTERED: boosters={} < 1 required (no strong microstructure)",
+                        familyId, setup.getSetupId(), boosters);
                 continue;
+            }
+
+            // LEARNING: Check if this setup should be avoided based on learned failure patterns
+            // FIX: Strong microstructure overrides learning block
+            if (failureLearningStore != null && !strongMicrostructure) {
+                boolean isLong = setup.getDirection() == com.kotsin.consumer.enrichment.intelligence.model.SetupDefinition.SetupDirection.LONG;
+                String direction = isLong ? "LONG" : "SHORT";
+                String scripCode = quantScore.getScripCode();
+
+                if (failureLearningStore.shouldAvoidSetup(scripCode, direction, setup.getSetupId(), quantScore)) {
+                    log.info("[SIGNAL_GEN] {} setup {} BLOCKED by learning: high failure rate for {} {} in current conditions",
+                            familyId, setup.getSetupId(), scripCode, direction);
+                    filteredSignals++;
+                    continue;
+                }
+            } else if (failureLearningStore != null && strongMicrostructure) {
+                log.info("[SIGNAL_GEN] {} setup {} LEARNING_OVERRIDE: strong microstructure overrides failure pattern",
+                        familyId, setup.getSetupId());
             }
 
             // Generate signal
@@ -383,19 +437,90 @@ public class SignalGenerator {
                         String.format("%.2f", microprice), String.format("%.2f", currentPrice),
                         String.format("%.2f", microprice - currentPrice));
             } else {
-                log.warn("[SIGNAL_GEN] Microprice {} too far from close {} (diff={:.2f} > maxDev={:.2f}), using close",
-                        microprice, currentPrice, Math.abs(microprice - currentPrice), maxDeviation);
+                log.warn("[SIGNAL_GEN] Microprice {} too far from close {} (diff={} > maxDev={}), using close",
+                        String.format("%.2f", microprice), String.format("%.2f", currentPrice),
+                        String.format("%.2f", Math.abs(microprice - currentPrice)), String.format("%.2f", maxDeviation));
             }
         }
 
-        // Calculate trade parameters
+        // Calculate trade parameters with STRUCTURAL SL (not ATR-based noise)
         boolean isLong = setup.getDirection() == com.kotsin.consumer.enrichment.intelligence.model.SetupDefinition.SetupDirection.LONG;
-        double stopDistance = entryPrice * atrPct / 100 * 1.5;
+        String familyId = setup.getFamilyId();
+
+        // FIX: Calculate structural stop loss using swing points, pivots, and SuperTrend
+        double stopLoss = calculateStructuralStopLoss(familyId, entryPrice, isLong, quantScore, atrPct);
+        double stopDistance = Math.abs(entryPrice - stopLoss);
+
+        // FIX: Ensure minimum SL distance (at least 0.3% from entry to avoid noise)
+        double minStopDistance = entryPrice * 0.003; // 0.3% minimum
+        if (stopDistance < minStopDistance) {
+            log.warn("[SIGNAL_GEN] {} SL too tight ({}%), expanding to minimum 0.3%",
+                    familyId, String.format("%.2f", (stopDistance / entryPrice) * 100));
+            stopDistance = minStopDistance;
+            stopLoss = isLong ? entryPrice - stopDistance : entryPrice + stopDistance;
+        }
+
+        // Calculate targets based on R:R ratio from setup
         double targetDistance = stopDistance * setup.getRiskRewardRatio();
-        double stopLoss = isLong ? entryPrice - stopDistance : entryPrice + stopDistance;
         double target1 = isLong ? entryPrice + (targetDistance * 0.5) : entryPrice - (targetDistance * 0.5);
         double target2 = isLong ? entryPrice + targetDistance : entryPrice - targetDistance;
         double target3 = isLong ? entryPrice + (targetDistance * 1.5) : entryPrice - (targetDistance * 1.5);
+
+        // FIX: Validate R:R ratio - track pending if below minimum instead of rejecting
+        double actualRR = targetDistance / stopDistance;
+        if (actualRR < MIN_RISK_REWARD_RATIO) {
+            // Instead of rejecting, track in PendingRRTracker for potential R:R improvement
+            if (pendingRRTracker != null) {
+                // Build a temporary signal for tracking
+                TradingSignal pendingSignal = TradingSignal.builder()
+                        .signalId(UUID.randomUUID().toString())
+                        .familyId(setup.getFamilyId())
+                        .scripCode(quantScore.getScripCode())
+                        .companyName(quantScore.getCompanyName())
+                        .exchange(quantScore.getExchange())
+                        .generatedAt(Instant.now())
+                        .dataTimestamp(getDataTimestamp(quantScore))
+                        .expiresAt(setup.getExpiresAt())
+                        .source(SignalSource.SETUP)
+                        .category(mapSetupCategory(setup.getSetupId()))
+                        .direction(isLong ? Direction.LONG : Direction.SHORT)
+                        .horizon(mapSetupHorizon(setup.getHorizon()))
+                        .urgency(Urgency.NORMAL)
+                        .currentPrice(currentPrice)
+                        .entryPrice(entryPrice)
+                        .stopLoss(stopLoss)
+                        .target1(target1)
+                        .target2(target2)
+                        .target3(target3)
+                        .confidence(setup.getCurrentConfidence())
+                        .setupId(setup.getSetupId())
+                        .matchedEvents(setup.getMetConditions())
+                        .patternProgress(setup.getProgress())
+                        .headline(generateSetupHeadline(setup))
+                        .narrative(buildDataDrivenNarrative(quantScore, setup))
+                        .entryReasons(generateSetupEntryReasons(setup))
+                        .historicalSuccessRate(getActualSuccessRate(setup.getSetupId()))
+                        .historicalSampleCount(getActualSampleCount(setup.getSetupId()))
+                        .positionSizeMultiplier(1.0)
+                        .riskPercentage(1.0)
+                        .build();
+
+                pendingRRTracker.trackPendingSignal(pendingSignal, actualRR);
+                log.info("[SIGNAL_GEN] {} PENDING: R:R {} < {} | tracking for improvement | entry={} SL={} T2={}",
+                        familyId, String.format("%.2f", actualRR), String.format("%.1f", MIN_RISK_REWARD_RATIO),
+                        String.format("%.2f", entryPrice), String.format("%.2f", stopLoss), String.format("%.2f", target2));
+            } else {
+                log.warn("[SIGNAL_GEN] {} REJECTED: R:R {} < {} minimum (no tracker) | entry={} SL={} T2={}",
+                        familyId, String.format("%.2f", actualRR), String.format("%.1f", MIN_RISK_REWARD_RATIO),
+                        String.format("%.2f", entryPrice), String.format("%.2f", stopLoss), String.format("%.2f", target2));
+            }
+            return null;
+        }
+
+        log.info("[SIGNAL_GEN] {} {} | entry={} SL={} ({}%) T2={} | R:R={}",
+                familyId, isLong ? "LONG" : "SHORT",
+                String.format("%.2f", entryPrice), String.format("%.2f", stopLoss),
+                String.format("%.2f", (stopDistance / entryPrice) * 100), String.format("%.2f", target2), String.format("%.2f", actualRR));
 
         // FIX: Separate timestamps for staleness check vs price-time correlation
         Instant dataTime = getDataTimestamp(quantScore);
@@ -941,14 +1066,15 @@ public class SignalGenerator {
             // Log modifications
             double change = modifiedConfidence - originalConfidence;
             if (Math.abs(change) > 0.05) {
-                log.info("[CONTEXT_MOD] {} {} | conf: {:.0f}% → {:.0f}% ({:+.0f}%) | {}",
+                log.info("[CONTEXT_MOD] {} {} | conf: {}% → {}% ({}%) | {}",
                         signal.getFamilyId(), signal.getDirection(),
-                        originalConfidence * 100, modifiedConfidence * 100, change * 100,
+                        String.format("%.0f", originalConfidence * 100), String.format("%.0f", modifiedConfidence * 100),
+                        String.format("%+.0f", change * 100),
                         modifierLog.toString().trim());
             } else {
-                log.trace("[CONTEXT_MOD] {} {} | conf unchanged at {:.0f}% | {}",
+                log.trace("[CONTEXT_MOD] {} {} | conf unchanged at {}% | {}",
                         signal.getFamilyId(), signal.getDirection(),
-                        originalConfidence * 100,
+                        String.format("%.0f", originalConfidence * 100),
                         modifierLog.length() > 0 ? modifierLog.toString().trim() : "no modifiers applied");
             }
         }
@@ -1008,8 +1134,8 @@ public class SignalGenerator {
         // Use SessionStructure's built-in modifier calculation
         modifier = session.getStructureModifier(isLong);
 
-        log.trace("[CONTEXT_MOD:SESSION] {} | pos={:.0f}% | isLong={} | baseModifier={:.2f}",
-                signal.getFamilyId(), positionInRange * 100, isLong, modifier);
+        log.trace("[CONTEXT_MOD:SESSION] {} | pos={}% | isLong={} | baseModifier={}",
+                signal.getFamilyId(), String.format("%.0f", positionInRange * 100), isLong, String.format("%.2f", modifier));
 
         // Additional boost for V-pattern detection
         if (session.isVBottomDetected() && isLong) {
@@ -1121,8 +1247,8 @@ public class SignalGenerator {
         double bearishAlignment = familyContext.getBearishAlignment();
         double maxAlignment = Math.max(bullishAlignment, bearishAlignment);
 
-        log.trace("[CONTEXT_MOD:FAMILY] {} | bullAlign={:.0f}% | bearAlign={:.0f}% | bias={} | isLong={}",
-                signal.getFamilyId(), bullishAlignment * 100, bearishAlignment * 100,
+        log.trace("[CONTEXT_MOD:FAMILY] {} | bullAlign={}% | bearAlign={}% | bias={} | isLong={}",
+                signal.getFamilyId(), String.format("%.0f", bullishAlignment * 100), String.format("%.0f", bearishAlignment * 100),
                 familyContext.getOverallBias(), isLong);
 
         // BUG #5 FIX: SEVERE penalty when family alignment is VERY LOW (< 30%)
@@ -1570,6 +1696,165 @@ public class SignalGenerator {
             case SWING -> Instant.now().plus(Duration.ofHours(4));
             case POSITIONAL -> Instant.now().plus(Duration.ofDays(1));
         };
+    }
+
+    /**
+     * Calculate STRUCTURAL stop loss using swing points, pivot levels, and technical indicators.
+     *
+     * PHILOSOPHY: SL should be placed at STRUCTURE, not arbitrary ATR multiples.
+     * - For LONG: SL below swing low / pivot support / SuperTrend
+     * - For SHORT: SL above swing high / pivot resistance / SuperTrend
+     *
+     * Priority order:
+     * 1. Swing low/high (most significant structure)
+     * 2. Nearest pivot support/resistance
+     * 3. SuperTrend level
+     * 4. Bollinger Band (fallback)
+     * 5. ATR-based (last resort if no structure available)
+     */
+    private double calculateStructuralStopLoss(String familyId, double entryPrice, boolean isLong,
+                                                EnrichedQuantScore quantScore, double atrPct) {
+        double atrBuffer = entryPrice * atrPct / 100 * 0.2; // 20% of ATR as buffer beyond structure
+        TechnicalContext techCtx = quantScore.getTechnicalContext();
+
+        // Collect all candidate SL levels
+        List<Double> slCandidates = new ArrayList<>();
+        StringBuilder slLog = new StringBuilder();
+
+        if (isLong) {
+            // === LONG: Find support levels below entry ===
+
+            // 1. Swing Low from SwingPointTracker
+            if (swingPointTracker != null) {
+                com.kotsin.consumer.curated.model.SwingPoint swingLow = swingPointTracker.getLastSwingLow(familyId);
+                if (swingLow != null && swingLow.getPrice() > 0 && swingLow.getPrice() < entryPrice) {
+                    double sl = swingLow.getPrice() - atrBuffer;
+                    slCandidates.add(sl);
+                    slLog.append(String.format("SwingLow=%.2f ", swingLow.getPrice()));
+                }
+            }
+
+            // 2. Technical Context levels
+            if (techCtx != null) {
+                // Nearest support
+                if (techCtx.getNearestSupport() != null && techCtx.getNearestSupport() > 0
+                        && techCtx.getNearestSupport() < entryPrice) {
+                    double sl = techCtx.getNearestSupport() - atrBuffer;
+                    slCandidates.add(sl);
+                    slLog.append(String.format("Support=%.2f ", techCtx.getNearestSupport()));
+                }
+
+                // Daily pivot S1
+                if (techCtx.getDailyS1() != null && techCtx.getDailyS1() > 0
+                        && techCtx.getDailyS1() < entryPrice) {
+                    double sl = techCtx.getDailyS1() - atrBuffer;
+                    slCandidates.add(sl);
+                    slLog.append(String.format("S1=%.2f ", techCtx.getDailyS1()));
+                }
+
+                // Camarilla L3 (support zone)
+                if (techCtx.getCamL3() != null && techCtx.getCamL3() > 0
+                        && techCtx.getCamL3() < entryPrice) {
+                    double sl = techCtx.getCamL3() - atrBuffer;
+                    slCandidates.add(sl);
+                    slLog.append(String.format("CamL3=%.2f ", techCtx.getCamL3()));
+                }
+
+                // SuperTrend value (if bullish, ST is below price)
+                if (techCtx.isSuperTrendBullish() && techCtx.getSuperTrendValue() > 0
+                        && techCtx.getSuperTrendValue() < entryPrice) {
+                    double sl = techCtx.getSuperTrendValue() - atrBuffer;
+                    slCandidates.add(sl);
+                    slLog.append(String.format("ST=%.2f ", techCtx.getSuperTrendValue()));
+                }
+
+                // Bollinger lower band
+                if (techCtx.getBbLower() > 0 && techCtx.getBbLower() < entryPrice) {
+                    double sl = techCtx.getBbLower() - atrBuffer;
+                    slCandidates.add(sl);
+                    slLog.append(String.format("BBLower=%.2f ", techCtx.getBbLower()));
+                }
+            }
+
+            // Choose the HIGHEST SL candidate (closest to entry but still structural)
+            // This gives the tightest structural stop
+            if (!slCandidates.isEmpty()) {
+                double structuralSL = slCandidates.stream().max(Double::compare).orElse(0.0);
+                log.debug("[STRUCTURAL_SL] {} LONG | candidates: {} | selected: {}",
+                        familyId, slLog.toString(), String.format("%.2f", structuralSL));
+                return structuralSL;
+            }
+
+        } else {
+            // === SHORT: Find resistance levels above entry ===
+
+            // 1. Swing High from SwingPointTracker
+            if (swingPointTracker != null) {
+                com.kotsin.consumer.curated.model.SwingPoint swingHigh = swingPointTracker.getLastSwingHigh(familyId);
+                if (swingHigh != null && swingHigh.getPrice() > 0 && swingHigh.getPrice() > entryPrice) {
+                    double sl = swingHigh.getPrice() + atrBuffer;
+                    slCandidates.add(sl);
+                    slLog.append(String.format("SwingHigh=%.2f ", swingHigh.getPrice()));
+                }
+            }
+
+            // 2. Technical Context levels
+            if (techCtx != null) {
+                // Nearest resistance
+                if (techCtx.getNearestResistance() != null && techCtx.getNearestResistance() > 0
+                        && techCtx.getNearestResistance() > entryPrice) {
+                    double sl = techCtx.getNearestResistance() + atrBuffer;
+                    slCandidates.add(sl);
+                    slLog.append(String.format("Resistance=%.2f ", techCtx.getNearestResistance()));
+                }
+
+                // Daily pivot R1
+                if (techCtx.getDailyR1() != null && techCtx.getDailyR1() > 0
+                        && techCtx.getDailyR1() > entryPrice) {
+                    double sl = techCtx.getDailyR1() + atrBuffer;
+                    slCandidates.add(sl);
+                    slLog.append(String.format("R1=%.2f ", techCtx.getDailyR1()));
+                }
+
+                // Camarilla H3 (resistance zone)
+                if (techCtx.getCamH3() != null && techCtx.getCamH3() > 0
+                        && techCtx.getCamH3() > entryPrice) {
+                    double sl = techCtx.getCamH3() + atrBuffer;
+                    slCandidates.add(sl);
+                    slLog.append(String.format("CamH3=%.2f ", techCtx.getCamH3()));
+                }
+
+                // SuperTrend value (if bearish, ST is above price)
+                if (!techCtx.isSuperTrendBullish() && techCtx.getSuperTrendValue() > 0
+                        && techCtx.getSuperTrendValue() > entryPrice) {
+                    double sl = techCtx.getSuperTrendValue() + atrBuffer;
+                    slCandidates.add(sl);
+                    slLog.append(String.format("ST=%.2f ", techCtx.getSuperTrendValue()));
+                }
+
+                // Bollinger upper band
+                if (techCtx.getBbUpper() > 0 && techCtx.getBbUpper() > entryPrice) {
+                    double sl = techCtx.getBbUpper() + atrBuffer;
+                    slCandidates.add(sl);
+                    slLog.append(String.format("BBUpper=%.2f ", techCtx.getBbUpper()));
+                }
+            }
+
+            // Choose the LOWEST SL candidate (closest to entry but still structural)
+            if (!slCandidates.isEmpty()) {
+                double structuralSL = slCandidates.stream().min(Double::compare).orElse(0.0);
+                log.debug("[STRUCTURAL_SL] {} SHORT | candidates: {} | selected: {}",
+                        familyId, slLog.toString(), String.format("%.2f", structuralSL));
+                return structuralSL;
+            }
+        }
+
+        // FALLBACK: No structural levels found - use ATR-based (but with larger multiplier)
+        double fallbackStopDistance = entryPrice * atrPct / 100 * 2.0; // 2x ATR instead of 1.5x
+        double fallbackSL = isLong ? entryPrice - fallbackStopDistance : entryPrice + fallbackStopDistance;
+        log.warn("[STRUCTURAL_SL] {} {} | NO STRUCTURE FOUND - using ATR fallback: {} ({}%)",
+                familyId, isLong ? "LONG" : "SHORT", String.format("%.2f", fallbackSL), String.format("%.2f", (fallbackStopDistance / entryPrice) * 100));
+        return fallbackSL;
     }
 
     private double calculatePositionSize(double confidence) {
