@@ -143,20 +143,48 @@ public class SignalHardGate {
             }
         }
 
-        // Log session position (but don't block)
+        // === HARD BLOCK 2: Session Position Extremes ===
+        // FIX: Changed from warning to BLOCKING - don't chase moves at extremes
+        // SHORT at session lows = chasing | LONG at session highs = chasing
         if (quantScore.hasSessionStructure()) {
             SessionStructure session = quantScore.getSessionStructure();
             double position = session.getPositionInRange();
 
-            if (isLong && position > 0.85) {
-                warnings.add(String.format("LONG_AT_HIGH:%.0f%%", position * 100));
+            // LONG at session HIGH (>70%) - BLOCK unless strong microstructure override
+            if (isLong && position > 0.70) {
+                if (!strongMicrostructure) {
+                    blockReasons.add(String.format("LONG_AT_HIGH:%.0f%%_NO_MICRO", position * 100));
+                } else {
+                    warnings.add(String.format("LONG_AT_HIGH:%.0f%%_MICRO_OVERRIDE", position * 100));
+                }
             }
-            if (!isLong && position < 0.15) {
-                warnings.add(String.format("SHORT_AT_LOW:%.0f%%", position * 100));
+            // SHORT at session LOW (<30%) - BLOCK (don't short at lows!)
+            // This was the PFC bug - shorting at 26% session position
+            if (!isLong && position < 0.30) {
+                if (!strongMicrostructure) {
+                    blockReasons.add(String.format("SHORT_AT_LOW:%.0f%%_NO_MICRO", position * 100));
+                } else {
+                    warnings.add(String.format("SHORT_AT_LOW:%.0f%%_MICRO_OVERRIDE", position * 100));
+                }
             }
         }
 
-        // Log SuperTrend conflict (but don't block)
+        // === HARD BLOCK 3: Exhaustion Events ===
+        // FIX: Changed from warning to BLOCKING - exhaustion = reversal signal
+        // SELLING_EXHAUSTION = sellers giving up = BULLISH (bad for SHORT)
+        // BUYING_EXHAUSTION = buyers giving up = BEARISH (bad for LONG)
+        if (quantScore.hasEvents()) {
+            List<DetectedEvent> events = quantScore.getDetectedEvents();
+            if (isLong && hasEvent(events, DetectedEvent.EventType.BUYING_EXHAUSTION)) {
+                blockReasons.add("BUYING_EXHAUSTION:BULLISH_REVERSAL_BLOCKED");
+            }
+            if (!isLong && hasEvent(events, DetectedEvent.EventType.SELLING_EXHAUSTION)) {
+                // FIX: This was the PFC bug - SHORT generated when SELLING_EXHAUSTION detected
+                blockReasons.add("SELLING_EXHAUSTION:BEARISH_REVERSAL_BLOCKED");
+            }
+        }
+
+        // Log SuperTrend conflict (warning only - not a hard blocker)
         TechnicalContext techCtx = quantScore.getTechnicalContext();
         if (techCtx != null) {
             boolean superTrendBullish = techCtx.isSuperTrendBullish();
@@ -168,23 +196,14 @@ public class SignalHardGate {
             }
         }
 
-        // Log exhaustion events (but don't block)
-        if (quantScore.hasEvents()) {
-            List<DetectedEvent> events = quantScore.getDetectedEvents();
-            if (isLong && hasEvent(events, DetectedEvent.EventType.BUYING_EXHAUSTION)) {
-                warnings.add("BUYING_EXHAUSTION");
-            }
-            if (!isLong && hasEvent(events, DetectedEvent.EventType.SELLING_EXHAUSTION)) {
-                warnings.add("SELLING_EXHAUSTION");
-            }
-        }
-
-        // Log historical performance (but don't block)
+        // === HARD BLOCK 4: Poor Historical Performance ===
+        // FIX: Changed from warning to BLOCKING - don't trade setups that fail 60%+ of time
         String setupId = signal.getSetupId();
         double setupWinRate = signal.getHistoricalSuccessRate();
         int setupSamples = signal.getHistoricalSampleCount();
         if (setupId != null && setupSamples >= MIN_HISTORICAL_SAMPLES && setupWinRate < 0.40) {
-            warnings.add(String.format("POOR_HISTORY:%s(%.0f%%/%d)", setupId, setupWinRate * 100, setupSamples));
+            blockReasons.add(String.format("POOR_HISTORY:%s(%.0f%%/%d)_BLOCKED",
+                    setupId, setupWinRate * 100, setupSamples));
         }
 
         // === LOG WARNINGS (for analysis, not blocking) ===

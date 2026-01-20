@@ -20,9 +20,6 @@ import com.kotsin.consumer.enrichment.tracker.SwingPointTracker;
 import com.kotsin.consumer.enrichment.tracker.SwingPointTracker.SwingAnalysis;
 import com.kotsin.consumer.curated.model.MultiTimeframeLevels;
 import com.kotsin.consumer.curated.service.MultiTimeframeLevelCalculator;
-import com.kotsin.consumer.enrichment.pattern.matcher.PatternMatcher;
-import com.kotsin.consumer.enrichment.pattern.model.PatternSignal;
-import com.kotsin.consumer.enrichment.pattern.publisher.PatternSignalPublisher;
 import com.kotsin.consumer.enrichment.store.EventStore;
 import com.kotsin.consumer.quant.calculator.QuantScoreCalculator;
 import com.kotsin.consumer.quant.model.QuantScore;
@@ -79,10 +76,6 @@ public class EnrichedQuantScoreCalculator {
     private final EventDetector eventDetector;
     private final ConfluenceCalculator confluenceCalculator;
     private final EventStore eventStore;
-
-    // Phase 4 pattern recognition
-    private final PatternMatcher patternMatcher;
-    private final PatternSignalPublisher patternSignalPublisher;
 
     // Session Structure Tracking (CRITICAL for context-aware signals)
     private final SessionStructureTracker sessionStructureTracker;
@@ -234,40 +227,6 @@ public class EnrichedQuantScoreCalculator {
             // =============== Calculate Base Score ===============
             QuantScore baseScore = baseCalculator.calculate(family);
 
-            // =============== PHASE 4: Pattern Recognition ===============
-            // Build temporary EnrichedQuantScore for pattern context
-            EnrichedQuantScore tempScore = EnrichedQuantScore.builder()
-                    .baseScore(baseScore)
-                    .historicalContext(historicalContext)
-                    .gexProfile(gexProfile)
-                    .technicalContext(technicalContext)
-                    .confluenceResult(confluenceResult)
-                    .detectedEvents(detectedEvents)
-                    .build();
-            tempScore.setScripCode(family.getFuture() != null ? family.getFuture().getScripCode() : null);
-            tempScore.setCompanyName(family.getFuture() != null ? family.getFuture().getCompanyName() : null);
-            tempScore.setClose(currentPrice);
-
-            // FIX: Set microprice from primary instrument for better entry price accuracy
-            // Microprice is orderbook-derived fair value, more current than candle close
-            InstrumentCandle primaryInstrument = family.getFuture() != null ? family.getFuture() :
-                                                  family.getEquity() != null ? family.getEquity() :
-                                                  family.getPrimaryInstrument();
-            if (primaryInstrument != null && primaryInstrument.getMicroprice() != null) {
-                tempScore.setMicroprice(primaryInstrument.getMicroprice());
-            }
-
-            // Process events through PatternMatcher
-            List<PatternSignal> patternSignals = patternMatcher.processEvents(
-                    family.getFamilyId(), detectedEvents, tempScore);
-
-            // Publish any generated pattern signals to Kafka
-            if (!patternSignals.isEmpty()) {
-                patternSignalPublisher.publishSignals(patternSignals);
-                log.info("[PHASE4] Published {} pattern signals for family {}",
-                        patternSignals.size(), family.getFamilyId());
-            }
-
             // =============== Apply All Modifiers ===============
             // FIX: Clamp each modifier to valid range to prevent NaN/crash from stacking
             // Phase 1 adaptive modifier
@@ -375,8 +334,6 @@ public class EnrichedQuantScoreCalculator {
                     .technicalContext(technicalContext)
                     .confluenceResult(confluenceResult)
                     .detectedEvents(detectedEvents)
-                    // Phase 4
-                    .patternSignals(patternSignals)
                     // Adjusted scores
                     .adjustedQuantScore(adjustedScore)
                     .adjustedConfidence(adjustedConfidence)
@@ -401,14 +358,14 @@ public class EnrichedQuantScoreCalculator {
             long totalMs = (System.nanoTime() - startTime) / 1_000_000;
 
             // Summary logging
-            if (isActionableMoment || !patternSignals.isEmpty()) {
+            if (isActionableMoment) {
                 log.info("[ENRICH] {} COMPLETE | price={} | score={} | conf={}% | " +
-                                "actionable={} | patterns={} | events={} | " +
+                                "actionable={} | events={} | " +
                                 "pos={}% | familyBias={} | combinedMod={} | totalMs={}",
                         familyId, String.format("%.2f", currentPrice),
                         String.format("%.0f", adjustedScore),
                         String.format("%.0f", adjustedConfidence * 100),
-                        isActionableMoment, patternSignals.size(), detectedEvents.size(),
+                        isActionableMoment, detectedEvents.size(),
                         String.format("%.0f", sessionStructure != null ? sessionStructure.getPositionInRange() * 100 : 50),
                         familyContext != null ? familyContext.getOverallBias() : "UNKNOWN",
                         String.format("%.2f", combinedModifier), totalMs);
@@ -1091,7 +1048,7 @@ public class EnrichedQuantScoreCalculator {
         // Base score
         private QuantScore baseScore;
 
-        // Instrument context (for PatternSignal generation)
+        // Instrument context
         private String scripCode;
         private String companyName;
         private String exchange;  // FIX: "N" for NSE, "M" for MCX, "B" for BSE
@@ -1192,9 +1149,6 @@ public class EnrichedQuantScoreCalculator {
         private ConfluenceCalculator.ConfluenceResult confluenceResult;
         private List<DetectedEvent> detectedEvents;
 
-        // Phase 4: Pattern Recognition
-        private List<PatternSignal> patternSignals;
-
         // Adjusted scores
         private double adjustedQuantScore;
         private double adjustedConfidence;
@@ -1232,7 +1186,6 @@ public class EnrichedQuantScoreCalculator {
                     .combinedModifier(1.0)
                     .isActionableMoment(false)
                     .detectedEvents(Collections.emptyList())
-                    .patternSignals(Collections.emptyList())
                     .build();
         }
 
@@ -1417,49 +1370,6 @@ public class EnrichedQuantScoreCalculator {
             return technicalContext != null ? technicalContext.getAtrPct() : null;
         }
 
-        // ======================== PHASE 4 HELPERS ========================
-
-        /**
-         * Check if any pattern signals were generated
-         */
-        public boolean hasPatternSignals() {
-            return patternSignals != null && !patternSignals.isEmpty();
-        }
-
-        /**
-         * Get count of pattern signals
-         */
-        public int getPatternSignalCount() {
-            return patternSignals != null ? patternSignals.size() : 0;
-        }
-
-        /**
-         * Get high-confidence pattern signals (confidence >= 0.70)
-         */
-        public List<PatternSignal> getHighConfidencePatternSignals() {
-            if (patternSignals == null) return Collections.emptyList();
-            return patternSignals.stream()
-                    .filter(s -> s.getConfidence() >= 0.70)
-                    .collect(java.util.stream.Collectors.toList());
-        }
-
-        /**
-         * Get the best pattern signal by confidence
-         */
-        public PatternSignal getBestPatternSignal() {
-            if (patternSignals == null || patternSignals.isEmpty()) return null;
-            return patternSignals.stream()
-                    .max(java.util.Comparator.comparingDouble(PatternSignal::getConfidence))
-                    .orElse(null);
-        }
-
-        /**
-         * Check if pattern recognition (Phase 4) is active
-         */
-        public boolean hasPatternRecognition() {
-            return patternSignals != null;
-        }
-
         /**
          * Get confluence score from zones
          */
@@ -1469,7 +1379,7 @@ public class EnrichedQuantScoreCalculator {
         }
 
         /**
-         * Get confluence zones for pattern signal generation
+         * Get confluence zones
          */
         public List<ConfluenceZone> getConfluenceZones() {
             if (confluenceResult == null || confluenceResult.getZones() == null) {
@@ -1481,7 +1391,7 @@ public class EnrichedQuantScoreCalculator {
         }
 
         /**
-         * Simple confluence zone representation for pattern signals
+         * Simple confluence zone representation
          */
         @lombok.Data
         @lombok.AllArgsConstructor

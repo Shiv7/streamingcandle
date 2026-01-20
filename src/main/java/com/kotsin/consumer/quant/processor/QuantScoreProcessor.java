@@ -191,19 +191,18 @@ public class QuantScoreProcessor {
             // Emit score to dashboard topic
             emitScore(score);
 
-            // Phase 5-6: Run full enrichment pipeline for intelligence, narrative, and enhanced signals
+            // Phase 5: Run full enrichment pipeline for state machine signals
             if (pipelineEnabled && enrichmentPipeline != null) {
                 try {
                     EnrichmentPipeline.PipelineResult pipelineResult = enrichmentPipeline.process(family);
                     if (pipelineResult != null && pipelineResult.getSignalsPublished() > 0) {
-                        log.info("[PIPELINE] {} {} | signals={} narrative={} setups={}",
+                        log.info("[PIPELINE] {} {} | signals={} actionable={}",
                             familyId, timeframe,
                             pipelineResult.getSignalsPublished(),
-                            pipelineResult.getIntelligence() != null ? "yes" : "no",
-                            pipelineResult.getIntelligence() != null && pipelineResult.getIntelligence().isHasReadySetups());
+                            pipelineResult.isActionableMoment());
                     }
                 } catch (Exception e) {
-                    log.debug("[PIPELINE] Error in Phase 5-6 for {}: {}", familyId, e.getMessage());
+                    log.debug("[PIPELINE] Error in Phase 5 for {}: {}", familyId, e.getMessage());
                 }
             }
 

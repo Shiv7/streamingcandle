@@ -6,8 +6,8 @@ import com.kotsin.consumer.config.KafkaTopics;
 import com.kotsin.consumer.enrichment.signal.model.TradingSignal;
 import com.kotsin.consumer.enrichment.signal.model.TradingSignal.ConfidenceBreakdown;
 import com.kotsin.consumer.enrichment.signal.model.TradingSignal.SignalSource;
-import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
+import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.kafka.core.KafkaTemplate;
 import org.springframework.kafka.support.SendResult;
 import org.springframework.stereotype.Component;
@@ -34,17 +34,30 @@ import java.util.concurrent.atomic.AtomicLong;
  */
 @Slf4j
 @Component
-@RequiredArgsConstructor
 public class TradingSignalPublisher {
 
     private final KafkaTemplate<String, String> kafkaTemplate;
     private final ObjectMapper objectMapper;
     private final SignalValidator signalValidator;
 
+    public TradingSignalPublisher(
+            @Qualifier("stringKafkaTemplate") KafkaTemplate<String, String> kafkaTemplate,
+            ObjectMapper objectMapper,
+            SignalValidator signalValidator) {
+        this.kafkaTemplate = kafkaTemplate;
+        this.objectMapper = objectMapper;
+        this.signalValidator = signalValidator;
+    }
+
     // Topic names - using centralized constants
     private static final String TOPIC_SIGNALS_V2 = KafkaTopics.TRADING_SIGNALS_V2;
     private static final String TOPIC_HIGH_PRIORITY = KafkaTopics.TRADING_SIGNALS_HIGH_PRIORITY;
     private static final String TOPIC_ALERTS = KafkaTopics.TRADING_SIGNALS_ALERTS;
+
+    // DISABLED: The InstrumentStateManager is now the ONLY signal generator.
+    // TradingSignalPublisher was part of the spam generator (700+ signals/day).
+    // All signal generation now goes through state machine with ONE signal per trade lifecycle.
+    private static final boolean DISABLED = true;
 
     // Statistics
     private final AtomicLong totalPublished = new AtomicLong(0);
@@ -57,11 +70,16 @@ public class TradingSignalPublisher {
 
     /**
      * Publish a single trading signal
+     * DISABLED - Replaced by InstrumentStateManager state machine
      *
      * @param signal Signal to publish
      * @return true if published successfully
      */
     public boolean publishSignal(TradingSignal signal) {
+        if (DISABLED) {
+            log.debug("[SIGNAL_PUB] DISABLED - State machine is the only signal generator now");
+            return false;
+        }
         if (signal == null) {
             return false;
         }
