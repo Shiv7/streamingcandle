@@ -21,6 +21,9 @@ import com.kotsin.consumer.enrichment.tracker.SwingPointTracker.SwingAnalysis;
 import com.kotsin.consumer.curated.model.MultiTimeframeLevels;
 import com.kotsin.consumer.curated.service.MultiTimeframeLevelCalculator;
 import com.kotsin.consumer.enrichment.store.EventStore;
+import com.kotsin.consumer.trading.mtf.HtfCandleAggregator;
+import com.kotsin.consumer.trading.mtf.MtfSmcAnalyzer;
+import com.kotsin.consumer.trading.mtf.MtfSmcContext;
 import com.kotsin.consumer.quant.calculator.QuantScoreCalculator;
 import com.kotsin.consumer.quant.model.QuantScore;
 import lombok.RequiredArgsConstructor;
@@ -88,6 +91,12 @@ public class EnrichedQuantScoreCalculator {
 
     // Multi-Timeframe Level Calculator (daily/weekly/monthly pivots and Fibonacci)
     private final MultiTimeframeLevelCalculator mtfLevelCalculator;
+
+    // HTF Candle Aggregator (aggregates 1m into 5m/15m/1H/4H/Daily)
+    private final HtfCandleAggregator htfCandleAggregator;
+
+    // MTF SMC Analyzer (Multi-Timeframe Smart Money Concepts)
+    private final MtfSmcAnalyzer mtfSmcAnalyzer;
 
     /**
      * Calculate enriched QuantScore with historical context and Phase 2, 3, 4 enrichments
@@ -224,6 +233,31 @@ public class EnrichedQuantScoreCalculator {
                     detectedEvents.size(),
                     phase3Ms);
 
+            // =============== HTF CANDLE AGGREGATION ===============
+            // Aggregate 1m candles into 5m/15m/1H/4H/Daily for proper MTF analysis
+            t0 = System.nanoTime();
+            if (htfCandleAggregator != null) {
+                htfCandleAggregator.processCandle(family);
+            }
+
+            // =============== MTF SMC ANALYSIS (Multi-Timeframe Smart Money Concepts) ===============
+            // REAL institutional analysis: HTF for bias, LTF for entry
+            MtfSmcContext mtfSmcContext = null;
+            if (mtfSmcAnalyzer != null && currentPrice > 0) {
+                mtfSmcContext = mtfSmcAnalyzer.analyze(familyId, currentPrice);
+
+                if (mtfSmcContext != null && mtfSmcContext.getHtfBias() != null) {
+                    log.debug("[ENRICH] {} MTF_SMC | HTF={} | zone={} | atPOI={} | ltfSwept={} | conf={}",
+                            familyId,
+                            mtfSmcContext.getHtfBias(),
+                            mtfSmcContext.isInDiscount() ? "DISCOUNT" : (mtfSmcContext.isInPremium() ? "PREMIUM" : "NEUTRAL"),
+                            mtfSmcContext.isAtHtfDemandZone() || mtfSmcContext.isAtHtfSupplyZone(),
+                            mtfSmcContext.isLtfLiquidityJustSwept(),
+                            mtfSmcContext.getMtfConfluenceScore());
+                }
+            }
+            long smcMs = (System.nanoTime() - t0) / 1_000_000;
+
             // =============== Calculate Base Score ===============
             QuantScore baseScore = baseCalculator.calculate(family);
 
@@ -306,6 +340,21 @@ public class EnrichedQuantScoreCalculator {
             long priceTimestamp = family.getWindowEndMillis() > 0 ? family.getWindowEndMillis() :
                                   (family.getTimestamp() > 0 ? family.getTimestamp() : System.currentTimeMillis());
 
+            // DIAGNOSTIC: Log scripCode extraction
+            if (scripCode == null) {
+                log.warn("[ENRICH_DIAG] scripCode is NULL! | familyId={} | hasFuture={} | hasEquity={} | " +
+                        "futureScripCode={} | equityScripCode={}",
+                        familyId,
+                        family.getFuture() != null,
+                        family.getEquity() != null,
+                        family.getFuture() != null ? family.getFuture().getScripCode() : "N/A",
+                        family.getEquity() != null ? family.getEquity().getScripCode() : "N/A");
+            } else {
+                log.debug("[ENRICH_DIAG] scripCode extracted | familyId={} | scripCode={} | exchange={} | " +
+                        "price={} | hasTech={}",
+                        familyId, scripCode, exchange, currentPrice, technicalContext != null);
+            }
+
             EnrichedQuantScore enrichedScore = EnrichedQuantScore.builder()
                     .baseScore(baseScore)
                     // FIX: Include scripCode, companyName, exchange, close, and priceTimestamp
@@ -334,6 +383,8 @@ public class EnrichedQuantScoreCalculator {
                     .technicalContext(technicalContext)
                     .confluenceResult(confluenceResult)
                     .detectedEvents(detectedEvents)
+                    // MTF SMC Context (Multi-Timeframe Smart Money Concepts)
+                    .mtfSmcContext(mtfSmcContext)
                     // Adjusted scores
                     .adjustedQuantScore(adjustedScore)
                     .adjustedConfidence(adjustedConfidence)
@@ -1148,6 +1199,32 @@ public class EnrichedQuantScoreCalculator {
         private TechnicalContext technicalContext;
         private ConfluenceCalculator.ConfluenceResult confluenceResult;
         private List<DetectedEvent> detectedEvents;
+
+        /**
+         * MTF SMC Context (Multi-Timeframe Smart Money Concepts)
+         *
+         * THIS IS REAL INSTITUTIONAL ANALYSIS:
+         *
+         * HTF (1H/4H) Analysis:
+         * - Market Structure bias (bullish/bearish)
+         * - Major Order Blocks (where institutions placed orders)
+         * - Major FVGs (real imbalances, not 1m noise)
+         *
+         * LTF (15m) Analysis:
+         * - Liquidity sweeps (THE entry signal!)
+         * - CHoCH/BOS confirmation
+         * - Precise entry at LTF OB
+         *
+         * Premium/Discount (from Daily range):
+         * - Buy in discount (below 50%)
+         * - Sell in premium (above 50%)
+         *
+         * WHY THIS MATTERS:
+         * - HTF gives DIRECTION (don't fight the trend)
+         * - HTF gives KEY LEVELS (where smart money operates)
+         * - LTF gives TIMING (when to pull the trigger)
+         */
+        private MtfSmcContext mtfSmcContext;
 
         // Adjusted scores
         private double adjustedQuantScore;

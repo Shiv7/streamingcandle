@@ -64,11 +64,16 @@ public class TechnicalIndicatorEnricher {
         String familyId = family.getFamilyId();
         String timeframe = family.getTimeframe();
         double close = family.getPrimaryPrice();
+        double open = getOpenPrice(family);
         double high = getHighPrice(family);
         double low = getLowPrice(family);
+        long timestamp = getTimestamp(family);
 
-        // Store current price in history
+        // Store current price in history (legacy format for backward compatibility)
         storePriceHistory(familyId, timeframe, high, low, close);
+
+        // Store full OHLC history for SMC analysis
+        storeFullCandleHistory(familyId, timeframe, open, high, low, close, timestamp);
 
         // FIX: Update session data for pivot calculation
         updateSessionData(familyId, high, low, close);
@@ -91,6 +96,15 @@ public class TechnicalIndicatorEnricher {
         // Calculate ATR first (needed for SuperTrend)
         double atr = calculateATR(history, ATR_PERIOD);
         double atrPct = close > 0 ? atr / close * 100 : 0;
+
+        // Calculate 5m ATR for stop sizing (more meaningful than 1m ATR for swing trades)
+        double atr5m = calculate5mATR(familyId);
+        // If 5m ATR not available, estimate from current TF ATR
+        // This is a rough estimate: 5m candle has ~5x the range of 1m candle
+        if (atr5m <= 0 && atr > 0) {
+            atr5m = atr * 5;
+            log.debug("[TECH] Using estimated 5m ATR: {} (1m ATR {} * 5)", atr5m, atr);
+        }
 
         // Calculate SuperTrend
         SuperTrendResult superTrend = calculateSuperTrend(history, familyId, timeframe, SUPERTREND_PERIOD, SUPERTREND_MULTIPLIER);
@@ -146,6 +160,7 @@ public class TechnicalIndicatorEnricher {
                 .bbSqueezeThreshold(BB_SQUEEZE_THRESHOLD)
                 // ATR
                 .atr(atr)
+                .atr5m(atr5m > 0 ? atr5m : null)  // 5m ATR for stop calculation
                 .atrPct(atrPct)
                 .atrPercentile(atrPercentile)
                 .volatilityExpanding(volatilityExpanding)
@@ -218,11 +233,26 @@ public class TechnicalIndicatorEnricher {
         double upperBand = hl2 + (multiplier * atr);
         double lowerBand = hl2 - (multiplier * atr);
 
-        // Final bands (compare with previous)
-        double finalUpperBand = prevState.finalUpperBand > 0 ?
-                Math.min(upperBand, prevState.finalUpperBand) : upperBand;
-        double finalLowerBand = prevState.finalLowerBand > 0 ?
-                Math.max(lowerBand, prevState.finalLowerBand) : lowerBand;
+        // Final bands with proper crossover check (TradingView standard formula)
+        // Upper Band: reset if basicUB < prevUB OR prevClose crossed above prevUB
+        double finalUpperBand;
+        if (prevState.finalUpperBand <= 0) {
+            finalUpperBand = upperBand;
+        } else if (upperBand < prevState.finalUpperBand || prevState.previousClose > prevState.finalUpperBand) {
+            finalUpperBand = upperBand;
+        } else {
+            finalUpperBand = prevState.finalUpperBand;
+        }
+
+        // Lower Band: reset if basicLB > prevLB OR prevClose crossed below prevLB
+        double finalLowerBand;
+        if (prevState.finalLowerBand <= 0) {
+            finalLowerBand = lowerBand;
+        } else if (lowerBand > prevState.finalLowerBand || prevState.previousClose < prevState.finalLowerBand) {
+            finalLowerBand = lowerBand;
+        } else {
+            finalLowerBand = prevState.finalLowerBand;
+        }
 
         // Determine SuperTrend value and direction
         double superTrend;
@@ -256,9 +286,9 @@ public class TechnicalIndicatorEnricher {
         boolean flipped = prevState.bullish != bullish && prevState.superTrend > 0;
         int candlesSinceFlip = flipped ? 0 : prevState.candlesSinceFlip + 1;
 
-        // Store new state
+        // Store new state (including close as previousClose for next calculation)
         SuperTrendState newState = new SuperTrendState(
-                superTrend, finalUpperBand, finalLowerBand, bullish, candlesSinceFlip);
+                superTrend, finalUpperBand, finalLowerBand, bullish, candlesSinceFlip, close);
         storeSuperTrendState(stateKey, newState);
 
         if (flipped) {
@@ -308,11 +338,19 @@ public class TechnicalIndicatorEnricher {
 
     // ======================== ATR CALCULATION ========================
 
+    /**
+     * Calculate ATR using Wilder's RMA (Running Moving Average) method
+     * This matches TradingView's ATR calculation exactly.
+     *
+     * Formula:
+     * - First ATR = SMA of first 'period' true ranges
+     * - Subsequent ATR = prevATR + (currentTR - prevATR) / period
+     */
     private double calculateATR(List<double[]> history, int period) {
         if (history.size() < 2) return 0;
 
+        // Calculate all True Range values
         List<Double> trueRanges = new ArrayList<>();
-
         for (int i = 1; i < history.size(); i++) {
             double high = history.get(i)[0];
             double low = history.get(i)[1];
@@ -323,16 +361,44 @@ public class TechnicalIndicatorEnricher {
             trueRanges.add(tr);
         }
 
-        // Simple moving average of TR
-        int start = Math.max(0, trueRanges.size() - period);
+        if (trueRanges.isEmpty()) return 0;
+
+        // If we don't have enough data for the period, use SMA of what we have
+        int actualPeriod = Math.min(period, trueRanges.size());
+
+        // First ATR = SMA of first 'actualPeriod' true ranges
         double sum = 0;
-        int count = 0;
-        for (int i = start; i < trueRanges.size(); i++) {
+        for (int i = 0; i < actualPeriod; i++) {
             sum += trueRanges.get(i);
-            count++;
+        }
+        double atr = sum / actualPeriod;
+
+        // Apply Wilder's smoothing (RMA) for remaining values
+        // ATR = prevATR + (currentTR - prevATR) / period
+        for (int i = actualPeriod; i < trueRanges.size(); i++) {
+            atr = atr + (trueRanges.get(i) - atr) / period;
         }
 
-        return count > 0 ? sum / count : 0;
+        return atr;
+    }
+
+    /**
+     * Calculate 5-minute ATR for the given family.
+     * This is used for stop calculation in swing trades to get meaningful stop distances.
+     *
+     * @param familyId Family ID
+     * @return 5m ATR, or 0 if not enough data
+     */
+    public double calculate5mATR(String familyId) {
+        List<double[]> history5m = getPriceHistory(familyId, "5m", ATR_PERIOD + 5);
+
+        if (history5m.size() < ATR_PERIOD) {
+            log.debug("[TECH] Not enough 5m history for ATR calc: {} candles (need {})",
+                    history5m.size(), ATR_PERIOD);
+            return 0;
+        }
+
+        return calculateATR(history5m, ATR_PERIOD);
     }
 
     private double calculateATRPercentile(String familyId, String timeframe, double currentATR) {
@@ -381,13 +447,28 @@ public class TechnicalIndicatorEnricher {
                     pivots.put(k.toString(), Double.parseDouble(v.toString()));
                 } catch (NumberFormatException ignored) {}
             });
+            log.debug("[TECH_DIAG] {} Loaded {} pivots from Redis | dailyPP={} | dailyS1={} | dailyR1={}",
+                    familyId, pivots.size(),
+                    pivots.get("dailyPP"),
+                    pivots.get("dailyS1"),
+                    pivots.get("dailyR1"));
+        } else {
+            log.debug("[TECH_DIAG] {} No pivots in Redis cache (key={})", familyId, pivotKey);
         }
 
         // FIX: If no cached pivots, try to calculate from session data
         if (pivots.isEmpty() || pivots.get("dailyPP") == null) {
+            log.debug("[TECH_DIAG] {} Calculating pivots from session data (cache empty or missing dailyPP)", familyId);
             Map<String, Double> sessionPivots = calculatePivotsFromSessionData(familyId);
             if (!sessionPivots.isEmpty()) {
                 pivots.putAll(sessionPivots);
+                log.debug("[TECH_DIAG] {} Calculated {} pivots from session | dailyPP={} | dailyS1={} | dailyR1={}",
+                        familyId, sessionPivots.size(),
+                        pivots.get("dailyPP"),
+                        pivots.get("dailyS1"),
+                        pivots.get("dailyR1"));
+            } else {
+                log.warn("[TECH_DIAG] {} NO pivots available! Both Redis and session data empty", familyId);
             }
         }
 
@@ -593,6 +674,103 @@ public class TechnicalIndicatorEnricher {
         return family.getPrimaryPrice();
     }
 
+    private double getOpenPrice(FamilyCandle family) {
+        if (family.getEquity() != null) {
+            return family.getEquity().getOpen();
+        }
+        if (family.getFuture() != null) {
+            return family.getFuture().getOpen();
+        }
+        return family.getPrimaryPrice();
+    }
+
+    private long getTimestamp(FamilyCandle family) {
+        return family.getWindowEndMillis();
+    }
+
+    /**
+     * Store full OHLC candle history for SMC analysis
+     * Stores: open,high,low,close,timestamp
+     */
+    private void storeFullCandleHistory(String familyId, String timeframe, double open, double high, double low, double close, long timestamp) {
+        String key = getHistoryKey(familyId, timeframe, "ohlc");
+        String entry = String.format("%.4f,%.4f,%.4f,%.4f,%d", open, high, low, close, timestamp);
+        redisTemplate.opsForList().rightPush(key, entry);
+        redisTemplate.opsForList().trim(key, -100, -1);
+        redisTemplate.expire(key, HISTORY_TTL);
+    }
+
+    /**
+     * Get full OHLC candle history for SMC analysis
+     * Returns: SmcCandleHistory with opens[], highs[], lows[], closes[], timestamps[]
+     */
+    public SmcCandleHistory getSmcCandleHistory(String familyId, String timeframe, int count) {
+        String key = getHistoryKey(familyId, timeframe, "ohlc");
+        List<String> entries = redisTemplate.opsForList().range(key, -count, -1);
+
+        if (entries == null || entries.isEmpty()) {
+            return SmcCandleHistory.empty();
+        }
+
+        double[] opens = new double[entries.size()];
+        double[] highs = new double[entries.size()];
+        double[] lows = new double[entries.size()];
+        double[] closes = new double[entries.size()];
+        long[] timestamps = new long[entries.size()];
+
+        int idx = 0;
+        for (String entry : entries) {
+            try {
+                String[] parts = entry.split(",");
+                if (parts.length >= 5) {
+                    opens[idx] = Double.parseDouble(parts[0]);
+                    highs[idx] = Double.parseDouble(parts[1]);
+                    lows[idx] = Double.parseDouble(parts[2]);
+                    closes[idx] = Double.parseDouble(parts[3]);
+                    timestamps[idx] = Long.parseLong(parts[4]);
+                    idx++;
+                }
+            } catch (NumberFormatException ignored) {}
+        }
+
+        // If some entries failed parsing, trim arrays
+        if (idx < entries.size()) {
+            opens = java.util.Arrays.copyOf(opens, idx);
+            highs = java.util.Arrays.copyOf(highs, idx);
+            lows = java.util.Arrays.copyOf(lows, idx);
+            closes = java.util.Arrays.copyOf(closes, idx);
+            timestamps = java.util.Arrays.copyOf(timestamps, idx);
+        }
+
+        return new SmcCandleHistory(opens, highs, lows, closes, timestamps, timeframe);
+    }
+
+    /**
+     * Candle history for SMC analysis
+     */
+    @lombok.Data
+    @lombok.AllArgsConstructor
+    public static class SmcCandleHistory {
+        private double[] opens;
+        private double[] highs;
+        private double[] lows;
+        private double[] closes;
+        private long[] timestamps;
+        private String timeframe;
+
+        public static SmcCandleHistory empty() {
+            return new SmcCandleHistory(new double[0], new double[0], new double[0], new double[0], new long[0], "");
+        }
+
+        public int size() {
+            return closes != null ? closes.length : 0;
+        }
+
+        public boolean hasData() {
+            return size() > 0;
+        }
+    }
+
     private void storePriceHistory(String familyId, String timeframe, double high, double low, double close) {
         String key = getHistoryKey(familyId, timeframe, "prices");
         String entry = String.format("%.4f,%.4f,%.4f", high, low, close);
@@ -636,26 +814,28 @@ public class TechnicalIndicatorEnricher {
 
     private SuperTrendState getSuperTrendState(String key) {
         String state = redisTemplate.opsForValue().get(key);
-        if (state == null) return new SuperTrendState(0, 0, 0, true, 0);
+        if (state == null) return new SuperTrendState(0, 0, 0, true, 0, 0);
 
         try {
             String[] parts = state.split(",");
+            // Handle both old format (5 fields) and new format (6 fields with previousClose)
             return new SuperTrendState(
                     Double.parseDouble(parts[0]),
                     Double.parseDouble(parts[1]),
                     Double.parseDouble(parts[2]),
                     Boolean.parseBoolean(parts[3]),
-                    Integer.parseInt(parts[4])
+                    Integer.parseInt(parts[4]),
+                    parts.length > 5 ? Double.parseDouble(parts[5]) : 0
             );
         } catch (Exception e) {
-            return new SuperTrendState(0, 0, 0, true, 0);
+            return new SuperTrendState(0, 0, 0, true, 0, 0);
         }
     }
 
     private void storeSuperTrendState(String key, SuperTrendState state) {
-        String value = String.format("%f,%f,%f,%b,%d",
+        String value = String.format("%f,%f,%f,%b,%d,%f",
                 state.superTrend, state.finalUpperBand, state.finalLowerBand,
-                state.bullish, state.candlesSinceFlip);
+                state.bullish, state.candlesSinceFlip, state.previousClose);
         redisTemplate.opsForValue().set(key, value, HISTORY_TTL);
     }
 
@@ -726,7 +906,7 @@ public class TechnicalIndicatorEnricher {
                                         double width, double widthPct, double percentB) {}
 
     private record SuperTrendState(double superTrend, double finalUpperBand, double finalLowerBand,
-                                    boolean bullish, int candlesSinceFlip) {}
+                                    boolean bullish, int candlesSinceFlip, double previousClose) {}
 
     private record SessionData(Double vwap, Double high, Double low, Double open) {}
 }

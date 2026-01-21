@@ -51,10 +51,17 @@ public class FudkiiStrategy implements TradingStrategy {
     private static final double TARGET1_ATR_MULT = 1.5;
     private static final double TARGET2_ATR_MULT = 2.5;
 
-    // Time limits
-    private static final long MAX_WATCHING_MS = 30 * 60 * 1000;   // 30 minutes
+    // Time limits - Extended to 60 minutes for 2-candle confirmation (2 x 30m candles)
+    private static final long MAX_WATCHING_MS = 60 * 60 * 1000;   // 60 minutes (2 candles for confirmation)
     private static final long MAX_POSITION_MS = 2 * 60 * 60 * 1000; // 2 hours (breakouts should be fast)
     private static final long COOLDOWN_MS = 60 * 60 * 1000;       // 60 minutes (longer cooldown for breakout strategy)
+
+    // NEAR-BREAKOUT PROXIMITY THRESHOLDS
+    // If price is within this threshold of BB/ST breakout level, keep signal active for 2-candle confirmation
+    private static final double MIN_PROXIMITY_PCT = 0.001;        // Minimum 0.1% proximity threshold
+    private static final double ATR_PROXIMITY_MULT = 0.10;        // 10% of ATR as proximity threshold
+    private static final double MAX_ADVERSE_MOVE_PCT = 0.005;     // Invalidate if price moves 0.5% against direction
+    private static final int MAX_CANDLES_FOR_CONFIRMATION = 2;    // Max candles to wait for confirmation
 
     @Override
     public String getStrategyId() {
@@ -88,25 +95,90 @@ public class FudkiiStrategy implements TradingStrategy {
 
     @Override
     public Optional<SetupContext> detectSetupForming(EnrichedQuantScore score) {
-        if (score == null) return Optional.empty();
+        // DIAGNOSTIC: Entry point
+        String scripCode = score != null ? score.getScripCode() : "null";
+        log.debug("[FUDKII_DIAG] detectSetupForming ENTRY | scripCode={}", scripCode);
 
-        TechnicalContext tech = score.getTechnicalContext();
-        if (tech == null) return Optional.empty();
-
-        double price = score.getClose();
-        if (price <= 0) return Optional.empty();
-
-        // Check for BB squeeze
-        if (!tech.isBbSqueezing()) {
+        if (score == null) {
+            log.debug("[FUDKII_DIAG] REJECTED: score is NULL");
             return Optional.empty();
         }
 
-        // Determine potential direction based on SuperTrend
-        Direction potentialDirection = tech.isSuperTrendBullish() ? Direction.LONG : Direction.SHORT;
+        TechnicalContext tech = score.getTechnicalContext();
+        if (tech == null) {
+            log.debug("[FUDKII_DIAG] {} REJECTED: TechnicalContext is NULL", scripCode);
+            return Optional.empty();
+        }
 
-        // Get ATR for target calculation
+        double price = score.getClose();
+        if (price <= 0) {
+            log.debug("[FUDKII_DIAG] {} REJECTED: price <= 0 | price={}", scripCode, price);
+            return Optional.empty();
+        }
+
+        // DIAGNOSTIC: Log all key technical indicators
+        log.debug("[FUDKII_DIAG] {} CHECKING | price={} | bbSqueeze={} | bbWidthPct={} | bbPctB={} | " +
+                "stBullish={} | stFlip={} | atr={}",
+                scripCode, price,
+                tech.isBbSqueezing(),
+                tech.getBbWidthPct(),
+                tech.getBbPercentB(),
+                tech.isSuperTrendBullish(),
+                tech.isSuperTrendFlip(),
+                tech.getAtr());
+
+        // Check for BB squeeze
+        if (!tech.isBbSqueezing()) {
+            log.debug("[FUDKII_DIAG] {} REJECTED: BB NOT squeezing | bbWidthPct={} | threshold={}",
+                    scripCode, tech.getBbWidthPct(), 0.02);
+            return Optional.empty();
+        }
+
+        log.info("[FUDKII_DIAG] {} SETUP DETECTED: BB squeeze active! | bbWidthPct={}", scripCode, tech.getBbWidthPct());
+
+        // Get ATR for calculations
         double atr = tech.getAtr();
         if (atr <= 0) atr = price * 0.01; // Default 1% if no ATR
+
+        // Calculate proximity threshold: max(0.1%, 10% of ATR)
+        double proximityThreshold = Math.max(MIN_PROXIMITY_PCT * price, atr * ATR_PROXIMITY_MULT);
+
+        // Get BB levels
+        double bbUpper = tech.getBbUpper();
+        double bbLower = tech.getBbLower();
+        double stValue = tech.getSuperTrendValue();
+        double bbPctB = tech.getBbPercentB();
+
+        // Check for NEAR-BREAKOUT conditions (within proximity threshold)
+        boolean nearUpperBB = bbUpper > 0 && (bbUpper - price) <= proximityThreshold && (bbUpper - price) >= 0;
+        boolean nearLowerBB = bbLower > 0 && (price - bbLower) <= proximityThreshold && (price - bbLower) >= 0;
+        boolean nearSTFlip = stValue > 0 && Math.abs(price - stValue) <= proximityThreshold;
+
+        // Also check if price is just above/below BB (actual breakout)
+        boolean aboveUpperBB = bbPctB > 1.0;
+        boolean belowLowerBB = bbPctB < 0.0;
+
+        boolean nearBreakout = nearUpperBB || nearLowerBB || nearSTFlip || aboveUpperBB || belowLowerBB;
+
+        // Determine direction based on which side we're near/breaking
+        Direction potentialDirection;
+        String breakoutType;
+
+        if (aboveUpperBB || nearUpperBB) {
+            potentialDirection = Direction.LONG;
+            breakoutType = aboveUpperBB ? "ABOVE upper BB" : "NEAR upper BB";
+        } else if (belowLowerBB || nearLowerBB) {
+            potentialDirection = Direction.SHORT;
+            breakoutType = belowLowerBB ? "BELOW lower BB" : "NEAR lower BB";
+        } else if (nearSTFlip) {
+            // Near SuperTrend - use ST direction
+            potentialDirection = tech.isSuperTrendBullish() ? Direction.LONG : Direction.SHORT;
+            breakoutType = "NEAR SuperTrend flip";
+        } else {
+            // Default to SuperTrend direction
+            potentialDirection = tech.isSuperTrendBullish() ? Direction.LONG : Direction.SHORT;
+            breakoutType = "ST direction";
+        }
 
         // Calculate potential stop and targets
         double stopLevel = tech.getSuperTrendValue();
@@ -123,12 +195,23 @@ public class FudkiiStrategy implements TradingStrategy {
             ofiZscore = score.getHistoricalContext().getOfiContext().getZscore();
         }
 
-        log.debug("[FUDKII] Setup forming: {} | BB squeezing | ST={} | price={:.2f} | ATR={:.2f}",
-                score.getScripCode(), potentialDirection, price, atr);
+        // Log near-breakout detection
+        if (nearBreakout) {
+            log.info("[FUDKII_NEAR] {} NEAR-BREAKOUT DETECTED | {} | direction={} | price={} | " +
+                    "bbUpper={} | bbLower={} | stValue={} | proximityThreshold={} | " +
+                    "nearUpperBB={} | nearLowerBB={} | nearSTFlip={} | aboveUpper={} | belowLower={}",
+                    scripCode, breakoutType, potentialDirection, price,
+                    String.format("%.2f", bbUpper), String.format("%.2f", bbLower),
+                    String.format("%.2f", stValue), String.format("%.4f", proximityThreshold),
+                    nearUpperBB, nearLowerBB, nearSTFlip, aboveUpperBB, belowLowerBB);
+        }
+
+        log.debug("[FUDKII] Setup forming: {} | BB squeezing | {} | ST={} | price={:.2f} | ATR={:.2f}",
+                score.getScripCode(), breakoutType, potentialDirection, price, atr);
 
         return Optional.of(SetupContext.builder()
                 .strategyId(STRATEGY_ID)
-                .setupDescription(String.format("BB squeeze + ST %s", potentialDirection))
+                .setupDescription(String.format("BB squeeze + %s", breakoutType))
                 .keyLevel(tech.getSuperTrendValue())
                 .entryZone(price)
                 .proposedStop(stopLevel)
@@ -138,6 +221,15 @@ public class FudkiiStrategy implements TradingStrategy {
                 .priceAtDetection(price)
                 .superTrendAligned(true)  // By definition, we use ST direction
                 .ofiZscoreAtDetection(ofiZscore)
+                // NEW: Near-breakout tracking fields
+                .nearBreakoutDetected(nearBreakout)
+                .bbUpperAtDetection(bbUpper)
+                .bbLowerAtDetection(bbLower)
+                .stValueAtDetection(stValue)
+                .atrAtDetection(atr)
+                .candlesSinceSetup(0)
+                .pendingConfirmation(nearBreakout && !aboveUpperBB && !belowLowerBB) // Pending if near but not yet broken
+                .proximityThreshold(proximityThreshold)
                 .build());
     }
 
@@ -145,35 +237,112 @@ public class FudkiiStrategy implements TradingStrategy {
     public Optional<TradingSignal> checkEntryTrigger(EnrichedQuantScore score, SetupContext setup) {
         if (score == null || setup == null) return Optional.empty();
 
+        String scripCode = score.getScripCode();
         TechnicalContext tech = score.getTechnicalContext();
         if (tech == null) return Optional.empty();
 
         double price = score.getClose();
         Direction direction = setup.getDirection();
 
-        // 1. Check SuperTrend FLIP (this is the key trigger)
-        if (!tech.isSuperTrendFlip()) {
-            log.trace("[FUDKII] No SuperTrend flip yet");
+        // FRESHNESS COMPARISON: Show setup values vs current fresh values
+        double currentOfi = 0;
+        if (score.getHistoricalContext() != null && score.getHistoricalContext().getOfiContext() != null) {
+            currentOfi = score.getHistoricalContext().getOfiContext().getZscore();
+        }
+
+        log.debug("[FUDKII_FRESH] {} COMPARING | setupPrice={} vs FRESH price={} | " +
+                "setupOfi={} vs FRESH ofi={} | FRESH stFlip={} | FRESH bbPctB={}",
+                scripCode,
+                String.format("%.2f", setup.getPriceAtDetection()),
+                String.format("%.2f", price),
+                String.format("%.2f", setup.getOfiZscoreAtDetection()),
+                String.format("%.2f", currentOfi),
+                tech.isSuperTrendFlip(),
+                String.format("%.3f", tech.getBbPercentB()));
+
+        // DIAGNOSTIC: Entry into checkEntryTrigger
+        log.debug("[FUDKII_DIAG] {} checkEntryTrigger | price={} | direction={} | stFlip={} | stBullish={} | bbPctB={} | nearBreakout={} | pending={}",
+                scripCode, price, direction, tech.isSuperTrendFlip(), tech.isSuperTrendBullish(), tech.getBbPercentB(),
+                setup.isNearBreakoutDetected(), setup.isPendingConfirmation());
+
+        // Get current BB and ST values
+        double bbPctB = tech.getBbPercentB();
+        boolean stBullish = tech.isSuperTrendBullish();
+        boolean stFlip = tech.isSuperTrendFlip();
+
+        // NEAR-BREAKOUT 2-CANDLE CONFIRMATION LOGIC
+        // If setup detected near-breakout, allow confirmation on 2nd candle with relaxed conditions
+        boolean nearBreakoutConfirmation = false;
+        if (setup.isNearBreakoutDetected()) {
+            // Check if price has confirmed breakout (crossed BB or ST aligned)
+            boolean bbConfirmed = (direction == Direction.LONG && bbPctB > 0.85) ||    // Close to or above upper BB
+                                  (direction == Direction.SHORT && bbPctB < 0.15);     // Close to or below lower BB
+            boolean stConfirmed = (direction == Direction.LONG && stBullish) ||
+                                  (direction == Direction.SHORT && !stBullish);
+
+            // Check for adverse price movement (invalidation)
+            double setupPrice = setup.getPriceAtDetection();
+            double adverseMovePct = direction == Direction.LONG ?
+                    (setupPrice - price) / setupPrice :  // Price dropped for LONG
+                    (price - setupPrice) / setupPrice;   // Price rose for SHORT
+
+            if (adverseMovePct > MAX_ADVERSE_MOVE_PCT) {
+                log.info("[FUDKII_NEAR] {} ADVERSE MOVE | direction={} | setupPrice={} | currentPrice={} | adverseMove={}%",
+                        scripCode, direction, setupPrice, price, String.format("%.2f", adverseMovePct * 100));
+                // Don't return empty - let normal flow handle, but don't use near-breakout confirmation
+            } else if (bbConfirmed || stConfirmed) {
+                nearBreakoutConfirmation = true;
+                log.info("[FUDKII_NEAR] {} 2-CANDLE CONFIRMATION | direction={} | bbPctB={} | stBullish={} | bbConfirmed={} | stConfirmed={}",
+                        scripCode, direction, String.format("%.3f", bbPctB), stBullish, bbConfirmed, stConfirmed);
+            }
+        }
+
+        // 1. Check SuperTrend FLIP OR near-breakout confirmation
+        if (!stFlip && !nearBreakoutConfirmation) {
+            log.debug("[FUDKII_DIAG] {} BLOCKED: No SuperTrend flip and no near-breakout confirmation | stFlip=false | stBullish={} | nearBreakout={}",
+                    scripCode, stBullish, setup.isNearBreakoutDetected());
             return Optional.empty();
         }
 
-        // 2. Verify flip direction matches our setup direction
-        boolean stBullish = tech.isSuperTrendBullish();
+        if (stFlip) {
+            log.debug("[FUDKII_DIAG] {} PASS: SuperTrend FLIP detected!", scripCode);
+        } else {
+            log.info("[FUDKII_DIAG] {} PASS: Near-breakout 2-candle confirmation!", scripCode);
+        }
+
+        // 2. Verify direction alignment
         if ((direction == Direction.LONG && !stBullish) ||
             (direction == Direction.SHORT && stBullish)) {
-            log.trace("[FUDKII] SuperTrend flipped wrong direction");
-            // Update direction to match the flip
-            direction = stBullish ? Direction.LONG : Direction.SHORT;
+            if (stFlip) {
+                // ST flipped opposite - adapt direction only if actual flip
+                log.debug("[FUDKII_DIAG] {} INFO: ST flipped opposite direction, adapting | setup={} | stBullish={}",
+                        scripCode, direction, stBullish);
+                direction = stBullish ? Direction.LONG : Direction.SHORT;
+            } else if (!nearBreakoutConfirmation) {
+                // No flip and no near-breakout confirmation - block
+                log.debug("[FUDKII_DIAG] {} BLOCKED: Direction mismatch without confirmation", scripCode);
+                return Optional.empty();
+            }
+            // If nearBreakoutConfirmation, keep original direction from setup
         }
 
-        // 3. Check BB break (price outside bands)
-        double bbPctB = tech.getBbPercentB();
+        // 3. Check BB break OR near-breakout confirmation (relaxed for 2-candle)
         boolean bbBreak = (direction == Direction.LONG && bbPctB > 1.0) ||
                          (direction == Direction.SHORT && bbPctB < 0.0);
+        boolean bbNearBreak = (direction == Direction.LONG && bbPctB > 0.85) ||
+                              (direction == Direction.SHORT && bbPctB < 0.15);
 
-        if (!bbBreak) {
-            log.trace("[FUDKII] No BB break: %B={:.2f}", bbPctB);
+        if (!bbBreak && !nearBreakoutConfirmation) {
+            log.debug("[FUDKII_DIAG] {} BLOCKED: No BB break | direction={} | bbPctB={} | need {} for {}",
+                    scripCode, direction, bbPctB,
+                    direction == Direction.LONG ? ">1.0" : "<0.0", direction);
             return Optional.empty();
+        }
+
+        if (bbBreak) {
+            log.debug("[FUDKII_DIAG] {} PASS: BB break confirmed | bbPctB={}", scripCode, bbPctB);
+        } else if (bbNearBreak && nearBreakoutConfirmation) {
+            log.info("[FUDKII_DIAG] {} PASS: BB near-break with 2-candle confirmation | bbPctB={}", scripCode, bbPctB);
         }
 
         // 4. Check OFI alignment
@@ -207,6 +376,38 @@ public class FudkiiStrategy implements TradingStrategy {
         if (atr <= 0) atr = price * 0.01;
 
         double stopLevel = tech.getSuperTrendValue();
+
+        // CRITICAL FIX #1: Validate stop is on CORRECT SIDE of entry
+        // For LONG: stop MUST be below entry, For SHORT: stop MUST be above entry
+        boolean stopOnWrongSide = (direction == Direction.LONG && stopLevel >= price) ||
+                                  (direction == Direction.SHORT && stopLevel <= price);
+
+        if (stopOnWrongSide) {
+            double oldStop = stopLevel;
+            // SuperTrend is on wrong side - calculate stop from entry price using ATR
+            stopLevel = direction == Direction.LONG ?
+                    price - (atr * 0.5) :  // Place stop 0.5 ATR below entry for LONG
+                    price + (atr * 0.5);   // Place stop 0.5 ATR above entry for SHORT
+            log.warn("[FUDKII_DIAG] {} STOP CORRECTED: SuperTrend on WRONG side | " +
+                    "direction={} | oldStop={} | price={} | newStop={} (0.5 ATR from entry)",
+                    scripCode, direction, oldStop, price, stopLevel);
+        }
+
+        // CRITICAL FIX #2: Ensure minimum stop distance of 0.3% from entry price
+        // Prevents extremely tight stops that get stopped out by noise
+        double minStopDistance = price * 0.003; // 0.3% minimum distance
+        double actualDistance = Math.abs(price - stopLevel);
+        if (actualDistance < minStopDistance) {
+            double oldStop = stopLevel;
+            // Stop is too tight - enforce minimum distance in correct direction
+            stopLevel = direction == Direction.LONG ?
+                    price - minStopDistance :
+                    price + minStopDistance;
+            log.warn("[FUDKII_DIAG] {} STOP ADJUSTED: Too tight ({}% < 0.3%) | " +
+                    "oldStop={} | newStop={} | enforced 0.3% minimum buffer",
+                    scripCode, String.format("%.4f", actualDistance / price * 100), oldStop, stopLevel);
+        }
+
         double target1 = direction == Direction.LONG ?
                 price + (atr * TARGET1_ATR_MULT) :
                 price - (atr * TARGET1_ATR_MULT);
@@ -324,6 +525,52 @@ public class FudkiiStrategy implements TradingStrategy {
         TechnicalContext tech = score.getTechnicalContext();
         if (tech == null) return Optional.empty();
 
+        String scripCode = score.getScripCode();
+        Direction direction = setup.getDirection();
+        double price = score.getClose();
+        double setupPrice = setup.getPriceAtDetection();
+
+        // NEAR-BREAKOUT: Allow longer watching period for 2-candle confirmation
+        if (setup.isNearBreakoutDetected()) {
+            // Check for adverse price movement
+            double adverseMovePct = direction == Direction.LONG ?
+                    (setupPrice - price) / setupPrice :  // Price dropped for LONG
+                    (price - setupPrice) / setupPrice;   // Price rose for SHORT
+
+            if (adverseMovePct > MAX_ADVERSE_MOVE_PCT) {
+                log.info("[FUDKII_INVALIDATE] {} ADVERSE MOVE | direction={} | setupPrice={} | currentPrice={} | adverseMove={}%",
+                        scripCode, direction, setupPrice, price, String.format("%.2f", adverseMovePct * 100));
+                return Optional.of(String.format("Price moved %.2f%% against direction", adverseMovePct * 100));
+            }
+
+            // Check if BB is still tight enough (allow some expansion but not too much)
+            double bbWidth = tech.getBbWidthPct();
+            if (bbWidth > 0.05) {  // Allow up to 5% BB width for near-breakout setups
+                log.info("[FUDKII_INVALIDATE] {} BB EXPANDED TOO MUCH | bbWidth={}% > 5%", scripCode, String.format("%.2f", bbWidth * 100));
+                return Optional.of("BB expanded too much without confirmation");
+            }
+
+            // Near-breakout setups get relaxed invalidation - don't invalidate on BB squeeze resolve
+            // as long as price is still in favorable position
+            double bbPctB = tech.getBbPercentB();
+            boolean priceStillFavorable = (direction == Direction.LONG && bbPctB > 0.5) ||
+                                          (direction == Direction.SHORT && bbPctB < 0.5);
+
+            if (!tech.isBbSqueezing() && !priceStillFavorable) {
+                log.info("[FUDKII_INVALIDATE] {} BB squeeze resolved with unfavorable price | direction={} | bbPctB={}",
+                        scripCode, direction, bbPctB);
+                return Optional.of("BB squeeze resolved with price not in favor");
+            }
+
+            // Log that we're keeping near-breakout setup active
+            log.debug("[FUDKII_NEAR] {} KEEPING ACTIVE | nearBreakout=true | bbPctB={} | priceStillFavorable={} | adverseMove={}%",
+                    scripCode, String.format("%.3f", bbPctB), priceStillFavorable, String.format("%.2f", adverseMovePct * 100));
+
+            return Optional.empty();  // Keep near-breakout setup active
+        }
+
+        // STANDARD INVALIDATION LOGIC (for non-near-breakout setups)
+
         // Invalidate if BB squeeze resolves without SuperTrend flip
         if (!tech.isBbSqueezing() && !tech.isSuperTrendFlip()) {
             return Optional.of("BB squeeze resolved without ST flip");
@@ -332,12 +579,19 @@ public class FudkiiStrategy implements TradingStrategy {
         // Invalidate if SuperTrend flips in wrong direction
         if (tech.isSuperTrendFlip()) {
             boolean stBullish = tech.isSuperTrendBullish();
-            if ((setup.getDirection() == Direction.LONG && !stBullish) ||
-                (setup.getDirection() == Direction.SHORT && stBullish)) {
+            if ((direction == Direction.LONG && !stBullish) ||
+                (direction == Direction.SHORT && stBullish)) {
                 return Optional.of("SuperTrend flipped wrong direction");
             }
         }
 
         return Optional.empty();
+    }
+
+    /**
+     * Helper method to calculate proximity threshold based on ATR and price
+     */
+    private double calculateProximityThreshold(double price, double atr) {
+        return Math.max(MIN_PROXIMITY_PCT * price, atr * ATR_PROXIMITY_MULT);
     }
 }

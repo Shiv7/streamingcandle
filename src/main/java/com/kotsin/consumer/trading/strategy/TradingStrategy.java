@@ -144,6 +144,60 @@ public interface TradingStrategy {
         private double priceAtDetection;
         private boolean superTrendAligned;
         private double ofiZscoreAtDetection;
+
+        // FUDKII Near-Breakout Tracking (for 2-candle confirmation)
+        private boolean nearBreakoutDetected;      // True if price within proximity of BB/ST breakout
+        private double bbUpperAtDetection;         // Upper BB level when setup detected
+        private double bbLowerAtDetection;         // Lower BB level when setup detected
+        private double stValueAtDetection;         // SuperTrend value when setup detected
+        private double atrAtDetection;             // ATR for proximity calculation
+        private int candlesSinceSetup;             // Track candles elapsed (max 2 for confirmation)
+        private boolean pendingConfirmation;       // True if waiting for 2nd candle confirmation
+        private double proximityThreshold;         // ATR-based threshold for near-breakout
+
+        // ======================== MTF CONTEXT (for proper stop/target sizing) ========================
+
+        /**
+         * Is HTF setup valid? (weekly/daily CPR narrow, price at HTF level)
+         */
+        private boolean htfSetupValid;
+
+        /**
+         * Which timeframe triggered the HTF setup? ("weekly" or "daily")
+         */
+        private String htfSetupTimeframe;
+
+        /**
+         * Weekly pivot level for reference (for targets)
+         */
+        private Double weeklyPivotLevel;
+
+        /**
+         * Monthly pivot level for context (strong support/resistance)
+         */
+        private Double monthlyPivotLevel;
+
+        /**
+         * Is weekly CPR narrow? (< 0.3% = breakout expected)
+         */
+        private boolean weeklyCprNarrow;
+
+        /**
+         * Is daily CPR narrow? (confirms weekly setup)
+         */
+        private boolean dailyCprNarrow;
+
+        /**
+         * 5-minute ATR at setup detection (USE THIS FOR STOPS!)
+         * Much more meaningful than 1m ATR for swing trades.
+         */
+        private double atr5mAtDetection;
+
+        /**
+         * MTF confluence score (0-10)
+         * Higher = price at multiple TF levels = higher probability setup
+         */
+        private int confluenceScore;
     }
 
     /**

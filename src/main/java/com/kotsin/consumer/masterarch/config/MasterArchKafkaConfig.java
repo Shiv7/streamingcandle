@@ -199,7 +199,7 @@ public class MasterArchKafkaConfig {
         ConcurrentKafkaListenerContainerFactory<String, String> factory =
                 new ConcurrentKafkaListenerContainerFactory<>();
         factory.setConsumerFactory(consumerFactory());
-        factory.setConcurrency(2);
+        factory.setConcurrency(6); // Increased from 2 for better parallelism
         return factory;
     }
 

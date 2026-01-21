@@ -97,9 +97,20 @@ public class EnrichmentPipeline {
             int publishedCount = 0;
 
             if (signalGenerationAllowed) {
+                // DIAGNOSTIC: Log before calling state manager
+                log.debug("[PIPELINE_DIAG] {} Calling InstrumentStateManager | timeframe={} | " +
+                        "scripCode={} | price={} | hasTech={}",
+                        familyId, timeframe,
+                        enrichedScore.getScripCode(),
+                        enrichedScore.getClose(),
+                        enrichedScore.getTechnicalContext() != null);
+
                 // Process through state machine - returns signal only on state transitions
                 // NOTE: State manager publishes to Kafka internally, we don't use signalPublisher here
                 java.util.Optional<TradingSignal> stateSignal = instrumentStateManager.processCandle(enrichedScore, timeframe);
+
+                // DIAGNOSTIC: Log result
+                log.debug("[PIPELINE_DIAG] {} StateManager returned | hasSignal={}", familyId, stateSignal.isPresent());
 
                 if (stateSignal.isPresent()) {
                     signals = Collections.singletonList(stateSignal.get());

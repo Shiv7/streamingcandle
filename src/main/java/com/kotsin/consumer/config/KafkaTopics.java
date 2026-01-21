@@ -110,6 +110,12 @@ public final class KafkaTopics {
     public static final String PAPER_TRADE_OUTCOMES = "paper-trade-outcomes";
     public static final String SIGNAL_EXPIRATIONS = "signal-expirations";
 
+    // ========== State Machine Topics (Dashboard Integration) ==========
+    public static final String STATE_MACHINE_SNAPSHOTS = "instrument-state-snapshots";
+    public static final String STATE_MACHINE_CONDITIONS = "instrument-condition-checks";
+    public static final String STATE_MACHINE_TRANSITIONS = "instrument-state-transitions";
+    public static final String STATE_MACHINE_OPPORTUNITIES = "strategy-opportunities";
+
     // ========== State Store Names ==========
     public static final String STORE_FMA_HISTORY = "fma-candle-history";
     public static final String STORE_FUDKII_HISTORY = "fudkii-candle-history";

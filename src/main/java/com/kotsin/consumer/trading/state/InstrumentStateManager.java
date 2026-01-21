@@ -12,6 +12,8 @@ import com.kotsin.consumer.trading.strategy.TradingStrategy.SetupContext;
 import lombok.Data;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
+import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.context.annotation.Lazy;
 import org.springframework.kafka.core.KafkaTemplate;
 import org.springframework.stereotype.Service;
 
@@ -40,6 +42,14 @@ public class InstrumentStateManager {
 
     private final KafkaTemplate<String, Object> kafkaTemplate;
     private final List<TradingStrategy> strategies;
+
+    // Dashboard integration - lazy to break circular dependency
+    private StateSnapshotPublisher stateSnapshotPublisher;
+
+    @Autowired
+    public void setStateSnapshotPublisher(@Lazy StateSnapshotPublisher publisher) {
+        this.stateSnapshotPublisher = publisher;
+    }
 
     // ======================== CONFIGURATION ========================
 
@@ -82,9 +92,24 @@ public class InstrumentStateManager {
 
     @PostConstruct
     public void init() {
+        log.info("[STATE_MGR] ====== INITIALIZATION START ======");
         log.info("[STATE_MGR] Initialized with {} strategies: {}",
                 strategies.size(),
                 strategies.stream().map(TradingStrategy::getStrategyId).toList());
+
+        // DIAGNOSTIC: Log each strategy details
+        for (TradingStrategy strategy : strategies) {
+            log.info("[STATE_MGR] Strategy registered: {} | description: {} | params: {}",
+                    strategy.getStrategyId(),
+                    strategy.getDescription(),
+                    strategy.getParams());
+        }
+
+        log.info("[STATE_MGR] KafkaTemplate available: {}", kafkaTemplate != null);
+        log.info("[STATE_MGR] Signal topic: {}", TRADING_SIGNALS_TOPIC);
+        log.info("[STATE_MGR] Max signals/instrument/day: {}", MAX_SIGNALS_PER_INSTRUMENT_PER_DAY);
+        log.info("[STATE_MGR] Max total positions: {}", MAX_TOTAL_POSITIONS);
+        log.info("[STATE_MGR] ====== INITIALIZATION COMPLETE ======");
     }
 
     // ======================== MAIN PROCESSING ========================
@@ -127,6 +152,15 @@ public class InstrumentStateManager {
             case COOLDOWN -> processCooldownState(ctx, score, currentPrice);
         }
 
+        // Publish state snapshot to dashboard (if publisher is available)
+        if (stateSnapshotPublisher != null) {
+            try {
+                stateSnapshotPublisher.publishSnapshot(familyId, score);
+            } catch (Exception e) {
+                log.warn("[STATE_MGR] Failed to publish snapshot for {}: {}", familyId, e.getMessage());
+            }
+        }
+
         // Return signal if one was emitted
         TradingSignal signal = currentCycleSignal.get();
         currentCycleSignal.remove();
@@ -137,24 +171,86 @@ public class InstrumentStateManager {
      * Convenience method for processing without FamilyCandle
      */
     public Optional<TradingSignal> processCandle(EnrichedQuantScore score, String timeframe) {
-        if (score == null || score.getScripCode() == null) return Optional.empty();
-        return processUpdate(score.getScripCode(), null, score);
+        // DIAGNOSTIC: Trace entry into processCandle
+        if (score == null) {
+            log.warn("[STATE_MGR_DIAG] processCandle called with NULL score | timeframe={}", timeframe);
+            return Optional.empty();
+        }
+
+        String scripCode = score.getScripCode();
+        String familyId = score.getBaseScore() != null ? score.getBaseScore().getFamilyId() : "unknown";
+
+        if (scripCode == null) {
+            log.warn("[STATE_MGR_DIAG] scripCode is NULL | familyId={} | timeframe={} | " +
+                    "hasBaseScore={} | hasTech={} | close={} | exchange={}",
+                    familyId, timeframe,
+                    score.getBaseScore() != null,
+                    score.getTechnicalContext() != null,
+                    score.getClose(),
+                    score.getExchange());
+            return Optional.empty();
+        }
+
+        // FRESHNESS LOGGING: Show incoming data timestamp and key values
+        var tech = score.getTechnicalContext();
+        double ofi = 0;
+        if (score.getHistoricalContext() != null && score.getHistoricalContext().getOfiContext() != null) {
+            ofi = score.getHistoricalContext().getOfiContext().getZscore();
+        }
+
+        log.debug("[FRESH_DATA] {} | tf={} | ts={} | price={} | ofi={} | atr={} | stBullish={} | stFlip={} | bbPctB={}",
+                scripCode, timeframe,
+                score.getPriceTimestamp(),
+                score.getClose(),
+                String.format("%.2f", ofi),
+                tech != null ? String.format("%.2f", tech.getAtr()) : "null",
+                tech != null ? tech.isSuperTrendBullish() : "null",
+                tech != null ? tech.isSuperTrendFlip() : "null",
+                tech != null ? String.format("%.3f", tech.getBbPercentB()) : "null");
+
+        return processUpdate(scripCode, null, score);
     }
 
     // ======================== STATE PROCESSORS ========================
 
     /**
      * IDLE state: Look for setups forming
+     * NOW CHECKS ALL STRATEGIES IN PARALLEL - multiple setups can be tracked simultaneously
      */
     private void processIdleState(InstrumentContext ctx, EnrichedQuantScore score, double currentPrice) {
+        // DIAGNOSTIC: Entry into IDLE state processing
+        log.debug("[STATE_MGR_DIAG] processIdleState ENTRY | familyId={} | price={} | strategiesCount={}",
+                ctx.familyId, currentPrice, strategies.size());
+
         // Check daily limit
         AtomicLong dayCount = dailySignalCounts.computeIfAbsent(ctx.familyId, k -> new AtomicLong(0));
         if (dayCount.get() >= MAX_SIGNALS_PER_INSTRUMENT_PER_DAY) {
+            log.debug("[STATE_MGR_DIAG] {} IDLE - DAILY LIMIT HIT | count={}/{}",
+                    ctx.familyId, dayCount.get(), MAX_SIGNALS_PER_INSTRUMENT_PER_DAY);
             return; // Hit daily limit for this instrument
         }
 
-        // Check each strategy for setup forming
+        // DIAGNOSTIC: Check TechnicalContext availability
+        var tech = score.getTechnicalContext();
+        if (tech != null) {
+            log.debug("[STATE_MGR_DIAG] {} IDLE - TechnicalContext | bbSqueeze={} | stFlip={} | stBullish={} | " +
+                    "dailyPP={} | dailyS1={} | dailyR1={}",
+                    ctx.familyId,
+                    tech.isBbSqueezing(),
+                    tech.isSuperTrendFlip(),
+                    tech.isSuperTrendBullish(),
+                    tech.getDailyPivot(),
+                    tech.getDailyS1(),
+                    tech.getDailyR1());
+        } else {
+            log.warn("[STATE_MGR_DIAG] {} IDLE - TechnicalContext is NULL!", ctx.familyId);
+        }
+
+        // Check ALL strategies for setup forming (PARALLEL evaluation)
+        int setupsDetected = 0;
         for (TradingStrategy strategy : strategies) {
+            log.trace("[STATE_MGR_DIAG] {} IDLE - Evaluating strategy: {}", ctx.familyId, strategy.getStrategyId());
+
             Optional<SetupContext> setupOpt = strategy.detectSetupForming(score);
 
             if (setupOpt.isPresent()) {
@@ -162,81 +258,132 @@ public class InstrumentStateManager {
                 setup.setFamilyId(ctx.familyId);
                 setup.setWatchingStartTime(System.currentTimeMillis());
 
-                // Transition to WATCHING
-                ctx.state = InstrumentState.WATCHING;
-                ctx.activeSetup = setup;
-                ctx.watchingStrategy = strategy;
-                ctx.watchingStartTime = System.currentTimeMillis();
+                // Add to watching setups (parallel tracking)
+                ctx.addWatchingSetup(strategy, setup);
+                setupsDetected++;
 
-                log.info("[STATE_MGR] {} IDLE → WATCHING | strategy={} | setup={} | level={:.2f}",
+                log.info("[STATE_MGR] {} SETUP DETECTED | strategy={} | setup={} | level={:.2f}",
                         ctx.familyId, strategy.getStrategyId(),
                         setup.getSetupDescription(), setup.getKeyLevel());
 
-                // Only watch ONE setup at a time
-                return;
+                // CONTINUE checking other strategies - don't return!
+            } else {
+                log.trace("[STATE_MGR_DIAG] {} IDLE - No setup from {} | price={}",
+                        ctx.familyId, strategy.getStrategyId(), currentPrice);
             }
+        }
+
+        // If any setups were detected, transition to WATCHING
+        if (setupsDetected > 0) {
+            ctx.state = InstrumentState.WATCHING;
+            ctx.watchingStartTime = System.currentTimeMillis();
+            log.info("[STATE_MGR] {} IDLE → WATCHING | {} parallel setups tracked: {}",
+                    ctx.familyId, setupsDetected,
+                    ctx.watchingSetups.keySet().stream().map(TradingStrategy::getStrategyId).toList());
+        } else {
+            log.trace("[STATE_MGR_DIAG] {} IDLE - No setup detected from any strategy", ctx.familyId);
         }
     }
 
     /**
      * WATCHING state: Look for entry trigger
+     * NOW CHECKS ALL PARALLEL SETUPS - first one that triggers fires the signal
      */
     private void processWatchingState(InstrumentContext ctx, EnrichedQuantScore score, double currentPrice) {
-        TradingStrategy strategy = ctx.watchingStrategy;
-        SetupContext setup = ctx.activeSetup;
-
-        if (strategy == null || setup == null) {
-            // Invalid state, reset
-            transitionToIdle(ctx, "INVALID_WATCHING_STATE");
+        // Check if we have any watching setups
+        if (ctx.watchingSetups.isEmpty()) {
+            log.warn("[STATE_MGR_DIAG] {} WATCHING - No setups tracked, returning to IDLE", ctx.familyId);
+            transitionToIdle(ctx, "NO_SETUPS_TRACKED");
             return;
         }
 
-        // Check for setup invalidation
-        Optional<String> invalidation = strategy.checkSetupInvalidation(score, setup);
-        if (invalidation.isPresent()) {
-            log.info("[STATE_MGR] {} WATCHING → IDLE | INVALIDATED: {}",
-                    ctx.familyId, invalidation.get());
-            transitionToIdle(ctx, invalidation.get());
-            return;
-        }
+        log.debug("[STATE_MGR_DIAG] {} WATCHING - Checking {} parallel setups: {}",
+                ctx.familyId, ctx.watchingSetups.size(),
+                ctx.watchingSetups.keySet().stream().map(TradingStrategy::getStrategyId).toList());
 
-        // Check for timeout
+        // Track setups to remove (invalidated or timed out)
+        List<TradingStrategy> toRemove = new ArrayList<>();
+
+        // Check for timeout (global for all setups)
         long watchingDuration = System.currentTimeMillis() - ctx.watchingStartTime;
-        long maxWatching = strategy.getParams().getMaxWatchingDurationMs();
-        if (maxWatching <= 0) maxWatching = DEFAULT_MAX_WATCHING_MS;
 
-        if (watchingDuration > maxWatching) {
-            log.info("[STATE_MGR] {} WATCHING → IDLE | TIMEOUT ({}min)",
-                    ctx.familyId, watchingDuration / 60000);
-            transitionToIdle(ctx, "WATCHING_TIMEOUT");
-            return;
-        }
+        // Check ALL setups for entry triggers and invalidation
+        for (Map.Entry<TradingStrategy, SetupContext> entry : ctx.watchingSetups.entrySet()) {
+            TradingStrategy strategy = entry.getKey();
+            SetupContext setup = entry.getValue();
 
-        // Check for entry trigger
-        Optional<TradingSignal> signalOpt = strategy.checkEntryTrigger(score, setup);
-
-        if (signalOpt.isPresent()) {
-            TradingSignal signal = signalOpt.get();
-
-            // Check position limit
-            if (activePositions.size() >= MAX_TOTAL_POSITIONS) {
-                log.warn("[STATE_MGR] {} WATCHING → IDLE | MAX_POSITIONS_REACHED ({})",
-                        ctx.familyId, activePositions.size());
-                transitionToIdle(ctx, "MAX_POSITIONS_REACHED");
-                return;
+            // Check for setup invalidation
+            Optional<String> invalidation = strategy.checkSetupInvalidation(score, setup);
+            if (invalidation.isPresent()) {
+                log.info("[STATE_MGR] {} SETUP INVALIDATED | strategy={} | reason={}",
+                        ctx.familyId, strategy.getStrategyId(), invalidation.get());
+                toRemove.add(strategy);
+                continue; // Check next setup
             }
 
-            // Transition to READY and emit signal
-            ctx.state = InstrumentState.READY;
-            ctx.pendingSignal = signal;
-            ctx.readyTime = System.currentTimeMillis();
+            // Check for timeout per strategy
+            long maxWatching = strategy.getParams().getMaxWatchingDurationMs();
+            if (maxWatching <= 0) maxWatching = DEFAULT_MAX_WATCHING_MS;
 
-            // Emit the ONE signal
-            emitSignal(ctx, signal);
+            if (watchingDuration > maxWatching) {
+                log.info("[STATE_MGR] {} SETUP TIMEOUT | strategy={} | duration={}min",
+                        ctx.familyId, strategy.getStrategyId(), watchingDuration / 60000);
+                toRemove.add(strategy);
+                continue; // Check next setup
+            }
 
-            log.info("[STATE_MGR] {} WATCHING → READY | SIGNAL EMITTED | {} {} | entry={:.2f} sl={:.2f} t1={:.2f}",
-                    ctx.familyId, signal.getDirection(), strategy.getStrategyId(),
-                    signal.getEntryPrice(), signal.getStopLoss(), signal.getTarget1());
+            // Check for entry trigger
+            log.debug("[STATE_MGR_DIAG] {} Checking entry trigger for {} | setup={}",
+                    ctx.familyId, strategy.getStrategyId(), setup.getSetupDescription());
+
+            Optional<TradingSignal> signalOpt = strategy.checkEntryTrigger(score, setup);
+
+            if (signalOpt.isPresent()) {
+                TradingSignal signal = signalOpt.get();
+
+                // Check position limit
+                if (activePositions.size() >= MAX_TOTAL_POSITIONS) {
+                    log.warn("[STATE_MGR] {} WATCHING → IDLE | MAX_POSITIONS_REACHED ({})",
+                            ctx.familyId, activePositions.size());
+                    transitionToIdle(ctx, "MAX_POSITIONS_REACHED");
+                    return;
+                }
+
+                // ENTRY TRIGGERED! Store the winning strategy for reference
+                ctx.watchingStrategy = strategy;
+                ctx.activeSetup = setup;
+
+                // Transition to READY and emit signal
+                ctx.state = InstrumentState.READY;
+                ctx.pendingSignal = signal;
+                ctx.readyTime = System.currentTimeMillis();
+
+                // Emit the ONE signal
+                emitSignal(ctx, signal);
+
+                log.info("[STATE_MGR] {} WATCHING → READY | SIGNAL EMITTED | {} {} | entry={:.2f} sl={:.2f} t1={:.2f}",
+                        ctx.familyId, signal.getDirection(), strategy.getStrategyId(),
+                        signal.getEntryPrice(), signal.getStopLoss(), signal.getTarget1());
+
+                // Clear other setups - we're committed to this one
+                ctx.watchingSetups.clear();
+                return; // Signal emitted, done processing
+            } else {
+                log.trace("[STATE_MGR_DIAG] {} No entry trigger from {} yet",
+                        ctx.familyId, strategy.getStrategyId());
+            }
+        }
+
+        // Remove invalidated/timed-out setups
+        for (TradingStrategy s : toRemove) {
+            ctx.watchingSetups.remove(s);
+        }
+
+        // If all setups were invalidated/timed-out, return to IDLE
+        if (ctx.watchingSetups.isEmpty()) {
+            log.info("[STATE_MGR] {} WATCHING → IDLE | All setups invalidated or timed out",
+                    ctx.familyId);
+            transitionToIdle(ctx, "ALL_SETUPS_INVALIDATED");
         }
     }
 
@@ -351,8 +498,7 @@ public class InstrumentStateManager {
 
     private void transitionToIdle(InstrumentContext ctx, String reason) {
         ctx.state = InstrumentState.IDLE;
-        ctx.activeSetup = null;
-        ctx.watchingStrategy = null;
+        ctx.clearWatchingSetups();  // Clear all parallel setups
         ctx.pendingSignal = null;
         ctx.position = null;
         ctx.watchingStartTime = 0;
@@ -473,6 +619,114 @@ public class InstrumentStateManager {
         return new ArrayList<>(todayOutcomes);
     }
 
+    // ======================== DASHBOARD INTEGRATION ========================
+
+    /**
+     * Get signals count today for a specific instrument.
+     */
+    public int getSignalsTodayForInstrument(String familyId) {
+        AtomicLong count = dailySignalCounts.get(familyId);
+        return count != null ? (int) count.get() : 0;
+    }
+
+    /**
+     * Get max signals allowed per day per instrument.
+     */
+    public int getMaxSignalsPerDay() {
+        return MAX_SIGNALS_PER_INSTRUMENT_PER_DAY;
+    }
+
+    /**
+     * Get watching setups for an instrument.
+     * Returns map of strategyId -> SetupContext
+     */
+    public Map<String, TradingStrategy.SetupContext> getWatchingSetups(String familyId) {
+        InstrumentContext ctx = instrumentStates.get(familyId);
+        if (ctx == null || ctx.watchingSetups.isEmpty()) {
+            return Collections.emptyMap();
+        }
+
+        Map<String, TradingStrategy.SetupContext> result = new HashMap<>();
+        for (Map.Entry<TradingStrategy, SetupContext> entry : ctx.watchingSetups.entrySet()) {
+            result.put(entry.getKey().getStrategyId(), entry.getValue());
+        }
+        return result;
+    }
+
+    /**
+     * Get near-opportunities (instruments close to triggering signals).
+     * Returns instruments in WATCHING state with high progress.
+     */
+    public List<com.kotsin.consumer.trading.state.dto.StrategyOpportunity> getNearOpportunities() {
+        List<com.kotsin.consumer.trading.state.dto.StrategyOpportunity> opportunities = new ArrayList<>();
+
+        for (Map.Entry<String, InstrumentContext> entry : instrumentStates.entrySet()) {
+            InstrumentContext ctx = entry.getValue();
+            if (ctx.state != InstrumentState.WATCHING || ctx.watchingSetups.isEmpty()) {
+                continue;
+            }
+
+            String scripCode = entry.getKey();
+
+            for (Map.Entry<TradingStrategy, SetupContext> setupEntry : ctx.watchingSetups.entrySet()) {
+                TradingStrategy strategy = setupEntry.getKey();
+                SetupContext setup = setupEntry.getValue();
+
+                // Calculate opportunity score (simplified - based on setup age and alignment)
+                long watchingDuration = System.currentTimeMillis() - setup.getWatchingStartTime();
+                double durationFactor = Math.min(1.0, watchingDuration / (30.0 * 60 * 1000)); // Max at 30 min
+
+                // Base score on setup having valid levels
+                double baseScore = 50;
+                if (setup.getKeyLevel() > 0 && setup.getProposedStop() > 0 && setup.getProposedTarget1() > 0) {
+                    baseScore = 70;
+                }
+                if (setup.isSuperTrendAligned()) {
+                    baseScore += 10;
+                }
+
+                double opportunityScore = baseScore + (durationFactor * 10);
+
+                // Only include if score >= 60
+                if (opportunityScore >= 60) {
+                    com.kotsin.consumer.trading.state.dto.StrategyOpportunity opp =
+                            com.kotsin.consumer.trading.state.dto.StrategyOpportunity.builder()
+                                    .scripCode(scripCode)
+                                    .companyName(scripCode) // Will be enriched by dashboard
+                                    .strategyId(strategy.getStrategyId())
+                                    .direction(setup.getDirection() != null ? setup.getDirection().name() : "LONG")
+                                    .opportunityScore(opportunityScore)
+                                    .currentPrice(setup.getPriceAtDetection())
+                                    .keyLevel(setup.getKeyLevel())
+                                    .nextConditionNeeded("Entry trigger")
+                                    .estimatedTimeframe("Monitoring...")
+                                    .build();
+
+                    opportunities.add(opp);
+                }
+            }
+        }
+
+        // Sort by score descending, limit to top 20
+        opportunities.sort((a, b) -> Double.compare(b.getOpportunityScore(), a.getOpportunityScore()));
+        if (opportunities.size() > 20) {
+            opportunities = opportunities.subList(0, 20);
+        }
+
+        return opportunities;
+    }
+
+    /**
+     * Get all instrument states summary by state.
+     */
+    public Map<InstrumentState, List<String>> getStatesSummary() {
+        return instrumentStates.entrySet().stream()
+                .collect(java.util.stream.Collectors.groupingBy(
+                        e -> e.getValue().state,
+                        java.util.stream.Collectors.mapping(Map.Entry::getKey, java.util.stream.Collectors.toList())
+                ));
+    }
+
     // ======================== INNER CLASSES ========================
 
     @Data
@@ -480,10 +734,14 @@ public class InstrumentStateManager {
         final String familyId;
         InstrumentState state = InstrumentState.IDLE;
 
-        // WATCHING state
+        // WATCHING state - NOW SUPPORTS MULTIPLE PARALLEL STRATEGIES
+        // Key: Strategy, Value: SetupContext for that strategy
+        Map<TradingStrategy, SetupContext> watchingSetups = new HashMap<>();
+        long watchingStartTime;
+
+        // Legacy single-strategy fields (used when a signal fires)
         TradingStrategy watchingStrategy;
         SetupContext activeSetup;
-        long watchingStartTime;
 
         // READY state
         TradingSignal pendingSignal;
@@ -497,6 +755,20 @@ public class InstrumentStateManager {
 
         InstrumentContext(String familyId) {
             this.familyId = familyId;
+        }
+
+        void addWatchingSetup(TradingStrategy strategy, SetupContext setup) {
+            watchingSetups.put(strategy, setup);
+        }
+
+        void clearWatchingSetups() {
+            watchingSetups.clear();
+            watchingStrategy = null;
+            activeSetup = null;
+        }
+
+        boolean hasAnyWatchingSetup() {
+            return !watchingSetups.isEmpty();
         }
     }
 }

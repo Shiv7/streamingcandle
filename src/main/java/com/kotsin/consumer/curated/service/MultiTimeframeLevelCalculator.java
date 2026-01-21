@@ -477,16 +477,27 @@ public class MultiTimeframeLevelCalculator {
             double s3 = low - (2 * (high - pivot));
             double s4 = low - (3 * (high - pivot));
 
-            // CPR (Camarilla)
-            double tc = close + ((high - low) * 1.1 / 12);
-            double bc = close - ((high - low) * 1.1 / 12);
-            double cprWidth = ((tc - bc) / close) * 100;
+            // ============ CPR (Central Pivot Range) - Frank Ochoa's Standard Formula ============
+            // CPR Formula:
+            //   Pivot (PP) = (H + L + C) / 3  (already calculated above)
+            //   BC (Bottom Central) = (H + L) / 2
+            //   TC (Top Central) = 2*PP - BC = (H + L + 2*C) / 3
+            //   CPR Width = |TC - BC| / PP * 100
+            //
+            // Key insight: When C is near (H+L)/2, CPR is narrow (breakout expected)
+            //              When C is far from (H+L)/2, CPR is wide (range-bound)
+            double bc = (high + low) / 2.0;                    // Bottom Central
+            double tc = (2 * pivot) - bc;                      // Top Central = 2*PP - BC
+            double cprWidth = Math.abs(tc - bc) / pivot * 100; // Width as % of pivot
 
             // Classify CPR width
+            // NARROW: < 0.5% = Expect breakout/trending day
+            // NORMAL: 0.5% - 1.0% = Range trading possible
+            // WIDE: > 1.0% = Range-bound, mean reversion
             PivotLevels.CPRWidth cprType;
-            if (cprWidth < 0.3) {
+            if (cprWidth < 0.5) {
                 cprType = PivotLevels.CPRWidth.NARROW;
-            } else if (cprWidth < 0.7) {
+            } else if (cprWidth < 1.0) {
                 cprType = PivotLevels.CPRWidth.NORMAL;
             } else {
                 cprType = PivotLevels.CPRWidth.WIDE;

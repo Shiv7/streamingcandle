@@ -85,7 +85,7 @@ public class CommonKafkaConfig {
         ConcurrentKafkaListenerContainerFactory<String, String> factory =
                 new ConcurrentKafkaListenerContainerFactory<>();
         factory.setConsumerFactory(commonConsumerFactory());
-        factory.setConcurrency(3);
+        factory.setConcurrency(10); // Increased from 3 for better parallelism (MasterArchProcessor uses this)
 
         StringJsonMessageConverter converter = new StringJsonMessageConverter(commonObjectMapper());
         factory.setRecordMessageConverter(converter);

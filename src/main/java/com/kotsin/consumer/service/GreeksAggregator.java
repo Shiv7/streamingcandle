@@ -1,5 +1,7 @@
 package com.kotsin.consumer.service;
 
+import com.github.benmanes.caffeine.cache.Cache;
+import com.github.benmanes.caffeine.cache.Caffeine;
 import com.kotsin.consumer.domain.model.OptionCandle;
 import com.kotsin.consumer.model.GreeksPortfolio;
 import com.kotsin.consumer.util.BlackScholesGreeks;
@@ -11,6 +13,7 @@ import java.time.temporal.ChronoUnit;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.concurrent.TimeUnit;
 
 /**
  * GreeksAggregator - Aggregates option Greeks across a family for risk management.
@@ -35,6 +38,18 @@ public class GreeksAggregator {
     private static final double GAMMA_CONCENTRATION_THRESHOLD = 0.6;  // 60% in top 3 strikes
     private static final int NEAR_TERM_DTE = 7;                       // Days to expiry
     private static final int FAR_TERM_DTE = 30;
+
+    /**
+     * Cache for calculated Greeks to avoid re-computing Black-Scholes on every message.
+     * Key: "strike:expiry:isCall:spotPrice(rounded)" -> GreeksResult
+     * TTL: 60 seconds (Greeks don't change dramatically within a minute)
+     * Max size: 10,000 entries (covers ~100 instruments × 100 options)
+     */
+    private final Cache<String, BlackScholesGreeks.GreeksResult> greeksCache = Caffeine.newBuilder()
+            .expireAfterWrite(60, TimeUnit.SECONDS)
+            .maximumSize(10_000)
+            .recordStats()  // For monitoring cache hit rate
+            .build();
 
     /**
      * Aggregate Greeks from list of option candles
@@ -110,15 +125,28 @@ public class GreeksAggregator {
                     try {
                         int dte = estimateDTE(expiry);
                         if (dte > 0) {
-                            double timeToExpiryYears = dte / 365.0;
-                            double volatility = opt.getImpliedVolatility() != null ? opt.getImpliedVolatility() : 0.30;
-                            BlackScholesGreeks.GreeksResult greeks = BlackScholesGreeks.calculateGreeks(
-                                spotPrice, strike, timeToExpiryYears, volatility, isCall
+                            final double timeToExpiryYears = dte / 365.0;
+                            final double volatility = opt.getImpliedVolatility() != null ? opt.getImpliedVolatility() : 0.30;
+                            final double finalSpot = spotPrice;
+                            final double finalStrike = strike;
+                            final boolean finalIsCall = isCall;
+
+                            // Use cache to avoid re-computing Black-Scholes
+                            // Round spotPrice to nearest 10 for cache key stability
+                            long roundedSpot = Math.round(spotPrice / 10) * 10;
+                            String cacheKey = String.format("%s:%.0f:%s:%d:%b",
+                                    expiry, strike, String.format("%.2f", volatility), roundedSpot, isCall);
+
+                            BlackScholesGreeks.GreeksResult greeks = greeksCache.get(cacheKey, k ->
+                                BlackScholesGreeks.calculateGreeks(finalSpot, finalStrike, timeToExpiryYears, volatility, finalIsCall)
                             );
-                            if (delta == null) delta = greeks.delta;
-                            if (gamma == null) gamma = greeks.gamma;
-                            if (vega == null) vega = greeks.vega;
-                            if (theta == null) theta = greeks.theta;
+
+                            if (greeks != null) {
+                                if (delta == null) delta = greeks.delta;
+                                if (gamma == null) gamma = greeks.gamma;
+                                if (vega == null) vega = greeks.vega;
+                                if (theta == null) theta = greeks.theta;
+                            }
                         }
                     } catch (Exception e) {
                         log.debug("Failed to calculate Greeks for option strike {}: {}", strike, e.getMessage());

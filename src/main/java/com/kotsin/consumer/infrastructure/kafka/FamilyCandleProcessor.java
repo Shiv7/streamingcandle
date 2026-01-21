@@ -1,5 +1,6 @@
 package com.kotsin.consumer.infrastructure.kafka;
 
+import com.fasterxml.jackson.annotation.JsonIgnore;
 import com.kotsin.consumer.config.KafkaConfig;
 import com.kotsin.consumer.domain.calculator.FuturesBuildupDetector;
 import com.kotsin.consumer.domain.calculator.OISignalDetector;
@@ -1168,6 +1169,11 @@ public class FamilyCandleProcessor {
         // Original full count is tracked in totalOptionsReceived for metrics
         private static final int MAX_OPTIONS_IN_COLLECTOR = 200;
 
+        // 🔴 CRITICAL FIX: Limit sub-candles to prevent RecordTooLargeException
+        // Sub-candles are only needed for MTF distribution calculation at emission time
+        // 500 sub-candles is enough for 1-minute window analysis (one every ~120ms)
+        private static final int MAX_SUB_CANDLES = 500;
+
         private InstrumentCandle equity;
         private InstrumentCandle future;
         // REMOVED: private List<InstrumentCandle> options = new ArrayList<>(); (dead code - never populated)
@@ -1181,8 +1187,13 @@ public class FamilyCandleProcessor {
         private int totalOptionsReceived = 0;
 
         // PHASE 2: MTF Distribution - track sub-candles during aggregation
+        // 🔴 CRITICAL FIX: @JsonIgnore excludes these from changelog serialization
+        // Sub-candles caused 156MB changelog messages leading to RecordTooLargeException
+        // They are only needed in-memory for MTF calculation, not for state recovery
+        @JsonIgnore
         private List<com.kotsin.consumer.model.UnifiedCandle> equitySubCandles = new ArrayList<>();
         // FIX: Also track future sub-candles for commodities (MCX)
+        @JsonIgnore
         private List<com.kotsin.consumer.model.UnifiedCandle> futureSubCandles = new ArrayList<>();
 
         public FamilyCandleCollector add(InstrumentCandle candle) {
@@ -1405,6 +1416,10 @@ public class FamilyCandleProcessor {
          * Before this fix: Only 1 sub-candle per window (the final aggregated InstrumentCandle)
          * After this fix: Multiple sub-candles (one every ~10 seconds during tick aggregation)
          *
+         * 🔴 CRITICAL FIX: Limit sub-candles to MAX_SUB_CANDLES to prevent memory issues
+         * The @JsonIgnore annotation prevents changelog serialization, but we still need
+         * a limit for in-memory safety during high-volume aggregation.
+         *
          * @param candle InstrumentCandle with embedded sub-candle snapshots
          * @param targetList List to add the converted UnifiedCandle objects
          * @param type Type string for logging ("equity" or "future")
@@ -1412,11 +1427,24 @@ public class FamilyCandleProcessor {
         private void extractAndAddSubCandles(InstrumentCandle candle,
                                               List<com.kotsin.consumer.model.UnifiedCandle> targetList,
                                               String type) {
+            // 🔴 CRITICAL FIX: Skip if already at limit to prevent unbounded growth
+            if (targetList.size() >= MAX_SUB_CANDLES) {
+                log.debug("[MTF-SUB-CANDLE-LIMIT] {} {} | Skipping - already at limit {}",
+                    candle.getScripCode(), type, MAX_SUB_CANDLES);
+                return;
+            }
+
             java.util.List<InstrumentCandle.SubCandleSnapshot> snapshots = candle.getSubCandleSnapshots();
 
             if (snapshots != null && !snapshots.isEmpty()) {
-                // Convert each SubCandleSnapshot to UnifiedCandle
+                // Convert each SubCandleSnapshot to UnifiedCandle (up to remaining capacity)
+                int added = 0;
                 for (InstrumentCandle.SubCandleSnapshot snapshot : snapshots) {
+                    if (targetList.size() >= MAX_SUB_CANDLES) {
+                        log.debug("[MTF-SUB-CANDLE-LIMIT] {} {} | Hit limit {} after adding {} snapshots",
+                            candle.getScripCode(), type, MAX_SUB_CANDLES, added);
+                        break;
+                    }
                     com.kotsin.consumer.model.UnifiedCandle uc = com.kotsin.consumer.model.UnifiedCandle.builder()
                         .scripCode(candle.getScripCode())
                         .companyName(candle.getCompanyName())
@@ -1436,10 +1464,11 @@ public class FamilyCandleProcessor {
                         .oiClose(snapshot.getOiClose())
                         .build();
                     targetList.add(uc);
+                    added++;
                 }
 
-                log.debug("[MTF-SUB-CANDLE] {} {} | Extracted {} sub-candle snapshots from InstrumentCandle",
-                    candle.getScripCode(), type, snapshots.size());
+                log.debug("[MTF-SUB-CANDLE] {} {} | Extracted {} sub-candle snapshots from InstrumentCandle (total: {})",
+                    candle.getScripCode(), type, added, targetList.size());
             } else {
                 // Fallback: No embedded snapshots, use the candle itself as single sub-candle
                 // This maintains backward compatibility with older data that doesn't have snapshots

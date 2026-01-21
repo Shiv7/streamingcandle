@@ -16,6 +16,8 @@ import org.springframework.data.redis.core.ZSetOperations;
 import org.springframework.stereotype.Service;
 
 import jakarta.annotation.PostConstruct;
+import org.springframework.scheduling.annotation.Async;
+
 import java.time.LocalDate;
 import java.time.ZoneId;
 import java.time.format.DateTimeFormatter;
@@ -53,8 +55,8 @@ public class RedisCandleHistoryService {
             .configure(DeserializationFeature.FAIL_ON_UNKNOWN_PROPERTIES, false);
     
     private final OkHttpClient httpClient = new OkHttpClient.Builder()
-            .connectTimeout(30, TimeUnit.SECONDS)
-            .readTimeout(60, TimeUnit.SECONDS)
+            .connectTimeout(5, TimeUnit.SECONDS)   // Reduced from 30s - fail fast
+            .readTimeout(10, TimeUnit.SECONDS)     // Reduced from 60s - prevent blocking Kafka threads
             .build();
     
     @Value("${history.base-url:http://localhost:8002}")
@@ -70,6 +72,9 @@ public class RedisCandleHistoryService {
     
     // Track which scripCodes have been bootstrapped (to avoid repeated API calls)
     private final Set<String> bootstrappedScripCodes = ConcurrentHashMap.newKeySet();
+
+    // Track which scripCodes are currently bootstrapping (to avoid duplicate async calls)
+    private final Set<String> bootstrappingInProgress = ConcurrentHashMap.newKeySet();
     
     private static final String KEY_PREFIX = "candles:";
     private static final ZoneId IST = ZoneId.of("Asia/Kolkata");
@@ -97,16 +102,18 @@ public class RedisCandleHistoryService {
     public List<UnifiedCandle> getCandles(String scripCode, String timeframe, int count,
                                           String exchange, String exchangeType) {
         String key = buildKey(scripCode, timeframe);
-        
+
         // Check if we have enough data
         Long size = zSetOps.zCard(key);
         if (size == null || size < count) {
-            // Trigger bootstrap if not already done
-            if (!bootstrappedScripCodes.contains(scripCode)) {
-                bootstrapFromApi(scripCode, exchange, exchangeType);
+            // Trigger ASYNC bootstrap if not already done or in progress
+            // This does NOT block the calling thread - returns immediately
+            if (!bootstrappedScripCodes.contains(scripCode) &&
+                !bootstrappingInProgress.contains(scripCode)) {
+                triggerAsyncBootstrap(scripCode, exchange, exchangeType);
             }
         }
-        
+
         // Fetch from Redis (reverse range to get most recent, then reverse to get chronological order)
         Set<String> jsonSet = zSetOps.reverseRange(key, 0, count - 1);
         if (jsonSet == null || jsonSet.isEmpty()) {
@@ -183,32 +190,57 @@ public class RedisCandleHistoryService {
     }
     
     // ======================== BOOTSTRAP LOGIC ========================
-    
+
     /**
-     * Bootstrap candles from 5paisa API for a scripCode
-     * Fetches last N days of 1m candles and aggregates to higher timeframes
+     * Trigger async bootstrap - does NOT block the calling thread.
+     * Used by getCandles() to prevent Kafka consumer thread blocking.
+     */
+    private void triggerAsyncBootstrap(String scripCode, String exchange, String exchangeType) {
+        if (bootstrappingInProgress.add(scripCode)) {
+            log.info("Triggering async bootstrap for {} ({}:{})", scripCode, exchange, exchangeType);
+            bootstrapFromApiAsync(scripCode, exchange, exchangeType);
+        }
+    }
+
+    /**
+     * ASYNC Bootstrap candles from 5paisa API for a scripCode.
+     * Runs on dedicated thread pool to prevent blocking Kafka consumer threads.
+     * Fetches last N days of 1m candles and aggregates to higher timeframes.
+     */
+    @Async("bootstrapExecutor")
+    public void bootstrapFromApiAsync(String scripCode, String exchange, String exchangeType) {
+        try {
+            bootstrapFromApi(scripCode, exchange, exchangeType);
+        } finally {
+            bootstrappingInProgress.remove(scripCode);
+        }
+    }
+
+    /**
+     * Synchronous bootstrap - used directly when async is not needed.
+     * DO NOT call this from Kafka consumer threads.
      */
     public void bootstrapFromApi(String scripCode, String exchange, String exchangeType) {
         if (bootstrappedScripCodes.contains(scripCode)) {
             log.debug("ScripCode {} already bootstrapped", scripCode);
             return;
         }
-        
+
         LocalDate endDate = LocalDate.now(IST);
         LocalDate startDate = endDate.minusDays(bootstrapDays);
-        
-        log.info("Bootstrapping candles for {} from {} to {} ({}:{})...", 
+
+        log.info("Bootstrapping candles for {} from {} to {} ({}:{})...",
                 scripCode, startDate, endDate, exchange, exchangeType);
-        
+
         try {
             List<ApiCandle> apiCandles = fetchFromApi(scripCode, startDate, endDate, exchange, exchangeType);
-            
+
             if (apiCandles.isEmpty()) {
                 log.warn("No candles returned from API for {}", scripCode);
                 bootstrappedScripCodes.add(scripCode);  // Mark as done to avoid retry
                 return;
             }
-            
+
             // Store 1m candles
             int stored1m = 0;
             for (ApiCandle ac : apiCandles) {
@@ -216,17 +248,17 @@ public class RedisCandleHistoryService {
                 storeCandle(candle);
                 stored1m++;
             }
-            
+
             // Aggregate to 30m
             List<UnifiedCandle> candles30m = aggregate1mTo30m(apiCandles, scripCode, exchange, exchangeType);
             for (UnifiedCandle c : candles30m) {
                 storeCandle(c);
             }
-            
+
             bootstrappedScripCodes.add(scripCode);
-            log.info("✅ Bootstrapped {} 1m candles, {} 30m candles for {}", 
+            log.info("Bootstrapped {} 1m candles, {} 30m candles for {}",
                     stored1m, candles30m.size(), scripCode);
-            
+
         } catch (Exception e) {
             log.error("Failed to bootstrap candles for {}: {}", scripCode, e.getMessage());
             bootstrappedScripCodes.add(scripCode);  // Mark as done to avoid retry loops

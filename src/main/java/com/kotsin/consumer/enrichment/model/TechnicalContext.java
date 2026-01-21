@@ -218,9 +218,18 @@ public class TechnicalContext {
     // ======================== ATR ========================
 
     /**
-     * Average True Range (14 period)
+     * Average True Range (14 period) - based on current candle timeframe
+     * WARNING: For 1m candles this will be very small!
      */
     private double atr;
+
+    /**
+     * 5-minute ATR (14 period) - USE THIS FOR STOP CALCULATION
+     * This is calculated separately from 5m candle history.
+     * Provides meaningful stop distances for swing trades.
+     * If not available, falls back to: currentTF ATR * 5
+     */
+    private Double atr5m;
 
     /**
      * ATR as percentage of price
@@ -236,6 +245,38 @@ public class TechnicalContext {
      * Is volatility expanding?
      */
     private boolean volatilityExpanding;
+
+    // ======================== CPR (Central Pivot Range) ========================
+
+    /**
+     * Daily CPR width as percentage of price
+     * NARROW (< 0.3%) = expect breakout
+     * NORMAL (0.3% - 0.7%) = range trading
+     * WIDE (> 0.7%) = range-bound
+     */
+    private Double dailyCprWidth;
+
+    /**
+     * Is daily CPR narrow? (< 0.3% = breakout expected)
+     */
+    private Boolean dailyCprNarrow;
+
+    /**
+     * Weekly CPR width as percentage of price
+     */
+    private Double weeklyCprWidth;
+
+    /**
+     * Is weekly CPR narrow? (< 0.3% = breakout expected)
+     */
+    private Boolean weeklyCprNarrow;
+
+    /**
+     * MTF Confluence Score (0-10)
+     * Higher = price at multiple timeframe levels simultaneously
+     * Used for position sizing and confidence adjustment
+     */
+    private Integer mtfConfluenceScore;
 
     // ======================== SESSION DATA ========================
 
@@ -341,6 +382,46 @@ public class TechnicalContext {
      */
     public double getStopLossFromBB() {
         return bbLower - (bbUpper - bbLower) * 0.1; // 10% below lower band
+    }
+
+    /**
+     * Get ATR for stop calculation - prefers 5m ATR for meaningful stops.
+     * Falls back to current timeframe ATR * 5 if 5m ATR not available.
+     *
+     * @return ATR value suitable for swing trade stop calculation
+     */
+    public double getAtrForStops() {
+        if (atr5m != null && atr5m > 0) {
+            return atr5m;
+        }
+        // Fallback: scale up 1m ATR (assumes current TF is 1m)
+        return atr * 5;
+    }
+
+    /**
+     * Check if HTF CPR setup is valid (weekly or daily CPR narrow = breakout expected)
+     */
+    public boolean isHtfCprSetup() {
+        return (weeklyCprNarrow != null && weeklyCprNarrow) ||
+               (dailyCprNarrow != null && dailyCprNarrow);
+    }
+
+    /**
+     * Get CPR regime description
+     */
+    public String getCprRegime() {
+        if (weeklyCprNarrow != null && weeklyCprNarrow) {
+            return "WEEKLY_NARROW";
+        }
+        if (dailyCprNarrow != null && dailyCprNarrow) {
+            return "DAILY_NARROW";
+        }
+        if (dailyCprWidth != null) {
+            if (dailyCprWidth < 0.3) return "DAILY_NARROW";
+            if (dailyCprWidth < 0.7) return "DAILY_NORMAL";
+            return "DAILY_WIDE";
+        }
+        return "UNKNOWN";
     }
 
     /**
