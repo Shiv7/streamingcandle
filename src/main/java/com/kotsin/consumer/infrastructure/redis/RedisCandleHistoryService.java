@@ -4,6 +4,7 @@ import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.DeserializationFeature;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.kotsin.consumer.model.UnifiedCandle;
+import com.kotsin.consumer.util.NseWindowAligner;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import okhttp3.HttpUrl;
@@ -16,6 +17,8 @@ import org.springframework.data.redis.core.ZSetOperations;
 import org.springframework.stereotype.Service;
 
 import jakarta.annotation.PostConstruct;
+import org.springframework.scheduling.annotation.Async;
+
 import java.time.LocalDate;
 import java.time.ZoneId;
 import java.time.format.DateTimeFormatter;
@@ -53,8 +56,8 @@ public class RedisCandleHistoryService {
             .configure(DeserializationFeature.FAIL_ON_UNKNOWN_PROPERTIES, false);
     
     private final OkHttpClient httpClient = new OkHttpClient.Builder()
-            .connectTimeout(30, TimeUnit.SECONDS)
-            .readTimeout(60, TimeUnit.SECONDS)
+            .connectTimeout(5, TimeUnit.SECONDS)   // Reduced from 30s - fail fast
+            .readTimeout(10, TimeUnit.SECONDS)     // Reduced from 60s - prevent blocking Kafka threads
             .build();
     
     @Value("${history.base-url:http://localhost:8002}")
@@ -63,13 +66,16 @@ public class RedisCandleHistoryService {
     @Value("${candle.history.bootstrap.days:40}")
     private int bootstrapDays;
     
-    @Value("${candle.history.max.candles:500}")
+    @Value("${candle.history.max.candles:15000}")
     private int maxCandlesPerKey;
     
     private ZSetOperations<String, String> zSetOps;
     
     // Track which scripCodes have been bootstrapped (to avoid repeated API calls)
     private final Set<String> bootstrappedScripCodes = ConcurrentHashMap.newKeySet();
+
+    // Track which scripCodes are currently bootstrapping (to avoid duplicate async calls)
+    private final Set<String> bootstrappingInProgress = ConcurrentHashMap.newKeySet();
     
     private static final String KEY_PREFIX = "candles:";
     private static final ZoneId IST = ZoneId.of("Asia/Kolkata");
@@ -97,16 +103,18 @@ public class RedisCandleHistoryService {
     public List<UnifiedCandle> getCandles(String scripCode, String timeframe, int count,
                                           String exchange, String exchangeType) {
         String key = buildKey(scripCode, timeframe);
-        
+
         // Check if we have enough data
         Long size = zSetOps.zCard(key);
         if (size == null || size < count) {
-            // Trigger bootstrap if not already done
-            if (!bootstrappedScripCodes.contains(scripCode)) {
-                bootstrapFromApi(scripCode, exchange, exchangeType);
+            // Trigger ASYNC bootstrap if not already done or in progress
+            // This does NOT block the calling thread - returns immediately
+            if (!bootstrappedScripCodes.contains(scripCode) &&
+                !bootstrappingInProgress.contains(scripCode)) {
+                triggerAsyncBootstrap(scripCode, exchange, exchangeType);
             }
         }
-        
+
         // Fetch from Redis (reverse range to get most recent, then reverse to get chronological order)
         Set<String> jsonSet = zSetOps.reverseRange(key, 0, count - 1);
         if (jsonSet == null || jsonSet.isEmpty()) {
@@ -183,32 +191,57 @@ public class RedisCandleHistoryService {
     }
     
     // ======================== BOOTSTRAP LOGIC ========================
-    
+
     /**
-     * Bootstrap candles from 5paisa API for a scripCode
-     * Fetches last N days of 1m candles and aggregates to higher timeframes
+     * Trigger async bootstrap - does NOT block the calling thread.
+     * Used by getCandles() to prevent Kafka consumer thread blocking.
+     */
+    private void triggerAsyncBootstrap(String scripCode, String exchange, String exchangeType) {
+        if (bootstrappingInProgress.add(scripCode)) {
+            log.info("Triggering async bootstrap for {} ({}:{})", scripCode, exchange, exchangeType);
+            bootstrapFromApiAsync(scripCode, exchange, exchangeType);
+        }
+    }
+
+    /**
+     * ASYNC Bootstrap candles from 5paisa API for a scripCode.
+     * Runs on dedicated thread pool to prevent blocking Kafka consumer threads.
+     * Fetches last N days of 1m candles and aggregates to higher timeframes.
+     */
+    @Async("bootstrapExecutor")
+    public void bootstrapFromApiAsync(String scripCode, String exchange, String exchangeType) {
+        try {
+            bootstrapFromApi(scripCode, exchange, exchangeType);
+        } finally {
+            bootstrappingInProgress.remove(scripCode);
+        }
+    }
+
+    /**
+     * Synchronous bootstrap - used directly when async is not needed.
+     * DO NOT call this from Kafka consumer threads.
      */
     public void bootstrapFromApi(String scripCode, String exchange, String exchangeType) {
         if (bootstrappedScripCodes.contains(scripCode)) {
             log.debug("ScripCode {} already bootstrapped", scripCode);
             return;
         }
-        
+
         LocalDate endDate = LocalDate.now(IST);
         LocalDate startDate = endDate.minusDays(bootstrapDays);
-        
-        log.info("Bootstrapping candles for {} from {} to {} ({}:{})...", 
+
+        log.info("Bootstrapping candles for {} from {} to {} ({}:{})...",
                 scripCode, startDate, endDate, exchange, exchangeType);
-        
+
         try {
             List<ApiCandle> apiCandles = fetchFromApi(scripCode, startDate, endDate, exchange, exchangeType);
-            
+
             if (apiCandles.isEmpty()) {
                 log.warn("No candles returned from API for {}", scripCode);
                 bootstrappedScripCodes.add(scripCode);  // Mark as done to avoid retry
                 return;
             }
-            
+
             // Store 1m candles
             int stored1m = 0;
             for (ApiCandle ac : apiCandles) {
@@ -216,17 +249,23 @@ public class RedisCandleHistoryService {
                 storeCandle(candle);
                 stored1m++;
             }
-            
+
             // Aggregate to 30m
             List<UnifiedCandle> candles30m = aggregate1mTo30m(apiCandles, scripCode, exchange, exchangeType);
             for (UnifiedCandle c : candles30m) {
                 storeCandle(c);
             }
-            
+
+            // Aggregate to 1h (needed by MtfSmcAnalyzer for HTF analysis)
+            List<UnifiedCandle> candles1h = aggregateToTimeframe(apiCandles, scripCode, exchange, exchangeType, "1h", 60);
+            for (UnifiedCandle c : candles1h) {
+                storeCandle(c);
+            }
+
             bootstrappedScripCodes.add(scripCode);
-            log.info("✅ Bootstrapped {} 1m candles, {} 30m candles for {}", 
-                    stored1m, candles30m.size(), scripCode);
-            
+            log.info("Bootstrapped {} 1m, {} 30m, {} 1h candles for {}",
+                    stored1m, candles30m.size(), candles1h.size(), scripCode);
+
         } catch (Exception e) {
             log.error("Failed to bootstrap candles for {}: {}", scripCode, e.getMessage());
             bootstrappedScripCodes.add(scripCode);  // Mark as done to avoid retry loops
@@ -272,55 +311,137 @@ public class RedisCandleHistoryService {
     
     /**
      * Aggregate 1m candles to 30m candles
+     *
+     * FIX: Now uses NSE-aligned windows (9:15-9:45, 9:45-10:15, etc.)
+     * instead of epoch-aligned windows (9:00-9:30, 9:30-10:00, etc.)
+     *
+     * This ensures the first 30m candle has full 30 minutes of data,
+     * which is critical for accurate SuperTrend and BB calculations.
      */
     private List<UnifiedCandle> aggregate1mTo30m(List<ApiCandle> candles1m, String scripCode,
                                                   String exchange, String exchangeType) {
         List<UnifiedCandle> candles30m = new ArrayList<>();
-        
+
         // Sort by datetime
         candles1m.sort(Comparator.comparing(c -> c.datetime));
-        
-        // Group by 30-minute window
+
+        // Group by NSE-aligned 30-minute window
+        // FIX: Use NseWindowAligner instead of epoch alignment
+        long periodMs = 30 * 60 * 1000L;
         Map<Long, List<ApiCandle>> windows = new LinkedHashMap<>();
         for (ApiCandle c : candles1m) {
-            long windowStart = (c.getTimestampMillis() / (30 * 60 * 1000)) * (30 * 60 * 1000);
+            // NSE-aligned window: 9:15-9:45, 9:45-10:15, etc.
+            long windowStart = NseWindowAligner.getAlignedWindowStart(c.getTimestampMillis(), periodMs);
             windows.computeIfAbsent(windowStart, k -> new ArrayList<>()).add(c);
         }
-        
+
         // Create 30m candles
         for (Map.Entry<Long, List<ApiCandle>> entry : windows.entrySet()) {
             long windowStart = entry.getKey();
             List<ApiCandle> windowCandles = entry.getValue();
-            
+
             if (windowCandles.isEmpty()) continue;
-            
+
+            // Sort window candles by timestamp to ensure correct open/close
+            windowCandles.sort(Comparator.comparing(ApiCandle::getTimestampMillis));
+
             double open = windowCandles.get(0).open;
             double close = windowCandles.get(windowCandles.size() - 1).close;
             double high = windowCandles.stream().mapToDouble(c -> c.high).max().orElse(0);
             double low = windowCandles.stream().mapToDouble(c -> c.low).min().orElse(0);
             long volume = windowCandles.stream().mapToLong(c -> c.volume).sum();
-            
+
             UnifiedCandle candle30m = UnifiedCandle.builder()
                     .scripCode(scripCode)
                     .exchange(exchange)
                     .exchangeType(exchangeType)
                     .timeframe("30m")
                     .windowStartMillis(windowStart)
-                    .windowEndMillis(windowStart + 30 * 60 * 1000)
+                    .windowEndMillis(windowStart + periodMs)
                     .open(open)
                     .high(high)
                     .low(low)
                     .close(close)
                     .volume(volume)
                     .build();
-            
+
             candle30m.updateHumanReadableTimestamps();
             candles30m.add(candle30m);
         }
-        
+
+        log.debug("[NSE-ALIGN] Aggregated {} 1m candles to {} NSE-aligned 30m candles for {}",
+                candles1m.size(), candles30m.size(), scripCode);
+
         return candles30m;
     }
-    
+
+    /**
+     * Generic method to aggregate 1m candles to any timeframe
+     *
+     * FIX: Now uses NSE-aligned windows for all timeframes.
+     * Windows are aligned to NSE market open (9:15 AM IST):
+     * - 30m: 9:15-9:45, 9:45-10:15, 10:15-10:45...
+     * - 1h:  9:15-10:15, 10:15-11:15, 11:15-12:15...
+     * - 15m: 9:15-9:30, 9:30-9:45, 9:45-10:00... (naturally aligned)
+     */
+    private List<UnifiedCandle> aggregateToTimeframe(List<ApiCandle> candles1m, String scripCode,
+                                                      String exchange, String exchangeType,
+                                                      String timeframe, int periodMinutes) {
+        List<UnifiedCandle> result = new ArrayList<>();
+
+        // Sort by datetime
+        candles1m.sort(Comparator.comparing(c -> c.datetime));
+
+        // Group by NSE-aligned window
+        // FIX: Use NseWindowAligner instead of epoch alignment
+        long periodMs = periodMinutes * 60 * 1000L;
+        Map<Long, List<ApiCandle>> windows = new LinkedHashMap<>();
+        for (ApiCandle c : candles1m) {
+            // NSE-aligned window start
+            long windowStart = NseWindowAligner.getAlignedWindowStart(c.getTimestampMillis(), periodMs);
+            windows.computeIfAbsent(windowStart, k -> new ArrayList<>()).add(c);
+        }
+
+        // Create candles
+        for (Map.Entry<Long, List<ApiCandle>> entry : windows.entrySet()) {
+            long windowStart = entry.getKey();
+            List<ApiCandle> windowCandles = entry.getValue();
+
+            if (windowCandles.isEmpty()) continue;
+
+            // Sort window candles by timestamp to ensure correct open/close
+            windowCandles.sort(Comparator.comparing(ApiCandle::getTimestampMillis));
+
+            double open = windowCandles.get(0).open;
+            double close = windowCandles.get(windowCandles.size() - 1).close;
+            double high = windowCandles.stream().mapToDouble(c -> c.high).max().orElse(0);
+            double low = windowCandles.stream().mapToDouble(c -> c.low).min().orElse(0);
+            long volume = windowCandles.stream().mapToLong(c -> c.volume).sum();
+
+            UnifiedCandle candle = UnifiedCandle.builder()
+                    .scripCode(scripCode)
+                    .exchange(exchange)
+                    .exchangeType(exchangeType)
+                    .timeframe(timeframe)
+                    .windowStartMillis(windowStart)
+                    .windowEndMillis(windowStart + periodMs)
+                    .open(open)
+                    .high(high)
+                    .low(low)
+                    .close(close)
+                    .volume(volume)
+                    .build();
+
+            candle.updateHumanReadableTimestamps();
+            result.add(candle);
+        }
+
+        log.debug("[NSE-ALIGN] Aggregated {} 1m candles to {} NSE-aligned {} candles for {}",
+                candles1m.size(), result.size(), timeframe, scripCode);
+
+        return result;
+    }
+
     /**
      * Convert API candle to UnifiedCandle
      */

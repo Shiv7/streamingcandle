@@ -2,13 +2,11 @@ package com.kotsin.consumer.enrichment;
 
 import com.kotsin.consumer.domain.model.FamilyCandle;
 import com.kotsin.consumer.enrichment.EnrichedQuantScoreCalculator.EnrichedQuantScore;
-import com.kotsin.consumer.enrichment.intelligence.IntelligenceOrchestrator;
-import com.kotsin.consumer.enrichment.intelligence.IntelligenceOrchestrator.MarketIntelligence;
-import com.kotsin.consumer.enrichment.model.DetectedEvent;
 import com.kotsin.consumer.enrichment.signal.SignalGenerator;
 import com.kotsin.consumer.enrichment.signal.TradingSignalPublisher;
 import com.kotsin.consumer.enrichment.signal.model.TradingSignal;
 import com.kotsin.consumer.enrichment.store.EventStore;
+import com.kotsin.consumer.trading.state.InstrumentStateManager;
 import com.kotsin.consumer.config.KafkaTopics;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import lombok.AllArgsConstructor;
@@ -29,12 +27,8 @@ import java.util.List;
  * EnrichmentPipeline - Complete enrichment pipeline integrating all phases
  *
  * Pipeline stages:
- * Phase 1: Historical Context (adaptive learning, regime detection)
- * Phase 2: Options Intelligence (GEX, Max Pain, Time/Expiry context)
- * Phase 3: Signal Intelligence (Technical, Confluence, Events)
- * Phase 4: Pattern Recognition (Sequence matching, Predictive patterns)
- * Phase 5: Intelligence (Narrative, Forecasting, Setup Tracking)
- * Phase 6: Signal Generation (Enhanced trading signals with context)
+ * Phase 1-4: Enriched Quant Score (Historical, Options Intelligence, Technical, Events)
+ * Phase 5: State Machine Trading (InstrumentStateManager - IDLE → WATCHING → READY → POSITIONED → COOLDOWN)
  *
  * This service provides a unified interface for complete market analysis.
  */
@@ -44,12 +38,12 @@ import java.util.List;
 public class EnrichmentPipeline {
 
     private final EnrichedQuantScoreCalculator quantScoreCalculator;
-    private final IntelligenceOrchestrator intelligenceOrchestrator;
     private final EventStore eventStore;
     private final SignalGenerator signalGenerator;
     private final TradingSignalPublisher signalPublisher;
+    private final InstrumentStateManager instrumentStateManager;
 
-    // Kafka publishers for intelligence outputs
+    // Kafka template (available for future use)
     @Autowired(required = false)
     private KafkaTemplate<String, String> kafkaTemplate;
 
@@ -61,7 +55,6 @@ public class EnrichmentPipeline {
     private long totalProcessingTimeMs = 0;
     private long phase1to4TimeMs = 0;
     private long phase5TimeMs = 0;
-    private long phase6TimeMs = 0;
     private long totalSignalsGenerated = 0;
     private long totalSignalsPublished = 0;
 
@@ -78,6 +71,21 @@ public class EnrichmentPipeline {
      * @return Complete pipeline result including all phases
      */
     public PipelineResult process(FamilyCandle family) {
+        return process(family, null);
+    }
+
+    /**
+     * Process a FamilyCandle through the complete enrichment pipeline with a pre-calculated score.
+     *
+     * FIX: This overload prevents duplicate data insertion into Redis price history.
+     * When EnrichedQuantScore is already calculated by QuantScoreProcessor, we reuse it
+     * instead of recalculating (which would call technicalEnricher.enrich() twice).
+     *
+     * @param family FamilyCandle to process
+     * @param preCalculatedScore Optional pre-calculated EnrichedQuantScore (null to calculate fresh)
+     * @return Complete pipeline result including all phases
+     */
+    public PipelineResult process(FamilyCandle family, EnrichedQuantScore preCalculatedScore) {
         if (family == null || family.getFamilyId() == null) {
             return PipelineResult.empty("UNKNOWN");
         }
@@ -91,44 +99,52 @@ public class EnrichmentPipeline {
 
         try {
             // =============== Phase 1-4: Enriched Quant Score ===============
-            EnrichedQuantScore enrichedScore = quantScoreCalculator.calculate(family);
+            // FIX: Reuse pre-calculated score if available to avoid duplicate Redis insertions
+            EnrichedQuantScore enrichedScore = preCalculatedScore != null
+                    ? preCalculatedScore
+                    : quantScoreCalculator.calculate(family);
             long phase1to4End = System.currentTimeMillis();
-            long phase1to4Duration = phase1to4End - phase1to4Start;
+            long phase1to4Duration = preCalculatedScore != null ? 0 : (phase1to4End - phase1to4Start);
 
-            // Get recent events for context
-            List<DetectedEvent> recentEvents = getRecentEvents(familyId);
-
-            // =============== Phase 5: Intelligence ===============
-            long phase5Start = System.currentTimeMillis();
-            MarketIntelligence intelligence = intelligenceOrchestrator.processIntelligence(
-                    familyId, enrichedScore, recentEvents);
-            long phase5End = System.currentTimeMillis();
-            long phase5Duration = phase5End - phase5Start;
-
-            // =============== Phase 6: Signal Generation ===============
-            // Only generate signals for 5m+ timeframes - 1m is pure noise
-            long phase6Start = System.currentTimeMillis();
-            List<TradingSignal> signals;
+            // =============== Phase 5: State Machine Trading ===============
+            // The InstrumentStateManager is the NEW signal generation system.
+            // It maintains state per instrument (IDLE → WATCHING → READY → POSITIONED → COOLDOWN)
+            // and generates ONE signal per trade lifecycle (no spam).
+            // NOTE: InstrumentStateManager publishes directly to Kafka, we just track here for stats.
+            List<TradingSignal> signals = new ArrayList<>();
             int publishedCount = 0;
 
             if (signalGenerationAllowed) {
-                signals = signalGenerator.generateSignals(familyId, enrichedScore, intelligence);
-                // Publish signals if any were generated
-                if (!signals.isEmpty()) {
-                    publishedCount = signalPublisher.publishSignals(signals);
+                // DIAGNOSTIC: Log before calling state manager
+                log.debug("[PIPELINE_DIAG] {} Calling InstrumentStateManager | timeframe={} | " +
+                        "scripCode={} | price={} | hasTech={}",
+                        familyId, timeframe,
+                        enrichedScore.getScripCode(),
+                        enrichedScore.getClose(),
+                        enrichedScore.getTechnicalContext() != null);
+
+                // Process through state machine - returns signal only on state transitions
+                // NOTE: State manager publishes to Kafka internally, we don't use signalPublisher here
+                java.util.Optional<TradingSignal> stateSignal = instrumentStateManager.processCandle(enrichedScore, timeframe);
+
+                // DIAGNOSTIC: Log result
+                log.debug("[PIPELINE_DIAG] {} StateManager returned | hasSignal={}", familyId, stateSignal.isPresent());
+
+                if (stateSignal.isPresent()) {
+                    signals = Collections.singletonList(stateSignal.get());
+                    publishedCount = 1; // Already published by state manager
+                    log.info("[PIPELINE] STATE MACHINE signal generated for {}: {} {} @ {}",
+                            familyId, stateSignal.get().getDirection(), stateSignal.get().getSetupId(),
+                            stateSignal.get().getEntryPrice());
                 }
             } else {
                 // Skip signal generation for 1m timeframe - just enrichment/learning
-                signals = Collections.emptyList();
                 log.debug("[PIPELINE] Skipping signal generation for {} - timeframe {} not allowed (need 5m+)",
                         familyId, timeframe);
             }
 
-            long phase6End = System.currentTimeMillis();
-            long phase6Duration = phase6End - phase6Start;
-
-            // Publish intelligence outputs to Kafka for dashboard
-            publishIntelligenceOutputs(familyId, intelligence);
+            long phase5End = System.currentTimeMillis();
+            long phase5Duration = phase5End - phase1to4End;
 
             // =============== Build Result ===============
             long totalTime = System.currentTimeMillis() - startTime;
@@ -139,13 +155,12 @@ public class EnrichmentPipeline {
                 totalProcessingTimeMs += totalTime;
                 this.phase1to4TimeMs += phase1to4Duration;
                 this.phase5TimeMs += phase5Duration;
-                this.phase6TimeMs += phase6Duration;
                 this.totalSignalsGenerated += signals.size();
                 this.totalSignalsPublished += publishedCount;
             }
 
-            log.debug("[PIPELINE] Processed {} in {}ms (Phase1-4: {}ms, Phase5: {}ms, Phase6: {}ms, signals: {})",
-                    familyId, totalTime, phase1to4Duration, phase5Duration, phase6Duration, signals.size());
+            log.debug("[PIPELINE] Processed {} in {}ms (Phase1-4: {}ms, Phase5: {}ms, signals: {})",
+                    familyId, totalTime, phase1to4Duration, phase5Duration, signals.size());
 
             return PipelineResult.builder()
                     .familyId(familyId)
@@ -153,21 +168,15 @@ public class EnrichmentPipeline {
                     .success(true)
                     // Phase 1-4 output
                     .enrichedScore(enrichedScore)
-                    // Phase 5 output
-                    .intelligence(intelligence)
-                    // Phase 6 output
+                    // Phase 5 output (state machine signals)
                     .generatedSignals(signals)
                     .signalsPublished(publishedCount)
                     // Summary
-                    .headline(intelligence.getHeadline())
-                    .recommendation(intelligence.getRecommendation())
                     .isActionableMoment(enrichedScore.isActionableMoment())
-                    .hasReadySetups(intelligence.isHasReadySetups())
                     .hasSignals(!signals.isEmpty())
                     // Timing
                     .phase1to4DurationMs(phase1to4Duration)
                     .phase5DurationMs(phase5Duration)
-                    .phase6DurationMs(phase6Duration)
                     .totalDurationMs(totalTime)
                     .build();
 
@@ -185,18 +194,6 @@ public class EnrichmentPipeline {
     }
 
     /**
-     * Get recent events for a family
-     */
-    private List<DetectedEvent> getRecentEvents(String familyId) {
-        try {
-            return eventStore.getRecentEvents(familyId, 30); // Last 30 minutes
-        } catch (Exception e) {
-            log.warn("[PIPELINE] Error getting recent events for {}: {}", familyId, e.getMessage());
-            return Collections.emptyList();
-        }
-    }
-
-    /**
      * Get pipeline statistics
      */
     public PipelineStats getStats() {
@@ -204,18 +201,14 @@ public class EnrichmentPipeline {
             double avgTotal = totalProcessed > 0 ? (double) totalProcessingTimeMs / totalProcessed : 0;
             double avgPhase1to4 = totalProcessed > 0 ? (double) phase1to4TimeMs / totalProcessed : 0;
             double avgPhase5 = totalProcessed > 0 ? (double) phase5TimeMs / totalProcessed : 0;
-            double avgPhase6 = totalProcessed > 0 ? (double) phase6TimeMs / totalProcessed : 0;
 
             return PipelineStats.builder()
                     .totalProcessed(totalProcessed)
                     .avgTotalDurationMs(avgTotal)
                     .avgPhase1to4DurationMs(avgPhase1to4)
                     .avgPhase5DurationMs(avgPhase5)
-                    .avgPhase6DurationMs(avgPhase6)
                     .totalSignalsGenerated(totalSignalsGenerated)
                     .totalSignalsPublished(totalSignalsPublished)
-                    .setupStats(intelligenceOrchestrator.getSetupStats())
-                    .intelligenceStats(intelligenceOrchestrator.getStats())
                     .signalGeneratorStats(signalGenerator.getStats())
                     .signalPublisherStats(signalPublisher.getStats())
                     .build();
@@ -230,67 +223,10 @@ public class EnrichmentPipeline {
     }
 
     /**
-     * Get cached intelligence for family (for quick lookups)
-     */
-    public MarketIntelligence getCachedIntelligence(String familyId) {
-        return intelligenceOrchestrator.getCachedIntelligence(familyId);
-    }
-
-    /**
-     * Mark a setup as triggered
-     */
-    public void markSetupTriggered(String activeSetupId, double entry, double stop, double target) {
-        intelligenceOrchestrator.markSetupTriggered(activeSetupId, entry, stop, target);
-    }
-
-    /**
      * Clear data for a family
      */
     public void clearFamily(String familyId) {
-        intelligenceOrchestrator.clearFamily(familyId);
         eventStore.clearFamily(familyId);
-        // Signal cache is auto-cleaned, but we can trigger clearing for a specific family
-        // if we add that method to SignalGenerator
-    }
-
-    /**
-     * Publish intelligence outputs to Kafka for dashboard consumption
-     */
-    private void publishIntelligenceOutputs(String familyId, MarketIntelligence intelligence) {
-        if (kafkaTemplate == null || objectMapper == null || intelligence == null) {
-            return;
-        }
-
-        try {
-            // Publish market narrative
-            if (intelligence.getNarrative() != null) {
-                String narrativeJson = objectMapper.writeValueAsString(intelligence.getNarrative());
-                kafkaTemplate.send(KafkaTopics.MARKET_NARRATIVE, familyId, narrativeJson);
-                log.debug("[PIPELINE] Published narrative for {} | headline: {}",
-                    familyId, intelligence.getHeadline());
-            }
-
-            // Publish full market intelligence
-            String intelligenceJson = objectMapper.writeValueAsString(intelligence);
-            kafkaTemplate.send(KafkaTopics.MARKET_INTELLIGENCE, familyId, intelligenceJson);
-
-            // Publish active setups if any
-            if (intelligence.getReadySetups() != null && !intelligence.getReadySetups().isEmpty()) {
-                String setupsJson = objectMapper.writeValueAsString(intelligence.getReadySetups());
-                kafkaTemplate.send(KafkaTopics.ACTIVE_SETUPS, familyId, setupsJson);
-                log.info("[PIPELINE] Published {} ready setups for {}",
-                    intelligence.getReadySetups().size(), familyId);
-            }
-
-            // Publish opportunity forecast if available
-            if (intelligence.getForecast() != null) {
-                String forecastJson = objectMapper.writeValueAsString(intelligence.getForecast());
-                kafkaTemplate.send(KafkaTopics.OPPORTUNITY_FORECAST, familyId, forecastJson);
-            }
-
-        } catch (Exception e) {
-            log.warn("[PIPELINE] Failed to publish intelligence for {}: {}", familyId, e.getMessage());
-        }
     }
 
     // ======================== RESULT MODELS ========================
@@ -307,25 +243,18 @@ public class EnrichmentPipeline {
         // Phase 1-4 output
         private EnrichedQuantScore enrichedScore;
 
-        // Phase 5 output
-        private MarketIntelligence intelligence;
-
-        // Phase 6 output
+        // Phase 5 output (state machine signals)
         @Builder.Default
         private List<TradingSignal> generatedSignals = new ArrayList<>();
         private int signalsPublished;
 
         // Summary
-        private String headline;
-        private IntelligenceOrchestrator.ActionRecommendation recommendation;
         private boolean isActionableMoment;
-        private boolean hasReadySetups;
         private boolean hasSignals;
 
         // Timing
         private long phase1to4DurationMs;
         private long phase5DurationMs;
-        private long phase6DurationMs;
         private long totalDurationMs;
 
         public static PipelineResult empty(String familyId) {
@@ -334,9 +263,7 @@ public class EnrichmentPipeline {
                     .processedAt(Instant.now())
                     .success(false)
                     .errorMessage("No data provided")
-                    .headline("No data available")
                     .isActionableMoment(false)
-                    .hasReadySetups(false)
                     .hasSignals(false)
                     .generatedSignals(Collections.emptyList())
                     .build();
@@ -376,33 +303,15 @@ public class EnrichmentPipeline {
             return enrichedScore != null ? enrichedScore.getAdjustedConfidence() : 0;
         }
 
-        /**
-         * Get the full narrative
-         */
-        public String getFullNarrative() {
-            return intelligence != null && intelligence.getNarrative() != null
-                    ? intelligence.getNarrative().getFullNarrative()
-                    : "No narrative available";
-        }
-
-        /**
-         * Get action type recommendation
-         */
-        public IntelligenceOrchestrator.ActionType getActionType() {
-            return recommendation != null
-                    ? recommendation.getAction()
-                    : IntelligenceOrchestrator.ActionType.WAIT;
-        }
-
         @Override
         public String toString() {
             if (!success) {
                 return String.format("PipelineResult[%s] FAILED: %s", familyId, errorMessage);
             }
-            return String.format("PipelineResult[%s] %s | Score:%.1f Conf:%.0f%% | %s | Signals:%d | %dms",
-                    familyId, headline,
+            return String.format("PipelineResult[%s] Score:%.1f Conf:%.0f%% | Signals:%d | %dms",
+                    familyId,
                     getAdjustedQuantScore(), getAdjustedConfidence() * 100,
-                    getActionType(), generatedSignals != null ? generatedSignals.size() : 0,
+                    generatedSignals != null ? generatedSignals.size() : 0,
                     totalDurationMs);
         }
     }
@@ -415,22 +324,19 @@ public class EnrichmentPipeline {
         private double avgTotalDurationMs;
         private double avgPhase1to4DurationMs;
         private double avgPhase5DurationMs;
-        private double avgPhase6DurationMs;
         private long totalSignalsGenerated;
         private long totalSignalsPublished;
-        private com.kotsin.consumer.enrichment.intelligence.tracker.SetupTracker.TrackerStats setupStats;
-        private IntelligenceOrchestrator.IntelligenceStats intelligenceStats;
         private SignalGenerator.GeneratorStats signalGeneratorStats;
         private TradingSignalPublisher.PublisherStats signalPublisherStats;
 
         @Override
         public String toString() {
             return String.format(
-                    "PipelineStats: %d processed, avg %.1fms (P1-4: %.1fms, P5: %.1fms, P6: %.1fms)\n" +
-                    "Signals: %d generated, %d published\n%s\n%s\n%s\n%s",
-                    totalProcessed, avgTotalDurationMs, avgPhase1to4DurationMs, avgPhase5DurationMs, avgPhase6DurationMs,
+                    "PipelineStats: %d processed, avg %.1fms (P1-4: %.1fms, P5: %.1fms)\n" +
+                    "Signals: %d generated, %d published\n%s\n%s",
+                    totalProcessed, avgTotalDurationMs, avgPhase1to4DurationMs, avgPhase5DurationMs,
                     totalSignalsGenerated, totalSignalsPublished,
-                    setupStats, intelligenceStats, signalGeneratorStats, signalPublisherStats);
+                    signalGeneratorStats, signalPublisherStats);
         }
     }
 }

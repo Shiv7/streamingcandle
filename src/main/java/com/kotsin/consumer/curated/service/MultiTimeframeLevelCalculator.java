@@ -85,10 +85,14 @@ public class MultiTimeframeLevelCalculator {
     // Only refresh when day changes (checked in fetchHistoricalData)
     private static final long OHLC_CACHE_TTL_MS = 24 * 60 * 60 * 1000; // 24 hours (whole day)
 
+    // FIX: Retry configuration for HTTP calls
+    private static final int MAX_HTTP_RETRIES = 3;
+    private static final int HTTP_TIMEOUT_SECONDS = 30;  // Increased from 20 to 30 seconds
+
     public MultiTimeframeLevelCalculator() {
         this.httpClient = new OkHttpClient.Builder()
-                .connectTimeout(10, TimeUnit.SECONDS)
-                .readTimeout(20, TimeUnit.SECONDS)  // Increased for large historical data fetches
+                .connectTimeout(15, TimeUnit.SECONDS)  // FIX: Increased from 10 to 15 seconds
+                .readTimeout(30, TimeUnit.SECONDS)     // FIX: Increased from 20 to 30 seconds
                 .build();
         this.objectMapper = new ObjectMapper();
         // Thread pool for async HTTP calls (I/O bound work)
@@ -241,9 +245,7 @@ public class MultiTimeframeLevelCalculator {
                             new TypeReference<List<OHLCData>>() {}
                     );
 
-                    log.info("Fetched {} 1m candles for {} from {} to {}",
-                            candles.size(), scripCode, startDate, endDate);
-
+                    // Log moved to after retry loop for accuracy
                     return candles;
 
                 } catch (Exception e) {
@@ -257,29 +259,70 @@ public class MultiTimeframeLevelCalculator {
                 }
             }, httpExecutor);
 
-            // Wait for response with timeout
-            // Increased to 20 seconds to handle cold cache scenarios when many requests are queued
-            List<OHLCData> candles;
-            try {
-                candles = dataFuture.get(20, TimeUnit.SECONDS);
-            } catch (TimeoutException e) {
-                log.error("HTTP call timed out for {}: timeout", scripCode);
-                // Cancel future and close any pending response
-                dataFuture.cancel(true);
-                Response pendingResponse = responseRef.get();
-                if (pendingResponse != null) {
-                    pendingResponse.close();
+            // FIX: Wait for response with increased timeout and retry logic
+            List<OHLCData> candles = null;
+            int attempt = 0;
+            while (attempt < MAX_HTTP_RETRIES && (candles == null || candles.isEmpty())) {
+                attempt++;
+                try {
+                    if (attempt > 1) {
+                        // Exponential backoff: 1s, 2s, 4s
+                        long backoffMs = (long) Math.pow(2, attempt - 1) * 1000;
+                        log.debug("Retry {} for {} after {}ms backoff", attempt, scripCode, backoffMs);
+                        Thread.sleep(backoffMs);
+
+                        // Create new request for retry
+                        final AtomicReference<Response> retryResponseRef = new AtomicReference<>();
+                        dataFuture = CompletableFuture.supplyAsync(() -> {
+                            Response retryResponse = null;
+                            try {
+                                retryResponse = httpClient.newCall(request).execute();
+                                retryResponseRef.set(retryResponse);
+                                if (!retryResponse.isSuccessful() || retryResponse.body() == null) {
+                                    log.warn("Historical API non-200/empty for {}: status={}", scripCode, retryResponse.code());
+                                    return Collections.<OHLCData>emptyList();
+                                }
+                                return objectMapper.readValue(
+                                        retryResponse.body().byteStream(),
+                                        new TypeReference<List<OHLCData>>() {}
+                                );
+                            } catch (Exception ex) {
+                                log.error("HTTP retry call failed for {}: {}", scripCode, ex.getMessage());
+                                return Collections.<OHLCData>emptyList();
+                            } finally {
+                                if (retryResponse != null) retryResponse.close();
+                            }
+                        }, httpExecutor);
+                        responseRef.set(null);  // Clear old ref
+                    }
+
+                    candles = dataFuture.get(HTTP_TIMEOUT_SECONDS, TimeUnit.SECONDS);
+
+                } catch (TimeoutException e) {
+                    log.warn("HTTP call timed out for {} (attempt {}/{})", scripCode, attempt, MAX_HTTP_RETRIES);
+                    dataFuture.cancel(true);
+                    Response pendingResponse = responseRef.get();
+                    if (pendingResponse != null) {
+                        pendingResponse.close();
+                    }
+                } catch (InterruptedException e) {
+                    Thread.currentThread().interrupt();
+                    log.warn("HTTP call interrupted for {}", scripCode);
+                    break;
                 }
+            }
+
+            if (candles == null || candles.isEmpty()) {
+                log.error("Failed to fetch historical data for {} after {} attempts", scripCode, attempt);
                 return Collections.emptyList();
             }
 
             // Cache the result if not empty
-            if (candles != null && !candles.isEmpty()) {
-                ohlcCache.put(scripCode, candles);
-                ohlcCacheTimestamp.put(scripCode, System.currentTimeMillis());
-            }
+            ohlcCache.put(scripCode, candles);
+            ohlcCacheTimestamp.put(scripCode, System.currentTimeMillis());
+            log.info("Fetched {} 1m candles for {} from {} to {}", candles.size(), scripCode, startDate, endDate);
 
-            return candles != null ? candles : Collections.emptyList();
+            return candles;
 
         } catch (Exception e) {
             log.error("Error fetching historical data for {}: {}", scripCode, e.getMessage());
@@ -477,16 +520,27 @@ public class MultiTimeframeLevelCalculator {
             double s3 = low - (2 * (high - pivot));
             double s4 = low - (3 * (high - pivot));
 
-            // CPR (Camarilla)
-            double tc = close + ((high - low) * 1.1 / 12);
-            double bc = close - ((high - low) * 1.1 / 12);
-            double cprWidth = ((tc - bc) / close) * 100;
+            // ============ CPR (Central Pivot Range) - Frank Ochoa's Standard Formula ============
+            // CPR Formula:
+            //   Pivot (PP) = (H + L + C) / 3  (already calculated above)
+            //   BC (Bottom Central) = (H + L) / 2
+            //   TC (Top Central) = 2*PP - BC = (H + L + 2*C) / 3
+            //   CPR Width = |TC - BC| / PP * 100
+            //
+            // Key insight: When C is near (H+L)/2, CPR is narrow (breakout expected)
+            //              When C is far from (H+L)/2, CPR is wide (range-bound)
+            double bc = (high + low) / 2.0;                    // Bottom Central
+            double tc = (2 * pivot) - bc;                      // Top Central = 2*PP - BC
+            double cprWidth = Math.abs(tc - bc) / pivot * 100; // Width as % of pivot
 
             // Classify CPR width
+            // NARROW: < 0.5% = Expect breakout/trending day
+            // NORMAL: 0.5% - 1.0% = Range trading possible
+            // WIDE: > 1.0% = Range-bound, mean reversion
             PivotLevels.CPRWidth cprType;
-            if (cprWidth < 0.3) {
+            if (cprWidth < 0.5) {
                 cprType = PivotLevels.CPRWidth.NARROW;
-            } else if (cprWidth < 0.7) {
+            } else if (cprWidth < 1.0) {
                 cprType = PivotLevels.CPRWidth.NORMAL;
             } else {
                 cprType = PivotLevels.CPRWidth.WIDE;

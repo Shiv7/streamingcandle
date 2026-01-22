@@ -85,10 +85,13 @@ public class MultiTimeframeLevels {
         private double s3;              // L - 2*(H - P)
         private double s4;              // L - 3*(H - P)
 
-        // CPR (Central Pivot Range) - Camarilla
-        private double tc;              // Top Central: (H - L) * 1.1/12 + C
-        private double bc;              // Bottom Central: C - (H - L) * 1.1/12
-        private double cprWidth;        // (TC - BC) / C * 100 (percentage)
+        // CPR (Central Pivot Range) - Frank Ochoa's Standard Formula
+        // TC = 2*PP - BC (where PP = (H+L+C)/3)
+        // BC = (H+L)/2
+        // When close is near (H+L)/2, CPR is narrow = breakout expected
+        private double tc;              // Top Central: 2*PP - BC
+        private double bc;              // Bottom Central: (H + L) / 2
+        private double cprWidth;        // |TC - BC| / PP * 100 (percentage)
 
         // CPR classification
         private CPRWidth cprType;

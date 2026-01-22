@@ -20,10 +20,10 @@ import com.kotsin.consumer.enrichment.tracker.SwingPointTracker;
 import com.kotsin.consumer.enrichment.tracker.SwingPointTracker.SwingAnalysis;
 import com.kotsin.consumer.curated.model.MultiTimeframeLevels;
 import com.kotsin.consumer.curated.service.MultiTimeframeLevelCalculator;
-import com.kotsin.consumer.enrichment.pattern.matcher.PatternMatcher;
-import com.kotsin.consumer.enrichment.pattern.model.PatternSignal;
-import com.kotsin.consumer.enrichment.pattern.publisher.PatternSignalPublisher;
 import com.kotsin.consumer.enrichment.store.EventStore;
+import com.kotsin.consumer.trading.mtf.HtfCandleAggregator;
+import com.kotsin.consumer.trading.mtf.MtfSmcAnalyzer;
+import com.kotsin.consumer.trading.mtf.MtfSmcContext;
 import com.kotsin.consumer.quant.calculator.QuantScoreCalculator;
 import com.kotsin.consumer.quant.model.QuantScore;
 import lombok.RequiredArgsConstructor;
@@ -80,10 +80,6 @@ public class EnrichedQuantScoreCalculator {
     private final ConfluenceCalculator confluenceCalculator;
     private final EventStore eventStore;
 
-    // Phase 4 pattern recognition
-    private final PatternMatcher patternMatcher;
-    private final PatternSignalPublisher patternSignalPublisher;
-
     // Session Structure Tracking (CRITICAL for context-aware signals)
     private final SessionStructureTracker sessionStructureTracker;
 
@@ -95,6 +91,12 @@ public class EnrichedQuantScoreCalculator {
 
     // Multi-Timeframe Level Calculator (daily/weekly/monthly pivots and Fibonacci)
     private final MultiTimeframeLevelCalculator mtfLevelCalculator;
+
+    // HTF Candle Aggregator (aggregates 1m into 5m/15m/1H/4H/Daily)
+    private final HtfCandleAggregator htfCandleAggregator;
+
+    // MTF SMC Analyzer (Multi-Timeframe Smart Money Concepts)
+    private final MtfSmcAnalyzer mtfSmcAnalyzer;
 
     /**
      * Calculate enriched QuantScore with historical context and Phase 2, 3, 4 enrichments
@@ -187,7 +189,8 @@ public class EnrichedQuantScoreCalculator {
             TechnicalContext technicalContext = technicalEnricher.enrich(family);
 
             // Confluence Zones (S/R level clustering)
-            double currentPrice = family.getFuture() != null ? family.getFuture().getClose() : 0;
+            // BUG FIX: Use getPrimaryPrice() to avoid 0 price for equity-only instruments
+            double currentPrice = family.getPrimaryPrice();
             ConfluenceCalculator.ConfluenceResult confluenceResult = confluenceCalculator.calculate(
                     currentPrice, technicalContext, gexProfile, maxPainProfile);
 
@@ -231,42 +234,38 @@ public class EnrichedQuantScoreCalculator {
                     detectedEvents.size(),
                     phase3Ms);
 
+            // =============== HTF CANDLE AGGREGATION ===============
+            // Aggregate 1m candles into 5m/15m/1H/4H/Daily for proper MTF analysis
+            // BUG FIX: Only process 1m candles - higher timeframes would corrupt aggregation!
+            // The aggregator is designed for 1m candles only. Processing 5m/15m/30m candles
+            // would incorrectly treat them as single-minute data points.
+            t0 = System.nanoTime();
+            String candleTimeframe = family.getTimeframe();
+            boolean is1mCandle = candleTimeframe == null || "1m".equals(candleTimeframe);
+            if (htfCandleAggregator != null && is1mCandle) {
+                htfCandleAggregator.processCandle(family);
+            }
+
+            // =============== MTF SMC ANALYSIS (Multi-Timeframe Smart Money Concepts) ===============
+            // REAL institutional analysis: HTF for bias, LTF for entry
+            MtfSmcContext mtfSmcContext = null;
+            if (mtfSmcAnalyzer != null && currentPrice > 0) {
+                mtfSmcContext = mtfSmcAnalyzer.analyze(familyId, currentPrice);
+
+                if (mtfSmcContext != null && mtfSmcContext.getHtfBias() != null) {
+                    log.debug("[ENRICH] {} MTF_SMC | HTF={} | zone={} | atPOI={} | ltfSwept={} | conf={}",
+                            familyId,
+                            mtfSmcContext.getHtfBias(),
+                            mtfSmcContext.isInDiscount() ? "DISCOUNT" : (mtfSmcContext.isInPremium() ? "PREMIUM" : "NEUTRAL"),
+                            mtfSmcContext.isAtHtfDemandZone() || mtfSmcContext.isAtHtfSupplyZone(),
+                            mtfSmcContext.isLtfLiquidityJustSwept(),
+                            mtfSmcContext.getMtfConfluenceScore());
+                }
+            }
+            long smcMs = (System.nanoTime() - t0) / 1_000_000;
+
             // =============== Calculate Base Score ===============
             QuantScore baseScore = baseCalculator.calculate(family);
-
-            // =============== PHASE 4: Pattern Recognition ===============
-            // Build temporary EnrichedQuantScore for pattern context
-            EnrichedQuantScore tempScore = EnrichedQuantScore.builder()
-                    .baseScore(baseScore)
-                    .historicalContext(historicalContext)
-                    .gexProfile(gexProfile)
-                    .technicalContext(technicalContext)
-                    .confluenceResult(confluenceResult)
-                    .detectedEvents(detectedEvents)
-                    .build();
-            tempScore.setScripCode(family.getFuture() != null ? family.getFuture().getScripCode() : null);
-            tempScore.setCompanyName(family.getFuture() != null ? family.getFuture().getCompanyName() : null);
-            tempScore.setClose(currentPrice);
-
-            // FIX: Set microprice from primary instrument for better entry price accuracy
-            // Microprice is orderbook-derived fair value, more current than candle close
-            InstrumentCandle primaryInstrument = family.getFuture() != null ? family.getFuture() :
-                                                  family.getEquity() != null ? family.getEquity() :
-                                                  family.getPrimaryInstrument();
-            if (primaryInstrument != null && primaryInstrument.getMicroprice() != null) {
-                tempScore.setMicroprice(primaryInstrument.getMicroprice());
-            }
-
-            // Process events through PatternMatcher
-            List<PatternSignal> patternSignals = patternMatcher.processEvents(
-                    family.getFamilyId(), detectedEvents, tempScore);
-
-            // Publish any generated pattern signals to Kafka
-            if (!patternSignals.isEmpty()) {
-                patternSignalPublisher.publishSignals(patternSignals);
-                log.info("[PHASE4] Published {} pattern signals for family {}",
-                        patternSignals.size(), family.getFamilyId());
-            }
 
             // =============== Apply All Modifiers ===============
             // FIX: Clamp each modifier to valid range to prevent NaN/crash from stacking
@@ -338,14 +337,34 @@ public class EnrichedQuantScoreCalculator {
             // =============== Build Enriched Score ===============
             // FIX: Extract scripCode, companyName, exchange, and priceTimestamp from FamilyCandle
             // Previously these were set on tempScore but NOT included in the final build!
-            String scripCode = family.getFuture() != null ? family.getFuture().getScripCode() : null;
-            String companyName = family.getFuture() != null ? family.getFuture().getCompanyName() : null;
+            // BUG FIX: scripCode and companyName should fall back to equity if no future exists!
+            // Previously only checked future, causing equity-only instruments to have NULL scripCode
+            // which made the state machine skip them entirely!
+            String scripCode = family.getFuture() != null ? family.getFuture().getScripCode() :
+                              (family.getEquity() != null ? family.getEquity().getScripCode() : null);
+            String companyName = family.getFuture() != null ? family.getFuture().getCompanyName() :
+                                (family.getEquity() != null ? family.getEquity().getCompanyName() : null);
             // FIX: Extract exchange from instrument - critical for MCX vs NSE distinction
             String exchange = family.getFuture() != null ? family.getFuture().getExchange() :
                              (family.getEquity() != null ? family.getEquity().getExchange() : "N");
             // FIX: Capture the candle's timestamp for accurate price-time correlation
             long priceTimestamp = family.getWindowEndMillis() > 0 ? family.getWindowEndMillis() :
                                   (family.getTimestamp() > 0 ? family.getTimestamp() : System.currentTimeMillis());
+
+            // DIAGNOSTIC: Log scripCode extraction
+            if (scripCode == null) {
+                log.warn("[ENRICH_DIAG] scripCode is NULL! | familyId={} | hasFuture={} | hasEquity={} | " +
+                        "futureScripCode={} | equityScripCode={}",
+                        familyId,
+                        family.getFuture() != null,
+                        family.getEquity() != null,
+                        family.getFuture() != null ? family.getFuture().getScripCode() : "N/A",
+                        family.getEquity() != null ? family.getEquity().getScripCode() : "N/A");
+            } else {
+                log.debug("[ENRICH_DIAG] scripCode extracted | familyId={} | scripCode={} | exchange={} | " +
+                        "price={} | hasTech={}",
+                        familyId, scripCode, exchange, currentPrice, technicalContext != null);
+            }
 
             EnrichedQuantScore enrichedScore = EnrichedQuantScore.builder()
                     .baseScore(baseScore)
@@ -375,8 +394,8 @@ public class EnrichedQuantScoreCalculator {
                     .technicalContext(technicalContext)
                     .confluenceResult(confluenceResult)
                     .detectedEvents(detectedEvents)
-                    // Phase 4
-                    .patternSignals(patternSignals)
+                    // MTF SMC Context (Multi-Timeframe Smart Money Concepts)
+                    .mtfSmcContext(mtfSmcContext)
                     // Adjusted scores
                     .adjustedQuantScore(adjustedScore)
                     .adjustedConfidence(adjustedConfidence)
@@ -401,14 +420,14 @@ public class EnrichedQuantScoreCalculator {
             long totalMs = (System.nanoTime() - startTime) / 1_000_000;
 
             // Summary logging
-            if (isActionableMoment || !patternSignals.isEmpty()) {
+            if (isActionableMoment) {
                 log.info("[ENRICH] {} COMPLETE | price={} | score={} | conf={}% | " +
-                                "actionable={} | patterns={} | events={} | " +
+                                "actionable={} | events={} | " +
                                 "pos={}% | familyBias={} | combinedMod={} | totalMs={}",
                         familyId, String.format("%.2f", currentPrice),
                         String.format("%.0f", adjustedScore),
                         String.format("%.0f", adjustedConfidence * 100),
-                        isActionableMoment, patternSignals.size(), detectedEvents.size(),
+                        isActionableMoment, detectedEvents.size(),
                         String.format("%.0f", sessionStructure != null ? sessionStructure.getPositionInRange() * 100 : 50),
                         familyContext != null ? familyContext.getOverallBias() : "UNKNOWN",
                         String.format("%.2f", combinedModifier), totalMs);
@@ -1091,7 +1110,7 @@ public class EnrichedQuantScoreCalculator {
         // Base score
         private QuantScore baseScore;
 
-        // Instrument context (for PatternSignal generation)
+        // Instrument context
         private String scripCode;
         private String companyName;
         private String exchange;  // FIX: "N" for NSE, "M" for MCX, "B" for BSE
@@ -1192,8 +1211,31 @@ public class EnrichedQuantScoreCalculator {
         private ConfluenceCalculator.ConfluenceResult confluenceResult;
         private List<DetectedEvent> detectedEvents;
 
-        // Phase 4: Pattern Recognition
-        private List<PatternSignal> patternSignals;
+        /**
+         * MTF SMC Context (Multi-Timeframe Smart Money Concepts)
+         *
+         * THIS IS REAL INSTITUTIONAL ANALYSIS:
+         *
+         * HTF (1H/4H) Analysis:
+         * - Market Structure bias (bullish/bearish)
+         * - Major Order Blocks (where institutions placed orders)
+         * - Major FVGs (real imbalances, not 1m noise)
+         *
+         * LTF (15m) Analysis:
+         * - Liquidity sweeps (THE entry signal!)
+         * - CHoCH/BOS confirmation
+         * - Precise entry at LTF OB
+         *
+         * Premium/Discount (from Daily range):
+         * - Buy in discount (below 50%)
+         * - Sell in premium (above 50%)
+         *
+         * WHY THIS MATTERS:
+         * - HTF gives DIRECTION (don't fight the trend)
+         * - HTF gives KEY LEVELS (where smart money operates)
+         * - LTF gives TIMING (when to pull the trigger)
+         */
+        private MtfSmcContext mtfSmcContext;
 
         // Adjusted scores
         private double adjustedQuantScore;
@@ -1232,7 +1274,6 @@ public class EnrichedQuantScoreCalculator {
                     .combinedModifier(1.0)
                     .isActionableMoment(false)
                     .detectedEvents(Collections.emptyList())
-                    .patternSignals(Collections.emptyList())
                     .build();
         }
 
@@ -1417,49 +1458,6 @@ public class EnrichedQuantScoreCalculator {
             return technicalContext != null ? technicalContext.getAtrPct() : null;
         }
 
-        // ======================== PHASE 4 HELPERS ========================
-
-        /**
-         * Check if any pattern signals were generated
-         */
-        public boolean hasPatternSignals() {
-            return patternSignals != null && !patternSignals.isEmpty();
-        }
-
-        /**
-         * Get count of pattern signals
-         */
-        public int getPatternSignalCount() {
-            return patternSignals != null ? patternSignals.size() : 0;
-        }
-
-        /**
-         * Get high-confidence pattern signals (confidence >= 0.70)
-         */
-        public List<PatternSignal> getHighConfidencePatternSignals() {
-            if (patternSignals == null) return Collections.emptyList();
-            return patternSignals.stream()
-                    .filter(s -> s.getConfidence() >= 0.70)
-                    .collect(java.util.stream.Collectors.toList());
-        }
-
-        /**
-         * Get the best pattern signal by confidence
-         */
-        public PatternSignal getBestPatternSignal() {
-            if (patternSignals == null || patternSignals.isEmpty()) return null;
-            return patternSignals.stream()
-                    .max(java.util.Comparator.comparingDouble(PatternSignal::getConfidence))
-                    .orElse(null);
-        }
-
-        /**
-         * Check if pattern recognition (Phase 4) is active
-         */
-        public boolean hasPatternRecognition() {
-            return patternSignals != null;
-        }
-
         /**
          * Get confluence score from zones
          */
@@ -1469,7 +1467,7 @@ public class EnrichedQuantScoreCalculator {
         }
 
         /**
-         * Get confluence zones for pattern signal generation
+         * Get confluence zones
          */
         public List<ConfluenceZone> getConfluenceZones() {
             if (confluenceResult == null || confluenceResult.getZones() == null) {
@@ -1481,7 +1479,7 @@ public class EnrichedQuantScoreCalculator {
         }
 
         /**
-         * Simple confluence zone representation for pattern signals
+         * Simple confluence zone representation
          */
         @lombok.Data
         @lombok.AllArgsConstructor

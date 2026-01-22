@@ -142,8 +142,11 @@ public class FUDKIIProcessor {
             }
 
             // Calculate SuperTrend for current and previous candles
-            double[] stCurrent = bbSuperTrendDetector.calculateSuperTrend(candles30m, atr);
-            double[] stPrev = bbSuperTrendDetector.calculateSuperTrend(prevCandles, atr);
+            // Use explicit state keys to avoid state collision between current and prev calculations
+            String stateKey = scripCode + ":30m";
+            String stateKeyPrev = scripCode + ":30m:prev";
+            double[] stCurrent = bbSuperTrendDetector.calculateSuperTrend(candles30m, atr, stateKey);
+            double[] stPrev = bbSuperTrendDetector.calculateSuperTrend(prevCandles, atr, stateKeyPrev);
             
             double superTrend = stCurrent[0];
             boolean superTrendBullish = stCurrent[1] > 0;

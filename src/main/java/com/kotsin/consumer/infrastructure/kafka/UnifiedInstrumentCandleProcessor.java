@@ -153,6 +153,16 @@ public class UnifiedInstrumentCandleProcessor {
             .build();
 
     /**
+     * FIX: Cache for company names by token
+     * Populated from tick data (which has company names) to enrich orderbook/OI logs
+     * that often have null company names in the source data.
+     */
+    private final Cache<String, String> companyNameCache = Caffeine.newBuilder()
+            .maximumSize(20_000)  // Support for all instruments
+            .expireAfterWrite(24, TimeUnit.HOURS)  // Refresh daily
+            .build();
+
+    /**
      * Build and start the unified processor
      */
     @PostConstruct
@@ -240,6 +250,10 @@ public class UnifiedInstrumentCandleProcessor {
         // TickDataTimestampExtractor already handles invalid timestamps by using Kafka record timestamp
         // This allows MCX and NSE data with timestamp=0 to be processed correctly
         .peek((key, tick) -> {
+            // FIX: Cache company name from tick data for use in OB/OI logging
+            if (tick.getCompanyName() != null && !tick.getCompanyName().isEmpty()) {
+                companyNameCache.put(tick.getScripCode(), tick.getCompanyName());
+            }
             if (traceLogger != null) {
                 traceLogger.logInputReceived("TICK", tick.getScripCode(), tick.getCompanyName(),
                     tick.getTimestamp(),
@@ -269,7 +283,12 @@ public class UnifiedInstrumentCandleProcessor {
         })
         .peek((key, ob) -> {
             if (traceLogger != null) {
-                traceLogger.logInputReceived("OB", String.valueOf(ob.getToken()), ob.getCompanyName(),
+                // FIX: Use cached company name if OB data doesn't have it
+                String companyName = ob.getCompanyName();
+                if (companyName == null || companyName.isEmpty()) {
+                    companyName = companyNameCache.getIfPresent(String.valueOf(ob.getToken()));
+                }
+                traceLogger.logInputReceived("OB", String.valueOf(ob.getToken()), companyName,
                     ob.getTimestamp(),
                     String.format("bid=%.2f ask=%.2f spread=%.2f imbalance=%.2f",
                         ob.getBestBid(), ob.getBestAsk(),
@@ -300,7 +319,12 @@ public class UnifiedInstrumentCandleProcessor {
         })
         .peek((key, oi) -> {
             if (traceLogger != null) {
-                traceLogger.logInputReceived("OI", String.valueOf(oi.getToken()), oi.getCompanyName(),
+                // FIX: Use cached company name if OI data doesn't have it
+                String companyName = oi.getCompanyName();
+                if (companyName == null || companyName.isEmpty()) {
+                    companyName = companyNameCache.getIfPresent(String.valueOf(oi.getToken()));
+                }
+                traceLogger.logInputReceived("OI", String.valueOf(oi.getToken()), companyName,
                     oi.getReceivedTimestamp(),
                     String.format("OI=%d change=%d changePct=%.2f",
                         oi.getOpenInterest(),
@@ -809,7 +833,8 @@ public class UnifiedInstrumentCandleProcessor {
         }
         // Fallback: build from tick
         String exch = tick.getExchange() != null ? tick.getExchange() : "N";
-        String exchType = tick.getExchangeType() != null ? tick.getExchangeType() : "C";
+        // FIX: Default to "D" (derivative) to match buildOIKey() storage - was "C" causing key mismatch
+        String exchType = tick.getExchangeType() != null ? tick.getExchangeType() : "D";
         return exch + ":" + exchType + ":" + tick.getScripCode();
     }
 

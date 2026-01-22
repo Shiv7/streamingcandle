@@ -166,7 +166,7 @@ public class QuantKafkaConfig {
         ConcurrentKafkaListenerContainerFactory<String, FamilyCandle> factory =
             new ConcurrentKafkaListenerContainerFactory<>();
         factory.setConsumerFactory(familyCandleConsumerFactory());
-        factory.setConcurrency(3); // Parallel processing
+        factory.setConcurrency(15); // Increased from 3 for high-throughput processing (8 topics × 20 partitions)
         factory.setBatchListener(false); // Process one at a time for scoring
         log.info("Created ConcurrentKafkaListenerContainerFactory for FamilyCandle");
         return factory;

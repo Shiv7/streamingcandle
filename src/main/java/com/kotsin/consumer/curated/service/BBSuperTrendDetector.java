@@ -42,12 +42,24 @@ public class BBSuperTrendDetector {
 
     // Cache for candle history per scrip/timeframe
     private final Map<String, Deque<UnifiedCandle>> candleHistory = new ConcurrentHashMap<>();
-    
+
     // Cache for SuperTrend state (to detect flips)
     private final Map<String, Boolean> prevSuperTrendBullish = new ConcurrentHashMap<>();
-    
+
+    // Cache for SuperTrend calculation state (proper band tracking)
+    private final Map<String, SuperTrendState> superTrendStateCache = new ConcurrentHashMap<>();
+
     // Max candles to keep
     private static final int MAX_HISTORY = 30;
+
+    // SuperTrend state record for proper band tracking
+    private record SuperTrendState(
+        double superTrend,
+        double finalUpperBand,
+        double finalLowerBand,
+        boolean bullish,
+        double previousClose
+    ) {}
 
     /**
      * Process a new candle and check for BB+SuperTrend confluence
@@ -210,68 +222,146 @@ public class BBSuperTrendDetector {
     }
 
     /**
-     * Calculate ATR (Average True Range)
+     * Calculate ATR using Wilder's RMA (Running Moving Average) method
+     * This matches TradingView's ATR calculation exactly.
+     *
+     * Formula:
+     * - First ATR = SMA of first 'period' true ranges
+     * - Subsequent ATR = (prevATR × (period-1) + currentTR) / period
+     *   Or equivalently: ATR = prevATR + (currentTR - prevATR) / period
      */
     public double calculateATR(List<UnifiedCandle> candles, int period) {
-        int actualPeriod = Math.min(period, candles.size());
-        if (actualPeriod <= 1) return 0;
+        if (candles.size() < 2) return 0;
 
-        double sum = 0;
-        for (int i = candles.size() - actualPeriod; i < candles.size(); i++) {
-            if (i < 0) continue;
+        // Calculate all True Range values
+        List<Double> trueRanges = new ArrayList<>();
+        for (int i = 1; i < candles.size(); i++) {
             UnifiedCandle c = candles.get(i);
-            double tr = c.getHigh() - c.getLow();
-            
-            if (i > 0) {
-                double prevClose = candles.get(i - 1).getClose();
-                tr = Math.max(tr, Math.abs(c.getHigh() - prevClose));
-                tr = Math.max(tr, Math.abs(c.getLow() - prevClose));
-            }
-            sum += tr;
+            double prevClose = candles.get(i - 1).getClose();
+            double tr = Math.max(c.getHigh() - c.getLow(),
+                        Math.max(Math.abs(c.getHigh() - prevClose),
+                                 Math.abs(c.getLow() - prevClose)));
+            trueRanges.add(tr);
         }
-        return sum / actualPeriod;
+
+        if (trueRanges.isEmpty()) return 0;
+
+        // If we don't have enough data for the period, use SMA of what we have
+        int actualPeriod = Math.min(period, trueRanges.size());
+
+        // First ATR = SMA of first 'actualPeriod' true ranges
+        double sum = 0;
+        for (int i = 0; i < actualPeriod; i++) {
+            sum += trueRanges.get(i);
+        }
+        double atr = sum / actualPeriod;
+
+        // Apply Wilder's smoothing (RMA) for remaining values
+        // ATR = prevATR + (currentTR - prevATR) / period
+        for (int i = actualPeriod; i < trueRanges.size(); i++) {
+            atr = atr + (trueRanges.get(i) - atr) / period;
+        }
+
+        return atr;
     }
 
     /**
-     * Calculate SuperTrend
+     * Calculate SuperTrend (backward compatible - derives state key from candle data)
      * Returns [superTrendValue, isBullish (1 or -1)]
      */
     public double[] calculateSuperTrend(List<UnifiedCandle> candles, double atr) {
+        if (candles.isEmpty()) {
+            return new double[] { 0, 0 };
+        }
+        // Derive state key from candle data for backward compatibility
+        UnifiedCandle current = candles.get(candles.size() - 1);
+        String stateKey = current.getScripCode() + ":" + current.getTimeframe();
+        return calculateSuperTrend(candles, atr, stateKey);
+    }
+
+    /**
+     * Calculate SuperTrend with proper state tracking (TradingView standard formula)
+     *
+     * Key insight: Bands should RESET when price crosses through them.
+     * - Upper band resets if: basicUpperBand < prevUpperBand OR prevClose > prevUpperBand
+     * - Lower band resets if: basicLowerBand > prevLowerBand OR prevClose < prevLowerBand
+     *
+     * @param candles Price history
+     * @param atr Current ATR value
+     * @param stateKey Unique key for state tracking (e.g., scripCode + timeframe)
+     * @return [superTrendValue, direction (1=bullish, -1=bearish)]
+     */
+    public double[] calculateSuperTrend(List<UnifiedCandle> candles, double atr, String stateKey) {
         if (candles.isEmpty() || atr <= 0) {
             return new double[] { 0, 0 };
         }
 
         UnifiedCandle current = candles.get(candles.size() - 1);
-        double hl2 = (current.getHigh() + current.getLow()) / 2;
-        
+        double high = current.getHigh();
+        double low = current.getLow();
+        double close = current.getClose();
+        double hl2 = (high + low) / 2;
+
         double basicUpperBand = hl2 + (superTrendMultiplier * atr);
         double basicLowerBand = hl2 - (superTrendMultiplier * atr);
-        
-        // Simple SuperTrend calculation
-        // In full implementation, we'd track previous upper/lower bands
-        double close = current.getClose();
-        
-        if (close > basicUpperBand) {
-            // Bullish - use lower band as support
-            return new double[] { basicLowerBand, 1 };
-        } else if (close < basicLowerBand) {
-            // Bearish - use upper band as resistance
-            return new double[] { basicUpperBand, -1 };
+
+        // Get previous state
+        SuperTrendState prev = superTrendStateCache.get(stateKey);
+
+        double finalUpperBand;
+        double finalLowerBand;
+        double superTrend;
+        boolean bullish;
+
+        if (prev == null) {
+            // First calculation - initialize with basic bands
+            finalUpperBand = basicUpperBand;
+            finalLowerBand = basicLowerBand;
+            bullish = close > hl2;
+            superTrend = bullish ? finalLowerBand : finalUpperBand;
         } else {
-            // Within bands - check trend from recent closes
-            int upCount = 0, downCount = 0;
-            int lookback = Math.min(5, candles.size());
-            for (int i = candles.size() - lookback; i < candles.size(); i++) {
-                if (i <= 0) continue;
-                if (candles.get(i).getClose() > candles.get(i - 1).getClose()) {
-                    upCount++;
+            // Upper Band: reset if basicUB < prevUB OR prevClose crossed above prevUB
+            if (basicUpperBand < prev.finalUpperBand || prev.previousClose > prev.finalUpperBand) {
+                finalUpperBand = basicUpperBand;
+            } else {
+                finalUpperBand = prev.finalUpperBand;
+            }
+
+            // Lower Band: reset if basicLB > prevLB OR prevClose crossed below prevLB
+            if (basicLowerBand > prev.finalLowerBand || prev.previousClose < prev.finalLowerBand) {
+                finalLowerBand = basicLowerBand;
+            } else {
+                finalLowerBand = prev.finalLowerBand;
+            }
+
+            // Determine direction based on previous SuperTrend value
+            if (prev.superTrend == prev.finalUpperBand) {
+                // Was bearish (ST was at upper band)
+                if (close > finalUpperBand) {
+                    bullish = true;
+                    superTrend = finalLowerBand;
                 } else {
-                    downCount++;
+                    bullish = false;
+                    superTrend = finalUpperBand;
+                }
+            } else {
+                // Was bullish (ST was at lower band)
+                if (close < finalLowerBand) {
+                    bullish = false;
+                    superTrend = finalUpperBand;
+                } else {
+                    bullish = true;
+                    superTrend = finalLowerBand;
                 }
             }
-            boolean bullish = upCount >= downCount;
-            return new double[] { bullish ? basicLowerBand : basicUpperBand, bullish ? 1 : -1 };
         }
+
+        // Store new state
+        superTrendStateCache.put(stateKey, new SuperTrendState(
+            superTrend, finalUpperBand, finalLowerBand, bullish, close
+        ));
+
+        return new double[] { superTrend, bullish ? 1 : -1 };
     }
 
     /**

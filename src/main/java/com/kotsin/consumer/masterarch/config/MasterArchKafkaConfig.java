@@ -199,28 +199,9 @@ public class MasterArchKafkaConfig {
         ConcurrentKafkaListenerContainerFactory<String, String> factory =
                 new ConcurrentKafkaListenerContainerFactory<>();
         factory.setConsumerFactory(consumerFactory());
-        factory.setConcurrency(2);
+        factory.setConcurrency(6); // Increased from 2 for better parallelism
         return factory;
     }
 
-    // ==================== STRING KAFKA TEMPLATE (for FUDKIIProcessor) ====================
-
-    @Bean
-    public ProducerFactory<String, String> stringProducerFactory() {
-        Map<String, Object> configProps = new HashMap<>();
-        configProps.put(ProducerConfig.BOOTSTRAP_SERVERS_CONFIG, bootstrapServers);
-        configProps.put(ProducerConfig.KEY_SERIALIZER_CLASS_CONFIG, StringSerializer.class);
-        configProps.put(ProducerConfig.VALUE_SERIALIZER_CLASS_CONFIG, StringSerializer.class);
-        configProps.put(ProducerConfig.BATCH_SIZE_CONFIG, batchSize);
-        configProps.put(ProducerConfig.LINGER_MS_CONFIG, lingerMs);
-        configProps.put(ProducerConfig.BUFFER_MEMORY_CONFIG, bufferMemory);
-        configProps.put(ProducerConfig.ACKS_CONFIG, "1");
-        configProps.put(ProducerConfig.RETRIES_CONFIG, 3);
-        return new DefaultKafkaProducerFactory<>(configProps);
-    }
-
-    @Bean
-    public KafkaTemplate<String, String> kafkaTemplate() {
-        return new KafkaTemplate<>(stringProducerFactory());
-    }
+    // NOTE: stringProducerFactory and kafkaTemplate beans are defined in CommonKafkaConfig
 }
