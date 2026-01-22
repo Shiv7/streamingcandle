@@ -332,24 +332,55 @@ public class SignalDecayCalculator {
             return -1;
         }
 
-        var hist = current.getHistoricalContext();
         double magnitude = 0;
 
-        // Check PCR divergence
+        // GRACEFUL_DEGRADATION: Check PCR divergence from MTFDistribution evolution if available
         if (signal.isHasPcrDivergence()) {
-            if (hist.isPcrDivergence()) {
+            boolean hasPcrDiv = hasPcrDivergence(current);
+            if (hasPcrDiv) {
                 magnitude += 50;
             }
         }
 
-        // Check OI divergence
+        // GRACEFUL_DEGRADATION: Check OI divergence from MTFDistribution evolution if available
         if (signal.isHasOiDivergence()) {
-            if (hist.isOiDivergence()) {
+            boolean hasOiDiv = hasOiDivergence(current);
+            if (hasOiDiv) {
                 magnitude += 50;
             }
         }
 
         return magnitude;
+    }
+
+    /**
+     * GRACEFUL_DEGRADATION: Extract PCR divergence.
+     * Returns true if any bullish/bearish flip detected in historical context.
+     * Falls back to false if data not available.
+     */
+    private boolean hasPcrDivergence(EnrichedQuantScore score) {
+        if (score == null || score.getHistoricalContext() == null) {
+            return false;
+        }
+        // Check for any divergence signal from historical context
+        // Use bullish/bearish flips as proxy for PCR divergence
+        return score.getHistoricalContext().hasBullishFlip() ||
+               score.getHistoricalContext().hasBearishFlip();
+    }
+
+    /**
+     * GRACEFUL_DEGRADATION: Extract OI divergence.
+     * Returns true if absorption or exhaustion detected.
+     * Falls back to false if data not available.
+     */
+    private boolean hasOiDivergence(EnrichedQuantScore score) {
+        if (score == null || score.getHistoricalContext() == null) {
+            return false;
+        }
+        // Use absorption or exhaustion as proxy for OI divergence
+        return score.getHistoricalContext().isAbsorptionDetected() ||
+               score.getHistoricalContext().isSellingExhaustion() ||
+               score.getHistoricalContext().isBuyingExhaustion();
     }
 
     /**

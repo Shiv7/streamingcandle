@@ -124,6 +124,15 @@ public class QuantSignalGenerator {
                 ? family.getTimestamp()
                 : System.currentTimeMillis();
 
+        // FIX: Make quantLabel consistent with direction to avoid confusing signals
+        // quantLabel from score is based on score value (>65 = BUY), but direction is from isBullish()/isBearish()
+        // Override quantLabel to match direction for consistency
+        String consistentQuantLabel = switch (direction) {
+            case LONG -> "BUY";
+            case SHORT -> "SELL";
+            case NEUTRAL -> "HOLD";
+        };
+
         return QuantTradingSignal.builder()
             .signalId(UUID.randomUUID().toString())
             .scripCode(score.getScripCode())
@@ -135,7 +144,7 @@ public class QuantSignalGenerator {
 
             // Quant score reference
             .quantScore(score.getQuantScore())
-            .quantLabel(score.getQuantLabel().name())
+            .quantLabel(consistentQuantLabel)  // FIX: Use direction-consistent label instead of score.getQuantLabel()
             .scoreBreakdown(score.getBreakdown())
             .confidence(score.getConfidence())
 

@@ -189,7 +189,8 @@ public class EnrichedQuantScoreCalculator {
             TechnicalContext technicalContext = technicalEnricher.enrich(family);
 
             // Confluence Zones (S/R level clustering)
-            double currentPrice = family.getFuture() != null ? family.getFuture().getClose() : 0;
+            // BUG FIX: Use getPrimaryPrice() to avoid 0 price for equity-only instruments
+            double currentPrice = family.getPrimaryPrice();
             ConfluenceCalculator.ConfluenceResult confluenceResult = confluenceCalculator.calculate(
                     currentPrice, technicalContext, gexProfile, maxPainProfile);
 
@@ -235,8 +236,13 @@ public class EnrichedQuantScoreCalculator {
 
             // =============== HTF CANDLE AGGREGATION ===============
             // Aggregate 1m candles into 5m/15m/1H/4H/Daily for proper MTF analysis
+            // BUG FIX: Only process 1m candles - higher timeframes would corrupt aggregation!
+            // The aggregator is designed for 1m candles only. Processing 5m/15m/30m candles
+            // would incorrectly treat them as single-minute data points.
             t0 = System.nanoTime();
-            if (htfCandleAggregator != null) {
+            String candleTimeframe = family.getTimeframe();
+            boolean is1mCandle = candleTimeframe == null || "1m".equals(candleTimeframe);
+            if (htfCandleAggregator != null && is1mCandle) {
                 htfCandleAggregator.processCandle(family);
             }
 
@@ -331,8 +337,13 @@ public class EnrichedQuantScoreCalculator {
             // =============== Build Enriched Score ===============
             // FIX: Extract scripCode, companyName, exchange, and priceTimestamp from FamilyCandle
             // Previously these were set on tempScore but NOT included in the final build!
-            String scripCode = family.getFuture() != null ? family.getFuture().getScripCode() : null;
-            String companyName = family.getFuture() != null ? family.getFuture().getCompanyName() : null;
+            // BUG FIX: scripCode and companyName should fall back to equity if no future exists!
+            // Previously only checked future, causing equity-only instruments to have NULL scripCode
+            // which made the state machine skip them entirely!
+            String scripCode = family.getFuture() != null ? family.getFuture().getScripCode() :
+                              (family.getEquity() != null ? family.getEquity().getScripCode() : null);
+            String companyName = family.getFuture() != null ? family.getFuture().getCompanyName() :
+                                (family.getEquity() != null ? family.getEquity().getCompanyName() : null);
             // FIX: Extract exchange from instrument - critical for MCX vs NSE distinction
             String exchange = family.getFuture() != null ? family.getFuture().getExchange() :
                              (family.getEquity() != null ? family.getEquity().getExchange() : "N");

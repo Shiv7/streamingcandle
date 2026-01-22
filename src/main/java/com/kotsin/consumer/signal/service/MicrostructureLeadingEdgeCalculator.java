@@ -150,8 +150,8 @@ public class MicrostructureLeadingEdgeCalculator {
 
         // Fallback: use microstructure score from base score
         if (score.getBaseScore() != null && score.getBaseScore().getBreakdown() != null) {
-            Double microScore = score.getBaseScore().getBreakdown().getMicrostructure();
-            if (microScore != null) {
+            double microScore = score.getBaseScore().getBreakdown().getMicrostructureScore();
+            if (microScore > 0) {
                 // Microstructure is 0-18, convert to 0-100
                 return (microScore / 18.0) * 100;
             }

@@ -16,12 +16,14 @@ import java.util.List;
  * THIS IS THE REAL MTF ANALYSIS ENGINE.
  *
  * WHAT IT DOES:
- * 1. Gets HTF candles (4H/1H) from HtfCandleAggregator
+ * 1. Gets HTF candles (1H) from HtfCandleAggregator
  * 2. Runs SmcAnalyzer on HTF data → HTF bias, major OBs, major FVGs
- * 3. Gets LTF candles (15m/5m) from HtfCandleAggregator
+ * 3. Gets LTF candles (5m) from HtfCandleAggregator
  * 4. Runs SmcAnalyzer on LTF data → sweeps, entry OBs, CHoCH
  * 5. Gets Daily range for premium/discount zones
  * 6. Combines everything into MtfSmcContext
+ *
+ * NOTE: LTF was changed from 15m to 5m for faster entry detection.
  *
  * THE MTF TRADING FLOW:
  *
@@ -61,8 +63,12 @@ public class MtfSmcAnalyzer {
     private final HtfCandleAggregator htfAggregator;
 
     // Timeframe configurations
+    // HTF (1H) = Higher Timeframe for structure, bias, and major order blocks
+    // LTF (5m) = Lower Timeframe for entries, liquidity sweeps, CHoCH
+    // FIX: Changed LTF from 15m to 5m for faster entry detection
+    // Real SMC traders use 1H/5m or 4H/15m combinations
     private static final String HTF_TIMEFRAME = "1h";      // For structure and major OBs
-    private static final String LTF_TIMEFRAME = "15m";     // For entries and sweeps
+    private static final String LTF_TIMEFRAME = "5m";      // For entries and sweeps (was 15m)
     private static final int HTF_CANDLE_COUNT = 100;
     private static final int LTF_CANDLE_COUNT = 100;
 
@@ -93,12 +99,27 @@ public class MtfSmcAnalyzer {
 
         double equilibrium = (dailyHigh + dailyLow) / 2.0;
         double rangePosition = (currentPrice - dailyLow) / (dailyHigh - dailyLow);
-        boolean inPremium = rangePosition > 0.5;
-        boolean inDiscount = rangePosition < 0.5;
+
+        // FIX: Zone determination with equilibrium buffer (40-60%)
+        // Previously: inPremium = >50%, inDiscount = <50% (mutually exclusive, exactly 50% = neither!)
+        // Now: Allow overlap in equilibrium zone to prevent deadlock
+        // For LONG: acceptable if rangePosition <= 60% (discount + equilibrium lower half)
+        // For SHORT: acceptable if rangePosition >= 40% (premium + equilibrium upper half)
+        boolean inPremium = rangePosition > 0.60;      // Strong premium = above 60%
+        boolean inDiscount = rangePosition < 0.40;     // Strong discount = below 40%
+        boolean inEquilibrium = rangePosition >= 0.40 && rangePosition <= 0.60;
+
+        // For strategy use: expand zones to include equilibrium edges
+        // This prevents the "exactly at 50%" deadlock
+        boolean acceptableForLong = rangePosition <= 0.60;   // Discount + equilibrium lower
+        boolean acceptableForShort = rangePosition >= 0.40;  // Premium + equilibrium upper
 
         // ========== STEP 2: HTF SMC ANALYSIS (1H) ==========
         SmcCandleData htfData = htfAggregator.getCandleArrays(familyId, HTF_TIMEFRAME, HTF_CANDLE_COUNT);
         SmcContext htfContext = null;
+
+        log.info("[MTF_SMC_DEBUG] {} HTF({}) - retrieved {} candles, hasData={}",
+                familyId, HTF_TIMEFRAME, htfData.size(), htfData.hasData());
 
         if (htfData.hasData()) {
             htfContext = smcAnalyzer.analyze(
@@ -109,13 +130,13 @@ public class MtfSmcAnalyzer {
                     htfData.getTimestamps(),
                     HTF_TIMEFRAME
             );
-            log.debug("[MTF_SMC] {} HTF({}) analysis | bias={} | demandZones={} | supplyZones={}",
+            log.info("[MTF_SMC_DEBUG] {} HTF({}) analysis result | bias={} | demandZones={} | supplyZones={}",
                     familyId, HTF_TIMEFRAME,
                     htfContext.getMarketBias(),
                     htfContext.getDemandZones().size(),
                     htfContext.getSupplyZones().size());
         } else {
-            log.debug("[MTF_SMC] {} Not enough HTF({}) data: {} candles",
+            log.warn("[MTF_SMC_DEBUG] {} Not enough HTF({}) data: only {} candles (need 20+)",
                     familyId, HTF_TIMEFRAME, htfData.size());
         }
 
@@ -159,7 +180,10 @@ public class MtfSmcAnalyzer {
                 .equilibrium(equilibrium)
                 .rangePosition(rangePosition)
                 .inPremium(inPremium)
-                .inDiscount(inDiscount);
+                .inDiscount(inDiscount)
+                .inEquilibrium(inEquilibrium)
+                .acceptableForLong(acceptableForLong)
+                .acceptableForShort(acceptableForShort);
 
         // HTF context
         if (htfContext != null) {

@@ -35,6 +35,26 @@ public class TechnicalContext {
     private String timeframe;
     private double currentPrice;
 
+    // ======================== DATA QUALITY ========================
+
+    /**
+     * Is this context based on sufficient data for valid indicators?
+     * false = not enough history, indicators may be placeholders/invalid
+     * Strategies should check this before using indicator values.
+     */
+    @Builder.Default
+    private boolean dataQualitySufficient = false;
+
+    /**
+     * Minimum candles needed for valid indicators (typically 20 for BB)
+     */
+    private int requiredCandleCount;
+
+    /**
+     * Actual candle count available when this context was built
+     */
+    private int actualCandleCount;
+
     // ======================== SUPERTREND ========================
 
     /**

@@ -907,11 +907,16 @@ public class FamilyCandleProcessor {
                 log.warn("⚠️ MTF Distribution calculation failed for {}: {}", familyId, e.getMessage());
             }
         } else {
-            log.debug("⚠️ MTF Distribution skipped for {} - insufficient sub-candles (equityCount={}, futureCount={}, isCommodity={})",
-                      familyId,
-                      collector.getEquitySubCandles() != null ? collector.getEquitySubCandles().size() : 0,
-                      collector.getFutureSubCandles() != null ? collector.getFutureSubCandles().size() : 0,
-                      isCommodity);
+            // PRICE_ACTION_FIX: For 1m candles (single sub-candle), create minimal MTFDistribution
+            // This ensures Price Action analysis has valid data even for base timeframe
+            com.kotsin.consumer.model.MTFDistribution minimalDist = createMinimalMTFDistribution(equity, future);
+            if (minimalDist != null) {
+                builder.mtfDistribution(minimalDist);
+                log.debug("MTF Distribution (minimal) for {}: single candle, direction={}, confidence={}",
+                          familyId, minimalDist.getDominantDirection(), minimalDist.getConfidence());
+            } else {
+                log.debug("⚠️ MTF Distribution skipped for {} - no valid candle data", familyId);
+            }
         }
 
         FamilyCandle familyCandle = builder
@@ -1042,6 +1047,77 @@ public class FamilyCandleProcessor {
         return DataQuality.VALID;
     }
     
+    /**
+     * PRICE_ACTION_FIX: Create minimal MTFDistribution for single-candle (1m) timeframes.
+     *
+     * This ensures Price Action analysis has valid data even when there's only one sub-candle.
+     * Lower confidence (0.3) indicates limited data, but the direction and momentum values
+     * allow downstream analysis to function correctly.
+     *
+     * @param equity The equity candle (may be null)
+     * @param future The future candle (may be null)
+     * @return Minimal MTFDistribution or null if no valid candle data
+     */
+    private com.kotsin.consumer.model.MTFDistribution createMinimalMTFDistribution(
+            InstrumentCandle equity, InstrumentCandle future) {
+
+        // Use equity first, fallback to future (handles commodities)
+        InstrumentCandle primary = equity != null ? equity : future;
+        if (primary == null || primary.getClose() <= 0) {
+            return null;
+        }
+
+        // Determine direction from single candle
+        com.kotsin.consumer.model.MTFDistribution.Direction direction;
+        if (primary.getClose() > primary.getOpen()) {
+            direction = com.kotsin.consumer.model.MTFDistribution.Direction.BULLISH;
+        } else if (primary.getClose() < primary.getOpen()) {
+            direction = com.kotsin.consumer.model.MTFDistribution.Direction.BEARISH;
+        } else {
+            direction = com.kotsin.consumer.model.MTFDistribution.Direction.NEUTRAL;
+        }
+
+        // Calculate momentum from single candle: (close - open) / (high - low)
+        double range = primary.getHigh() - primary.getLow();
+        double momentum = range > 0 ? (primary.getClose() - primary.getOpen()) / range : 0;
+
+        // Create minimal evolution metrics
+        com.kotsin.consumer.model.EvolutionMetrics minimalEvolution =
+            com.kotsin.consumer.model.EvolutionMetrics.builder()
+                .candleSequence(com.kotsin.consumer.model.EvolutionMetrics.CandleSequence.builder()
+                    .pattern(direction == com.kotsin.consumer.model.MTFDistribution.Direction.BULLISH ? "↑" :
+                             direction == com.kotsin.consumer.model.MTFDistribution.Direction.BEARISH ? "↓" : "─")
+                    .sequenceType(direction == com.kotsin.consumer.model.MTFDistribution.Direction.BULLISH ?
+                        com.kotsin.consumer.model.EvolutionMetrics.CandleSequence.SequenceType.TREND :
+                        direction == com.kotsin.consumer.model.MTFDistribution.Direction.BEARISH ?
+                        com.kotsin.consumer.model.EvolutionMetrics.CandleSequence.SequenceType.TREND :
+                        com.kotsin.consumer.model.EvolutionMetrics.CandleSequence.SequenceType.CONSOLIDATION)
+                    .longestRun(1)
+                    .reversalCount(0)
+                    .momentumSlope(momentum)
+                    .build())
+                .build();
+
+        return com.kotsin.consumer.model.MTFDistribution.builder()
+            .bullishSubCandles(direction == com.kotsin.consumer.model.MTFDistribution.Direction.BULLISH ? 1 : 0)
+            .bearishSubCandles(direction == com.kotsin.consumer.model.MTFDistribution.Direction.BEARISH ? 1 : 0)
+            .totalSubCandles(1)
+            .directionalConsistency(1.0)  // Single candle = 100% consistent
+            .dominantDirection(direction)
+            .volumeSpikeCandleIndex(0)    // Only one candle
+            .earlyVolumeRatio(1.0)        // All volume is "early"
+            .lateVolumeRatio(0.0)
+            .volumeDrying(false)
+            .earlyMomentum(momentum)
+            .lateMomentum(momentum)
+            .momentumShift(0)
+            .momentumAccelerating(false)
+            .momentumDecelerating(false)
+            .confidence(0.3)              // Lower confidence for single candle
+            .evolution(minimalEvolution)
+            .build();
+    }
+
     /**
      * Validate OHLC data, log errors, and record metrics
      * Delegates to centralized OHLCValidator utility

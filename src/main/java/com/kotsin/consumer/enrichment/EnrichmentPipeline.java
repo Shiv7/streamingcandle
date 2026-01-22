@@ -71,6 +71,21 @@ public class EnrichmentPipeline {
      * @return Complete pipeline result including all phases
      */
     public PipelineResult process(FamilyCandle family) {
+        return process(family, null);
+    }
+
+    /**
+     * Process a FamilyCandle through the complete enrichment pipeline with a pre-calculated score.
+     *
+     * FIX: This overload prevents duplicate data insertion into Redis price history.
+     * When EnrichedQuantScore is already calculated by QuantScoreProcessor, we reuse it
+     * instead of recalculating (which would call technicalEnricher.enrich() twice).
+     *
+     * @param family FamilyCandle to process
+     * @param preCalculatedScore Optional pre-calculated EnrichedQuantScore (null to calculate fresh)
+     * @return Complete pipeline result including all phases
+     */
+    public PipelineResult process(FamilyCandle family, EnrichedQuantScore preCalculatedScore) {
         if (family == null || family.getFamilyId() == null) {
             return PipelineResult.empty("UNKNOWN");
         }
@@ -84,9 +99,12 @@ public class EnrichmentPipeline {
 
         try {
             // =============== Phase 1-4: Enriched Quant Score ===============
-            EnrichedQuantScore enrichedScore = quantScoreCalculator.calculate(family);
+            // FIX: Reuse pre-calculated score if available to avoid duplicate Redis insertions
+            EnrichedQuantScore enrichedScore = preCalculatedScore != null
+                    ? preCalculatedScore
+                    : quantScoreCalculator.calculate(family);
             long phase1to4End = System.currentTimeMillis();
-            long phase1to4Duration = phase1to4End - phase1to4Start;
+            long phase1to4Duration = preCalculatedScore != null ? 0 : (phase1to4End - phase1to4Start);
 
             // =============== Phase 5: State Machine Trading ===============
             // The InstrumentStateManager is the NEW signal generation system.

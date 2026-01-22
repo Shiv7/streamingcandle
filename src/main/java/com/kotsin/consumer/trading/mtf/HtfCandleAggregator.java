@@ -1,12 +1,14 @@
 package com.kotsin.consumer.trading.mtf;
 
 import com.kotsin.consumer.domain.model.FamilyCandle;
+import com.kotsin.consumer.infrastructure.redis.RedisCandleHistoryService;
+import com.kotsin.consumer.model.UnifiedCandle;
 import lombok.AllArgsConstructor;
 import lombok.Builder;
 import lombok.Data;
 import lombok.NoArgsConstructor;
-import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
+import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.data.redis.core.RedisTemplate;
 import org.springframework.stereotype.Service;
 
@@ -16,6 +18,7 @@ import java.time.ZoneId;
 import java.time.ZonedDateTime;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.Map;
 
@@ -45,10 +48,26 @@ import java.util.Map;
  */
 @Slf4j
 @Service
-@RequiredArgsConstructor
 public class HtfCandleAggregator {
 
     private final RedisTemplate<String, String> redisTemplate;
+
+    @Autowired(required = false)
+    private RedisCandleHistoryService candleHistoryService;
+
+    // Track which familyId:timeframe pairs have been SUCCESSFULLY bootstrapped
+    // Key format: "familyId:timeframe" (e.g., "3150:1h", "3150:4h")
+    private final Set<String> bootstrappedPairs = ConcurrentHashMap.newKeySet();
+
+    // FIX: Track bootstrap attempts for retry logic (allows up to 3 retries before giving up)
+    // Key format: "familyId:timeframe" -> attempt count
+    private final Map<String, Integer> bootstrapAttempts = new ConcurrentHashMap<>();
+    private static final int MAX_BOOTSTRAP_ATTEMPTS = 3;
+
+    @Autowired
+    public HtfCandleAggregator(RedisTemplate<String, String> redisTemplate) {
+        this.redisTemplate = redisTemplate;
+    }
 
     // Redis key patterns
     private static final String HTF_CANDLE_KEY = "smtis:htf:candles:%s:%s";  // familyId:timeframe
@@ -118,7 +137,7 @@ public class HtfCandleAggregator {
     private HtfCandle aggregateCandle(String familyId, int tfMinutes,
                                        double open, double high, double low, double close,
                                        double volume, long timestamp) {
-        String tfKey = tfMinutes + "m";
+        String tfKey = normalizeTimeframe(tfMinutes);
         String key = familyId + ":" + tfKey;
 
         // Get or create building candle
@@ -264,13 +283,42 @@ public class HtfCandleAggregator {
      * Get historical HTF candles for SMC analysis
      *
      * @param familyId  The family ID
-     * @param timeframe Timeframe string ("5m", "15m", "1h", "4h", "daily")
+     * @param timeframe Timeframe string ("5m", "15m", "1h", "4h", "daily") - normalized format
      * @param count     Number of candles to retrieve
      * @return List of HtfCandles (oldest first)
      */
     public List<HtfCandle> getCandles(String familyId, String timeframe, int count) {
         String key = String.format(HTF_CANDLE_KEY, familyId, timeframe);
         List<String> entries = redisTemplate.opsForList().range(key, -count, -1);
+
+        // Bootstrap from historical service if insufficient data
+        // Track per timeframe to ensure each timeframe is bootstrapped independently
+        // FIX: Allow retries for failed bootstraps (up to MAX_BOOTSTRAP_ATTEMPTS)
+        // FIX: Increase threshold from 20 to 50 to ensure we get historical data, not just today's real-time
+        String bootstrapKey = familyId + ":" + timeframe;
+        int currentSize = entries != null ? entries.size() : 0;
+
+        // FIX: Trigger bootstrap if we have fewer than 50 candles (not just 20)
+        // This ensures we get historical data from RedisCandleHistoryService
+        // Real-time aggregation typically produces ~6 1h candles per day
+        // We want at least 50 for proper swing detection and market structure analysis
+        boolean needsBootstrap = currentSize < 50;
+        boolean alreadySuccessful = bootstrappedPairs.contains(bootstrapKey);
+        int attempts = bootstrapAttempts.getOrDefault(bootstrapKey, 0);
+        boolean canRetry = attempts < MAX_BOOTSTRAP_ATTEMPTS;
+
+        log.debug("[HTF_DEBUG] {} {} getCandles - currentSize={}, needsBootstrap={}, alreadySuccessful={}, attempts={}, canRetry={}",
+                familyId, timeframe, currentSize, needsBootstrap, alreadySuccessful, attempts, canRetry);
+
+        if (needsBootstrap && !alreadySuccessful && canRetry) {
+            log.info("[HTF_DEBUG] {} {} - Triggering bootstrap (attempt {}) - currentSize={} < 50",
+                    familyId, timeframe, attempts + 1, currentSize);
+            bootstrapFromHistoricalService(familyId, timeframe);
+            // Re-fetch after bootstrap
+            entries = redisTemplate.opsForList().range(key, -count, -1);
+            log.info("[HTF_DEBUG] {} {} - After bootstrap: {} entries", familyId, timeframe,
+                    entries != null ? entries.size() : 0);
+        }
 
         List<HtfCandle> candles = new ArrayList<>();
         if (entries == null) return candles;
@@ -298,14 +346,170 @@ public class HtfCandleAggregator {
     }
 
     /**
+     * Bootstrap HTF candles from RedisCandleHistoryService (historical 1m data)
+     * This bridges the gap between historical API data and the HTF candle store.
+     *
+     * FIX: Only mark as successfully bootstrapped if we have enough data (20+ candles).
+     * Failed bootstraps are tracked and can be retried up to MAX_BOOTSTRAP_ATTEMPTS times.
+     */
+    private void bootstrapFromHistoricalService(String familyId, String timeframe) {
+        String bootstrapKey = familyId + ":" + timeframe;
+
+        // FIX: Track attempt count for retry logic
+        int attemptCount = bootstrapAttempts.merge(bootstrapKey, 1, Integer::sum);
+        log.debug("[HTF] Bootstrap attempt {} for {} {}", attemptCount, familyId, timeframe);
+
+        if (candleHistoryService == null) {
+            log.debug("[HTF] CandleHistoryService not available for bootstrap - will retry later");
+            // FIX: Do NOT mark as bootstrapped - allow retry when service becomes available
+            return;
+        }
+
+        try {
+            // FIRST: Try to get pre-aggregated candles directly (RedisCandleHistoryService now stores 1h)
+            log.info("[HTF_BOOTSTRAP_DEBUG] {} {} - Fetching pre-aggregated from RedisCandleHistoryService...", familyId, timeframe);
+            List<UnifiedCandle> preAggregated = candleHistoryService.getCandles(
+                    familyId, timeframe, 500, "N", "C");
+            log.info("[HTF_BOOTSTRAP_DEBUG] {} {} - Got {} pre-aggregated candles from history service",
+                    familyId, timeframe, preAggregated.size());
+
+            // FIX: Increase threshold to 50 to match minimum requirement for good market structure analysis
+            if (preAggregated.size() >= 50) {
+                // Convert UnifiedCandle to HtfCandle and store
+                for (UnifiedCandle uc : preAggregated) {
+                    HtfCandle htf = HtfCandle.builder()
+                            .open(uc.getOpen())
+                            .high(uc.getHigh())
+                            .low(uc.getLow())
+                            .close(uc.getClose())
+                            .volume(uc.getVolume())
+                            .timestamp(uc.getWindowEndMillis())
+                            .timeframe(timeframe)
+                            .build();
+                    storeCompletedCandle(familyId, htf);
+                }
+                log.info("[HTF] Bootstrapped {} pre-aggregated {} candles for {} from historical service",
+                        preAggregated.size(), timeframe, familyId);
+                // FIX: Mark as successfully bootstrapped only when we have enough data
+                bootstrappedPairs.add(bootstrapKey);
+                return;
+            }
+
+            // FIX: ALWAYS try 1m fallback if pre-aggregated is insufficient (< 50)
+            // This handles the case where RedisCandleHistoryService was bootstrapped before 1h aggregation was added
+            log.info("[HTF_BOOTSTRAP_DEBUG] {} {} - Pre-aggregated insufficient ({}), trying 1m fallback...",
+                    familyId, timeframe, preAggregated.size());
+
+            // FALLBACK: Get 1m candles and aggregate manually
+            // FIX: Increased from 500 to 15000 to support 2 months of historical data
+            List<UnifiedCandle> candles1m = candleHistoryService.getCandles(
+                    familyId, "1m", 15000, "N", "C");
+
+            log.info("[HTF_BOOTSTRAP_DEBUG] {} {} - Got {} 1m candles for manual aggregation",
+                    familyId, timeframe, candles1m.size());
+
+            if (candles1m.isEmpty()) {
+                log.warn("[HTF] No historical 1m candles found for {} {} - attempt {}/{}",
+                        familyId, timeframe, attemptCount, MAX_BOOTSTRAP_ATTEMPTS);
+                // FIX: Do NOT mark as bootstrapped - allow retry
+                return;
+            }
+
+            // Determine aggregation period based on timeframe
+            int periodMinutes = switch (timeframe) {
+                case "5m" -> 5;
+                case "15m" -> 15;
+                case "1h" -> 60;
+                case "4h" -> 240;
+                default -> 60;
+            };
+
+            // Aggregate 1m candles to requested timeframe
+            List<HtfCandle> aggregated = aggregateHistoricalCandles(candles1m, timeframe, periodMinutes);
+
+            log.info("[HTF_BOOTSTRAP_DEBUG] {} {} - Aggregated {} {} candles from {} 1m candles",
+                    familyId, timeframe, aggregated.size(), timeframe, candles1m.size());
+
+            // FIX: Lower threshold to 20 for aggregated candles (we tried our best)
+            if (aggregated.size() >= 20) {
+                // Store aggregated candles
+                for (HtfCandle candle : aggregated) {
+                    storeCompletedCandle(familyId, candle);
+                }
+                log.info("[HTF] Successfully bootstrapped {} {} candles for {} from 1m aggregation",
+                        aggregated.size(), timeframe, familyId);
+                // FIX: Mark as successfully bootstrapped only when we have enough data
+                bootstrappedPairs.add(bootstrapKey);
+            } else {
+                log.warn("[HTF] Insufficient aggregated candles ({}) for {} {} - need 20+, attempt {}/{}",
+                        aggregated.size(), familyId, timeframe, attemptCount, MAX_BOOTSTRAP_ATTEMPTS);
+                // FIX: Do NOT mark as bootstrapped - allow retry
+            }
+
+        } catch (Exception e) {
+            log.warn("[HTF] Bootstrap failed for {} {} (attempt {}/{}): {}",
+                    familyId, timeframe, attemptCount, MAX_BOOTSTRAP_ATTEMPTS, e.getMessage());
+            // FIX: Do NOT mark as bootstrapped on exception - allow retry
+        }
+    }
+
+    /**
+     * Aggregate 1m UnifiedCandles to HTF candles
+     */
+    private List<HtfCandle> aggregateHistoricalCandles(List<UnifiedCandle> candles1m,
+                                                        String timeframe, int periodMinutes) {
+        List<HtfCandle> result = new ArrayList<>();
+        if (candles1m.isEmpty()) return result;
+
+        // Sort by timestamp
+        candles1m.sort((a, b) -> Long.compare(a.getWindowStartMillis(), b.getWindowStartMillis()));
+
+        long periodMs = periodMinutes * 60 * 1000L;
+        Map<Long, List<UnifiedCandle>> windows = new java.util.LinkedHashMap<>();
+
+        for (UnifiedCandle c : candles1m) {
+            long windowStart = (c.getWindowStartMillis() / periodMs) * periodMs;
+            windows.computeIfAbsent(windowStart, k -> new ArrayList<>()).add(c);
+        }
+
+        for (Map.Entry<Long, List<UnifiedCandle>> entry : windows.entrySet()) {
+            List<UnifiedCandle> windowCandles = entry.getValue();
+            if (windowCandles.isEmpty()) continue;
+
+            double open = windowCandles.get(0).getOpen();
+            double close = windowCandles.get(windowCandles.size() - 1).getClose();
+            double high = windowCandles.stream().mapToDouble(UnifiedCandle::getHigh).max().orElse(0);
+            double low = windowCandles.stream().mapToDouble(UnifiedCandle::getLow).min().orElse(0);
+            double volume = windowCandles.stream().mapToDouble(UnifiedCandle::getVolume).sum();
+
+            result.add(HtfCandle.builder()
+                    .open(open)
+                    .high(high)
+                    .low(low)
+                    .close(close)
+                    .volume(volume)
+                    .timestamp(entry.getKey() + periodMs) // End of window
+                    .timeframe(timeframe)
+                    .candleCount(windowCandles.size())
+                    .build());
+        }
+
+        return result;
+    }
+
+    /**
      * Get candles as arrays for SmcAnalyzer
      */
     public SmcCandleData getCandleArrays(String familyId, String timeframe, int count) {
         List<HtfCandle> candles = getCandles(familyId, timeframe, count);
 
         if (candles.isEmpty()) {
+            log.warn("[HTF_DEBUG] {} {} - No candles found! Check bootstrap status.", familyId, timeframe);
             return SmcCandleData.empty(timeframe);
         }
+
+        log.debug("[HTF_DEBUG] {} {} - Retrieved {} candles for SMC analysis",
+                familyId, timeframe, candles.size());
 
         double[] opens = new double[candles.size()];
         double[] highs = new double[candles.size()];
@@ -368,6 +572,15 @@ public class HtfCandleAggregator {
     }
 
     // ============ HELPER METHODS ============
+
+    /**
+     * Normalize timeframe to standard format (e.g., 60 -> "1h", 240 -> "4h")
+     */
+    private String normalizeTimeframe(int minutes) {
+        if (minutes == 60) return "1h";
+        if (minutes == 240) return "4h";
+        return minutes + "m";
+    }
 
     private double getOpen(FamilyCandle family) {
         if (family.getFuture() != null) return family.getFuture().getOpen();

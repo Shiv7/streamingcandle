@@ -415,7 +415,7 @@ public class SignalContext {
                 .entryPrice(signal.getEntryPrice())
                 .stopLoss(signal.getStopLoss())
                 .target1(signal.getTarget1())
-                .target2(signal.getTarget2() != null ? signal.getTarget2() : signal.getTarget1() * 1.005)
+                .target2(signal.getTarget2() > 0 ? signal.getTarget2() : signal.getTarget1() * 1.005)
                 .initialScore(signal.getConfidence() * 100)
                 .initialConfidence(signal.getConfidence())
                 .currentScore(signal.getConfidence() * 100)
@@ -434,23 +434,29 @@ public class SignalContext {
                 }
             }
 
-            // Divergence
+            // Divergence - GRACEFUL_DEGRADATION: Extract from historical context signals
+            boolean pcrDiv = false;
+            boolean oiDiv = false;
+            double divMag = 0;
+
             if (score.getHistoricalContext() != null) {
                 var hist = score.getHistoricalContext();
-                builder.hasPcrDivergence(hist.isPcrDivergence());
-                builder.hasOiDivergence(hist.isOiDivergence());
+                // Use bullish/bearish flips as proxy for PCR divergence
+                pcrDiv = hist.hasBullishFlip() || hist.hasBearishFlip();
+                if (pcrDiv) divMag += 50;
+
+                // Use absorption/exhaustion as proxy for OI divergence
+                oiDiv = hist.isAbsorptionDetected() || hist.isSellingExhaustion() || hist.isBuyingExhaustion();
+                if (oiDiv) divMag += 50;
 
                 // Get OFI zscore
                 if (hist.getOfiContext() != null) {
                     builder.initialOfiZscore(hist.getOfiContext().getZscore());
                 }
-
-                // Calculate divergence magnitude
-                double divMag = 0;
-                if (hist.isPcrDivergence()) divMag += 50;
-                if (hist.isOiDivergence()) divMag += 50;
-                builder.initialDivergenceMagnitude(divMag);
             }
+            builder.hasPcrDivergence(pcrDiv);
+            builder.hasOiDivergence(oiDiv);
+            builder.initialDivergenceMagnitude(divMag);
 
             // MTF SMC context
             if (score.getMtfSmcContext() != null) {
@@ -459,9 +465,9 @@ public class SignalContext {
                 builder.initialRangePosition(smc.getRangePosition());
             }
 
-            // Session
-            if (score.getTimeContext() != null) {
-                builder.initialSession(score.getTimeContext().getSession());
+            // Session - GRACEFUL_DEGRADATION: Convert Session enum to String
+            if (score.getTimeContext() != null && score.getTimeContext().getSession() != null) {
+                builder.initialSession(score.getTimeContext().getSession().name());
             }
 
             // Volume - use base score volume if available

@@ -114,9 +114,27 @@ public class MtfSmcContext {
     private boolean inPremium;
 
     /**
-     * Is price in discount zone? (Below 50% = where to BUY)
+     * Is price in discount zone? (Below 40% = strong discount)
      */
     private boolean inDiscount;
+
+    /**
+     * Is price in equilibrium zone? (40-60% = neutral zone)
+     * FIX: Added to prevent "exactly at 50%" deadlock
+     */
+    private boolean inEquilibrium;
+
+    /**
+     * Is zone acceptable for LONG? (Below 60% = discount + equilibrium lower)
+     * FIX: More lenient zone check for LONG trades
+     */
+    private boolean acceptableForLong;
+
+    /**
+     * Is zone acceptable for SHORT? (Above 40% = premium + equilibrium upper)
+     * FIX: More lenient zone check for SHORT trades
+     */
+    private boolean acceptableForShort;
 
     /**
      * Position in daily range (0.0 = at low, 1.0 = at high)

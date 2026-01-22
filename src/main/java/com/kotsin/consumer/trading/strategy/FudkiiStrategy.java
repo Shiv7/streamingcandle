@@ -1,7 +1,9 @@
 package com.kotsin.consumer.trading.strategy;
 
 import com.kotsin.consumer.enrichment.EnrichedQuantScoreCalculator.EnrichedQuantScore;
+import com.kotsin.consumer.enrichment.model.HistoricalContext;
 import com.kotsin.consumer.enrichment.model.TechnicalContext;
+import com.kotsin.consumer.enrichment.signal.model.SignalRationale;
 import com.kotsin.consumer.enrichment.signal.model.TradingSignal;
 import com.kotsin.consumer.enrichment.signal.model.TradingSignal.Direction;
 import com.kotsin.consumer.enrichment.signal.model.TradingSignal.Horizon;
@@ -11,6 +13,8 @@ import com.kotsin.consumer.trading.model.TradeOutcome.ExitReason;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.stereotype.Component;
 
+import java.util.ArrayList;
+import java.util.List;
 import java.util.Optional;
 import java.util.UUID;
 
@@ -107,6 +111,24 @@ public class FudkiiStrategy implements TradingStrategy {
         TechnicalContext tech = score.getTechnicalContext();
         if (tech == null) {
             log.debug("[FUDKII_DIAG] {} REJECTED: TechnicalContext is NULL", scripCode);
+            return Optional.empty();
+        }
+
+        // FIX: Filter by required timeframe FIRST - FUDKII only works on 30m candles
+        String timeframe = tech.getTimeframe();
+        if (!REQUIRED_TIMEFRAME.equals(timeframe)) {
+            log.trace("[FUDKII] {} Skipping non-30m candle | tf={}", scripCode, timeframe);
+            return Optional.empty();
+        }
+
+        // FIX: Validate BB data quality - reject if insufficient history caused fake values
+        // When history < 20 candles, BB returns bbWidthPct=0 and bbPercentB=0.5 or NaN
+        if (tech.getBbUpper() <= 0 || tech.getBbLower() <= 0 ||
+            tech.getBbUpper() <= tech.getBbLower() ||
+            Double.isNaN(tech.getBbPercentB())) {
+            log.debug("[FUDKII_DIAG] {} REJECTED: Invalid BB data (insufficient history) | " +
+                    "bbUpper={} | bbLower={} | bbPctB={}",
+                    scripCode, tech.getBbUpper(), tech.getBbLower(), tech.getBbPercentB());
             return Optional.empty();
         }
 
@@ -345,19 +367,35 @@ public class FudkiiStrategy implements TradingStrategy {
             log.info("[FUDKII_DIAG] {} PASS: BB near-break with 2-candle confirmation | bbPctB={}", scripCode, bbPctB);
         }
 
-        // 4. Check OFI alignment
+        // 4. Check OFI alignment - CHANGED FROM HARD GATE TO SOFT MODIFIER
+        // Only reject if OFI is STRONGLY AGAINST the direction (z-score > 1.5 opposite way)
+        // Neutral or mildly aligned OFI is acceptable - will affect confidence instead
         double ofiZscore = 0;
         if (score.getHistoricalContext() != null && score.getHistoricalContext().getOfiContext() != null) {
             ofiZscore = score.getHistoricalContext().getOfiContext().getZscore();
         }
 
-        boolean ofiAligned = (direction == Direction.LONG && ofiZscore > MIN_OFI_ZSCORE) ||
-                            (direction == Direction.SHORT && ofiZscore < -MIN_OFI_ZSCORE);
+        // FIX: Only block if OFI is STRONGLY against us (not just "not aligned")
+        boolean ofiStronglyAgainst = (direction == Direction.LONG && ofiZscore < -MIN_OFI_ZSCORE) ||
+                                     (direction == Direction.SHORT && ofiZscore > MIN_OFI_ZSCORE);
 
-        if (!ofiAligned) {
-            log.trace("[FUDKII] OFI not strongly aligned: {:.2f}", ofiZscore);
+        if (ofiStronglyAgainst) {
+            log.debug("[FUDKII_DIAG] {} BLOCKED: OFI STRONGLY AGAINST direction | ofi={} | direction={}",
+                    scripCode, String.format("%.2f", ofiZscore), direction);
             return Optional.empty();
         }
+
+        // Calculate OFI confidence bonus (used later in confidence calculation)
+        double ofiConfidenceBonus = 0;
+        if ((direction == Direction.LONG && ofiZscore > MIN_OFI_ZSCORE) ||
+            (direction == Direction.SHORT && ofiZscore < -MIN_OFI_ZSCORE)) {
+            ofiConfidenceBonus = 0.10;  // Strong OFI alignment
+            log.debug("[FUDKII_DIAG] {} OFI strongly aligned | ofi={} | bonus=+10%", scripCode, String.format("%.2f", ofiZscore));
+        } else if ((direction == Direction.LONG && ofiZscore > 0.5) ||
+                   (direction == Direction.SHORT && ofiZscore < -0.5)) {
+            ofiConfidenceBonus = 0.05;  // Moderate OFI alignment
+        }
+        // Neutral OFI (between -0.5 and 0.5) = no bonus, no penalty
 
         // 5. Check MTF alignment (HTF bullish for LONG, bearish for SHORT)
         if (tech.getMtfBullishPercentage() > 0) {
@@ -426,15 +464,87 @@ public class FudkiiStrategy implements TradingStrategy {
         }
 
         // Calculate confidence
-        double confidence = 0.65;  // Base for BB squeeze + ST flip
-        if (Math.abs(ofiZscore) > 2.0) confidence += 0.1;  // Strong OFI
+        double confidence = 0.60;  // Base (lowered from 0.65 since OFI is now soft gate)
+        confidence += ofiConfidenceBonus;  // OFI bonus calculated earlier (0, 0.05, or 0.10)
         if (tech.isVolatilityExpanding()) confidence += 0.05;  // Vol expanding after squeeze
         if (tech.getMtfBullishPercentage() > 0.7 && direction == Direction.LONG) confidence += 0.05;
         if (tech.getMtfBullishPercentage() < 0.3 && direction == Direction.SHORT) confidence += 0.05;
+        if (nearBreakoutConfirmation) confidence += 0.05;  // 2-candle confirmation adds confidence
         confidence = Math.min(0.95, confidence);
 
         log.info("[FUDKII] ENTRY TRIGGERED | {} {} @ {:.2f} | ST flip | BB %B={:.2f} | OFI={:.2f} | R:R={:.2f} | conf={:.0f}%",
                 score.getScripCode(), direction, price, bbPctB, ofiZscore, rr, confidence * 100);
+
+        // Extract microstructure metrics (vpin, kyleLambda)
+        Double vpin = null;
+        Double kyleLambda = null;
+        HistoricalContext histCtx = score.getHistoricalContext();
+        if (histCtx != null) {
+            if (histCtx.getVpinContext() != null) {
+                vpin = histCtx.getVpinContext().getCurrentValue();
+            }
+            if (histCtx.getLambdaContext() != null) {
+                kyleLambda = histCtx.getLambdaContext().getCurrentValue();
+            }
+        }
+
+        // Get GEX regime
+        String gexRegime = score.getGexRegime() != null ? score.getGexRegime().name() : null;
+
+        // Build entry reasons list
+        List<String> entryReasons = new ArrayList<>();
+        entryReasons.add("BB squeeze detected (low volatility compression)");
+        if (stFlip) {
+            entryReasons.add(String.format("SuperTrend flipped %s", direction == Direction.LONG ? "bullish" : "bearish"));
+        } else if (nearBreakoutConfirmation) {
+            entryReasons.add("2-candle near-breakout confirmation");
+        }
+        if (bbBreak) {
+            entryReasons.add(String.format("Price broke %s BB (%%B=%.2f)", direction == Direction.LONG ? "upper" : "lower", bbPctB));
+        }
+        entryReasons.add(String.format("OFI confirms direction (z-score=%.2f)", ofiZscore));
+        if (tech.getMtfBullishPercentage() > 0) {
+            entryReasons.add(String.format("MTF alignment: %.0f%% %s",
+                    direction == Direction.LONG ? tech.getMtfBullishPercentage() * 100 : (1 - tech.getMtfBullishPercentage()) * 100,
+                    direction == Direction.LONG ? "bullish" : "bearish"));
+        }
+        if (vpin != null && vpin > 0.5) {
+            entryReasons.add(String.format("Informed flow active (VPIN=%.2f)", vpin));
+        }
+
+        // Build SignalRationale
+        SignalRationale rationale = SignalRationale.builder()
+                .headline(String.format("FUDKII %s | BB squeeze breakout with ST flip", direction))
+                .thesis(String.format("Volatility compression (BB squeeze) resolved with %s breakout, " +
+                        "confirmed by SuperTrend flip and OFI z-score of %.2f indicating %s flow pressure.",
+                        direction == Direction.LONG ? "upward" : "downward",
+                        ofiZscore,
+                        direction == Direction.LONG ? "buying" : "selling"))
+                .tradeType(SignalRationale.TradeType.BREAKOUT)
+                .trigger(SignalRationale.TriggerContext.builder()
+                        .type(SignalRationale.TriggerContext.TriggerType.TECHNICAL_SIGNAL)
+                        .description("BB squeeze + SuperTrend flip combination")
+                        .patternName("FUDKII_BREAKOUT")
+                        .triggerEvents(entryReasons)
+                        .build())
+                .flowContext(SignalRationale.FlowContext.builder()
+                        .ofiStatus(String.format("OFI z-score: %.2f (%s)", ofiZscore,
+                                ofiZscore > 2 ? "Strong" : ofiZscore > 1.5 ? "Moderate" : "Normal"))
+                        .vpinStatus(vpin != null ? String.format("VPIN: %.2f (%s)", vpin,
+                                vpin > 0.7 ? "High informed trading" : vpin > 0.5 ? "Moderate" : "Low") : "N/A")
+                        .build())
+                .technicalContext(SignalRationale.TechnicalContext.builder()
+                        .superTrendStatus(String.format("SuperTrend: %s (value=%.2f)",
+                                tech.isSuperTrendBullish() ? "Bullish" : "Bearish", tech.getSuperTrendValue()))
+                        .bbPosition(String.format("BB %%B: %.2f (%s)", bbPctB,
+                                bbPctB > 1 ? "Above upper" : bbPctB < 0 ? "Below lower" : "Inside bands"))
+                        .momentumStatus(tech.isVolatilityExpanding() ? "Volatility expanding post-squeeze" : "Volatility stable")
+                        .build())
+                .edge(SignalRationale.EdgeDefinition.builder()
+                        .type(SignalRationale.EdgeDefinition.EdgeType.TECHNICAL_CONFLUENCE)
+                        .description("BB squeeze energy release with trend confirmation from SuperTrend flip")
+                        .build())
+                .build();
 
         // Build signal
         return Optional.of(TradingSignal.builder()
@@ -447,6 +557,7 @@ public class FudkiiStrategy implements TradingStrategy {
                 .horizon(Horizon.SWING)
                 .category(SignalCategory.BREAKOUT)
                 .setupId(STRATEGY_ID)
+                .currentPrice(price)
                 .entryPrice(price)
                 .stopLoss(stopLevel)
                 .target1(target1)
@@ -455,6 +566,12 @@ public class FudkiiStrategy implements TradingStrategy {
                 .dataTimestamp(java.time.Instant.ofEpochMilli(score.getPriceTimestamp()))
                 .headline(String.format("FUDKII %s | BB squeeze + ST flip | OFI=%.2f | ATR=%.2f | R:R=%.2f",
                         direction, ofiZscore, atr, rr))
+                // NEW: Added missing fields
+                .vpin(vpin)
+                .kyleLambda(kyleLambda)
+                .gexRegime(gexRegime)
+                .entryReasons(entryReasons)
+                .rationale(rationale)
                 .build());
     }
 

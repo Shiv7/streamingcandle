@@ -54,14 +54,18 @@ public class DivergenceStrengthCalculator {
             return DivergenceStrength.none();
         }
 
+        // GRACEFUL_DEGRADATION: Check divergence from historical context signals
+        boolean hasPcrDivergence = false;
+        boolean hasOiDivergence = false;
         HistoricalContext hist = score.getHistoricalContext();
-        if (hist == null) {
-            return DivergenceStrength.none();
-        }
 
-        // Check if any divergence detected
-        boolean hasPcrDivergence = hist.isPcrDivergence();
-        boolean hasOiDivergence = hist.isOiDivergence();
+        if (hist != null) {
+            // Use bullish/bearish flips as proxy for PCR divergence
+            hasPcrDivergence = hist.hasBullishFlip() || hist.hasBearishFlip();
+
+            // Use absorption/exhaustion as proxy for OI divergence
+            hasOiDivergence = hist.isAbsorptionDetected() || hist.isSellingExhaustion() || hist.isBuyingExhaustion();
+        }
 
         if (!hasPcrDivergence && !hasOiDivergence) {
             return DivergenceStrength.none();

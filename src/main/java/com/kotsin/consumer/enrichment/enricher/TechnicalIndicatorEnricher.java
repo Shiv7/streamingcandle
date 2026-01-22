@@ -34,6 +34,10 @@ public class TechnicalIndicatorEnricher {
     private final RedisTemplate<String, String> redisTemplate;
     private final MTFSuperTrendAggregator mtfAggregator;
 
+    // FIX: Track last stored timestamp per family/timeframe to prevent duplicate insertions
+    // Key format: "familyId:timeframe" -> lastTimestamp
+    private final java.util.concurrent.ConcurrentHashMap<String, Long> lastStoredTimestamp = new java.util.concurrent.ConcurrentHashMap<>();
+
     // SuperTrend parameters
     private static final int SUPERTREND_PERIOD = 10;
     private static final double SUPERTREND_MULTIPLIER = 3.0;
@@ -69,11 +73,22 @@ public class TechnicalIndicatorEnricher {
         double low = getLowPrice(family);
         long timestamp = getTimestamp(family);
 
-        // Store current price in history (legacy format for backward compatibility)
-        storePriceHistory(familyId, timeframe, high, low, close);
+        // FIX: Check for duplicate timestamp before storing (prevents double insertion)
+        String dedupKey = familyId + ":" + timeframe;
+        Long lastTs = lastStoredTimestamp.get(dedupKey);
+        if (lastTs != null && lastTs == timestamp) {
+            log.debug("[TECH] Skipping duplicate candle for {} {} ts={}", familyId, timeframe, timestamp);
+            // Still calculate indicators from existing history, just don't store again
+        } else {
+            // Store current price in history (legacy format for backward compatibility)
+            storePriceHistory(familyId, timeframe, high, low, close);
 
-        // Store full OHLC history for SMC analysis
-        storeFullCandleHistory(familyId, timeframe, open, high, low, close, timestamp);
+            // Store full OHLC history for SMC analysis
+            storeFullCandleHistory(familyId, timeframe, open, high, low, close, timestamp);
+
+            // Update dedup tracker
+            lastStoredTimestamp.put(dedupKey, timestamp);
+        }
 
         // FIX: Update session data for pivot calculation
         updateSessionData(familyId, high, low, close);
@@ -82,14 +97,17 @@ public class TechnicalIndicatorEnricher {
         List<double[]> history = getPriceHistory(familyId, timeframe, BB_PERIOD + 5);
 
         if (history.size() < 5) {
-            // Not enough data yet
+            // Not enough data yet - mark as INSUFFICIENT quality
             return TechnicalContext.builder()
                     .familyId(familyId)
                     .timeframe(timeframe)
                     .currentPrice(close)
+                    .dataQualitySufficient(false)  // FIX: Mark as insufficient
+                    .requiredCandleCount(BB_PERIOD)
+                    .actualCandleCount(history.size())
                     .superTrendBullish(true)
                     .superTrendFlip(false)
-                    .bbPercentB(0.5)
+                    .bbPercentB(Double.NaN)  // FIX: Use NaN instead of fake 0.5
                     .build();
         }
 
@@ -142,6 +160,10 @@ public class TechnicalIndicatorEnricher {
                 .familyId(familyId)
                 .timeframe(timeframe)
                 .currentPrice(close)
+                // Data Quality - FIX: Track if we have enough data for valid indicators
+                .dataQualitySufficient(history.size() >= BB_PERIOD)
+                .requiredCandleCount(BB_PERIOD)
+                .actualCandleCount(history.size())
                 // SuperTrend
                 .superTrendValue(superTrend.value)
                 .superTrendBullish(superTrend.bullish)
@@ -303,8 +325,19 @@ public class TechnicalIndicatorEnricher {
 
     private BollingerBandResult calculateBollingerBands(List<double[]> history, int period, double stdDevMult) {
         if (history.size() < period) {
+            // FIX: Return values that clearly indicate INVALID data, not fake squeeze
+            // Previously returned widthPct=0 which triggered false squeeze detection!
+            // Now: widthPct=0.20 (20%) prevents false squeeze, percentB=NaN marks as invalid
             double close = history.isEmpty() ? 0 : history.get(history.size() - 1)[2];
-            return new BollingerBandResult(close, close, close, 0, 0, 0.5);
+            double fakeWidth = close * 0.20;  // 20% of price = clearly NOT a squeeze
+            return new BollingerBandResult(
+                close + fakeWidth / 2,  // upper = price + 10%
+                close,                   // middle = price
+                close - fakeWidth / 2,  // lower = price - 10%
+                fakeWidth,               // width = 20% of price
+                0.20,                    // widthPct = 20% (NOT a squeeze - threshold is 2%)
+                Double.NaN               // percentB = NaN (marks as invalid data)
+            );
         }
 
         // Get last 'period' closes

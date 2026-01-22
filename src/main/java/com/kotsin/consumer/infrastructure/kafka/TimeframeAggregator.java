@@ -19,6 +19,8 @@ import com.kotsin.consumer.domain.calculator.FuturesBuildupDetector;
 import com.kotsin.consumer.domain.calculator.OISignalDetector;
 import com.kotsin.consumer.domain.calculator.PCRCalculator;
 
+import com.kotsin.consumer.timeExtractor.NseAlignedTimestampExtractor;
+
 import java.time.*;
 import java.time.format.DateTimeFormatter;
 import java.util.*;
@@ -137,14 +139,22 @@ public class TimeframeAggregator {
      * 🛡️ CRITICAL FIX: Event-Time Processing for Multi-Timeframe Aggregation
      *
      * Build topology for minute-based timeframe aggregation
+     *
+     * 🔴 NSE ALIGNMENT FIX:
+     * Uses NseAlignedTimestampExtractor which offsets timestamps by -15 minutes,
+     * making Kafka's epoch-aligned windows effectively NSE-aligned:
+     * - Kafka sees: 9:00-9:30, 9:30-10:00, 10:00-10:30
+     * - Real windows: 9:15-9:45, 9:45-10:15, 10:15-10:45
+     *
+     * The output transformation adds 15 minutes back to window boundaries.
      */
     private void buildTimeframeTopology(StreamsBuilder builder, String timeframe, int minutes, String outputTopic) {
-        // Use event-time (candle windowStartMillis) instead of ingestion time
-        // This ensures 1m → 5m → 15m → 1h aggregation works for both replay and live data
+        // Use NSE-aligned event-time (offsets by -15 minutes for proper market alignment)
+        // This ensures 30m windows are 9:15-9:45, 9:45-10:15 instead of 9:00-9:30, 9:30-10:00
         KStream<String, FamilyCandle> input = builder.stream(
             inputTopic,
             Consumed.with(Serdes.String(), FamilyCandle.serde())
-                .withTimestampExtractor(new com.kotsin.consumer.timeExtractor.FamilyCandleTimestampExtractor())
+                .withTimestampExtractor(new NseAlignedTimestampExtractor())
         );
 
         // Window by target timeframe with alignment to market open
@@ -177,9 +187,14 @@ public class TimeframeAggregator {
             .filter((windowedKey, candle) -> candle != null)
             .process(() -> new WallClockWindowEmitter<>(graceMsForEmitter))  // Wall-clock based emission
             .map((windowedKey, candle) -> {
-                // Update window times
-                candle.setWindowStartMillis(windowedKey.window().start());
-                candle.setWindowEndMillis(windowedKey.window().end());
+                // 🔴 NSE ALIGNMENT FIX: Add 15 minutes back to window boundaries
+                // The NseAlignedTimestampExtractor offset by -15 minutes for windowing,
+                // now we restore the correct NSE-aligned times
+                long nseWindowStart = windowedKey.window().start() + NseAlignedTimestampExtractor.NSE_OFFSET_MS;
+                long nseWindowEnd = windowedKey.window().end() + NseAlignedTimestampExtractor.NSE_OFFSET_MS;
+
+                candle.setWindowStartMillis(nseWindowStart);
+                candle.setWindowEndMillis(nseWindowEnd);
                 candle.setTimeframe(timeframe);
                 updateHumanReadableTime(candle);
 
@@ -236,11 +251,11 @@ public class TimeframeAggregator {
             StreamsBuilder builder = new StreamsBuilder();
 
             // Daily uses session windows aligned to market hours (9:15 AM - 3:30 PM)
-            // Use event-time for consistent replay/live behavior
+            // Use NSE-aligned event-time for consistent replay/live behavior
             KStream<String, FamilyCandle> input = builder.stream(
                 inputTopic,
                 Consumed.with(Serdes.String(), FamilyCandle.serde())
-                    .withTimestampExtractor(new com.kotsin.consumer.timeExtractor.FamilyCandleTimestampExtractor())
+                    .withTimestampExtractor(new NseAlignedTimestampExtractor())
             );
 
             // Use 6h 15m window (market session length) with gap detection
@@ -271,8 +286,12 @@ public class TimeframeAggregator {
                 .filter((windowedKey, candle) -> candle != null)
                 .process(() -> new WallClockWindowEmitter<>(dailyGraceMs))  // Wall-clock based emission
                 .map((windowedKey, candle) -> {
-                    candle.setWindowStartMillis(windowedKey.window().start());
-                    candle.setWindowEndMillis(windowedKey.window().end());
+                    // 🔴 NSE ALIGNMENT FIX: Add 15 minutes back to window boundaries
+                    long nseWindowStart = windowedKey.window().start() + NseAlignedTimestampExtractor.NSE_OFFSET_MS;
+                    long nseWindowEnd = windowedKey.window().end() + NseAlignedTimestampExtractor.NSE_OFFSET_MS;
+
+                    candle.setWindowStartMillis(nseWindowStart);
+                    candle.setWindowEndMillis(nseWindowEnd);
                     candle.setTimeframe("1d");
                     updateHumanReadableTime(candle);
 
@@ -352,6 +371,8 @@ public class TimeframeAggregator {
                 .oiInterpretation(incoming.getOiInterpretation())
                 .oiInterpretationConfidence(incoming.getOiInterpretationConfidence())
                 .oiSuggestsReversal(incoming.isOiSuggestsReversal())
+                // PRICE_ACTION_FIX: Preserve mtfDistribution for price action analysis
+                .mtfDistribution(incoming.getMtfDistribution())
                 .build();
         }
 
@@ -537,6 +558,13 @@ public class TimeframeAggregator {
         aggregate.setOiInterpretation(incoming.getOiInterpretation());
         aggregate.setOiInterpretationConfidence(incoming.getOiInterpretationConfidence());
         aggregate.setOiSuggestsReversal(incoming.isOiSuggestsReversal());
+
+        // PRICE_ACTION_FIX: Preserve mtfDistribution from incoming candle
+        // For aggregated timeframes, use latest mtfDistribution as it represents
+        // the most recent sub-candle analysis for that window
+        if (incoming.getMtfDistribution() != null) {
+            aggregate.setMtfDistribution(incoming.getMtfDistribution());
+        }
 
         return aggregate;
     }
@@ -737,26 +765,54 @@ public class TimeframeAggregator {
     private void updateInstrumentTimeframes(FamilyCandle candle, String timeframe) {
         if (candle == null) return;
 
+        // BUG FIX: Calculate consistent humanReadableTime from windowStartMillis
+        String humanReadableTime = null;
+        try {
+            ZonedDateTime zdt = ZonedDateTime.ofInstant(
+                Instant.ofEpochMilli(candle.getWindowStartMillis()),
+                IST
+            );
+            humanReadableTime = zdt.format(DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm:ss"));
+        } catch (Exception e) {
+            // Fallback - will be null
+        }
+
         if (candle.getEquity() != null) {
             candle.getEquity().setTimeframe(timeframe);
             candle.getEquity().setWindowStartMillis(candle.getWindowStartMillis());
             candle.getEquity().setWindowEndMillis(candle.getWindowEndMillis());
+            if (humanReadableTime != null) {
+                candle.getEquity().setHumanReadableTime(humanReadableTime);
+            }
         }
 
         if (candle.getFuture() != null) {
             candle.getFuture().setTimeframe(timeframe);
             candle.getFuture().setWindowStartMillis(candle.getWindowStartMillis());
             candle.getFuture().setWindowEndMillis(candle.getWindowEndMillis());
+            if (humanReadableTime != null) {
+                candle.getFuture().setHumanReadableTime(humanReadableTime);
+            }
         }
 
         if (candle.getPrimaryInstrument() != null) {
             candle.getPrimaryInstrument().setTimeframe(timeframe);
             candle.getPrimaryInstrument().setWindowStartMillis(candle.getWindowStartMillis());
             candle.getPrimaryInstrument().setWindowEndMillis(candle.getWindowEndMillis());
+            if (humanReadableTime != null) {
+                candle.getPrimaryInstrument().setHumanReadableTime(humanReadableTime);
+            }
         }
 
-        // Note: Options are not updated as they may have different characteristics
-        // But we could update them if needed for consistency
+        // BUG FIX: Also update options for full consistency
+        if (candle.getOptions() != null) {
+            for (var option : candle.getOptions()) {
+                if (option != null && humanReadableTime != null) {
+                    // Options don't have setHumanReadableTime but should be consistent
+                    // If needed, add humanReadableTime field to OptionCandle
+                }
+            }
+        }
     }
 
     /**

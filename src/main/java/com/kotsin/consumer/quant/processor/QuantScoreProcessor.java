@@ -192,9 +192,10 @@ public class QuantScoreProcessor {
             emitScore(score);
 
             // Phase 5: Run full enrichment pipeline for state machine signals
+            // FIX: Pass pre-calculated enrichedScore to avoid duplicate Redis insertions
             if (pipelineEnabled && enrichmentPipeline != null) {
                 try {
-                    EnrichmentPipeline.PipelineResult pipelineResult = enrichmentPipeline.process(family);
+                    EnrichmentPipeline.PipelineResult pipelineResult = enrichmentPipeline.process(family, enrichedScore);
                     if (pipelineResult != null && pipelineResult.getSignalsPublished() > 0) {
                         log.info("[PIPELINE] {} {} | signals={} actionable={}",
                             familyId, timeframe,

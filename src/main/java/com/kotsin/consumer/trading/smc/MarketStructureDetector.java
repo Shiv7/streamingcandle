@@ -43,12 +43,17 @@ public class MarketStructureDetector {
     public MarketStructureResult detectStructure(double[] highs, double[] lows,
                                                    double[] closes, long[] timestamps) {
         if (highs.length < SWING_LOOKBACK * 2 + 1) {
+            log.debug("[MKT_STRUCT_DEBUG] Not enough candles: {} (need {})",
+                    highs.length, SWING_LOOKBACK * 2 + 1);
             return MarketStructureResult.empty();
         }
 
         // Step 1: Find all swing points
         List<SwingPoint> swingHighs = findSwingHighs(highs, timestamps);
         List<SwingPoint> swingLows = findSwingLows(lows, timestamps);
+
+        log.debug("[MKT_STRUCT_DEBUG] From {} candles, found {} swing highs, {} swing lows",
+                highs.length, swingHighs.size(), swingLows.size());
 
         // Step 2: Classify swing points (HH, HL, LH, LL)
         classifySwingPoints(swingHighs, swingLows);
@@ -181,35 +186,67 @@ public class MarketStructureDetector {
     }
 
     /**
-     * Determine market bias based on swing structure
+     * Determine market bias based on swing structure.
+     *
+     * FIX: Changed from requiring PERFECT HH+HL or LH+LL to a scoring system.
+     * The old algorithm marked 70%+ of instruments as RANGING because it required
+     * BOTH conditions to be true simultaneously.
+     *
+     * New algorithm:
+     * - Analyzes last 2-3 swing pairs
+     * - Scores each pair as bullish (+1) or bearish (-1)
+     * - Determines bias based on net score
      */
     private MarketBias determineMarketBias(List<SwingPoint> swingHighs, List<SwingPoint> swingLows) {
         if (swingHighs.size() < 2 || swingLows.size() < 2) {
+            log.debug("[MKT_STRUCT_DEBUG] Insufficient swings for bias: swingHighs={}, swingLows={} (need 2+ each)",
+                    swingHighs.size(), swingLows.size());
             return MarketBias.UNKNOWN;
         }
 
-        // Get last two swings of each type
-        SwingPoint lastHigh = swingHighs.get(swingHighs.size() - 1);
-        SwingPoint prevHigh = swingHighs.get(swingHighs.size() - 2);
-        SwingPoint lastLow = swingLows.get(swingLows.size() - 1);
-        SwingPoint prevLow = swingLows.get(swingLows.size() - 2);
+        // Look at last 2-3 swing pairs for more robust detection
+        int lookback = Math.min(3, Math.min(swingHighs.size(), swingLows.size()));
 
-        boolean makingHigherHighs = lastHigh.getPrice() > prevHigh.getPrice();
-        boolean makingHigherLows = lastLow.getPrice() > prevLow.getPrice();
-        boolean makingLowerHighs = lastHigh.getPrice() < prevHigh.getPrice();
-        boolean makingLowerLows = lastLow.getPrice() < prevLow.getPrice();
+        int bullishScore = 0;
+        int bearishScore = 0;
 
-        // Bullish: HH + HL
-        if (makingHigherHighs && makingHigherLows) {
-            return MarketBias.BULLISH;
+        // Analyze swing highs
+        for (int i = swingHighs.size() - lookback; i < swingHighs.size() - 1; i++) {
+            SwingPoint current = swingHighs.get(i + 1);
+            SwingPoint previous = swingHighs.get(i);
+            double diff = (current.getPrice() - previous.getPrice()) / previous.getPrice();
+
+            if (diff > EQUAL_TOLERANCE) bullishScore++;      // Higher high
+            else if (diff < -EQUAL_TOLERANCE) bearishScore++; // Lower high
+            // Equal highs don't change score
         }
 
-        // Bearish: LH + LL
-        if (makingLowerHighs && makingLowerLows) {
+        // Analyze swing lows
+        for (int i = swingLows.size() - lookback; i < swingLows.size() - 1; i++) {
+            SwingPoint current = swingLows.get(i + 1);
+            SwingPoint previous = swingLows.get(i);
+            double diff = (current.getPrice() - previous.getPrice()) / previous.getPrice();
+
+            if (diff > EQUAL_TOLERANCE) bullishScore++;      // Higher low
+            else if (diff < -EQUAL_TOLERANCE) bearishScore++; // Lower low
+        }
+
+        log.debug("[MKT_STRUCT_DEBUG] Bias scoring | bullishScore={} | bearishScore={} | lookback={}",
+                bullishScore, bearishScore, lookback);
+
+        // Determine bias based on net score
+        int netScore = bullishScore - bearishScore;
+
+        // FIX: More lenient thresholds - net score of 1+ is enough
+        // (previously required BOTH HH+HL which is net score of 2+)
+        if (netScore >= 1) {
+            return MarketBias.BULLISH;
+        }
+        if (netScore <= -1) {
             return MarketBias.BEARISH;
         }
 
-        // Ranging: Mixed structure
+        // Truly mixed/flat structure
         return MarketBias.RANGING;
     }
 

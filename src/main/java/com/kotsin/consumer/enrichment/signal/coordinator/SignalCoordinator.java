@@ -5,13 +5,15 @@ import com.kotsin.consumer.enrichment.model.TechnicalContext;
 import com.kotsin.consumer.enrichment.signal.model.TradingSignal;
 import com.kotsin.consumer.enrichment.signal.model.TradingSignal.Direction;
 import com.kotsin.consumer.enrichment.signal.model.TradingSignal.Horizon;
+import com.kotsin.consumer.signal.model.SignalContext;
+import com.kotsin.consumer.signal.model.SignalStatus;
+import com.kotsin.consumer.signal.service.SignalLifecycleManager;
 import lombok.Data;
-import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
+import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.kafka.core.KafkaTemplate;
 import org.springframework.stereotype.Service;
 
-import java.time.Instant;
 import java.util.*;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.atomic.AtomicInteger;
@@ -41,10 +43,25 @@ import java.util.concurrent.atomic.AtomicLong;
  */
 @Slf4j
 @Service
-@RequiredArgsConstructor
 public class SignalCoordinator {
 
     private final KafkaTemplate<String, Object> kafkaTemplate;
+
+    // SIGNAL_DECAY_INTEGRATION: Optional SignalLifecycleManager for decay tracking
+    // If not available, coordinator continues to work with basic state tracking
+    private final Optional<SignalLifecycleManager> lifecycleManager;
+
+    @Autowired
+    public SignalCoordinator(KafkaTemplate<String, Object> kafkaTemplate,
+                             @Autowired(required = false) SignalLifecycleManager lifecycleManager) {
+        this.kafkaTemplate = kafkaTemplate;
+        this.lifecycleManager = Optional.ofNullable(lifecycleManager);
+        if (this.lifecycleManager.isPresent()) {
+            log.info("[COORD] SignalLifecycleManager integration ENABLED - signal decay tracking active");
+        } else {
+            log.info("[COORD] SignalLifecycleManager not available - basic state tracking only");
+        }
+    }
 
     // ======================== CONFIGURATION ========================
 
@@ -223,6 +240,21 @@ public class SignalCoordinator {
             kafkaTemplate.send(TRADING_SIGNALS_TOPIC, familyId, signal);
             totalPublished.incrementAndGet();
 
+            // SIGNAL_DECAY_INTEGRATION: Register with lifecycle manager for decay tracking
+            lifecycleManager.ifPresent(lm -> {
+                try {
+                    SignalContext ctx = lm.registerSignal(signal, quantScore);
+                    if (ctx != null) {
+                        log.debug("[COORD] {} registered with lifecycle manager | initialScore={}",
+                                familyId, String.format("%.1f", ctx.getInitialScore()));
+                    }
+                } catch (Exception e) {
+                    log.warn("[COORD] Failed to register {} with lifecycle manager: {}",
+                            familyId, e.getMessage());
+                    // Non-critical - continue even if registration fails
+                }
+            });
+
             log.info("[COORD] PUBLISHED {} {} {} from {} | conf={:.0f}% | dayCount={}/{} | active={}",
                     familyId, direction, horizon, source,
                     signal.getConfidence() * 100,
@@ -255,6 +287,9 @@ public class SignalCoordinator {
         if (active.isExpired()) {
             log.info("[COORD] {} active {} signal EXPIRED", familyId, active.direction);
             activeSignals.remove(familyId);
+            // SIGNAL_DECAY_INTEGRATION: Invalidate in lifecycle manager
+            lifecycleManager.ifPresent(lm ->
+                lm.invalidateSignal(active.signalId, SignalStatus.INVALID_TIME_EXPIRED));
             return;
         }
 
@@ -267,6 +302,9 @@ public class SignalCoordinator {
                         familyId, active.direction, currentPrice);
                 active.invalidated = true;
                 activeSignals.remove(familyId);
+                // SIGNAL_DECAY_INTEGRATION: Invalidate in lifecycle manager
+                lifecycleManager.ifPresent(lm ->
+                    lm.invalidateSignal(active.signalId, SignalStatus.INVALID_STOP_BREACHED));
                 return;
             }
         }
@@ -280,8 +318,48 @@ public class SignalCoordinator {
                         familyId, active.direction, currentPrice);
                 active.invalidated = true;
                 activeSignals.remove(familyId);
+                // SIGNAL_DECAY_INTEGRATION: Mark as executed in lifecycle manager
+                lifecycleManager.ifPresent(lm -> lm.markExecuted(active.signalId));
             }
         }
+    }
+
+    /**
+     * SIGNAL_DECAY_INTEGRATION: Update signal state with full enriched data.
+     * Call this on every tick/candle update for decay-based tracking.
+     *
+     * @param familyId Family identifier
+     * @param current Current enriched quant score
+     */
+    public void updateSignalStateWithDecay(String familyId, EnrichedQuantScore current) {
+        if (current == null) return;
+
+        // Basic price update
+        updateSignalState(familyId, current.getClose());
+
+        // SIGNAL_DECAY_INTEGRATION: Update with decay calculation
+        lifecycleManager.ifPresent(lm -> {
+            try {
+                Map<String, SignalStatus> statusMap = lm.updateFamilySignals(familyId, current);
+
+                // Check for decay-based invalidations
+                for (Map.Entry<String, SignalStatus> entry : statusMap.entrySet()) {
+                    SignalStatus status = entry.getValue();
+                    if (status.isInvalid()) {
+                        // Sync invalidation to coordinator state
+                        ActiveSignal active = activeSignals.get(familyId);
+                        if (active != null && entry.getKey().equals(active.signalId)) {
+                            log.info("[COORD] {} DECAY_INVALIDATED | {} | reason={}",
+                                    familyId, active.direction, status.getDescription());
+                            active.invalidated = true;
+                            activeSignals.remove(familyId);
+                        }
+                    }
+                }
+            } catch (Exception e) {
+                log.warn("[COORD] Decay update failed for {}: {}", familyId, e.getMessage());
+            }
+        });
     }
 
     /**
@@ -297,6 +375,10 @@ public class SignalCoordinator {
             log.info("[COORD] {} active {} signal INVALIDATED: {}",
                     familyId, active.direction, reason);
             activeSignals.remove(familyId);
+
+            // SIGNAL_DECAY_INTEGRATION: Sync invalidation to lifecycle manager
+            lifecycleManager.ifPresent(lm ->
+                lm.invalidateSignal(active.signalId, SignalStatus.CANCELLED));
         }
     }
 
@@ -414,8 +496,13 @@ public class SignalCoordinator {
      * Get coordinator statistics
      */
     public String getStats() {
+        // SIGNAL_DECAY_INTEGRATION: Include lifecycle manager stats if available
+        String lifecycleStats = lifecycleManager
+                .map(lm -> String.format(" | lifecycle_active=%d", lm.getActiveSignalCount()))
+                .orElse("");
+
         return String.format(
-                "[COORD] received=%d published=%d (%.1f%%) | blocked: dedup=%d flip=%d active=%d mtf=%d daily=%d | active_signals=%d",
+                "[COORD] received=%d published=%d (%.1f%%) | blocked: dedup=%d flip=%d active=%d mtf=%d daily=%d | active_signals=%d%s",
                 totalReceived.get(),
                 totalPublished.get(),
                 totalReceived.get() > 0 ? (totalPublished.get() * 100.0 / totalReceived.get()) : 0,
@@ -424,7 +511,8 @@ public class SignalCoordinator {
                 blockedByActiveSignal.get(),
                 blockedByMtf.get(),
                 blockedByDailyLimit.get(),
-                activeSignals.size()
+                activeSignals.size(),
+                lifecycleStats
         );
     }
 

@@ -33,10 +33,10 @@ import java.util.*;
  * ENHANCEMENTS OVER BASE VERSION:
  * ============================================================================
  *
- * 1. SESSION TIME FILTER
- *    - Avoid opening noise (9:15-9:20)
- *    - Avoid lunch hour (12:00-13:30)
- *    - Avoid closing chaos (15:00-15:30)
+ * 1. DUAL ENTRY TRIGGER (KEY FIX!)
+ *    - Accept EITHER liquidity sweep OR simple zone rejection
+ *    - Zone rejection = at HTF zone + LTF structure confirms
+ *    - This trades like real SMC traders, not just on rare sweep events
  *
  * 2. MICROSTRUCTURE LEADING EDGE
  *    - Check if LTF microstructure > MTF > HTF (institutions entering)
@@ -170,19 +170,27 @@ public class InstitutionalPivotStrategy implements TradingStrategy {
             return Optional.empty();
         }
 
-        // ========== CHECK 3: IN CORRECT ZONE ==========
-        boolean inDiscount = smc.isInDiscount();
-        boolean inPremium = smc.isInPremium();
+        // ========== CHECK 3: IN CORRECT ZONE (FIXED - with equilibrium handling) ==========
+        // FIX: Use acceptableForLong/Short instead of strict inDiscount/inPremium
+        // This prevents the "exactly at 50%" deadlock where both were false
+        boolean acceptableForLong = smc.isAcceptableForLong();    // Below 60%
+        boolean acceptableForShort = smc.isAcceptableForShort();  // Above 40%
+        boolean inEquilibrium = smc.isInEquilibrium();            // 40-60%
 
-        // LONG needs discount, SHORT needs premium
-        if (htfBias == MarketBias.BULLISH && !inDiscount) {
-            log.debug("[INST_PIVOT] {} Bullish but not in discount zone", scripCode);
+        // LONG needs discount or equilibrium lower half
+        if (htfBias == MarketBias.BULLISH && !acceptableForLong) {
+            log.debug("[INST_PIVOT] {} Bullish but in premium zone ({}%)",
+                    scripCode, String.format("%.1f", smc.getRangePosition() * 100));
             return Optional.empty();
         }
-        if (htfBias == MarketBias.BEARISH && !inPremium) {
-            log.debug("[INST_PIVOT] {} Bearish but not in premium zone", scripCode);
+        // SHORT needs premium or equilibrium upper half
+        if (htfBias == MarketBias.BEARISH && !acceptableForShort) {
+            log.debug("[INST_PIVOT] {} Bearish but in discount zone ({}%)",
+                    scripCode, String.format("%.1f", smc.getRangePosition() * 100));
             return Optional.empty();
         }
+
+        // Note: Equilibrium trades will have reduced confluence below
 
         // ========== CHECK 4: AT HTF POI OR KEY PIVOT ==========
         boolean atHtfPoi = smc.isAtHtfDemandZone() || smc.isAtHtfSupplyZone() || smc.isAtHtfFvg();
@@ -204,6 +212,18 @@ public class InstitutionalPivotStrategy implements TradingStrategy {
         // Null-safe: If no family context, continue without bonus
         int familyBonus = calculateFamilyAlignmentBonus(score, htfBias);
         confluence += familyBonus;
+
+        // ========== ZONE STRENGTH ADJUSTMENT ==========
+        // FIX: Reduce confluence for equilibrium trades (riskier)
+        // Boost confluence for deep discount/premium trades (better R:R)
+        if (inEquilibrium) {
+            confluence -= 1;  // Equilibrium = reduced confidence
+            log.debug("[INST_PIVOT] {} In equilibrium zone - confluence reduced by 1", scripCode);
+        } else if ((htfBias == MarketBias.BULLISH && smc.getRangePosition() < 0.25) ||
+                   (htfBias == MarketBias.BEARISH && smc.getRangePosition() > 0.75)) {
+            confluence += 1;  // Deep discount/premium = bonus
+            log.debug("[INST_PIVOT] {} In deep zone - confluence boosted by 1", scripCode);
+        }
 
         // ========== ENHANCEMENT 4: DIVERGENCE STRENGTH BONUS ==========
         // Null-safe: If can't calculate divergence, continue without bonus
@@ -265,10 +285,12 @@ public class InstitutionalPivotStrategy implements TradingStrategy {
                 (smc.isAtHtfDemandZone() ? "HTF_DEMAND" : "HTF_SUPPLY") :
                 "PIVOT";
 
-        log.info("[INST_PIVOT] SETUP | {} {} @ {} | HTF={} | zone={} | POI={} | conf={} | R:R={} | famBonus={} | divStr={}",
+        String zoneDesc = smc.isInDiscount() ? "DISCOUNT" :
+                          smc.isInPremium() ? "PREMIUM" : "EQUILIBRIUM";
+        log.info("[INST_PIVOT] SETUP | {} {} @ {} | HTF={} | zone={} ({}%) | POI={} | conf={} | R:R={} | famBonus={} | divStr={}",
                 scripCode, direction, String.format("%.2f", price),
                 htfBias,
-                inDiscount ? "DISCOUNT" : "PREMIUM",
+                zoneDesc, String.format("%.0f", smc.getRangePosition() * 100),
                 poiDesc,
                 confluence,
                 String.format("%.1f", rr),
@@ -324,29 +346,83 @@ public class InstitutionalPivotStrategy implements TradingStrategy {
             return Optional.empty();
         }
 
-        // ========== THE KEY ENTRY SIGNAL: LTF LIQUIDITY SWEEP ==========
-        if (!smc.isLtfLiquidityJustSwept()) {
-            log.debug("[INST_PIVOT] {} Waiting for LTF liquidity sweep", scripCode);
-            return Optional.empty();
-        }
+        // ========== ENTRY TRIGGERS: LIQUIDITY SWEEP, ZONE REJECTION, OR PIVOT RETEST ==========
+        // Real traders enter on ANY of these - we should too!
+        // 1. Liquidity sweep = price hunted stops, now reversing (SMC classic)
+        // 2. Zone rejection = at demand/supply zone with LTF structure confirming (SMC)
+        // 3. Pivot retest = at key pivot level with LTF structure confirming (Pivot trading)
 
+        boolean hasLiquiditySweep = smc.isLtfLiquidityJustSwept();
         LiquiditySweep sweep = smc.getLtfLastSweep();
-        if (sweep == null) return Optional.empty();
 
-        // Validate sweep direction
-        boolean correctSweep = (direction == Direction.LONG && !sweep.isBuySide()) ||
-                (direction == Direction.SHORT && sweep.isBuySide());
+        // LTF structure confirmation - needed for zone rejection and pivot retest
+        boolean ltfStructureConfirms = (direction == Direction.LONG &&
+                                        (smc.isLtfStructureBullish() || smc.isLtfRecentChoch())) ||
+                                       (direction == Direction.SHORT &&
+                                        (!smc.isLtfStructureBullish() || smc.isLtfRecentChoch()));
 
-        if (!correctSweep) {
-            log.debug("[INST_PIVOT] {} Sweep direction mismatch | dir={} | sweepBuySide={}",
-                    scripCode, direction, sweep.isBuySide());
+        // TRIGGER 1: SMC Zone Rejection
+        boolean atSmcZone = (direction == Direction.LONG && smc.isAtHtfDemandZone()) ||
+                            (direction == Direction.SHORT && smc.isAtHtfSupplyZone());
+        boolean hasZoneRejection = atSmcZone && ltfStructureConfirms;
+
+        // TRIGGER 2: Pivot Retest - price at key pivot with structure confirmation
+        // For LONG: price at support pivots (S1, S2, Pivot, BC) with bullish structure
+        // For SHORT: price at resistance pivots (R1, R2, Pivot, TC) with bearish structure
+        MultiTimeframeLevels mtf = score.getMtfLevels();
+        boolean hasPivotRetest = false;
+        String pivotLevel = null;
+
+        if (mtf != null && mtf.getDailyPivot() != null && ltfStructureConfirms) {
+            var dp = mtf.getDailyPivot();
+            if (direction == Direction.LONG) {
+                // LONG looks for support pivots
+                if (isNearLevel(price, dp.getS1())) { hasPivotRetest = true; pivotLevel = "S1"; }
+                else if (isNearLevel(price, dp.getS2())) { hasPivotRetest = true; pivotLevel = "S2"; }
+                else if (isNearLevel(price, dp.getPivot()) && price < dp.getPivot()) { hasPivotRetest = true; pivotLevel = "PP"; }
+                else if (isNearLevel(price, dp.getBc())) { hasPivotRetest = true; pivotLevel = "BC"; }
+            } else {
+                // SHORT looks for resistance pivots
+                if (isNearLevel(price, dp.getR1())) { hasPivotRetest = true; pivotLevel = "R1"; }
+                else if (isNearLevel(price, dp.getR2())) { hasPivotRetest = true; pivotLevel = "R2"; }
+                else if (isNearLevel(price, dp.getPivot()) && price > dp.getPivot()) { hasPivotRetest = true; pivotLevel = "PP"; }
+                else if (isNearLevel(price, dp.getTc())) { hasPivotRetest = true; pivotLevel = "TC"; }
+            }
+        }
+
+        // Accept ANY of the three triggers
+        if (!hasLiquiditySweep && !hasZoneRejection && !hasPivotRetest) {
+            log.debug("[INST_PIVOT] {} Waiting for: sweep OR zone rejection OR pivot retest", scripCode);
             return Optional.empty();
         }
 
-        // Validate sweep showed reversal
-        if (!sweep.isValidReversal()) {
-            log.debug("[INST_PIVOT] {} Sweep didn't show valid reversal", scripCode);
-            return Optional.empty();
+        // Determine which trigger fired (priority: sweep > zone > pivot)
+        String triggerType;
+        if (hasLiquiditySweep) {
+            triggerType = "LIQUIDITY_SWEEP";
+        } else if (hasZoneRejection) {
+            triggerType = "ZONE_REJECTION";
+        } else {
+            triggerType = "PIVOT_RETEST@" + pivotLevel;
+        }
+        log.info("[INST_PIVOT] {} Entry trigger fired: {}", scripCode, triggerType);
+
+        // Validate sweep if that's the trigger
+        boolean validSweep = false;
+        if (hasLiquiditySweep && sweep != null) {
+            boolean correctSweep = (direction == Direction.LONG && !sweep.isBuySide()) ||
+                    (direction == Direction.SHORT && sweep.isBuySide());
+            validSweep = correctSweep && sweep.isValidReversal();
+
+            if (!validSweep && !hasZoneRejection && !hasPivotRetest) {
+                // Sweep exists but invalid, and no other triggers available
+                log.debug("[INST_PIVOT] {} Sweep invalid and no zone/pivot fallback", scripCode);
+                return Optional.empty();
+            }
+            if (!validSweep) {
+                // Fall back to zone rejection or pivot retest
+                triggerType = hasZoneRejection ? "ZONE_REJECTION" : "PIVOT_RETEST@" + pivotLevel;
+            }
         }
 
         // ========== ENHANCEMENT 2: MICROSTRUCTURE LEADING EDGE ==========
@@ -391,20 +467,35 @@ public class InstitutionalPivotStrategy implements TradingStrategy {
         double targetMultiplier = getGexTargetMultiplier(score);
 
         // ========== CALCULATE FINAL STOP AND TARGETS ==========
+        // FIX: Handle both sweep-based and zone-rejection-based entries
         double stopLoss;
         double target1;
         double target2;
         double target3;
 
         if (direction == Direction.LONG) {
-            stopLoss = sweep.getSweepPrice() * 0.999;
+            // For sweep entry: use sweep price; for zone rejection: use SMC stop
+            if (validSweep && sweep != null) {
+                stopLoss = sweep.getSweepPrice() * 0.999;
+            } else {
+                // Zone rejection entry - use SMC-calculated stop (below demand zone)
+                stopLoss = smc.getLongStopLoss();
+                if (stopLoss <= 0) stopLoss = price * (1 - MIN_STOP_PCT / 100);
+            }
             double minStop = price * (1 - MIN_STOP_PCT / 100);
             if (stopLoss > minStop) stopLoss = minStop;
 
             target1 = smc.getLongTarget();
             if (target1 <= price) target1 = price * (1 + 0.01 * targetMultiplier);
         } else {
-            stopLoss = sweep.getSweepPrice() * 1.001;
+            // For sweep entry: use sweep price; for zone rejection: use SMC stop
+            if (validSweep && sweep != null) {
+                stopLoss = sweep.getSweepPrice() * 1.001;
+            } else {
+                // Zone rejection entry - use SMC-calculated stop (above supply zone)
+                stopLoss = smc.getShortStopLoss();
+                if (stopLoss <= 0) stopLoss = price * (1 + MIN_STOP_PCT / 100);
+            }
             double minStop = price * (1 + MIN_STOP_PCT / 100);
             if (stopLoss < minStop) stopLoss = minStop;
 
@@ -436,8 +527,18 @@ public class InstitutionalPivotStrategy implements TradingStrategy {
         // LTF confirmation
         if (ltfConfirms) confidence += 0.10;
 
-        // Sweep quality
-        if (sweep.isValidReversal()) confidence += 0.05;
+        // Sweep quality (only if we have a valid sweep)
+        if (validSweep && sweep != null && sweep.isValidReversal()) confidence += 0.05;
+
+        // Zone rejection bonus (if that's our trigger)
+        if (hasZoneRejection && !validSweep) confidence += 0.05;
+
+        // Pivot retest bonus (strong levels = strong trades)
+        if (hasPivotRetest && !validSweep && !hasZoneRejection) {
+            confidence += 0.05;
+            // Extra bonus for S1/R1 (first support/resistance) - most reliable
+            if ("S1".equals(pivotLevel) || "R1".equals(pivotLevel)) confidence += 0.03;
+        }
 
         // Bias alignment
         if (smc.isBiasAligned()) confidence += 0.08;
@@ -463,11 +564,15 @@ public class InstitutionalPivotStrategy implements TradingStrategy {
 
         double riskPct = risk / price * 100;
 
-        log.info("[INST_PIVOT] ENTRY! | {} {} @ {} | HTF={} | LTF_sweep={} | " +
+        // Log entry with trigger type
+        String sweepInfo = (validSweep && sweep != null) ?
+                String.format("%.2f", sweep.getLiquidityLevel()) : "ZONE_REJECT";
+
+        log.info("[INST_PIVOT] ENTRY! | {} {} @ {} | HTF={} | trigger={} | " +
                         "SL={} ({}%) | T1={} | T2={} | T3={} | R:R={} | conf={}% | leadEdge={} | ofi={:.2f}",
                 scripCode, direction, String.format("%.2f", price),
                 smc.getHtfBias(),
-                String.format("%.2f", sweep.getLiquidityLevel()),
+                triggerType + (validSweep ? "@" + sweepInfo : ""),
                 String.format("%.2f", stopLoss),
                 String.format("%.2f", riskPct),
                 String.format("%.2f", target1),
@@ -488,6 +593,7 @@ public class InstitutionalPivotStrategy implements TradingStrategy {
                 .horizon(Horizon.SWING)
                 .category(SignalCategory.REVERSAL)
                 .setupId(STRATEGY_ID)
+                .currentPrice(price)  // FIX: Was missing - must set current price
                 .entryPrice(price)
                 .stopLoss(stopLoss)
                 .target1(target1)
@@ -495,8 +601,8 @@ public class InstitutionalPivotStrategy implements TradingStrategy {
                 .confidence(confidence)
                 .dataTimestamp(java.time.Instant.ofEpochMilli(
                         score.getPriceTimestamp() > 0 ? score.getPriceTimestamp() : System.currentTimeMillis()))
-                .headline(String.format("INST_%s | HTF=%s | Sweep@%.2f | SL=%.2f (%.1f%%) | T1=%.2f | T2=%.2f | R:R=%.1f | LE=%s",
-                        direction, smc.getHtfBias(), sweep.getLiquidityLevel(),
+                .headline(String.format("INST_%s | HTF=%s | %s | SL=%.2f (%.1f%%) | T1=%.2f | T2=%.2f | R:R=%.1f | LE=%s",
+                        direction, smc.getHtfBias(), triggerType,
                         stopLoss, riskPct, target1, target2, rr, leadingEdge.getPattern()))
                 .build());
     }
@@ -604,37 +710,17 @@ public class InstitutionalPivotStrategy implements TradingStrategy {
 
     /**
      * Check if current time is good for trading.
-     * Avoids: Opening noise, lunch hour, closing chaos.
-     * Null-safe: Returns true if no time context available.
+     *
+     * FIX: Session time filter REMOVED - real SMC traders trade all sessions!
+     * The best liquidity sweeps often happen at market open (9:15-9:20) when
+     * overnight liquidity gets hunted. Blocking this window was killing entries.
+     *
+     * Previously blocked: 9:15-9:20 (opening), 12:00-13:30 (lunch), 15:00+ (close)
+     * Now: Trade all market hours - let the SETUP and ENTRY logic filter, not time.
      */
     private boolean isGoodTradingTime(EnrichedQuantScore score) {
-        // Get current time
-        LocalTime now = LocalTime.now(ZoneId.of("Asia/Kolkata"));
-        int hour = now.getHour();
-        int minute = now.getMinute();
-        int timeHHMM = hour * 100 + minute;
-
-        // Opening noise (9:15-9:20)
-        if (timeHHMM >= 915 && timeHHMM <= 920) {
-            return false;
-        }
-
-        // Lunch hour (12:00-13:30)
-        if (timeHHMM >= 1200 && timeHHMM <= 1330) {
-            return false;
-        }
-
-        // Closing chaos (15:00-15:30)
-        if (timeHHMM >= 1500) {
-            return false;
-        }
-
-        // Check time context if available
-        TimeContext timeContext = score != null ? score.getTimeContext() : null;
-        if (timeContext != null && timeContext.shouldAvoidTrading()) {
-            return false;
-        }
-
+        // SESSION TIME FILTER DISABLED
+        // Real SMC traders trade opening sweeps - that's where institutions hunt stops
         return true;
     }
 
@@ -774,7 +860,7 @@ public class InstitutionalPivotStrategy implements TradingStrategy {
      * Null-safe: Returns original stop if no ATR data.
      */
     private double validateStopWithAtr(double price, double stopLoss, Direction direction, TechnicalContext tech) {
-        if (tech == null || tech.getAtrPct() == null || tech.getAtrPct() <= 0) {
+        if (tech == null || tech.getAtrPct() <= 0) {
             return stopLoss; // No ATR, use original
         }
 
@@ -835,6 +921,14 @@ public class InstitutionalPivotStrategy implements TradingStrategy {
     }
 
     private boolean isNear(double price, double level) {
+        return Math.abs(price - level) / price * 100 <= LEVEL_PROXIMITY_PCT;
+    }
+
+    /**
+     * Check if price is near a specific level (for pivot retest detection)
+     */
+    private boolean isNearLevel(double price, double level) {
+        if (level <= 0) return false;
         return Math.abs(price - level) / price * 100 <= LEVEL_PROXIMITY_PCT;
     }
 
