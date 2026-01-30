@@ -167,9 +167,11 @@ public class TechnicalIndicatorService {
             return;
         }
 
-        // Use equity candle if available, otherwise future
-        InstrumentCandle candle = family.getEquity() != null ? family.getEquity() : family.getFuture();
+        // FIX: Use getPrimaryInstrumentOrFallback() which checks primaryInstrument → equity → future
+        // Previously only checked equity → future, missing 30m+ candles that use primaryInstrument
+        InstrumentCandle candle = family.getPrimaryInstrumentOrFallback();
         if (candle == null) {
+            log.warn("[TECH_SVC] No primary instrument found for {} [{}]", family.getFamilyId(), family.getTimeframe());
             return;
         }
 

@@ -14,10 +14,24 @@ import com.kotsin.consumer.signal.service.DivergenceStrengthCalculator;
 import com.kotsin.consumer.signal.service.DivergenceStrengthCalculator.DivergenceStrength;
 import com.kotsin.consumer.signal.service.MicrostructureLeadingEdgeCalculator;
 import com.kotsin.consumer.signal.service.MicrostructureLeadingEdgeCalculator.LeadingEdgeResult;
+import com.kotsin.consumer.domain.model.FamilyCandle;
+import com.kotsin.consumer.trading.gate.FlowAlignmentGate;
+import com.kotsin.consumer.trading.gate.FlowAlignmentGate.FlowGateResult;
+import com.kotsin.consumer.trading.gate.FlowAlignmentGate.SignalDirection;
 import com.kotsin.consumer.trading.model.Position;
 import com.kotsin.consumer.trading.model.TradeOutcome.ExitReason;
+import com.kotsin.consumer.trading.mtf.HierarchicalMtfAnalyzer;
+import com.kotsin.consumer.trading.mtf.HierarchicalMtfAnalyzer.HierarchicalContext;
 import com.kotsin.consumer.trading.mtf.MtfSmcContext;
+import com.kotsin.consumer.trading.mtf.SwingRangeCalculator;
+import com.kotsin.consumer.trading.mtf.SwingRangeCalculator.SwingRange;
+import com.kotsin.consumer.trading.mtf.SwingRangeCalculator.ZonePosition;
+import com.kotsin.consumer.trading.quality.SignalQualityCalculator;
+import com.kotsin.consumer.trading.quality.SignalQualityCalculator.QualityTier;
+import com.kotsin.consumer.trading.quality.SignalQualityCalculator.SignalQuality;
 import com.kotsin.consumer.trading.smc.SmcContext.*;
+import com.kotsin.consumer.trading.strategy.EntrySequenceValidator.SequenceValidation;
+import com.kotsin.consumer.enrichment.enricher.MTFSuperTrendAggregator.TradingHorizon;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.stereotype.Component;
@@ -78,6 +92,13 @@ public class InstitutionalPivotStrategy implements TradingStrategy {
     // Inject calculators (optional - null-safe if not available)
     private final Optional<DivergenceStrengthCalculator> divergenceCalculator;
     private final Optional<MicrostructureLeadingEdgeCalculator> leadingEdgeCalculator;
+
+    // NEW: Proper MTF components (replaces voting system and fake confidence)
+    private final Optional<HierarchicalMtfAnalyzer> hierarchicalAnalyzer;
+    private final Optional<SwingRangeCalculator> swingRangeCalculator;
+    private final Optional<FlowAlignmentGate> flowAlignmentGate;
+    private final Optional<EntrySequenceValidator> entrySequenceValidator;
+    private final Optional<SignalQualityCalculator> signalQualityCalculator;
 
     // ============ THRESHOLDS ============
 
@@ -343,6 +364,14 @@ public class InstitutionalPivotStrategy implements TradingStrategy {
         // ========== ENHANCEMENT 1: SESSION TIME FILTER ==========
         if (!isGoodTradingTime(score)) {
             log.debug("[INST_PIVOT] {} Skipping entry - not good trading time", scripCode);
+            return Optional.empty();
+        }
+
+        // ========== NEW: FLOW ALIGNMENT GATE (FAIL FAST) ==========
+        // Block signals that contradict F&O flow BEFORE doing expensive analysis
+        FlowGateResult flowResult = evaluateFlowAlignment(score, direction);
+        if (flowResult.isBlocked()) {
+            log.info("[INST_PIVOT] {} BLOCKED by flow gate: {}", scripCode, flowResult.reason());
             return Optional.empty();
         }
 
@@ -1010,6 +1039,146 @@ public class InstitutionalPivotStrategy implements TradingStrategy {
             return price + t3Distance;
         } else {
             return price - t3Distance;
+        }
+    }
+
+    // ============================================================================
+    // NEW: PROPER MTF ANALYSIS METHODS
+    // ============================================================================
+
+    /**
+     * Evaluate flow alignment using FlowAlignmentGate.
+     * This is a "fail fast" check - blocks signals that contradict F&O flow.
+     *
+     * FLOW INTERPRETATION:
+     * - LONG_BUILDUP: Price up + OI up = Fresh longs entering (confirms LONG)
+     * - SHORT_COVERING: Price up + OI down = Shorts exiting (supports LONG)
+     * - SHORT_BUILDUP: Price down + OI up = Fresh shorts entering (BLOCKS LONG)
+     * - LONG_UNWINDING: Price down + OI down = Longs exiting (BLOCKS LONG)
+     *
+     * Null-safe: Returns PASS_NO_DATA if gate not available or no data.
+     */
+    private FlowGateResult evaluateFlowAlignment(EnrichedQuantScore score, Direction direction) {
+        if (flowAlignmentGate.isEmpty()) {
+            return FlowGateResult.passNoData();  // Allow if gate not available
+        }
+
+        // Get OI interpretation from the score's family candle
+        String oiInterpretation = null;
+        Double oiConfidence = null;
+
+        // Try to get from the score's enriched data
+        if (score != null) {
+            // Check if we have OFI interpretation in the score
+            if (score.getHistoricalContext() != null &&
+                score.getHistoricalContext().getOfiContext() != null) {
+                // Use OFI context for flow interpretation
+                double ofiZscore = score.getHistoricalContext().getOfiContext().getZscore();
+                // Simple mapping: positive OFI = buying pressure, negative = selling pressure
+                if (ofiZscore > 0.5) {
+                    oiInterpretation = "LONG_BUILDUP";
+                    oiConfidence = Math.min(1.0, ofiZscore / 2.0);
+                } else if (ofiZscore < -0.5) {
+                    oiInterpretation = "SHORT_BUILDUP";
+                    oiConfidence = Math.min(1.0, Math.abs(ofiZscore) / 2.0);
+                } else {
+                    oiInterpretation = "NEUTRAL";
+                    oiConfidence = 0.5;
+                }
+            }
+        }
+
+        if (oiInterpretation == null) {
+            return FlowGateResult.passNoData();
+        }
+
+        SignalDirection signalDir = direction == Direction.LONG ?
+                SignalDirection.LONG : SignalDirection.SHORT;
+
+        return flowAlignmentGate.get().evaluateWithFlow(signalDir, oiInterpretation, oiConfidence);
+    }
+
+    /**
+     * Perform hierarchical MTF analysis using the new analyzer.
+     * Returns proper HTF=context, LTF=timing analysis instead of voting.
+     *
+     * Null-safe: Returns HierarchicalContext.empty() if analyzer not available.
+     */
+    private HierarchicalContext analyzeHierarchicalMtf(String familyId, TradingHorizon horizon, double price) {
+        if (hierarchicalAnalyzer.isEmpty()) {
+            return HierarchicalContext.empty();
+        }
+
+        try {
+            return hierarchicalAnalyzer.get().analyze(familyId, horizon, price);
+        } catch (Exception e) {
+            log.debug("[INST_PIVOT] Error in hierarchical MTF analysis: {}", e.getMessage());
+            return HierarchicalContext.empty();
+        }
+    }
+
+    /**
+     * Calculate current swing range using SwingRangeCalculator.
+     * This replaces the 20-day range with current swing structure.
+     *
+     * Null-safe: Returns SwingRange.empty() if calculator not available.
+     */
+    private SwingRange calculateSwingRange(String familyId, String timeframe) {
+        if (swingRangeCalculator.isEmpty()) {
+            return SwingRange.empty();
+        }
+
+        try {
+            return swingRangeCalculator.get().calculateCurrentSwing(familyId, timeframe);
+        } catch (Exception e) {
+            log.debug("[INST_PIVOT] Error calculating swing range: {}", e.getMessage());
+            return SwingRange.empty();
+        }
+    }
+
+    /**
+     * Validate entry sequence using EntrySequenceValidator.
+     * Enforces proper SMC sequence instead of accepting ANY trigger.
+     *
+     * Null-safe: Returns null if validator not available (falls back to old logic).
+     */
+    private SequenceValidation validateEntrySequence(HierarchicalContext ctx,
+                                                      FlowGateResult flowResult,
+                                                      Direction direction) {
+        if (entrySequenceValidator.isEmpty() || ctx == null) {
+            return null;  // Fall back to old logic
+        }
+
+        try {
+            if (direction == Direction.LONG) {
+                return entrySequenceValidator.get().validateLongSequence(ctx, flowResult);
+            } else {
+                return entrySequenceValidator.get().validateShortSequence(ctx, flowResult);
+            }
+        } catch (Exception e) {
+            log.debug("[INST_PIVOT] Error validating entry sequence: {}", e.getMessage());
+            return null;
+        }
+    }
+
+    /**
+     * Calculate signal quality using SignalQualityCalculator.
+     * Replaces arbitrary confidence bonuses with honest quality tiers.
+     *
+     * Null-safe: Returns null if calculator not available (falls back to old confidence).
+     */
+    private SignalQuality calculateSignalQuality(SequenceValidation sequence,
+                                                  FlowGateResult flowResult,
+                                                  HierarchicalContext ctx) {
+        if (signalQualityCalculator.isEmpty() || sequence == null) {
+            return null;  // Fall back to old confidence calculation
+        }
+
+        try {
+            return signalQualityCalculator.get().calculate(sequence, flowResult, ctx);
+        } catch (Exception e) {
+            log.debug("[INST_PIVOT] Error calculating signal quality: {}", e.getMessage());
+            return null;
         }
     }
 }

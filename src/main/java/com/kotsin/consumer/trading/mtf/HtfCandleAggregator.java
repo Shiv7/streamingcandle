@@ -365,11 +365,18 @@ public class HtfCandleAggregator {
             return;
         }
 
+        // FIX: Determine exchange type from familyId instead of hardcoding "N", "C"
+        // MCX scripCodes are typically in ranges: 400000+, 450000+, 467xxx, 488xxx
+        String[] exchangeInfo = determineExchangeType(familyId);
+        String exchange = exchangeInfo[0];
+        String exchangeType = exchangeInfo[1];
+
         try {
             // FIRST: Try to get pre-aggregated candles directly (RedisCandleHistoryService now stores 1h)
-            log.info("[HTF_BOOTSTRAP_DEBUG] {} {} - Fetching pre-aggregated from RedisCandleHistoryService...", familyId, timeframe);
+            log.info("[HTF_BOOTSTRAP_DEBUG] {} {} - Fetching pre-aggregated from RedisCandleHistoryService (exchange={}:{})...",
+                    familyId, timeframe, exchange, exchangeType);
             List<UnifiedCandle> preAggregated = candleHistoryService.getCandles(
-                    familyId, timeframe, 500, "N", "C");
+                    familyId, timeframe, 500, exchange, exchangeType);
             log.info("[HTF_BOOTSTRAP_DEBUG] {} {} - Got {} pre-aggregated candles from history service",
                     familyId, timeframe, preAggregated.size());
 
@@ -403,7 +410,7 @@ public class HtfCandleAggregator {
             // FALLBACK: Get 1m candles and aggregate manually
             // FIX: Increased from 500 to 15000 to support 2 months of historical data
             List<UnifiedCandle> candles1m = candleHistoryService.getCandles(
-                    familyId, "1m", 15000, "N", "C");
+                    familyId, "1m", 15000, exchange, exchangeType);
 
             log.info("[HTF_BOOTSTRAP_DEBUG] {} {} - Got {} 1m candles for manual aggregation",
                     familyId, timeframe, candles1m.size());
@@ -675,6 +682,30 @@ public class HtfCandleAggregator {
     }
 
     /**
+     * Determine exchange and exchange type from scripCode/familyId.
+     * MCX scripCodes are typically in ranges: 400000+, 450000+, 467xxx, 488xxx
+     *
+     * @param familyId The scripCode/familyId to check
+     * @return String array [exchange, exchangeType] - e.g., ["N", "C"] for NSE Cash, ["M", "D"] for MCX Derivatives
+     */
+    private String[] determineExchangeType(String familyId) {
+        try {
+            int scripCode = Integer.parseInt(familyId);
+
+            // MCX scripCodes are typically > 400000
+            // Common MCX ranges: 450000-470000 (futures), 480000-500000 (options)
+            if (scripCode >= 400000) {
+                return new String[]{"M", "D"};  // MCX Derivatives
+            }
+        } catch (NumberFormatException e) {
+            // Not a numeric scripCode, default to NSE
+        }
+
+        // Default to NSE Cash
+        return new String[]{"N", "C"};
+    }
+
+    /**
      * Candle data arrays for SmcAnalyzer
      */
     @Data
@@ -700,5 +731,124 @@ public class HtfCandleAggregator {
         public boolean hasData() {
             return size() >= 20;  // Minimum for SMC analysis
         }
+    }
+
+    // =============================================================================
+    // ADMIN METHODS - Bootstrap attempt management
+    // =============================================================================
+
+    /**
+     * Clear bootstrap attempts for a specific scripCode.
+     * This allows re-bootstrap for instruments that exhausted their attempts.
+     *
+     * @param scripCode The scripCode to clear attempts for
+     * @return Number of timeframe entries cleared
+     */
+    public int clearBootstrapAttempts(String scripCode) {
+        int cleared = 0;
+        String prefix = scripCode + ":";
+
+        // Clear from bootstrapAttempts map
+        for (String key : new ArrayList<>(bootstrapAttempts.keySet())) {
+            if (key.startsWith(prefix)) {
+                bootstrapAttempts.remove(key);
+                cleared++;
+            }
+        }
+
+        // Also clear from bootstrappedPairs (in case it was marked as successful)
+        for (String key : new ArrayList<>(bootstrappedPairs)) {
+            if (key.startsWith(prefix)) {
+                bootstrappedPairs.remove(key);
+            }
+        }
+
+        if (cleared > 0) {
+            log.info("[HTF_ADMIN] Cleared {} bootstrap entries for scripCode={}", cleared, scripCode);
+        }
+        return cleared;
+    }
+
+    /**
+     * Clear bootstrap attempts for all MCX instruments (scripCode >= 400000).
+     * Useful after fixing MCX bootstrap issues.
+     *
+     * @return Number of entries cleared
+     */
+    public int clearMcxBootstrapAttempts() {
+        int cleared = 0;
+
+        for (String key : new ArrayList<>(bootstrapAttempts.keySet())) {
+            try {
+                String scripPart = key.split(":")[0];
+                int scripCode = Integer.parseInt(scripPart);
+                if (scripCode >= 400000) {
+                    bootstrapAttempts.remove(key);
+                    cleared++;
+                }
+            } catch (NumberFormatException e) {
+                // Not a numeric key, skip
+            }
+        }
+
+        for (String key : new ArrayList<>(bootstrappedPairs)) {
+            try {
+                String scripPart = key.split(":")[0];
+                int scripCode = Integer.parseInt(scripPart);
+                if (scripCode >= 400000) {
+                    bootstrappedPairs.remove(key);
+                }
+            } catch (NumberFormatException e) {
+                // Not a numeric key, skip
+            }
+        }
+
+        log.info("[HTF_ADMIN] Cleared {} MCX bootstrap entries (scripCode >= 400000)", cleared);
+        return cleared;
+    }
+
+    /**
+     * Get bootstrap attempt statistics for monitoring.
+     *
+     * @return Map with statistics
+     */
+    public Map<String, Object> getBootstrapAttemptStats() {
+        Map<String, Object> stats = new java.util.LinkedHashMap<>();
+
+        int total = bootstrapAttempts.size();
+        int exhausted = 0;
+        int mcxTotal = 0;
+        int mcxExhausted = 0;
+
+        for (Map.Entry<String, Integer> entry : bootstrapAttempts.entrySet()) {
+            String key = entry.getKey();
+            int attempts = entry.getValue();
+
+            if (attempts >= MAX_BOOTSTRAP_ATTEMPTS) {
+                exhausted++;
+            }
+
+            try {
+                String scripPart = key.split(":")[0];
+                int scripCode = Integer.parseInt(scripPart);
+                if (scripCode >= 400000) {
+                    mcxTotal++;
+                    if (attempts >= MAX_BOOTSTRAP_ATTEMPTS) {
+                        mcxExhausted++;
+                    }
+                }
+            } catch (NumberFormatException e) {
+                // Not a numeric key, skip
+            }
+        }
+
+        stats.put("totalTrackedPairs", total);
+        stats.put("exhaustedAttempts", exhausted);
+        stats.put("successfullyBootstrapped", bootstrappedPairs.size());
+        stats.put("maxAttemptsAllowed", MAX_BOOTSTRAP_ATTEMPTS);
+        stats.put("mcxTotal", mcxTotal);
+        stats.put("mcxExhausted", mcxExhausted);
+
+        return stats;
     }
 }

@@ -594,9 +594,12 @@ public class TimeframeAggregator {
                 .expectedCandleCount(getExpectedCandleCount(timeframe))
                 // ========== MTF DISTRIBUTION ==========
                 .mtfDistribution(incoming.getMtfDistribution())
-                // 🔴 BUG-008 FIX: Add GreeksPortfolio & IVSurface
-                .greeksPortfolio(incoming.getGreeksPortfolio())
-                .ivSurface(incoming.getIvSurface())
+                // 🔴 MTF-FIX: DO NOT copy GreeksPortfolio & IVSurface for HTF candles
+                // These are point-in-time values from 1m. Leaving them null allows
+                // QuantScoreProcessor.enrichFamilyCandle() to recalculate them using
+                // the properly AGGREGATED options data, giving timeframe-specific values.
+                // .greeksPortfolio(incoming.getGreeksPortfolio())  // REMOVED for MTF
+                // .ivSurface(incoming.getIvSurface())              // REMOVED for MTF
                 .build();
         }
 
@@ -911,13 +914,19 @@ public class TimeframeAggregator {
             aggregate.setMtfDistribution(incoming.getMtfDistribution());
         }
 
-        // 🔴 BUG-008 FIX: Update GreeksPortfolio & IVSurface (use LATEST - point-in-time)
-        if (incoming.getGreeksPortfolio() != null) {
-            aggregate.setGreeksPortfolio(incoming.getGreeksPortfolio());
-        }
-        if (incoming.getIvSurface() != null) {
-            aggregate.setIvSurface(incoming.getIvSurface());
-        }
+        // 🔴 MTF-FIX: DO NOT copy GreeksPortfolio & IVSurface during aggregation
+        // These are point-in-time values from 1m candles. Leaving them null allows
+        // QuantScoreProcessor.enrichFamilyCandle() to recalculate them using the
+        // AGGREGATED options data (with properly merged OFI, VPIN, volumes etc.),
+        // giving timeframe-specific Greeks/IV values instead of identical copies.
+        // BEFORE (WRONG): All timeframes had identical Greeks/IV scores
+        // AFTER: Each timeframe gets Greeks/IV calculated from its aggregated options
+        // if (incoming.getGreeksPortfolio() != null) {
+        //     aggregate.setGreeksPortfolio(incoming.getGreeksPortfolio());
+        // }
+        // if (incoming.getIvSurface() != null) {
+        //     aggregate.setIvSurface(incoming.getIvSurface());
+        // }
 
         // 🔴 BUG-011 FIX: Update additional missing fields
         if (incoming.getSpotFuturePremiumChange() != null) {

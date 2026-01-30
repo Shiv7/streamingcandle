@@ -5,6 +5,7 @@ import com.kotsin.consumer.config.VCPConfig;
 import com.kotsin.consumer.domain.model.FamilyCandle;
 import com.kotsin.consumer.domain.model.InstrumentCandle;
 import com.kotsin.consumer.model.*;
+import com.kotsin.consumer.model.SlimCandle;
 import com.kotsin.consumer.service.VCPCalculator;
 import com.kotsin.consumer.util.FamilyCandleConverter;
 
@@ -317,12 +318,24 @@ public class VCPProcessor {
     }
 
     /**
-     * Candle history wrapper for state store
+     * Candle history wrapper for state store.
+     *
+     * CRITICAL FIX: Uses SlimCandle instead of UnifiedCandle to prevent
+     * RecordTooLargeException. UnifiedCandle has ~100+ fields including large
+     * Maps that cause changelog records to exceed Kafka's 1MB limit.
+     * SlimCandle stores only essential OHLCV + volume profile data (~200 bytes each).
      */
     @lombok.Data
     @lombok.NoArgsConstructor
     public static class CandleHistory {
-        private List<UnifiedCandle> candles = new ArrayList<>();
+        // New slim format - used for storage
+        private List<SlimCandle> slimCandles = new ArrayList<>();
+
+        // Legacy field for backward compatibility during migration
+        // Jackson will populate this if old format is deserialized
+        @com.fasterxml.jackson.annotation.JsonProperty("candles")
+        private List<UnifiedCandle> legacyCandles;
+
         private int maxSize = 48;
 
         public CandleHistory(int maxSize) {
@@ -330,15 +343,46 @@ public class VCPProcessor {
         }
 
         public void add(UnifiedCandle candle) {
-            candles.add(candle);
+            // Migrate legacy candles on first add if present
+            migrateLegacyIfNeeded();
+
+            // Convert to slim version before storing
+            slimCandles.add(SlimCandle.from(candle));
             // Trim to max size
-            while (candles.size() > maxSize) {
-                candles.remove(0);
+            while (slimCandles.size() > maxSize) {
+                slimCandles.remove(0);
             }
         }
 
         public int size() {
-            return candles.size();
+            migrateLegacyIfNeeded();
+            return slimCandles.size();
+        }
+
+        /**
+         * Get candles as UnifiedCandle list for backward compatibility with calculators.
+         * JsonIgnore prevents conflict with legacyCandles @JsonProperty("candles").
+         */
+        @com.fasterxml.jackson.annotation.JsonIgnore
+        public List<UnifiedCandle> getCandles() {
+            migrateLegacyIfNeeded();
+            List<UnifiedCandle> result = new ArrayList<>(slimCandles.size());
+            for (SlimCandle slim : slimCandles) {
+                result.add(slim.toUnifiedCandle());
+            }
+            return result;
+        }
+
+        /**
+         * Migrate legacy UnifiedCandle list to SlimCandle list (one-time operation)
+         */
+        private void migrateLegacyIfNeeded() {
+            if (legacyCandles != null && !legacyCandles.isEmpty()) {
+                for (UnifiedCandle legacy : legacyCandles) {
+                    slimCandles.add(SlimCandle.from(legacy));
+                }
+                legacyCandles = null; // Clear after migration
+            }
         }
     }
 

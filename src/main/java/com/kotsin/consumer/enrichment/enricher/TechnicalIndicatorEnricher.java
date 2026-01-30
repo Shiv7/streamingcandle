@@ -1048,6 +1048,9 @@ public class TechnicalIndicatorEnricher {
                 log.info("[TECH-BOOTSTRAP] Loaded {} historical candles for {} [{}], total now: {}",
                         bootstrappedCount, familyId, timeframe, mergedHistory.size());
 
+                // FIX: Persist bootstrapped data to streaming store so it survives across calls
+                persistToStreamingStore(familyId, timeframe, mergedHistory);
+
                 // Also warm up SuperTrend state from historical data if needed
                 warmupSuperTrendState(familyId, timeframe, mergedHistory);
                 return true;
@@ -1114,6 +1117,37 @@ public class TechnicalIndicatorEnricher {
 
     private String getHistoryKey(String familyId, String timeframe, String metric) {
         return String.format("%s:history:%s:%s:%s", KEY_PREFIX, familyId, timeframe, metric);
+    }
+
+    /**
+     * Persist bootstrapped historical data to the streaming store (prices_v2).
+     * This ensures the data survives across method calls and doesn't require re-bootstrapping.
+     */
+    private void persistToStreamingStore(String familyId, String timeframe, TreeMap<Long, double[]> history) {
+        String streamingKey = getHistoryKey(familyId, timeframe, "prices_v2");
+
+        try {
+            // Store each historical point with timestamp as score
+            for (Map.Entry<Long, double[]> entry : history.entrySet()) {
+                long ts = entry.getKey();
+                double[] hlc = entry.getValue();
+                // Format: timestamp,high,low,close
+                String value = String.format("%d,%.6f,%.6f,%.6f", ts, hlc[0], hlc[1], hlc[2]);
+                redisTemplate.opsForZSet().add(streamingKey, value, ts);
+            }
+
+            // Trim to keep only last 200 entries
+            long size = redisTemplate.opsForZSet().zCard(streamingKey);
+            if (size > 200) {
+                redisTemplate.opsForZSet().removeRange(streamingKey, 0, size - 201);
+            }
+
+            log.debug("[TECH-BOOTSTRAP] Persisted {} candles to streaming store for {} [{}]",
+                    history.size(), familyId, timeframe);
+        } catch (Exception e) {
+            log.warn("[TECH-BOOTSTRAP] Failed to persist to streaming store for {} [{}]: {}",
+                    familyId, timeframe, e.getMessage());
+        }
     }
 
     private String getStateKey(String familyId, String timeframe, String indicator) {

@@ -147,7 +147,7 @@ public class WallClockWindowEmitter<K, V> implements Processor<Windowed<K>, V, W
         // Now: Buffer ALL records and emit on next punctuate cycle.
         // Max delay = checkIntervalMs (1 second) which is acceptable.
 
-        if (emittedWindowKeys.contains(windowKey)) {
+        if (isWindowAlreadyEmitted(windowKey)) {
             // Window already emitted - skip late arrivals
             if (log.isDebugEnabled()) {
                 log.debug("WallClockEmitter: late record for already-emitted window key={}", windowKey);
@@ -182,9 +182,11 @@ public class WallClockWindowEmitter<K, V> implements Processor<Windowed<K>, V, W
         // Find windows ready to emit
         pendingWindows.removeIf(pw -> {
             if (wallClockTime >= pw.closeTime) {
-                if (!emittedWindowKeys.contains(pw.windowKey)) {
+                if (!isWindowAlreadyEmitted(pw.windowKey)) {
                     toEmit.add(pw);
-                    emittedWindowKeys.add(pw.windowKey);
+                    // FIX: Store with emission timestamp for proper cleanup in replay mode
+                    String keyWithEmitTime = pw.windowKey + "|" + wallClockTime;
+                    emittedWindowKeys.add(keyWithEmitTime);
                 }
                 return true; // Remove from pending
             }
@@ -272,18 +274,54 @@ public class WallClockWindowEmitter<K, V> implements Processor<Windowed<K>, V, W
     }
 
     /**
-     * Clean up old emitted keys to prevent memory leak
-     * Keep keys for windows that ended within last 5 minutes
+     * Check if a window was already emitted.
+     * Handles both old format (key|start|end) and new format (key|start|end|emitTime).
+     */
+    private boolean isWindowAlreadyEmitted(String windowKey) {
+        for (String emittedKey : emittedWindowKeys) {
+            // New format: key|start|end|emitTime - check if prefix matches
+            if (emittedKey.startsWith(windowKey + "|") || emittedKey.equals(windowKey)) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    /**
+     * Clean up old emitted keys to prevent memory leak.
+     *
+     * FIX: The old logic compared windowEnd to wall clock cutoff, which broke replay mode
+     * where data is hours/days behind wall clock. The key would be removed immediately
+     * after emission, causing duplicate emissions on subsequent records.
+     *
+     * NEW LOGIC: Track when each key was ADDED to emittedWindowKeys (emission time),
+     * and only remove keys that were emitted more than 5 minutes ago (wall clock).
+     * This works correctly for both live and replay scenarios.
      */
     private void cleanupOldKeys(long now) {
+        // Keep keys for 5 minutes after emission (wall clock time)
+        // This prevents re-emission of the same window within that period
         long cutoff = now - 300_000; // 5 minutes ago
+
         emittedWindowKeys.removeIf(key -> {
-            // Key format: "key|start|end"
+            // Key format: "key|start|end|emitTime" (new format with emission time)
+            // OR: "key|start|end" (old format - keep these for backward compat during transition)
             String[] parts = key.split("\\|");
-            if (parts.length >= 3) {
+            if (parts.length >= 4) {
+                // New format with emission timestamp
+                try {
+                    long emitTime = Long.parseLong(parts[3]);
+                    return emitTime < cutoff;
+                } catch (NumberFormatException e) {
+                    return true;
+                }
+            } else if (parts.length >= 3) {
+                // Old format - use conservative cleanup (only if window is VERY old)
+                // Remove if window ended more than 1 hour ago (handles replay catch-up)
                 try {
                     long end = Long.parseLong(parts[2]);
-                    return end < cutoff;
+                    long conservativeCutoff = now - 3600_000; // 1 hour ago
+                    return end < conservativeCutoff;
                 } catch (NumberFormatException e) {
                     return true;
                 }

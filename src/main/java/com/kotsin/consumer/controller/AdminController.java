@@ -1,6 +1,7 @@
 package com.kotsin.consumer.controller;
 
 import com.kotsin.consumer.infrastructure.redis.RedisCandleHistoryService;
+import com.kotsin.consumer.trading.mtf.HtfCandleAggregator;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.http.ResponseEntity;
@@ -32,6 +33,7 @@ import java.util.Map;
 public class AdminController {
 
     private final RedisCandleHistoryService candleHistoryService;
+    private final HtfCandleAggregator htfCandleAggregator;
 
     /**
      * Clear bootstrap state for a specific scripCode.
@@ -250,6 +252,73 @@ public class AdminController {
         response.put("failed", failed);
         response.put("inProgress", inProgress);
         response.put("totalTracked", stats.get("totalTracked"));
+
+        return ResponseEntity.ok(response);
+    }
+
+    // =============================================================================
+    // HTF CANDLE AGGREGATOR BOOTSTRAP MANAGEMENT
+    // =============================================================================
+
+    /**
+     * Clear HTF bootstrap attempts for a specific scripCode.
+     * The instrument will retry bootstrap on next candle access.
+     *
+     * @param scripCode Scrip code to clear
+     * @return Success message
+     */
+    @PostMapping("/htf/clear/{scripCode}")
+    public ResponseEntity<Map<String, Object>> clearHtfBootstrapAttempts(@PathVariable String scripCode) {
+        log.info("[ADMIN] Clearing HTF bootstrap attempts for scripCode={}", scripCode);
+
+        int cleared = htfCandleAggregator.clearBootstrapAttempts(scripCode);
+
+        Map<String, Object> response = new LinkedHashMap<>();
+        response.put("status", "success");
+        response.put("scripCode", scripCode);
+        response.put("clearedEntries", cleared);
+        response.put("message", "ScripCode " + scripCode + " will retry HTF bootstrap on next candle");
+
+        return ResponseEntity.ok(response);
+    }
+
+    /**
+     * Clear HTF bootstrap attempts for all MCX instruments (scripCode >= 400000).
+     * Use this after fixing MCX bootstrap issues.
+     *
+     * @return Count of cleared entries
+     */
+    @PostMapping("/htf/clear-mcx")
+    public ResponseEntity<Map<String, Object>> clearMcxHtfBootstrapAttempts() {
+        log.info("[ADMIN] Clearing HTF bootstrap attempts for all MCX instruments (scripCode >= 400000)");
+
+        Map<String, Object> beforeStats = htfCandleAggregator.getBootstrapAttemptStats();
+        int cleared = htfCandleAggregator.clearMcxBootstrapAttempts();
+        Map<String, Object> afterStats = htfCandleAggregator.getBootstrapAttemptStats();
+
+        Map<String, Object> response = new LinkedHashMap<>();
+        response.put("status", "success");
+        response.put("action", "mcx_htf_bootstrap_cleared");
+        response.put("clearedEntries", cleared);
+        response.put("beforeStats", beforeStats);
+        response.put("afterStats", afterStats);
+        response.put("message", "MCX instruments (scripCode >= 400000) will retry HTF bootstrap on next candle");
+
+        return ResponseEntity.ok(response);
+    }
+
+    /**
+     * Get HTF bootstrap attempt statistics.
+     *
+     * @return Bootstrap attempt stats
+     */
+    @GetMapping("/htf/stats")
+    public ResponseEntity<Map<String, Object>> getHtfBootstrapStats() {
+        Map<String, Object> stats = htfCandleAggregator.getBootstrapAttemptStats();
+
+        Map<String, Object> response = new LinkedHashMap<>();
+        response.put("status", "ok");
+        response.put("htfBootstrapStats", stats);
 
         return ResponseEntity.ok(response);
     }

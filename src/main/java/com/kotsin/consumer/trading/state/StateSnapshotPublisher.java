@@ -5,9 +5,19 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import com.kotsin.consumer.config.KafkaTopics;
 import com.kotsin.consumer.enrichment.EnrichedQuantScoreCalculator.EnrichedQuantScore;
 import com.kotsin.consumer.trading.model.Position;
+import com.kotsin.consumer.trading.gate.FlowAlignmentGate;
+import com.kotsin.consumer.trading.gate.FlowAlignmentGate.FlowGateResult;
+import com.kotsin.consumer.trading.gate.FlowAlignmentGate.SignalDirection;
+import com.kotsin.consumer.trading.mtf.HierarchicalMtfAnalyzer;
+import com.kotsin.consumer.trading.mtf.HierarchicalMtfAnalyzer.HierarchicalContext;
+import com.kotsin.consumer.trading.quality.SignalQualityCalculator;
+import com.kotsin.consumer.trading.quality.SignalQualityCalculator.SignalQuality;
 import com.kotsin.consumer.trading.state.dto.*;
+import com.kotsin.consumer.trading.strategy.EntrySequenceValidator;
+import com.kotsin.consumer.trading.strategy.EntrySequenceValidator.SequenceValidation;
 import com.kotsin.consumer.trading.strategy.TradingStrategy;
 import com.kotsin.consumer.trading.strategy.TradingStrategy.SetupContext;
+import com.kotsin.consumer.enrichment.enricher.MTFSuperTrendAggregator.TradingHorizon;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.beans.factory.annotation.Qualifier;
@@ -37,6 +47,11 @@ public class StateSnapshotPublisher {
     private final KafkaTemplate<String, String> kafkaTemplate;
     private final ObjectMapper objectMapper;
     private final List<TradingStrategy> strategies;
+    private final Optional<StrategyConditionBuilder> conditionBuilder;
+    private final Optional<HierarchicalMtfAnalyzer> hierarchicalAnalyzer;
+    private final Optional<FlowAlignmentGate> flowAlignmentGate;
+    private final Optional<EntrySequenceValidator> entrySequenceValidator;
+    private final Optional<SignalQualityCalculator> signalQualityCalculator;
 
     // Lazy injection to break circular dependency
     private InstrumentStateManager stateManager;
@@ -44,10 +59,20 @@ public class StateSnapshotPublisher {
     public StateSnapshotPublisher(
             @Qualifier("stringKafkaTemplate") KafkaTemplate<String, String> kafkaTemplate,
             ObjectMapper objectMapper,
-            List<TradingStrategy> strategies) {
+            List<TradingStrategy> strategies,
+            Optional<StrategyConditionBuilder> conditionBuilder,
+            Optional<HierarchicalMtfAnalyzer> hierarchicalAnalyzer,
+            Optional<FlowAlignmentGate> flowAlignmentGate,
+            Optional<EntrySequenceValidator> entrySequenceValidator,
+            Optional<SignalQualityCalculator> signalQualityCalculator) {
         this.kafkaTemplate = kafkaTemplate;
         this.objectMapper = objectMapper;
         this.strategies = strategies;
+        this.conditionBuilder = conditionBuilder;
+        this.hierarchicalAnalyzer = hierarchicalAnalyzer;
+        this.flowAlignmentGate = flowAlignmentGate;
+        this.entrySequenceValidator = entrySequenceValidator;
+        this.signalQualityCalculator = signalQualityCalculator;
     }
 
     // Setter injection to break circular dependency
@@ -213,7 +238,7 @@ public class StateSnapshotPublisher {
                 .vpin(vpin)
                 .superTrendBullish(tech != null && tech.isSuperTrendBullish())
                 .superTrendFlip(tech != null && tech.isSuperTrendFlip())
-                .bbPercentB(tech != null ? tech.getBbPercentB() : 0.5)
+                .bbPercentB(tech != null && !Double.isNaN(tech.getBbPercentB()) ? tech.getBbPercentB() : 0.5)
                 .bbSqueezing(tech != null && tech.isBbSqueezing())
                 .activeSetups(activeSetups)
                 .position(positionInfo)
@@ -232,6 +257,8 @@ public class StateSnapshotPublisher {
         }
 
         List<ActiveSetupInfo> result = new ArrayList<>();
+        // Use scripCode as familyId - EnrichedQuantScore stores scripCode, not familyId
+        String familyId = score.getScripCode() != null ? score.getScripCode() : scripCode;
 
         for (Map.Entry<String, SetupContext> entry : setups.entrySet()) {
             String strategyId = entry.getKey();
@@ -247,6 +274,71 @@ public class StateSnapshotPublisher {
             int progressPercent = calculateProgress(conditions);
             String blockingCondition = findBlockingCondition(conditions);
 
+            boolean isLong = setup.getDirection() == null || !"SHORT".equals(setup.getDirection().name());
+
+            // Build detailed conditions and MTF analysis for INST_PIVOT strategy
+            List<StrategyConditionDTO> detailedConditions = null;
+            MtfAnalysisDTO mtfAnalysis = null;
+            String qualityTier = null;
+            boolean readyForEntry = false;
+            String notReadyReason = null;
+
+            if ("INST_PIVOT".equals(strategyId) && conditionBuilder.isPresent()) {
+                try {
+                    // Get hierarchical context
+                    HierarchicalContext htfCtx = hierarchicalAnalyzer
+                            .map(a -> a.analyze(familyId, TradingHorizon.INTRADAY, score.getClose()))
+                            .orElse(null);
+
+                    // Get flow result
+                    // Note: EnrichedQuantScore doesn't store FamilyCandle, so we pass null
+                    // FlowAlignmentGate handles null gracefully with passNoData()
+                    FlowGateResult flowResult = flowAlignmentGate
+                            .map(g -> g.evaluate(isLong ? SignalDirection.LONG : SignalDirection.SHORT,
+                                    null))
+                            .orElse(FlowGateResult.passNoData());
+
+                    // Validate entry sequence
+                    SequenceValidation sequence = null;
+                    if (htfCtx != null && entrySequenceValidator.isPresent()) {
+                        sequence = isLong
+                                ? entrySequenceValidator.get().validateLongSequence(htfCtx, flowResult)
+                                : entrySequenceValidator.get().validateShortSequence(htfCtx, flowResult);
+                    }
+
+                    // Calculate signal quality
+                    SignalQuality quality = null;
+                    if (sequence != null && signalQualityCalculator.isPresent()) {
+                        quality = signalQualityCalculator.get().calculate(sequence, flowResult, htfCtx);
+                        qualityTier = quality.getTierDisplay();
+                        readyForEntry = quality.isValid() && sequence.coreRequirementsMet();
+                        if (!readyForEntry) {
+                            notReadyReason = quality.summary();
+                        }
+                    }
+
+                    // Build detailed conditions
+                    detailedConditions = conditionBuilder.get().buildInstPivotConditions(
+                            htfCtx, flowResult, sequence, quality, isLong);
+
+                    // Build MTF analysis DTO
+                    if (htfCtx != null) {
+                        mtfAnalysis = conditionBuilder.get().buildMtfAnalysis(
+                                htfCtx, flowResult, sequence, quality);
+                    }
+
+                    // Update progress based on detailed conditions
+                    if (detailedConditions != null && !detailedConditions.isEmpty()) {
+                        progressPercent = conditionBuilder.get().calculateOverallProgress(detailedConditions);
+                        blockingCondition = conditionBuilder.get().findBlockingCondition(detailedConditions);
+                    }
+
+                } catch (Exception e) {
+                    log.warn("[STATE_PUB] Failed to build detailed conditions for {}: {}",
+                            scripCode, e.getMessage());
+                }
+            }
+
             ActiveSetupInfo info = ActiveSetupInfo.builder()
                     .strategyId(strategyId)
                     .setupDescription(setup.getSetupDescription())
@@ -257,6 +349,11 @@ public class StateSnapshotPublisher {
                     .conditions(conditions)
                     .progressPercent(progressPercent)
                     .blockingCondition(blockingCondition)
+                    .detailedConditions(detailedConditions)
+                    .mtfAnalysis(mtfAnalysis)
+                    .qualityTier(qualityTier)
+                    .readyForEntry(readyForEntry)
+                    .notReadyReason(notReadyReason)
                     .build();
 
             result.add(info);

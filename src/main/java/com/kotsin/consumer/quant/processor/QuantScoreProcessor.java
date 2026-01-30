@@ -248,9 +248,16 @@ public class QuantScoreProcessor {
     }
 
     /**
-     * Enrich FamilyCandle with Greeks and IV if not present
+     * Enrich FamilyCandle with Greeks and IV if not present.
+     *
+     * 🔴 MTF-FIX: For HTF candles (5m, 15m, etc.), Greeks/IV are intentionally NULL
+     * from TimeframeAggregator so they get recalculated here using the properly
+     * AGGREGATED options data, giving timeframe-specific values.
      */
     private void enrichFamilyCandle(FamilyCandle family) {
+        String timeframe = family.getTimeframe() != null ? family.getTimeframe() : "1m";
+        boolean isHTF = !"1m".equals(timeframe);
+
         // Add Greeks portfolio if not present
         if (!family.hasGreeksPortfolio() && family.getOptions() != null && !family.getOptions().isEmpty()) {
             try {
@@ -259,6 +266,13 @@ public class QuantScoreProcessor {
                     family.getPrimaryPrice()
                 );
                 family.setGreeksPortfolio(greeksPortfolio);
+                if (isHTF) {
+                    log.debug("[MTF-ENRICH] {} {} | Greeks recalculated: delta={} gamma={} (from {} options)",
+                        family.getFamilyId(), timeframe,
+                        String.format("%.2f", greeksPortfolio.getTotalDelta()),
+                        String.format("%.4f", greeksPortfolio.getTotalGamma()),
+                        family.getOptions().size());
+                }
             } catch (Exception e) {
                 log.debug("Failed to calculate Greeks for {}: {}", family.getFamilyId(), e.getMessage());
             }
@@ -273,6 +287,12 @@ public class QuantScoreProcessor {
                     null  // No historical IV rank available
                 );
                 family.setIvSurface(ivSurface);
+                if (isHTF) {
+                    log.debug("[MTF-ENRICH] {} {} | IV recalculated: atmIV={} ivRank={}",
+                        family.getFamilyId(), timeframe,
+                        String.format("%.2f", ivSurface.getAtmIV()),
+                        String.format("%.2f", ivSurface.getIvRank()));
+                }
             } catch (Exception e) {
                 log.debug("Failed to calculate IV Surface for {}: {}", family.getFamilyId(), e.getMessage());
             }
@@ -325,24 +345,32 @@ public class QuantScoreProcessor {
     /**
      * Emit QuantScore to dashboard topic
      */
-    @Async
     public void emitScore(QuantScore score) {
         if (scoreProducer == null) {
-            log.debug("Score producer not available, skipping emit");
+            log.warn("Score producer not available (null), skipping emit for {}", score.getFamilyId());
             return;
         }
 
         try {
-            scoreProducer.send(
-                config.getScoresTopic(),
-                score.getFamilyId(),
-                score
-            );
-            log.debug("Emitted QuantScore for {} with score {}",
-                score.getSymbol(), score.getQuantScore());
+            String topic = config.getScoresTopic();
+            log.debug("Sending QuantScore to topic {} for {} with score {}",
+                topic, score.getFamilyId(), score.getQuantScore());
+
+            scoreProducer.send(topic, score.getFamilyId(), score)
+                .whenComplete((result, ex) -> {
+                    if (ex != null) {
+                        log.error("Failed to emit QuantScore for {} to {}: {}",
+                            score.getFamilyId(), topic, ex.getMessage());
+                    } else {
+                        log.debug("Successfully emitted QuantScore for {} to {} partition {} offset {}",
+                            score.getSymbol(), topic,
+                            result.getRecordMetadata().partition(),
+                            result.getRecordMetadata().offset());
+                    }
+                });
         } catch (Exception e) {
-            log.error("Failed to emit QuantScore for {}: {}",
-                score.getFamilyId(), e.getMessage());
+            log.error("Exception while emitting QuantScore for {}: {}",
+                score.getFamilyId(), e.getMessage(), e);
         }
     }
 
