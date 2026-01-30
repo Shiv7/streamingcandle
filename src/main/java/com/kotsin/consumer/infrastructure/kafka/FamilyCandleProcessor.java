@@ -884,14 +884,49 @@ public class FamilyCandleProcessor {
         
         // PHASE 2: MTF Distribution Analysis
         // Calculate intra-window sub-candle patterns for directional consistency
-        // FIX: For commodities, use futureSubCandles when equitySubCandles is empty
-        List<com.kotsin.consumer.model.UnifiedCandle> subCandles = collector.getEquitySubCandles();
-        String subCandleSource = "equity";
+        // BUG #3 FIX: Extract sub-candles directly from InstrumentCandle at emission time
+        // The collector's @JsonIgnore lists (equitySubCandles, futureSubCandles) are lost after
+        // state store serialization/deserialization. Instead, extract from InstrumentCandle.subCandleSnapshots
+        // which ARE persisted and survive serialization.
+        List<com.kotsin.consumer.model.UnifiedCandle> subCandles = new ArrayList<>();
+        String subCandleSource = "none";
 
-        // For commodities (no equity), use future sub-candles for MTF distribution
-        if ((subCandles == null || subCandles.isEmpty()) && isCommodity) {
-            subCandles = collector.getFutureSubCandles();
-            subCandleSource = "future";
+        // Try equity first, then future for commodities
+        InstrumentCandle subCandleSourceCandle = equity;
+        if (subCandleSourceCandle == null && isCommodity) {
+            subCandleSourceCandle = future;
+        }
+
+        if (subCandleSourceCandle != null) {
+            List<InstrumentCandle.SubCandleSnapshot> snapshots = subCandleSourceCandle.getSubCandleSnapshots();
+            if (snapshots != null && !snapshots.isEmpty()) {
+                subCandleSource = (subCandleSourceCandle == equity) ? "equity" : "future";
+                for (InstrumentCandle.SubCandleSnapshot snap : snapshots) {
+                    com.kotsin.consumer.model.UnifiedCandle uc = new com.kotsin.consumer.model.UnifiedCandle();
+                    uc.setOpen(snap.getOpen());
+                    uc.setHigh(snap.getHigh());
+                    uc.setLow(snap.getLow());
+                    uc.setClose(snap.getClose());
+                    uc.setVolume(snap.getVolume());
+                    uc.setBuyVolume(snap.getBuyVolume());
+                    uc.setSellVolume(snap.getSellVolume());
+                    uc.setVwap(snap.getVwap());
+                    uc.setTickCount(snap.getTickCount());
+                    subCandles.add(uc);
+                }
+                log.debug("[MTF-SUBCANDLE-EXTRACT] {} | Extracted {} sub-candles from {} InstrumentCandle.subCandleSnapshots",
+                    familyId, subCandles.size(), subCandleSource);
+            }
+        }
+
+        // Fallback to collector lists if InstrumentCandle snapshots empty (backward compatibility)
+        if (subCandles.isEmpty()) {
+            subCandles = collector.getEquitySubCandles();
+            subCandleSource = "equity-collector";
+            if ((subCandles == null || subCandles.isEmpty()) && isCommodity) {
+                subCandles = collector.getFutureSubCandles();
+                subCandleSource = "future-collector";
+            }
         }
 
         if (subCandles != null && !subCandles.isEmpty() && subCandles.size() > 1) {
@@ -912,8 +947,9 @@ public class FamilyCandleProcessor {
             com.kotsin.consumer.model.MTFDistribution minimalDist = createMinimalMTFDistribution(equity, future);
             if (minimalDist != null) {
                 builder.mtfDistribution(minimalDist);
-                log.debug("MTF Distribution (minimal) for {}: single candle, direction={}, confidence={}",
-                          familyId, minimalDist.getDominantDirection(), minimalDist.getConfidence());
+                log.debug("MTF Distribution (minimal) for {}: single candle (subCandles={}), direction={}, confidence={}",
+                          familyId, subCandles != null ? subCandles.size() : 0,
+                          minimalDist.getDominantDirection(), minimalDist.getConfidence());
             } else {
                 log.debug("⚠️ MTF Distribution skipped for {} - no valid candle data", familyId);
             }

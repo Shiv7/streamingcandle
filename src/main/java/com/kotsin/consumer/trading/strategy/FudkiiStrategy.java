@@ -228,8 +228,8 @@ public class FudkiiStrategy implements TradingStrategy {
                     nearUpperBB, nearLowerBB, nearSTFlip, aboveUpperBB, belowLowerBB);
         }
 
-        log.debug("[FUDKII] Setup forming: {} | BB squeezing | {} | ST={} | price={:.2f} | ATR={:.2f}",
-                score.getScripCode(), breakoutType, potentialDirection, price, atr);
+        log.debug("[FUDKII] Setup forming: {} | BB squeezing | {} | ST={} | price={} | ATR={}",
+                score.getScripCode(), breakoutType, potentialDirection, String.format("%.2f", price), String.format("%.2f", atr));
 
         return Optional.of(SetupContext.builder()
                 .strategyId(STRATEGY_ID)
@@ -400,11 +400,11 @@ public class FudkiiStrategy implements TradingStrategy {
         // 5. Check MTF alignment (HTF bullish for LONG, bearish for SHORT)
         if (tech.getMtfBullishPercentage() > 0) {
             if (direction == Direction.LONG && tech.getMtfBullishPercentage() < 0.5) {
-                log.trace("[FUDKII] MTF not bullish enough for LONG: {:.0f}%", tech.getMtfBullishPercentage() * 100);
+                log.trace("[FUDKII] MTF not bullish enough for LONG: {}%", String.format("%.0f", tech.getMtfBullishPercentage() * 100));
                 return Optional.empty();
             }
             if (direction == Direction.SHORT && tech.getMtfBullishPercentage() > 0.5) {
-                log.trace("[FUDKII] MTF too bullish for SHORT: {:.0f}%", tech.getMtfBullishPercentage() * 100);
+                log.trace("[FUDKII] MTF too bullish for SHORT: {}%", String.format("%.0f", tech.getMtfBullishPercentage() * 100));
                 return Optional.empty();
             }
         }
@@ -459,7 +459,7 @@ public class FudkiiStrategy implements TradingStrategy {
         double rr = risk > 0 ? reward / risk : 0;
 
         if (rr < 1.5) {
-            log.trace("[FUDKII] R:R too low: {:.2f}", rr);
+            log.trace("[FUDKII] R:R too low: {}", String.format("%.2f", rr));
             return Optional.empty();
         }
 
@@ -472,8 +472,9 @@ public class FudkiiStrategy implements TradingStrategy {
         if (nearBreakoutConfirmation) confidence += 0.05;  // 2-candle confirmation adds confidence
         confidence = Math.min(0.95, confidence);
 
-        log.info("[FUDKII] ENTRY TRIGGERED | {} {} @ {:.2f} | ST flip | BB %B={:.2f} | OFI={:.2f} | R:R={:.2f} | conf={:.0f}%",
-                score.getScripCode(), direction, price, bbPctB, ofiZscore, rr, confidence * 100);
+        log.info("[FUDKII] ENTRY TRIGGERED | {} {} @ {} | ST flip | BB %B={} | OFI={} | R:R={} | conf={}%",
+                score.getScripCode(), direction, String.format("%.2f", price), String.format("%.2f", bbPctB),
+                String.format("%.2f", ofiZscore), String.format("%.2f", rr), String.format("%.0f", confidence * 100));
 
         // Extract microstructure metrics (vpin, kyleLambda)
         Double vpin = null;

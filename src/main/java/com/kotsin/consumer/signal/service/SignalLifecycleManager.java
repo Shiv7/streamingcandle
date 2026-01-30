@@ -97,12 +97,12 @@ public class SignalLifecycleManager {
         signalsByFamily.computeIfAbsent(signal.getFamilyId(), k -> ConcurrentHashMap.newKeySet())
                 .add(signal.getSignalId());
 
-        log.info("[LIFECYCLE] REGISTERED | {} | {} {} @ {} | SL={} | T1={} | conf={:.0f}%",
+        log.info("[LIFECYCLE] REGISTERED | {} | {} {} @ {} | SL={} | T1={} | conf={}%",
                 signal.getSignalId(), signal.getDirection(), signal.getScripCode(),
                 String.format("%.2f", signal.getEntryPrice()),
                 String.format("%.2f", signal.getStopLoss()),
                 String.format("%.2f", signal.getTarget1()),
-                signal.getConfidence() * 100);
+                String.format("%.0f", signal.getConfidence() * 100));
 
         return context;
     }
@@ -135,8 +135,8 @@ public class SignalLifecycleManager {
 
         // Log status changes
         if (status == SignalStatus.STRENGTHENING || status == SignalStatus.WEAKENING) {
-            log.debug("[LIFECYCLE] {} | {} | decay={:.1f}% | score={:.1f}",
-                    context.getScripCode(), status, context.getCombinedDecay() * 100, context.getCurrentScore());
+            log.debug("[LIFECYCLE] {} | {} | decay={}% | score={}",
+                    context.getScripCode(), status, String.format("%.1f", context.getCombinedDecay() * 100), String.format("%.1f", context.getCurrentScore()));
         }
 
         return status;
@@ -197,9 +197,9 @@ public class SignalLifecycleManager {
             familySignals.remove(signalId);
         }
 
-        log.info("[LIFECYCLE] INVALIDATED | {} | {} | {} | decay={:.1f}% | age={:.1f}min",
+        log.info("[LIFECYCLE] INVALIDATED | {} | {} | {} | decay={}% | age={}min",
                 signalId, context.getScripCode(), reason.getDescription(),
-                context.getCombinedDecay() * 100, context.getAgeMinutes());
+                String.format("%.1f", context.getCombinedDecay() * 100), String.format("%.1f", context.getAgeMinutes()));
     }
 
     /**
@@ -231,9 +231,9 @@ public class SignalLifecycleManager {
             familySignals.remove(signalId);
         }
 
-        log.info("[LIFECYCLE] EXECUTED | {} | {} | entry={} | decay={:.1f}%",
+        log.info("[LIFECYCLE] EXECUTED | {} | {} | entry={} | decay={}%",
                 signalId, context.getScripCode(), String.format("%.2f", context.getEntryPrice()),
-                context.getCombinedDecay() * 100);
+                String.format("%.1f", context.getCombinedDecay() * 100));
     }
 
     /**

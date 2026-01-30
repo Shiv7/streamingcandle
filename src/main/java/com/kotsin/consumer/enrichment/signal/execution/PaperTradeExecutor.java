@@ -148,19 +148,24 @@ public class PaperTradeExecutor {
 
     /**
      * Consume price data and track positions
+     *
+     * FIX: Changed parameter from ConsumerRecord<String, String> to FamilyCandle
+     * The StringJsonMessageConverter in curatedKafkaListenerContainerFactory
+     * automatically deserializes JSON to the method parameter type.
+     * Using ConsumerRecord<String, String> caused deserialization failure because
+     * the converter tried to deserialize JSON object to String type.
      */
     @KafkaListener(
             topics = "${paper.trade.executor.price.topic:" + KafkaTopics.FAMILY_CANDLE_1M + "}",
             groupId = "${paper.trade.executor.price.group.id:paper-trade-price-tracker-v1}",
             containerFactory = "curatedKafkaListenerContainerFactory"
     )
-    public void consumePrice(ConsumerRecord<String, String> record) {
+    public void consumePrice(FamilyCandle candle) {
         if (activePositions.isEmpty()) {
             return;
         }
 
         try {
-            FamilyCandle candle = objectMapper.readValue(record.value(), FamilyCandle.class);
             String familyId = candle.getFamilyId();
 
             // Get primary instrument for OHLC data

@@ -569,7 +569,7 @@ public class InstitutionalPivotStrategy implements TradingStrategy {
                 String.format("%.2f", sweep.getLiquidityLevel()) : "ZONE_REJECT";
 
         log.info("[INST_PIVOT] ENTRY! | {} {} @ {} | HTF={} | trigger={} | " +
-                        "SL={} ({}%) | T1={} | T2={} | T3={} | R:R={} | conf={}% | leadEdge={} | ofi={:.2f}",
+                        "SL={} ({}%) | T1={} | T2={} | T3={} | R:R={} | conf={}% | leadEdge={} | ofi={}",
                 scripCode, direction, String.format("%.2f", price),
                 smc.getHtfBias(),
                 triggerType + (validSweep ? "@" + sweepInfo : ""),
@@ -581,7 +581,7 @@ public class InstitutionalPivotStrategy implements TradingStrategy {
                 String.format("%.1f", rr),
                 String.format("%.0f", confidence * 100),
                 leadingEdge.getPattern(),
-                ofiConfirmation);
+                String.format("%.2f", ofiConfirmation));
 
         return Optional.of(TradingSignal.builder()
                 .signalId(UUID.randomUUID().toString())

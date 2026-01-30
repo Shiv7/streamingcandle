@@ -760,13 +760,33 @@ public class TickAggregate {
             medianTradeSize = sizes.size() % 2 == 0 ?
                 (sizes.get(mid - 1) + sizes.get(mid)) / 2.0 : sizes.get(mid);
 
-            double largeThreshold = avgTradeSize * 10;
+            // BUG #6 FIX: Adaptive large trade threshold for commodities/low-liquidity instruments
+            // Old: Fixed 10x avgTradeSize - too high for commodities where avg=10 means threshold=100
+            // New: Use minimum of 10x avg OR 5% of window volume OR 4x avg (for commodities)
+            // This catches significant trades like a 46-lot in a 684-volume window (6.7% of volume)
+            double largeThreshold;
+            boolean isCommodity = "M".equalsIgnoreCase(exchange);
+            if (isCommodity || avgTradeSize < 20) {
+                // For commodities or low avg trade size: use lower multiplier and volume percentage
+                double thresholdByMultiplier = avgTradeSize * 4;  // 4x instead of 10x
+                double thresholdByVolume = volume * 0.05;         // 5% of window volume
+                largeThreshold = Math.min(thresholdByMultiplier, Math.max(thresholdByVolume, avgTradeSize * 3));
+            } else {
+                // For liquid instruments: traditional 10x rule but cap at 5% volume
+                double thresholdByMultiplier = avgTradeSize * 10;
+                double thresholdByVolume = volume * 0.05;
+                largeThreshold = Math.min(thresholdByMultiplier, thresholdByVolume);
+            }
+            // Ensure minimum threshold of 2x average to avoid noise
+            largeThreshold = Math.max(largeThreshold, avgTradeSize * 2);
+
             largeTradeCount = 0;
             for (TradeInfo trade : tradeHistory) {
                 if (trade.quantity > largeThreshold) {
                     largeTradeCount++;
-                    log.debug("[LARGE-TRADE] {} | size={} threshold={}",
-                        scripCode, trade.quantity, String.format("%.0f", largeThreshold));
+                    log.debug("[LARGE-TRADE] {} | size={} threshold={} ({}% of window vol)",
+                        scripCode, trade.quantity, String.format("%.0f", largeThreshold),
+                        volume > 0 ? String.format("%.1f", trade.quantity * 100.0 / volume) : "N/A");
                 }
             }
         } else {
@@ -822,17 +842,35 @@ public class TickAggregate {
     }
 
     // P2 getters
+    // BUG #2 FIX: Use persisted incremental fields as fallback when transient map is lost after deserialization
     public int getMaxTicksInAnySecond() {
-        if (tickCountPerSecond == null || tickCountPerSecond.isEmpty()) return 0;
-        return tickCountPerSecond.values().stream().max(Integer::compareTo).orElse(0);
+        // Prefer transient map if available (more accurate during aggregation)
+        if (tickCountPerSecond != null && !tickCountPerSecond.isEmpty()) {
+            return tickCountPerSecond.values().stream().max(Integer::compareTo).orElse(0);
+        }
+        // Fallback to persisted incremental field after deserialization
+        return maxTicksInAnySecond;
     }
     public int getSecondsWithTicks() {
-        return tickCountPerSecond != null ? tickCountPerSecond.size() : 0;
+        // Prefer transient map if available
+        if (tickCountPerSecond != null && !tickCountPerSecond.isEmpty()) {
+            return tickCountPerSecond.size();
+        }
+        // Fallback to persisted incremental field after deserialization
+        return secondsWithTicks;
     }
     public double getTickBurstRatio() {
         int max = getMaxTicksInAnySecond();
         int seconds = getSecondsWithTicks();
-        if (seconds == 0) return 0.0;
+        if (seconds == 0) {
+            // BUG #2 FIX: Estimate seconds from tick timestamps if available
+            if (tickCount > 0 && lastTickTimestamp > firstTickTimestamp) {
+                long durationMs = lastTickTimestamp - firstTickTimestamp;
+                seconds = Math.max(1, (int) (durationMs / 1000));
+            } else {
+                return 0.0;
+            }
+        }
         double avg = (double) tickCount / seconds;
         return avg > 0 ? max / avg : 0.0;
     }

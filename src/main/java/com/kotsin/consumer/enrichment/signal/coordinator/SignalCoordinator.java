@@ -156,14 +156,14 @@ public class SignalCoordinator {
                 // Opposite direction - need strong reason to flip
                 if (signal.getConfidence() < MTF_OVERRIDE_MIN_CONFIDENCE) {
                     blockedByActiveSignal.incrementAndGet();
-                    log.info("[COORD] BLOCKED {} {} from {} | ACTIVE_OPPOSITE_SIGNAL (conf={:.0f}% < {:.0f}% required)",
-                            familyId, direction, source, signal.getConfidence() * 100, MTF_OVERRIDE_MIN_CONFIDENCE * 100);
+                    log.info("[COORD] BLOCKED {} {} from {} | ACTIVE_OPPOSITE_SIGNAL (conf={}% < {}% required)",
+                            familyId, direction, source, String.format("%.0f", signal.getConfidence() * 100), String.format("%.0f", MTF_OVERRIDE_MIN_CONFIDENCE * 100));
                     return false;
                 }
                 // High confidence flip - invalidate old signal
                 active.invalidated = true;
-                log.info("[COORD] {} INVALIDATING active {} signal due to high-conf {} signal (conf={:.0f}%)",
-                        familyId, active.direction, direction, signal.getConfidence() * 100);
+                log.info("[COORD] {} INVALIDATING active {} signal due to high-conf {} signal (conf={}%)",
+                        familyId, active.direction, direction, String.format("%.0f", signal.getConfidence() * 100));
             }
         }
 
@@ -179,8 +179,8 @@ public class SignalCoordinator {
                             familyId, direction, source, timeSinceFlip / 60000, lastDir.direction);
                     return false;
                 }
-                log.info("[COORD] {} ALLOWING early flip from {} to {} (conf={:.0f}% >= {:.0f}%)",
-                        familyId, lastDir.direction, direction, signal.getConfidence() * 100, MTF_OVERRIDE_MIN_CONFIDENCE * 100);
+                log.info("[COORD] {} ALLOWING early flip from {} to {} (conf={}% >= {}%)",
+                        familyId, lastDir.direction, direction, String.format("%.0f", signal.getConfidence() * 100), String.format("%.0f", MTF_OVERRIDE_MIN_CONFIDENCE * 100));
             }
         }
 
@@ -204,14 +204,14 @@ public class SignalCoordinator {
 
             if (!mtfValid && signal.getConfidence() < MTF_OVERRIDE_MIN_CONFIDENCE) {
                 blockedByMtf.incrementAndGet();
-                log.info("[COORD] BLOCKED {} {} from {} | MTF_MISALIGNED (HTF disagrees, conf={:.0f}% < {:.0f}%)",
-                        familyId, direction, source, signal.getConfidence() * 100, MTF_OVERRIDE_MIN_CONFIDENCE * 100);
+                log.info("[COORD] BLOCKED {} {} from {} | MTF_MISALIGNED (HTF disagrees, conf={}% < {}%)",
+                        familyId, direction, source, String.format("%.0f", signal.getConfidence() * 100), String.format("%.0f", MTF_OVERRIDE_MIN_CONFIDENCE * 100));
                 return false;
             }
 
             if (!mtfValid) {
-                log.info("[COORD] {} {} MTF misaligned but high-conf override (conf={:.0f}%)",
-                        familyId, direction, signal.getConfidence() * 100);
+                log.info("[COORD] {} {} MTF misaligned but high-conf override (conf={}%)",
+                        familyId, direction, String.format("%.0f", signal.getConfidence() * 100));
             }
         }
 
@@ -255,9 +255,9 @@ public class SignalCoordinator {
                 }
             });
 
-            log.info("[COORD] PUBLISHED {} {} {} from {} | conf={:.0f}% | dayCount={}/{} | active={}",
+            log.info("[COORD] PUBLISHED {} {} {} from {} | conf={}% | dayCount={}/{} | active={}",
                     familyId, direction, horizon, source,
-                    signal.getConfidence() * 100,
+                    String.format("%.0f", signal.getConfidence() * 100),
                     dayCount.get(), MAX_SIGNALS_PER_FAMILY_PER_DAY,
                     activeSignals.size());
 
@@ -298,8 +298,8 @@ public class SignalCoordinator {
             boolean slHit = (active.direction == Direction.LONG && currentPrice <= active.stopLoss) ||
                            (active.direction == Direction.SHORT && currentPrice >= active.stopLoss);
             if (slHit) {
-                log.info("[COORD] {} active {} signal SL_HIT at {:.2f}",
-                        familyId, active.direction, currentPrice);
+                log.info("[COORD] {} active {} signal SL_HIT at {}",
+                        familyId, active.direction, String.format("%.2f", currentPrice));
                 active.invalidated = true;
                 activeSignals.remove(familyId);
                 // SIGNAL_DECAY_INTEGRATION: Invalidate in lifecycle manager
@@ -314,8 +314,8 @@ public class SignalCoordinator {
             boolean targetHit = (active.direction == Direction.LONG && currentPrice >= active.target) ||
                                (active.direction == Direction.SHORT && currentPrice <= active.target);
             if (targetHit) {
-                log.info("[COORD] {} active {} signal TARGET_HIT at {:.2f}",
-                        familyId, active.direction, currentPrice);
+                log.info("[COORD] {} active {} signal TARGET_HIT at {}",
+                        familyId, active.direction, String.format("%.2f", currentPrice));
                 active.invalidated = true;
                 activeSignals.remove(familyId);
                 // SIGNAL_DECAY_INTEGRATION: Mark as executed in lifecycle manager
@@ -433,13 +433,13 @@ public class SignalCoordinator {
 
             // LONG requires at least 50% HTF bullish
             if (isLong && htfBullishPct < 0.5) {
-                log.debug("[MTF] LONG blocked - HTF only {:.0f}% bullish", htfBullishPct * 100);
+                log.debug("[MTF] LONG blocked - HTF only {}% bullish", String.format("%.0f", htfBullishPct * 100));
                 return false;
             }
 
             // SHORT requires at least 50% HTF bearish (i.e., <50% bullish)
             if (!isLong && htfBullishPct > 0.5) {
-                log.debug("[MTF] SHORT blocked - HTF {:.0f}% bullish", htfBullishPct * 100);
+                log.debug("[MTF] SHORT blocked - HTF {}% bullish", String.format("%.0f", htfBullishPct * 100));
                 return false;
             }
         }

@@ -13,6 +13,7 @@ import com.kotsin.consumer.regime.model.SecurityRegime;
 import com.kotsin.consumer.score.calculator.MTISCalculator;
 import com.kotsin.consumer.score.model.FamilyIntelligenceState;
 import com.kotsin.consumer.score.model.FamilyScore;
+import com.kotsin.consumer.service.FamilyScoreCacheService;
 import com.kotsin.consumer.signal.model.FUDKIIOutput;
 import jakarta.annotation.PostConstruct;
 import jakarta.annotation.PreDestroy;
@@ -62,6 +63,9 @@ public class MTISProcessor {
 
     @Autowired
     private KafkaTemplate<String, FamilyScore> familyScoreProducer;
+
+    @Autowired
+    private FamilyScoreCacheService familyScoreCacheService;  // Redis cache for dashboard restart survival
 
     @Value("${mtis.processor.enabled:true}")
     private boolean enabled;
@@ -347,7 +351,10 @@ public class MTISProcessor {
         // 7. Emit to output topic (async send - non-blocking)
         try {
             familyScoreProducer.send(outputTopic, familyId, score);
-            
+
+            // 8. Cache to Redis for dashboard restart survival
+            familyScoreCacheService.cacheScore(score);
+
             // 🔍 ENHANCED LOGGING: Always log MTIS scores with full breakdown
             String symbol = familyCandle.getSymbol() != null ? familyCandle.getSymbol() : familyId;
             double mtis = score.getMtis();

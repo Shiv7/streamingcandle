@@ -262,9 +262,9 @@ public class InstrumentStateManager {
                 ctx.addWatchingSetup(strategy, setup);
                 setupsDetected++;
 
-                log.info("[STATE_MGR] {} SETUP DETECTED | strategy={} | setup={} | level={:.2f}",
+                log.info("[STATE_MGR] {} SETUP DETECTED | strategy={} | setup={} | level={}",
                         ctx.familyId, strategy.getStrategyId(),
-                        setup.getSetupDescription(), setup.getKeyLevel());
+                        setup.getSetupDescription(), String.format("%.2f", setup.getKeyLevel()));
 
                 // CONTINUE checking other strategies - don't return!
             } else {
@@ -361,9 +361,10 @@ public class InstrumentStateManager {
                 // Emit the ONE signal
                 emitSignal(ctx, signal);
 
-                log.info("[STATE_MGR] {} WATCHING → READY | SIGNAL EMITTED | {} {} | entry={:.2f} sl={:.2f} t1={:.2f}",
+                log.info("[STATE_MGR] {} WATCHING → READY | SIGNAL EMITTED | {} {} | entry={} sl={} t1={}",
                         ctx.familyId, signal.getDirection(), strategy.getStrategyId(),
-                        signal.getEntryPrice(), signal.getStopLoss(), signal.getTarget1());
+                        String.format("%.2f", signal.getEntryPrice()), String.format("%.2f", signal.getStopLoss()),
+                        String.format("%.2f", signal.getTarget1()));
 
                 // Clear other setups - we're committed to this one
                 ctx.watchingSetups.clear();
@@ -405,9 +406,9 @@ public class InstrumentStateManager {
         ctx.position = position;
         ctx.pendingSignal = null;
 
-        log.info("[STATE_MGR] {} READY → POSITIONED | FILLED | {} {} @ {:.2f}",
+        log.info("[STATE_MGR] {} READY → POSITIONED | FILLED | {} {} @ {}",
                 ctx.familyId, position.getDirection(), ctx.watchingStrategy.getStrategyId(),
-                position.getEntryPrice());
+                String.format("%.2f", position.getEntryPrice()));
     }
 
     /**
@@ -431,18 +432,18 @@ public class InstrumentStateManager {
         if (maxPosition <= 0) maxPosition = DEFAULT_MAX_POSITION_MS;
 
         if (positionDuration > maxPosition) {
-            log.info("[STATE_MGR] {} TIME_STOP after {}min | P&L={:.2f} ({:.2f}%)",
+            log.info("[STATE_MGR] {} TIME_STOP after {}min | P&L={} ({}%)",
                     ctx.familyId, positionDuration / 60000,
-                    position.getUnrealizedPnL(), position.getPnLPercent());
+                    String.format("%.2f", position.getUnrealizedPnL()), String.format("%.2f", position.getPnLPercent()));
             exitPosition(ctx, currentPrice, ExitReason.TIME_STOP);
             return;
         }
 
         // Check stop loss
         if (position.isStopLossHit()) {
-            log.info("[STATE_MGR] {} STOP_LOSS_HIT @ {:.2f} | P&L={:.2f} ({:.2f}%)",
-                    ctx.familyId, currentPrice,
-                    position.getUnrealizedPnL(), position.getPnLPercent());
+            log.info("[STATE_MGR] {} STOP_LOSS_HIT @ {} | P&L={} ({}%)",
+                    ctx.familyId, String.format("%.2f", currentPrice),
+                    String.format("%.2f", position.getUnrealizedPnL()), String.format("%.2f", position.getPnLPercent()));
             exitPosition(ctx, currentPrice, ExitReason.STOP_LOSS_HIT);
             return;
         }
@@ -452,15 +453,15 @@ public class InstrumentStateManager {
             position.setTarget1Hit(true);
             // Trail stop to breakeven
             position.trailStopLoss(position.getEntryPrice());
-            log.info("[STATE_MGR] {} TARGET_1_HIT @ {:.2f} | Trailing stop to breakeven",
-                    ctx.familyId, currentPrice);
+            log.info("[STATE_MGR] {} TARGET_1_HIT @ {} | Trailing stop to breakeven",
+                    ctx.familyId, String.format("%.2f", currentPrice));
         }
 
         // Check target 2 (full exit)
         if (position.isTarget2Hit()) {
-            log.info("[STATE_MGR] {} TARGET_2_HIT @ {:.2f} | P&L={:.2f} ({:.2f}%)",
-                    ctx.familyId, currentPrice,
-                    position.getUnrealizedPnL(), position.getPnLPercent());
+            log.info("[STATE_MGR] {} TARGET_2_HIT @ {} | P&L={} ({}%)",
+                    ctx.familyId, String.format("%.2f", currentPrice),
+                    String.format("%.2f", position.getUnrealizedPnL()), String.format("%.2f", position.getPnLPercent()));
             exitPosition(ctx, currentPrice, ExitReason.TARGET_2_HIT);
             return;
         }
@@ -469,9 +470,9 @@ public class InstrumentStateManager {
         Optional<ExitSignal> exitOpt = strategy.checkExitConditions(position, score);
         if (exitOpt.isPresent()) {
             ExitSignal exit = exitOpt.get();
-            log.info("[STATE_MGR] {} STRATEGY_EXIT: {} | P&L={:.2f} ({:.2f}%)",
+            log.info("[STATE_MGR] {} STRATEGY_EXIT: {} | P&L={} ({}%)",
                     ctx.familyId, exit.getDescription(),
-                    position.getUnrealizedPnL(), position.getPnLPercent());
+                    String.format("%.2f", position.getUnrealizedPnL()), String.format("%.2f", position.getPnLPercent()));
             exitPosition(ctx, exit.getExitPrice() > 0 ? exit.getExitPrice() : currentPrice, exit.getReason());
         }
     }

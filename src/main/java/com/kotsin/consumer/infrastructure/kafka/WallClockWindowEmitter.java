@@ -1,5 +1,6 @@
 package com.kotsin.consumer.infrastructure.kafka;
 
+import com.kotsin.consumer.domain.model.FamilyCandle;
 import org.apache.kafka.streams.KeyValue;
 import org.apache.kafka.streams.kstream.Windowed;
 import org.apache.kafka.streams.processor.PunctuationType;
@@ -62,6 +63,7 @@ public class WallClockWindowEmitter<K, V> implements Processor<Windowed<K>, V, W
 
     private final long graceMs;
     private final long checkIntervalMs;
+    private final int timeframeMinutes;  // For calculating correct output timestamp
     private ProcessorContext<Windowed<K>, V> context;
 
     // Track emitted windows to avoid duplicates
@@ -71,19 +73,34 @@ public class WallClockWindowEmitter<K, V> implements Processor<Windowed<K>, V, W
     private final List<PendingWindow<K, V>> pendingWindows = new ArrayList<>();
 
     /**
+     * Full constructor with all parameters.
+     *
      * @param graceMs Grace period in milliseconds after window end
      * @param checkIntervalMs How often to check for closable windows (wall clock)
+     * @param timeframeMinutes The timeframe in minutes (for calculating correct output timestamp)
      */
-    public WallClockWindowEmitter(long graceMs, long checkIntervalMs) {
+    public WallClockWindowEmitter(long graceMs, long checkIntervalMs, int timeframeMinutes) {
         this.graceMs = graceMs;
         this.checkIntervalMs = checkIntervalMs;
+        this.timeframeMinutes = timeframeMinutes;
     }
 
     /**
-     * Convenience constructor with 1 second check interval
+     * Constructor with default check interval (1 second).
+     *
+     * @param graceMs Grace period in milliseconds after window end
+     * @param timeframeMinutes The timeframe in minutes (for calculating correct output timestamp)
+     */
+    public WallClockWindowEmitter(long graceMs, int timeframeMinutes) {
+        this(graceMs, 1000L, timeframeMinutes);
+    }
+
+    /**
+     * Convenience constructor with 1 second check interval and default 1m timeframe.
+     * Use this for 1m candles or when timestamp correction is not needed.
      */
     public WallClockWindowEmitter(long graceMs) {
-        this(graceMs, 1000L);
+        this(graceMs, 1000L, 1);
     }
 
     @Override
@@ -97,8 +114,8 @@ public class WallClockWindowEmitter<K, V> implements Processor<Windowed<K>, V, W
             this::punctuate
         );
 
-        log.info("WallClockWindowEmitter initialized: graceMs={}, checkIntervalMs={}",
-            graceMs, checkIntervalMs);
+        log.info("WallClockWindowEmitter initialized: graceMs={}, checkIntervalMs={}, timeframeMinutes={}",
+            graceMs, checkIntervalMs, timeframeMinutes);
     }
 
     @Override
@@ -189,18 +206,69 @@ public class WallClockWindowEmitter<K, V> implements Processor<Windowed<K>, V, W
     }
 
     private void emitWindow(Windowed<K> windowedKey, V value, long recordTimestamp) {
-        // Forward with the original record timestamp, preserving Windowed<K> key
-        context.forward(new Record<>(windowedKey, value, recordTimestamp));
+        // 🔴 FIX: Calculate correct output timestamp
+        // The input timestamp may be offset (e.g., -15min for NSE alignment)
+        // We need to use the CORRECTED timestamp for the output Kafka record
+        long outputTimestamp = calculateCorrectedTimestamp(windowedKey, value);
+
+        // Forward with the CORRECTED timestamp, preserving Windowed<K> key
+        context.forward(new Record<>(windowedKey, value, outputTimestamp));
 
         if (log.isDebugEnabled()) {
             long windowEnd = windowedKey.window().end();
             long delay = System.currentTimeMillis() - windowEnd;
-            log.debug("WallClockEmitter emitting: key={} window=[{},{}] delay={}ms",
+            log.debug("WallClockEmitter emitting: key={} window=[{},{}] delay={}ms outputTs={}",
                 windowedKey.key(),
                 Instant.ofEpochMilli(windowedKey.window().start()),
                 Instant.ofEpochMilli(windowEnd),
-                delay);
+                delay,
+                Instant.ofEpochMilli(outputTimestamp));
         }
+    }
+
+    /**
+     * Calculate the corrected timestamp for the output Kafka record.
+     *
+     * 🔴 FIX: The input timestamp may be offset for market alignment (e.g., -15min for NSE).
+     * The output record should have the ACTUAL window start time, not the offset time.
+     *
+     * For FamilyCandle values, we extract the exchange and apply the correct offset.
+     * For other values, we use the window start + offset based on timeframe.
+     */
+    private long calculateCorrectedTimestamp(Windowed<K> windowedKey, V value) {
+        long windowStart = windowedKey.window().start();
+
+        // For FamilyCandle, extract exchange and calculate correct offset
+        if (value instanceof FamilyCandle) {
+            FamilyCandle candle = (FamilyCandle) value;
+            String exchange = extractExchange(candle);
+            long offsetMs = com.kotsin.consumer.timeExtractor.MarketAlignedTimestampExtractor
+                .getOffsetMs(exchange, timeframeMinutes);
+            return windowStart + offsetMs;
+        }
+
+        // For other types, use default NSE offset for larger timeframes
+        // (This maintains backward compatibility)
+        if (timeframeMinutes >= 30) {
+            return windowStart + com.kotsin.consumer.timeExtractor.MarketAlignedTimestampExtractor.NSE_OFFSET_MS;
+        }
+
+        // For smaller timeframes, no offset needed
+        return windowStart;
+    }
+
+    /**
+     * Extract exchange from FamilyCandle.
+     */
+    private String extractExchange(FamilyCandle candle) {
+        if (candle.getEquity() != null && candle.getEquity().getExchange() != null) {
+            return candle.getEquity().getExchange();
+        }
+        if (candle.getFuture() != null && candle.getFuture().getExchange() != null) {
+            return candle.getFuture().getExchange();
+        }
+        // Default to NSE
+        return "N";
     }
 
     /**

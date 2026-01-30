@@ -2,14 +2,19 @@ package com.kotsin.consumer.enrichment.enricher;
 
 import com.kotsin.consumer.domain.model.FamilyCandle;
 import com.kotsin.consumer.enrichment.model.TechnicalContext;
-import lombok.RequiredArgsConstructor;
+import com.kotsin.consumer.model.UnifiedCandle;
+import com.fasterxml.jackson.databind.DeserializationFeature;
+import com.fasterxml.jackson.databind.ObjectMapper;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.data.redis.core.RedisTemplate;
+import org.springframework.data.redis.core.ZSetOperations;
 import org.springframework.stereotype.Service;
 
+import jakarta.annotation.PostConstruct;
 import java.time.Duration;
 import java.time.LocalDate;
 import java.util.*;
+import java.util.concurrent.ConcurrentHashMap;
 
 /**
  * TechnicalIndicatorEnricher - Calculates technical indicators for trading signals
@@ -25,18 +30,27 @@ import java.util.*;
  * - Previous indicator values (for flip detection)
  * - Session data (VWAP, high, low)
  * - Daily/Weekly/Monthly pivots (calculated once per period)
+ *
+ * FIX: Now integrates with RedisCandleHistoryService for historical data bootstrap.
+ * This ensures indicators have sufficient history even on first calculation.
  */
 @Slf4j
 @Service
-@RequiredArgsConstructor
 public class TechnicalIndicatorEnricher {
 
     private final RedisTemplate<String, String> redisTemplate;
     private final MTFSuperTrendAggregator mtfAggregator;
 
+    // ObjectMapper for deserializing historical candles
+    private final ObjectMapper objectMapper = new ObjectMapper()
+            .configure(DeserializationFeature.FAIL_ON_UNKNOWN_PROPERTIES, false);
+
     // FIX: Track last stored timestamp per family/timeframe to prevent duplicate insertions
     // Key format: "familyId:timeframe" -> lastTimestamp
-    private final java.util.concurrent.ConcurrentHashMap<String, Long> lastStoredTimestamp = new java.util.concurrent.ConcurrentHashMap<>();
+    private final ConcurrentHashMap<String, Long> lastStoredTimestamp = new ConcurrentHashMap<>();
+
+    // FIX: Track which familyId+timeframe combos have been bootstrapped from historical data
+    private final Set<String> bootstrappedKeys = ConcurrentHashMap.newKeySet();
 
     // SuperTrend parameters
     private static final int SUPERTREND_PERIOD = 10;
@@ -52,7 +66,24 @@ public class TechnicalIndicatorEnricher {
 
     // Redis key patterns
     private static final String KEY_PREFIX = "smtis:tech";
+    private static final String HISTORICAL_KEY_PREFIX = "candles:";  // RedisCandleHistoryService key pattern
     private static final Duration HISTORY_TTL = Duration.ofHours(48);
+
+    // Minimum candles required for valid indicators
+    private static final int MIN_CANDLES_FOR_SUPERTREND = SUPERTREND_PERIOD + 1;  // 11
+    private static final int MIN_CANDLES_FOR_BB = BB_PERIOD;  // 20
+
+    public TechnicalIndicatorEnricher(RedisTemplate<String, String> redisTemplate,
+                                       MTFSuperTrendAggregator mtfAggregator) {
+        this.redisTemplate = redisTemplate;
+        this.mtfAggregator = mtfAggregator;
+    }
+
+    @PostConstruct
+    public void init() {
+        log.info("[TECH] TechnicalIndicatorEnricher initialized with historical data integration. " +
+                "Min candles: SuperTrend={}, BB={}", MIN_CANDLES_FOR_SUPERTREND, MIN_CANDLES_FOR_BB);
+    }
 
     /**
      * Enrich FamilyCandle with technical indicators
@@ -80,8 +111,9 @@ public class TechnicalIndicatorEnricher {
             log.debug("[TECH] Skipping duplicate candle for {} {} ts={}", familyId, timeframe, timestamp);
             // Still calculate indicators from existing history, just don't store again
         } else {
-            // Store current price in history (legacy format for backward compatibility)
-            storePriceHistory(familyId, timeframe, high, low, close);
+            // Store current price in history WITH TIMESTAMP for deduplication
+            // FIX: Use timestamp-based storage that integrates with historical data
+            storePriceHistoryWithTimestamp(familyId, timeframe, high, low, close, timestamp);
 
             // Store full OHLC history for SMC analysis
             storeFullCandleHistory(familyId, timeframe, open, high, low, close, timestamp);
@@ -127,8 +159,10 @@ public class TechnicalIndicatorEnricher {
         // Calculate SuperTrend
         SuperTrendResult superTrend = calculateSuperTrend(history, familyId, timeframe, SUPERTREND_PERIOD, SUPERTREND_MULTIPLIER);
 
-        // Update MTF aggregator with this timeframe's SuperTrend
-        mtfAggregator.updateState(familyId, timeframe, superTrend.bullish, superTrend.value, superTrend.flipped);
+        // FIX: Only update MTF aggregator if SuperTrend is valid (not NaN)
+        if (!Double.isNaN(superTrend.value)) {
+            mtfAggregator.updateState(familyId, timeframe, superTrend.bullish, superTrend.value, superTrend.flipped);
+        }
 
         // Get MTF analysis for this family
         MTFSuperTrendAggregator.MTFAnalysis mtfAnalysis = mtfAggregator.getAnalysis(familyId);
@@ -142,18 +176,41 @@ public class TechnicalIndicatorEnricher {
         // Get session data
         SessionData session = getSessionData(familyId, family);
 
-        // Find nearest support/resistance
-        Double nearestSupport = findNearestSupport(close, pivots, bb.lower);
-        Double nearestResistance = findNearestResistance(close, pivots, bb.upper);
+        // FIX: Handle NaN BB values in support/resistance calculation
+        Double nearestSupport = findNearestSupport(close, pivots, Double.isNaN(bb.lower) ? 0.0 : bb.lower);
+        Double nearestResistance = findNearestResistance(close, pivots, Double.isNaN(bb.upper) ? Double.MAX_VALUE : bb.upper);
 
-        double distToSupport = nearestSupport != null ?
+        double distToSupport = nearestSupport != null && nearestSupport > 0 ?
                 (close - nearestSupport) / close * 100 : 99;
-        double distToResistance = nearestResistance != null ?
+        double distToResistance = nearestResistance != null && nearestResistance < Double.MAX_VALUE ?
                 (nearestResistance - close) / close * 100 : 99;
 
         // Calculate ATR percentile (compare to recent ATR values)
         double atrPercentile = calculateATRPercentile(familyId, timeframe, atr);
         boolean volatilityExpanding = atrPercentile > 70;
+
+        // FIX: Check if indicators have valid data
+        boolean hasSufficientHistory = history.size() >= BB_PERIOD;
+        boolean superTrendValid = !Double.isNaN(superTrend.value);
+        boolean bbValid = !Double.isNaN(bb.upper) && !Double.isNaN(bb.lower);
+
+        // FIX: BB squeeze should only be true if BB is valid AND width is below threshold
+        boolean bbSqueeze = bbValid && !Double.isNaN(bb.widthPct) && bb.widthPct < BB_SQUEEZE_THRESHOLD;
+
+        // ENHANCED LOGGING: Output calculated indicator values for verification (BEFORE building context)
+        log.debug("[TECH] {} [{}] INDICATORS | candles={} | ST={} ({}) | " +
+                "BB=[{}/{}/{}] %B={} squeeze={} | ATR={} ({}%) | quality={}",
+                familyId, timeframe, history.size(),
+                superTrendValid ? String.format("%.2f", superTrend.value) : "NaN",
+                superTrend.bullish ? "BULL" : "BEAR",
+                bbValid ? String.format("%.2f", bb.upper) : "NaN",
+                bbValid ? String.format("%.2f", bb.middle) : "NaN",
+                bbValid ? String.format("%.2f", bb.lower) : "NaN",
+                bbValid ? String.format("%.3f", bb.percentB) : "NaN",
+                bbSqueeze,
+                String.format("%.2f", atr),
+                String.format("%.2f", atrPct),
+                hasSufficientHistory ? "GOOD" : "INSUFFICIENT");
 
         // Build context
         return TechnicalContext.builder()
@@ -161,24 +218,24 @@ public class TechnicalIndicatorEnricher {
                 .timeframe(timeframe)
                 .currentPrice(close)
                 // Data Quality - FIX: Track if we have enough data for valid indicators
-                .dataQualitySufficient(history.size() >= BB_PERIOD)
+                .dataQualitySufficient(hasSufficientHistory)
                 .requiredCandleCount(BB_PERIOD)
                 .actualCandleCount(history.size())
-                // SuperTrend
-                .superTrendValue(superTrend.value)
+                // SuperTrend - FIX: Use 0 or null indicator for invalid values
+                .superTrendValue(superTrendValid ? superTrend.value : 0.0)  // Use 0 to indicate invalid
                 .superTrendBullish(superTrend.bullish)
-                .superTrendFlip(superTrend.flipped)
+                .superTrendFlip(superTrendValid && superTrend.flipped)  // Only flip if valid
                 .candlesSinceStFlip(superTrend.candlesSinceFlip)
                 .superTrendMultiplier(SUPERTREND_MULTIPLIER)
                 .superTrendPeriod(SUPERTREND_PERIOD)
-                // Bollinger Bands
-                .bbUpper(bb.upper)
-                .bbMiddle(bb.middle)
-                .bbLower(bb.lower)
-                .bbWidth(bb.width)
-                .bbWidthPct(bb.widthPct)
-                .bbPercentB(bb.percentB)
-                .bbSqueezing(bb.widthPct < BB_SQUEEZE_THRESHOLD)
+                // Bollinger Bands - FIX: Use NaN for invalid (TechnicalContext uses primitive double)
+                .bbUpper(bbValid ? bb.upper : Double.NaN)
+                .bbMiddle(bbValid ? bb.middle : Double.NaN)
+                .bbLower(bbValid ? bb.lower : Double.NaN)
+                .bbWidth(bbValid ? bb.width : Double.NaN)
+                .bbWidthPct(bbValid ? bb.widthPct : Double.NaN)
+                .bbPercentB(bb.percentB)  // Keep NaN - explicitly signals invalid
+                .bbSqueezing(bbSqueeze)  // FIX: false if BB invalid
                 .bbSqueezeThreshold(BB_SQUEEZE_THRESHOLD)
                 // ATR
                 .atr(atr)
@@ -234,7 +291,11 @@ public class TechnicalIndicatorEnricher {
     private SuperTrendResult calculateSuperTrend(List<double[]> history, String familyId,
                                                   String timeframe, int period, double multiplier) {
         if (history.size() < period + 1) {
-            return new SuperTrendResult(0, true, false, 0);
+            // FIX: Return null SuperTrend value (Double.NaN) instead of 0 to indicate insufficient data
+            // This prevents API from serving fake "0" values that look valid but aren't
+            log.debug("[TECH] Insufficient data for SuperTrend {} [{}]: have {} need {}",
+                    familyId, timeframe, history.size(), period + 1);
+            return new SuperTrendResult(Double.NaN, true, false, 0);
         }
 
         // Get previous SuperTrend state
@@ -325,18 +386,19 @@ public class TechnicalIndicatorEnricher {
 
     private BollingerBandResult calculateBollingerBands(List<double[]> history, int period, double stdDevMult) {
         if (history.size() < period) {
-            // FIX: Return values that clearly indicate INVALID data, not fake squeeze
-            // Previously returned widthPct=0 which triggered false squeeze detection!
-            // Now: widthPct=0.20 (20%) prevents false squeeze, percentB=NaN marks as invalid
-            double close = history.isEmpty() ? 0 : history.get(history.size() - 1)[2];
-            double fakeWidth = close * 0.20;  // 20% of price = clearly NOT a squeeze
+            // FIX: Return NaN for ALL values when insufficient data
+            // This ensures:
+            // 1. API consumers know the data is invalid
+            // 2. No fake squeeze detection (widthPct=NaN won't match any threshold)
+            // 3. No fake band values that look plausible but are wrong
+            log.debug("[TECH] Insufficient data for BB: have {} need {}", history.size(), period);
             return new BollingerBandResult(
-                close + fakeWidth / 2,  // upper = price + 10%
-                close,                   // middle = price
-                close - fakeWidth / 2,  // lower = price - 10%
-                fakeWidth,               // width = 20% of price
-                0.20,                    // widthPct = 20% (NOT a squeeze - threshold is 2%)
-                Double.NaN               // percentB = NaN (marks as invalid data)
+                Double.NaN,  // upper - invalid
+                Double.NaN,  // middle - invalid
+                Double.NaN,  // lower - invalid
+                Double.NaN,  // width - invalid
+                Double.NaN,  // widthPct - invalid (prevents false squeeze detection)
+                Double.NaN   // percentB - invalid
             );
         }
 
@@ -804,37 +866,250 @@ public class TechnicalIndicatorEnricher {
         }
     }
 
+    /**
+     * Store price history with timestamp for proper deduplication.
+     * Format: "timestamp,high,low,close"
+     */
     private void storePriceHistory(String familyId, String timeframe, double high, double low, double close) {
-        String key = getHistoryKey(familyId, timeframe, "prices");
-        String entry = String.format("%.4f,%.4f,%.4f", high, low, close);
+        storePriceHistoryWithTimestamp(familyId, timeframe, high, low, close, System.currentTimeMillis());
+    }
 
-        // Append to list
-        redisTemplate.opsForList().rightPush(key, entry);
-        // Trim to keep last 100 entries
-        redisTemplate.opsForList().trim(key, -100, -1);
+    /**
+     * Store price history with explicit timestamp for deduplication.
+     */
+    private void storePriceHistoryWithTimestamp(String familyId, String timeframe,
+                                                  double high, double low, double close, long timestamp) {
+        String key = getHistoryKey(familyId, timeframe, "prices_v2");  // New key with timestamp
+        // Format: timestamp,high,low,close (timestamp first for sorting/dedup)
+        String entry = String.format("%d,%.4f,%.4f,%.4f", timestamp, high, low, close);
+
+        // Use sorted set for automatic deduplication by timestamp
+        redisTemplate.opsForZSet().add(key, entry, timestamp);
+
+        // Trim to keep last 200 entries (more than enough for any indicator)
+        Long size = redisTemplate.opsForZSet().zCard(key);
+        if (size != null && size > 200) {
+            redisTemplate.opsForZSet().removeRange(key, 0, size - 201);
+        }
         redisTemplate.expire(key, HISTORY_TTL);
     }
 
+    /**
+     * Get price history with automatic bootstrap from historical data store.
+     *
+     * FIX: This now:
+     * 1. Checks real-time streaming data first (prices_v2 sorted set)
+     * 2. If insufficient, bootstraps from historical candle store (candles:timeframe:scripCode)
+     * 3. Merges both sources with timestamp-based deduplication
+     * 4. Returns aligned, deduplicated history sorted chronologically
+     *
+     * @param familyId Family ID (usually scripCode for equities)
+     * @param timeframe Timeframe (1m, 5m, 15m, 30m, 1h)
+     * @param count Number of candles needed
+     * @return List of [high, low, close] arrays, oldest first
+     */
     private List<double[]> getPriceHistory(String familyId, String timeframe, int count) {
-        String key = getHistoryKey(familyId, timeframe, "prices");
-        List<String> entries = redisTemplate.opsForList().range(key, -count, -1);
+        // Use TreeMap for automatic timestamp-based sorting and deduplication
+        // Key = timestamp, Value = [high, low, close]
+        TreeMap<Long, double[]> mergedHistory = new TreeMap<>();
 
-        List<double[]> history = new ArrayList<>();
-        if (entries != null) {
-            for (String entry : entries) {
+        // 1. Load from real-time streaming store (new v2 format with timestamps)
+        String streamingKey = getHistoryKey(familyId, timeframe, "prices_v2");
+        Set<String> streamingEntries = redisTemplate.opsForZSet().reverseRange(streamingKey, 0, count - 1);
+
+        if (streamingEntries != null) {
+            for (String entry : streamingEntries) {
                 try {
                     String[] parts = entry.split(",");
-                    if (parts.length >= 3) {
-                        history.add(new double[]{
-                                Double.parseDouble(parts[0]),
-                                Double.parseDouble(parts[1]),
-                                Double.parseDouble(parts[2])
-                        });
+                    if (parts.length >= 4) {
+                        long ts = Long.parseLong(parts[0]);
+                        double high = Double.parseDouble(parts[1]);
+                        double low = Double.parseDouble(parts[2]);
+                        double close = Double.parseDouble(parts[3]);
+                        mergedHistory.put(ts, new double[]{high, low, close});
                     }
                 } catch (NumberFormatException ignored) {}
             }
         }
+
+        // 2. Also check legacy format (without timestamps) for backward compatibility
+        String legacyKey = getHistoryKey(familyId, timeframe, "prices");
+        List<String> legacyEntries = redisTemplate.opsForList().range(legacyKey, -count, -1);
+        if (legacyEntries != null && !legacyEntries.isEmpty() && mergedHistory.size() < count) {
+            // Legacy entries don't have timestamps, use sequential fake timestamps
+            // These will be overwritten if real data exists
+            long fakeTs = System.currentTimeMillis() - (legacyEntries.size() * 60000);
+            for (String entry : legacyEntries) {
+                try {
+                    String[] parts = entry.split(",");
+                    if (parts.length >= 3) {
+                        double high = Double.parseDouble(parts[0]);
+                        double low = Double.parseDouble(parts[1]);
+                        double close = Double.parseDouble(parts[2]);
+                        // Only add if not already present
+                        mergedHistory.putIfAbsent(fakeTs, new double[]{high, low, close});
+                        fakeTs += 60000;
+                    }
+                } catch (NumberFormatException ignored) {}
+            }
+        }
+
+        // 3. If still insufficient, bootstrap from historical candle store
+        String bootstrapKey = familyId + ":" + timeframe;
+        int beforeBootstrap = mergedHistory.size();
+        if (mergedHistory.size() < count && !bootstrappedKeys.contains(bootstrapKey)) {
+            log.info("[TECH-HISTORY] {} [{}] Triggering bootstrap: have {} need {} | streamingData={} legacyData={}",
+                    familyId, timeframe, mergedHistory.size(), count,
+                    streamingEntries != null ? streamingEntries.size() : 0,
+                    legacyEntries != null ? legacyEntries.size() : 0);
+
+            boolean bootstrapSuccess = bootstrapFromHistoricalStore(familyId, timeframe, count, mergedHistory);
+
+            // FIX: Only mark as bootstrapped if we actually loaded sufficient data
+            // This allows retry on next candle if bootstrap failed or loaded nothing
+            if (bootstrapSuccess && mergedHistory.size() >= count) {
+                bootstrappedKeys.add(bootstrapKey);
+                log.info("[TECH-HISTORY] {} [{}] Bootstrap SUCCESS: {} -> {} candles",
+                        familyId, timeframe, beforeBootstrap, mergedHistory.size());
+            } else {
+                log.warn("[TECH-HISTORY] {} [{}] Bootstrap INCOMPLETE: {} -> {} candles (need {}), will retry",
+                        familyId, timeframe, beforeBootstrap, mergedHistory.size(), count);
+            }
+        }
+
+        // 4. Convert to list (TreeMap is already sorted by timestamp ascending)
+        List<double[]> history = new ArrayList<>();
+        int skip = Math.max(0, mergedHistory.size() - count);
+        int idx = 0;
+        for (double[] hlc : mergedHistory.values()) {
+            if (idx >= skip) {
+                history.add(hlc);
+            }
+            idx++;
+        }
+
+        if (history.size() < count) {
+            log.debug("[TECH] Insufficient history for {} [{}]: have {} need {}",
+                    familyId, timeframe, history.size(), count);
+        }
+
         return history;
+    }
+
+    /**
+     * Bootstrap price history from RedisCandleHistoryService's historical data store.
+     *
+     * The historical store uses Redis sorted sets with key pattern: candles:{timeframe}:{scripCode}
+     * Each entry is a JSON-serialized UnifiedCandle with score = windowStartMillis.
+     *
+     * @return true if at least some candles were loaded, false otherwise
+     */
+    private boolean bootstrapFromHistoricalStore(String familyId, String timeframe, int count,
+                                               TreeMap<Long, double[]> mergedHistory) {
+        String historicalKey = HISTORICAL_KEY_PREFIX + timeframe + ":" + familyId;
+
+        try {
+            // FIX: Fetch more candles than needed (3x) to account for deduplication with streaming data
+            // The streaming data and historical data often overlap in timestamps
+            int fetchCount = Math.max(count * 3, 100);
+            Set<String> historicalEntries = redisTemplate.opsForZSet().reverseRange(historicalKey, 0, fetchCount - 1);
+
+            if (historicalEntries == null || historicalEntries.isEmpty()) {
+                log.warn("[TECH-BOOTSTRAP] No historical data found for {} [{}] key={} - check if RedisCandleHistoryService is storing data",
+                        familyId, timeframe, historicalKey);
+                return false;
+            }
+
+            log.debug("[TECH-BOOTSTRAP] Found {} entries in historical store for {} [{}]",
+                    historicalEntries.size(), familyId, timeframe);
+
+            int bootstrappedCount = 0;
+            for (String json : historicalEntries) {
+                try {
+                    UnifiedCandle candle = objectMapper.readValue(json, UnifiedCandle.class);
+                    if (candle != null && candle.getWindowStartMillis() > 0) {
+                        long ts = candle.getWindowStartMillis();
+                        // Only add if not already present (real-time data takes precedence)
+                        if (!mergedHistory.containsKey(ts)) {
+                            mergedHistory.put(ts, new double[]{
+                                    candle.getHigh(),
+                                    candle.getLow(),
+                                    candle.getClose()
+                            });
+                            bootstrappedCount++;
+                        }
+                    }
+                } catch (Exception e) {
+                    log.trace("[TECH-BOOTSTRAP] Failed to parse candle: {}", e.getMessage());
+                }
+            }
+
+            if (bootstrappedCount > 0) {
+                log.info("[TECH-BOOTSTRAP] Loaded {} historical candles for {} [{}], total now: {}",
+                        bootstrappedCount, familyId, timeframe, mergedHistory.size());
+
+                // Also warm up SuperTrend state from historical data if needed
+                warmupSuperTrendState(familyId, timeframe, mergedHistory);
+                return true;
+            } else {
+                log.warn("[TECH-BOOTSTRAP] Found {} entries but parsed 0 candles for {} [{}]",
+                        historicalEntries.size(), familyId, timeframe);
+                return false;
+            }
+        } catch (Exception e) {
+            log.warn("[TECH-BOOTSTRAP] Failed to bootstrap from historical store for {} [{}]: {}",
+                    familyId, timeframe, e.getMessage());
+            return false;
+        }
+    }
+
+    /**
+     * Warm up SuperTrend state by processing historical candles in sequence.
+     * This ensures the first real-time candle gets correct SuperTrend values.
+     */
+    private void warmupSuperTrendState(String familyId, String timeframe, TreeMap<Long, double[]> history) {
+        if (history.size() < MIN_CANDLES_FOR_SUPERTREND) {
+            return;
+        }
+
+        String stateKey = getStateKey(familyId, timeframe, "supertrend");
+        SuperTrendState existingState = getSuperTrendState(stateKey);
+
+        // Only warmup if no existing state
+        if (existingState.superTrend > 0) {
+            log.debug("[TECH-WARMUP] SuperTrend state already exists for {} [{}], skipping warmup",
+                    familyId, timeframe);
+            return;
+        }
+
+        // Convert to list for sequential processing
+        List<double[]> historyList = new ArrayList<>(history.values());
+
+        // Process candles sequentially to build up SuperTrend state
+        // We need to simulate the calculation to build correct state
+        double atr = calculateATR(historyList, SUPERTREND_PERIOD);
+        if (atr <= 0) {
+            return;
+        }
+
+        // Get last candle for initial state
+        double[] lastCandle = historyList.get(historyList.size() - 1);
+        double high = lastCandle[0];
+        double low = lastCandle[1];
+        double close = lastCandle[2];
+        double hl2 = (high + low) / 2;
+
+        double upperBand = hl2 + (SUPERTREND_MULTIPLIER * atr);
+        double lowerBand = hl2 - (SUPERTREND_MULTIPLIER * atr);
+        boolean bullish = close > hl2;
+        double superTrend = bullish ? lowerBand : upperBand;
+
+        SuperTrendState warmupState = new SuperTrendState(
+                superTrend, upperBand, lowerBand, bullish, 0, close);
+        storeSuperTrendState(stateKey, warmupState);
+
+        log.info("[TECH-WARMUP] Initialized SuperTrend state for {} [{}]: ST={} dir={} from {} candles",
+                familyId, timeframe, String.format("%.2f", superTrend), bullish ? "BULL" : "BEAR", historyList.size());
     }
 
     private String getHistoryKey(String familyId, String timeframe, String metric) {

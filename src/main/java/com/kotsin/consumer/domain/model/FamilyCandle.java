@@ -227,7 +227,35 @@ public class FamilyCandle {
     // ==================== DATA QUALITY ====================
     private DataQuality quality;
     private String qualityReason;
-    
+
+    // ==================== AGGREGATION COMPLETENESS ====================
+    /**
+     * Number of 1m candles aggregated into this candle.
+     * For 1m candles, this is 1.
+     * For 30m candles, expected is 30.
+     */
+    private int aggregatedCandleCount;
+
+    /**
+     * Expected number of 1m candles for this timeframe.
+     * Set based on timeframe: 5m=5, 15m=15, 30m=30, 1h=60, etc.
+     * For last candle of day, this may be lower (e.g., 4h candle ending at market close).
+     */
+    private int expectedCandleCount;
+
+    /**
+     * Completeness ratio = aggregatedCandleCount / expectedCandleCount.
+     * 1.0 = fully complete, < 0.8 = sparse data warning.
+     * Used to flag potentially unreliable aggregated candles.
+     */
+    private double completenessRatio;
+
+    /**
+     * True if this candle is the last incomplete candle of the trading session.
+     * E.g., 4h candle from 13:15-15:30 only has 2h15m of data.
+     */
+    private boolean lastIncompleteSessionCandle;
+
     // ========== PHASE 2: MTF Distribution ==========
     /**
      * Multi-timeframe distribution metrics
@@ -267,17 +295,59 @@ public class FamilyCandle {
     /**
      * Check if complete family data is available
      *
-     * 🔴 FIX Bug #6: For commodities (MCX), equity is null - don't require it.
-     * BEFORE: Required equity for all families → commodities always incomplete
-     * AFTER: Commodities require future, NSE stocks require equity + future
+     * 🔴 FIX Bug #6: Exchange-aware completeness check.
+     *
+     * MCX Commodities:
+     * - Mini contracts (CRUDEOILM, GOLDM, SILVERM) have NO options
+     * - Regular contracts (CRUDEOIL, GOLD, SILVER) have options
+     * - Only require future to be present, options are optional
+     *
+     * NSE Stocks:
+     * - Require equity to be present
+     * - Options are expected but not always available for all strikes
      */
     public boolean isComplete() {
-        // For commodities: future is the primary instrument, equity is not available
+        // For commodities: future is the primary instrument
         if (isCommodity) {
-            return future != null && hasOptions && optionCount >= 2;  // Lower option threshold for commodities
+            // 🔴 FIX: MCX mini contracts (ending with 'M') have NO options
+            // Only require future for commodities, options are optional
+            if (future == null) {
+                return false;
+            }
+            // Check if this is a mini contract (no options expected)
+            String companyName = future.getCompanyName();
+            if (companyName != null && isMiniContract(companyName)) {
+                // Mini contract - just need the future
+                return true;
+            }
+            // Regular commodity contract - options expected but not mandatory
+            // Use lower threshold since commodity options have less liquidity
+            return hasOptions || optionCount > 0;
         }
-        // For NSE stocks: require equity, future is optional but preferred
-        return equity != null && hasOptions && optionCount >= 4;
+        // For NSE stocks: require equity, options are expected
+        return equity != null && hasOptions && optionCount >= 2;
+    }
+
+    /**
+     * Check if the contract is an MCX mini contract (no options available).
+     * Mini contracts end with 'M' in the symbol: CRUDEOILM, GOLDM, SILVERM, etc.
+     */
+    private boolean isMiniContract(String companyName) {
+        if (companyName == null) return false;
+        // Extract symbol (first word before space)
+        String[] parts = companyName.split("\\s+");
+        if (parts.length > 0) {
+            String symbol = parts[0].toUpperCase();
+            // Mini contracts end with 'M': CRUDEOILM, GOLDM, SILVERM, NATURALGAS, etc.
+            // But not all symbols ending in M are mini (e.g., ALUMINUM)
+            // Known mini contracts: CRUDEOILM, GOLDM, SILVERM, GOLDGUINEA, etc.
+            return symbol.endsWith("OILM") ||
+                   symbol.equals("GOLDM") ||
+                   symbol.equals("SILVERM") ||
+                   symbol.equals("GOLDGUINEA") ||
+                   symbol.endsWith("MINI");
+        }
+        return false;
     }
 
     /**

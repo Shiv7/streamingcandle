@@ -83,12 +83,14 @@ public class SignalDecayCalculator {
         double currentScore = signal.getInitialScore() * combinedDecay;
         signal.setCurrentScore(currentScore);
 
-        log.debug("[DECAY] {} | time={:.2f} | target={:.2f} | div={:.2f} | mom={:.2f} | " +
-                        "vol={:.2f} | session={:.2f} | COMBINED={:.2f} | score={:.1f}→{:.1f}",
+        log.debug("[DECAY] {} | time={} | target={} | div={} | mom={} | " +
+                        "vol={} | session={} | COMBINED={} | score={}→{}",
                 signal.getScripCode(),
-                timeDecay, targetDecay, divergenceDecay, momentumDecay,
-                volumeDecay, sessionDecay, combinedDecay,
-                signal.getInitialScore(), currentScore);
+                String.format("%.2f", timeDecay), String.format("%.2f", targetDecay),
+                String.format("%.2f", divergenceDecay), String.format("%.2f", momentumDecay),
+                String.format("%.2f", volumeDecay), String.format("%.2f", sessionDecay),
+                String.format("%.2f", combinedDecay),
+                String.format("%.1f", signal.getInitialScore()), String.format("%.1f", currentScore));
 
         return combinedDecay;
     }

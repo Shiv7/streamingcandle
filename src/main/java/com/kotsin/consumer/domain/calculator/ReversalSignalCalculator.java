@@ -281,6 +281,15 @@ public class ReversalSignalCalculator {
         Long oiChange = future.getOiChange();
         Double oiChangePct = future.getOiChangePercent();
 
+        // BUG #5 FIX: Fallback OI change calculation if oiChange is null but we have oiOpen/oiClose
+        // This handles edge cases where UnifiedInstrumentCandleProcessor's fallback also failed
+        if (oiChange == null && future.getOiOpen() != null && future.getOiClose() != null && future.getOiOpen() > 0) {
+            oiChange = future.getOiClose() - future.getOiOpen();
+            oiChangePct = (double) oiChange / future.getOiOpen() * 100.0;
+            log.debug("[OI-INTERP-FALLBACK] {} | Calculated intra-window OI change: {} ({}%)",
+                current.getFamilyId(), oiChange, String.format("%.3f", oiChangePct));
+        }
+
         if (oiChange == null) {
             current.setOiInterpretation("NO_OI_CHANGE");
             current.setOiInterpretationConfidence(0.0);

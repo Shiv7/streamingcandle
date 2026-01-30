@@ -174,13 +174,12 @@ public class PendingRRTracker {
             groupId = "${pending.rr.tracker.group.id:pending-rr-tracker-v1}",
             containerFactory = "curatedKafkaListenerContainerFactory"
     )
-    public void consumePriceUpdate(String message) {
+    public void consumePriceUpdate(FamilyCandle candle) {
         if (!enabled || pendingById.isEmpty()) {
             return;
         }
 
         try {
-            FamilyCandle candle = objectMapper.readValue(message, FamilyCandle.class);
             String familyId = candle.getFamilyId();
 
             List<PendingSignal> familySignals = pendingByFamily.get(familyId);

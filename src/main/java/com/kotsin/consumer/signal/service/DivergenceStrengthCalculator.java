@@ -101,8 +101,9 @@ public class DivergenceStrengthCalculator {
                 .direction(direction)
                 .build();
 
-        log.debug("[DIV_STRENGTH] type={} | dir={} | score={:.1f} | dur={:.2f} | mag={:.2f} | vel={:.2f} | conf={:.2f}",
-                type, direction, strength, durationFactor, magnitudeFactor, velocityFactor, confluenceFactor);
+        log.debug("[DIV_STRENGTH] type={} | dir={} | score={} | dur={} | mag={} | vel={} | conf={}",
+                type, direction, String.format("%.1f", strength), String.format("%.2f", durationFactor),
+                String.format("%.2f", magnitudeFactor), String.format("%.2f", velocityFactor), String.format("%.2f", confluenceFactor));
 
         return result;
     }

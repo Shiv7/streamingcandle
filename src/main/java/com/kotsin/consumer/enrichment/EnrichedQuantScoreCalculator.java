@@ -26,6 +26,7 @@ import com.kotsin.consumer.trading.mtf.MtfSmcAnalyzer;
 import com.kotsin.consumer.trading.mtf.MtfSmcContext;
 import com.kotsin.consumer.quant.calculator.QuantScoreCalculator;
 import com.kotsin.consumer.quant.model.QuantScore;
+import com.kotsin.consumer.service.TechnicalIndicatorService;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.stereotype.Service;
@@ -97,6 +98,9 @@ public class EnrichedQuantScoreCalculator {
 
     // MTF SMC Analyzer (Multi-Timeframe Smart Money Concepts)
     private final MtfSmcAnalyzer mtfSmcAnalyzer;
+
+    // Technical Indicator Service (for caching indicators for REST API)
+    private final TechnicalIndicatorService technicalIndicatorService;
 
     /**
      * Calculate enriched QuantScore with historical context and Phase 2, 3, 4 enrichments
@@ -187,6 +191,11 @@ public class EnrichedQuantScoreCalculator {
 
             // Technical Indicators (SuperTrend, BB, Pivots, ATR)
             TechnicalContext technicalContext = technicalEnricher.enrich(family);
+
+            // Update technical indicator cache for REST API
+            if (technicalIndicatorService != null && technicalContext != null) {
+                technicalIndicatorService.updateIndicators(family, technicalContext);
+            }
 
             // Confluence Zones (S/R level clustering)
             // BUG FIX: Use getPrimaryPrice() to avoid 0 price for equity-only instruments
@@ -450,14 +459,33 @@ public class EnrichedQuantScoreCalculator {
 
             // Fallback to base calculation
             QuantScore baseScore = baseCalculator.calculate(family);
+
+            // FIX: Extract critical fields even on error - these are needed for signal generation
+            // Without these, InstrumentStateManager returns early and no signals are generated
+            String fallbackScripCode = family.getFuture() != null ? family.getFuture().getScripCode() :
+                                      (family.getEquity() != null ? family.getEquity().getScripCode() : null);
+            String fallbackCompanyName = family.getFuture() != null ? family.getFuture().getCompanyName() :
+                                        (family.getEquity() != null ? family.getEquity().getCompanyName() : null);
+            String fallbackExchange = family.getFuture() != null ? family.getFuture().getExchange() :
+                                     (family.getEquity() != null ? family.getEquity().getExchange() : "N");
+            double fallbackClose = family.getPrimaryPrice();
+            long fallbackPriceTimestamp = family.getWindowEndMillis() > 0 ? family.getWindowEndMillis() :
+                                          (family.getTimestamp() > 0 ? family.getTimestamp() : System.currentTimeMillis());
+
             return EnrichedQuantScore.builder()
                     .baseScore(baseScore)
+                    // FIX: Include critical fields for signal generation
+                    .scripCode(fallbackScripCode)
+                    .companyName(fallbackCompanyName)
+                    .exchange(fallbackExchange)
+                    .close(fallbackClose)
+                    .priceTimestamp(fallbackPriceTimestamp)
                     .adjustedQuantScore(baseScore.getQuantScore())
                     .adjustedConfidence(baseScore.getConfidence() * 0.8) // Reduce confidence on error
                     .adaptiveModifier(1.0)
                     .combinedModifier(1.0)
                     .isActionableMoment(false)
-                    .enrichmentNote("Enrichment failed - using base score")
+                    .enrichmentNote("Enrichment failed - using base score with critical fields preserved")
                     .build();
         }
     }

@@ -99,8 +99,9 @@ public class MicrostructureLeadingEdgeCalculator {
                 .build();
 
         if (result.isDetected()) {
-            log.debug("[LEADING_EDGE] {} | LTF={:.0f} | MTF={:.0f} | HTF={:.0f} | bonus={} | score={:.0f}",
-                    pattern, ltfScore, mtfScore, htfScore, momentumBonus, finalScore);
+            log.debug("[LEADING_EDGE] {} | LTF={} | MTF={} | HTF={} | bonus={} | score={}",
+                    pattern, String.format("%.0f", ltfScore), String.format("%.0f", mtfScore),
+                    String.format("%.0f", htfScore), momentumBonus, String.format("%.0f", finalScore));
         }
 
         return result;

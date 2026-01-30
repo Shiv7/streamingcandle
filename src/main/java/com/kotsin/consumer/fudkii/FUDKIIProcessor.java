@@ -65,6 +65,10 @@ public class FUDKIIProcessor {
     // Cooldown cache: key = scripCode:direction, value = last emission timestamp
     private final Map<String, Long> lastEmissionCache = new ConcurrentHashMap<>();
 
+    // FIX: Cache for previous SuperTrend bullish state (proper flip detection)
+    // Key = scripCode:timeframe, Value = previous bullish state
+    private final Map<String, Boolean> prevSTBullishCache = new ConcurrentHashMap<>();
+
     @PostConstruct
     public void init() {
         log.info("📊 FUDKIIProcessor initialized. Enabled: {}", enabled);
@@ -110,14 +114,8 @@ public class FUDKIIProcessor {
                 return;
             }
 
-            // Get current and previous candles
+            // Get current candle
             UnifiedCandle current = candles30m.get(candles30m.size() - 1);
-            List<UnifiedCandle> prevCandles = candles30m.subList(0, candles30m.size() - 1);
-            
-            if (prevCandles.isEmpty()) {
-                log.debug("Insufficient history for FUDKII: {} needs at least 2 candles", scripCode);
-                return;
-            }
 
             // Calculate Bollinger Bands
             double[] bb = bbSuperTrendDetector.calculateBollingerBands(candles30m);
@@ -141,18 +139,22 @@ public class FUDKIIProcessor {
                 return;
             }
 
-            // Calculate SuperTrend for current and previous candles
-            // Use explicit state keys to avoid state collision between current and prev calculations
+            // FIX: Calculate SuperTrend ONCE and compare against CACHED previous state
+            // Previous bug: Using different cache keys (":30m" vs ":30m:prev") caused false flips
+            // because ":30m:prev" had no state and used simple initialization logic
             String stateKey = scripCode + ":30m";
-            String stateKeyPrev = scripCode + ":30m:prev";
             double[] stCurrent = bbSuperTrendDetector.calculateSuperTrend(candles30m, atr, stateKey);
-            double[] stPrev = bbSuperTrendDetector.calculateSuperTrend(prevCandles, atr, stateKeyPrev);
-            
+
             double superTrend = stCurrent[0];
             boolean superTrendBullish = stCurrent[1] > 0;
-            boolean prevSuperTrendBullish = stPrev[1] > 0;
-            boolean superTrendFlipped = superTrendBullish != prevSuperTrendBullish;
+
+            // Get previous bullish state from our cache (NOT by recalculating)
+            Boolean prevSuperTrendBullish = prevSTBullishCache.get(stateKey);
+            boolean superTrendFlipped = prevSuperTrendBullish != null && prevSuperTrendBullish != superTrendBullish;
             boolean stFlipOnCurrentCandle = superTrendFlipped;
+
+            // Store current state for next candle comparison
+            prevSTBullishCache.put(stateKey, superTrendBullish);
 
             // STRICT SIMULTANEITY CHECK: Both must be on current candle
             boolean simultaneityValid = bbBreakoutOnCurrentCandle && stFlipOnCurrentCandle;

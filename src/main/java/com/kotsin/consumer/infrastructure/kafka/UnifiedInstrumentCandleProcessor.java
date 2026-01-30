@@ -114,50 +114,58 @@ public class UnifiedInstrumentCandleProcessor {
     private KafkaStreams streams;
 
     /**
-     * 🛡️ CRITICAL FIX: VPIN Memory Leak Prevention
+     * 🔧 OPTIMIZED: Consolidated cache for VPIN state (was 2 separate caches)
+     * Combines VPINCalculator and lastTradingDay into single cache entry
      *
-     * BEFORE (BROKEN):
-     * - ConcurrentHashMap never cleaned up
-     * - Every new instrument adds a VPINCalculator
-     * - With 5000+ instruments daily, causes OOM in 48 hours
-     *
-     * AFTER (FIXED):
-     * - Caffeine cache with automatic eviction
-     * - Max 10,000 instruments (sufficient for all NSE/BSE instruments)
-     * - Evict after 2 hours of inactivity
-     * - Prevents memory leak while maintaining performance
-     * 
-     * NEW: VPIN reset at market open
-     * - Tracks last trading day per instrument
-     * - Resets VPIN calculator when crossing into new trading day
+     * Benefits:
+     * - Single cache lookup instead of two
+     * - Atomic state management (calculator + trading day always in sync)
+     * - Reduced memory overhead from cache infrastructure
      */
-    private final Cache<String, AdaptiveVPINCalculator> vpinCalculators = Caffeine.newBuilder()
+    private static class VPINState {
+        final AdaptiveVPINCalculator calculator;
+        LocalDate lastTradingDay;
+
+        VPINState(AdaptiveVPINCalculator calculator) {
+            this.calculator = calculator;
+        }
+    }
+
+    private final Cache<String, VPINState> vpinCache = Caffeine.newBuilder()
             .maximumSize(10_000)  // Max instruments to cache
-            .expireAfterAccess(2, TimeUnit.HOURS)  // Evict if not accessed for 2 hours
+            .expireAfterAccess(3, TimeUnit.HOURS)  // Extended from 2h to 3h for trading session coverage
             .recordStats()  // Enable cache statistics
             .build();
-    
-    // Track last trading day per instrument for VPIN reset detection
-    private final Cache<String, LocalDate> vpinLastTradingDay = Caffeine.newBuilder()
-            .maximumSize(10_000)
-            .expireAfterAccess(2, TimeUnit.HOURS)
-            .build();
 
     /**
-     * Cache to track previous window's OI close per instrument key
-     * Used to calculate OI change from previous window to current window
+     * 🔧 OPTIMIZED: Consolidated cache for instrument metadata (was 2 separate caches)
+     * Combines companyName and previousOIClose into single cache entry
+     *
+     * Key format: scripCode (String)
+     * OI values stored in map by exchange:exchangeType prefix for derivatives
      */
-    private final Cache<String, Long> previousOICloseCache = Caffeine.newBuilder()
-            .maximumSize(10_000)  // Max instruments to cache
-            .expireAfterWrite(1, TimeUnit.DAYS)  // Clear after 1 day
-            .build();
+    private static class InstrumentMetadata {
+        String companyName;
+        final Map<String, Long> oiCloseByKey = new HashMap<>();  // exchange:exchangeType -> oiClose
 
-    /**
-     * FIX: Cache for company names by token
-     * Populated from tick data (which has company names) to enrich orderbook/OI logs
-     * that often have null company names in the source data.
-     */
-    private final Cache<String, String> companyNameCache = Caffeine.newBuilder()
+        void setCompanyName(String name) {
+            if (name != null && !name.isEmpty()) {
+                this.companyName = name;
+            }
+        }
+
+        void setOIClose(String exchange, String exchangeType, Long oiClose) {
+            if (oiClose != null) {
+                oiCloseByKey.put(exchange + ":" + exchangeType, oiClose);
+            }
+        }
+
+        Long getOIClose(String exchange, String exchangeType) {
+            return oiCloseByKey.get(exchange + ":" + exchangeType);
+        }
+    }
+
+    private final Cache<String, InstrumentMetadata> instrumentMetadataCache = Caffeine.newBuilder()
             .maximumSize(20_000)  // Support for all instruments
             .expireAfterWrite(24, TimeUnit.HOURS)  // Refresh daily
             .build();
@@ -252,7 +260,8 @@ public class UnifiedInstrumentCandleProcessor {
         .peek((key, tick) -> {
             // FIX: Cache company name from tick data for use in OB/OI logging
             if (tick.getCompanyName() != null && !tick.getCompanyName().isEmpty()) {
-                companyNameCache.put(tick.getScripCode(), tick.getCompanyName());
+                instrumentMetadataCache.get(tick.getScripCode(), k -> new InstrumentMetadata())
+                        .setCompanyName(tick.getCompanyName());
             }
             if (traceLogger != null) {
                 traceLogger.logInputReceived("TICK", tick.getScripCode(), tick.getCompanyName(),
@@ -283,12 +292,19 @@ public class UnifiedInstrumentCandleProcessor {
         })
         .peek((key, ob) -> {
             if (traceLogger != null) {
-                // FIX: Use cached company name if OB data doesn't have it
+                // FIX: Use cached company name if OB data doesn't have it, with DB fallback
                 String companyName = ob.getCompanyName();
+                String scripCode = String.valueOf(ob.getToken());
                 if (companyName == null || companyName.isEmpty()) {
-                    companyName = companyNameCache.getIfPresent(String.valueOf(ob.getToken()));
+                    InstrumentMetadata meta = instrumentMetadataCache.getIfPresent(scripCode);
+                    if (meta != null && meta.companyName != null) {
+                        companyName = meta.companyName;
+                    } else {
+                        // Fallback: lookup from ScripRepository and cache it
+                        companyName = lookupAndCacheCompanyName(scripCode, ob.getExchange(), ob.getExchangeType());
+                    }
                 }
-                traceLogger.logInputReceived("OB", String.valueOf(ob.getToken()), companyName,
+                traceLogger.logInputReceived("OB", scripCode, companyName,
                     ob.getTimestamp(),
                     String.format("bid=%.2f ask=%.2f spread=%.2f imbalance=%.2f",
                         ob.getBestBid(), ob.getBestAsk(),
@@ -319,12 +335,19 @@ public class UnifiedInstrumentCandleProcessor {
         })
         .peek((key, oi) -> {
             if (traceLogger != null) {
-                // FIX: Use cached company name if OI data doesn't have it
+                // FIX: Use cached company name if OI data doesn't have it, with DB fallback
                 String companyName = oi.getCompanyName();
+                String scripCode = String.valueOf(oi.getToken());
                 if (companyName == null || companyName.isEmpty()) {
-                    companyName = companyNameCache.getIfPresent(String.valueOf(oi.getToken()));
+                    InstrumentMetadata meta = instrumentMetadataCache.getIfPresent(scripCode);
+                    if (meta != null && meta.companyName != null) {
+                        companyName = meta.companyName;
+                    } else {
+                        // Fallback: lookup from ScripRepository and cache it
+                        companyName = lookupAndCacheCompanyName(scripCode, oi.getExchange(), oi.getExchangeType());
+                    }
                 }
-                traceLogger.logInputReceived("OI", String.valueOf(oi.getToken()), companyName,
+                traceLogger.logInputReceived("OI", scripCode, companyName,
                     oi.getReceivedTimestamp(),
                     String.format("OI=%d change=%d changePct=%.2f",
                         oi.getOpenInterest(),
@@ -839,6 +862,60 @@ public class UnifiedInstrumentCandleProcessor {
     }
 
     /**
+     * Lookup company name from ScripRepository and cache it for future use.
+     * Called when OB/OI arrives before tick data for an instrument.
+     *
+     * @param scripCode The scripCode/token to lookup
+     * @param exchange Exchange code (N/B/M)
+     * @param exchangeType Exchange type (C/D/F/O)
+     * @return Company name or null if not found
+     */
+    private String lookupAndCacheCompanyName(String scripCode, String exchange, String exchangeType) {
+        if (scripCode == null || scripCode.isEmpty()) {
+            return null;
+        }
+
+        try {
+            // Try lookup with exchange context first
+            String exch = exchange != null ? exchange : "N";
+            String exchType = exchangeType != null ? exchangeType : "C";
+
+            Optional<Scrip> scripOpt = scripRepository.findFirstByExchAndExchTypeAndScripCode(exch, exchType, scripCode);
+
+            // Fallback: try direct scripCode lookup (scripCode is unique across exchanges)
+            if (scripOpt.isEmpty()) {
+                scripOpt = scripRepository.findByScripCode(scripCode);
+            }
+
+            if (scripOpt.isPresent()) {
+                Scrip scrip = scripOpt.get();
+                String companyName = scrip.getName();
+                if (companyName == null || companyName.isEmpty()) {
+                    companyName = scrip.getFullName();
+                }
+                if (companyName == null || companyName.isEmpty()) {
+                    companyName = scrip.getSymbolRoot();
+                }
+
+                // Cache for future lookups
+                if (companyName != null && !companyName.isEmpty()) {
+                    instrumentMetadataCache.get(scripCode, k -> new InstrumentMetadata())
+                            .setCompanyName(companyName);
+                    return companyName;
+                }
+            }
+        } catch (Exception e) {
+            // Log but don't fail - company name is just for logging
+            if (log.isDebugEnabled()) {
+                log.debug("[METADATA-LOOKUP] Failed to lookup company name for scripCode={}: {}",
+                    scripCode, e.getMessage());
+            }
+        }
+
+        return null;
+    }
+
+    /**
      * Calculate Volume Profile (POC, VAH, VAL) from volume-at-price histogram
      *
      * POC = Point of Control (price with maximum volume)
@@ -1101,22 +1178,25 @@ public class UnifiedInstrumentCandleProcessor {
         // FIX: Use minute-average volume instead of daily volume for bucket sizing
         // BEFORE: bucketSize = dailyVolume / 50 = 200K for 10M daily (7+ minutes to fill 1 bucket)
         // AFTER: bucketSize = minuteAvgVolume / 50 ≈ 533 for 10M daily (fills properly per minute)
-        // Trading day = 375 minutes (9:15-15:30), so minuteAvg = dailyVolume / 375
         // This ensures buckets fill within reasonable timeframes for toxic flow detection
-        final int TRADING_MINUTES_PER_DAY = 375;  // NSE trading hours: 9:15 AM to 3:30 PM
-        double minuteAvgVolume = avgDailyVolume / TRADING_MINUTES_PER_DAY;
+        //
+        // 🔴 FIX: Exchange-aware trading minutes
+        // NSE/BSE: 375 minutes (9:15 AM - 3:30 PM)
+        // MCX: ~870 minutes (9:00 AM - 11:30 PM with session breaks)
+        int tradingMinutesPerDay = getTradingMinutesForExchange(tick.getExchange());
+        double minuteAvgVolume = avgDailyVolume / tradingMinutesPerDay;
 
-        // Get or create VPIN calculator using minute-average volume
-        AdaptiveVPINCalculator vpinCalc = vpinCalculators.get(vpinKey, k -> new AdaptiveVPINCalculator(minuteAvgVolume));
-        
+        // Get or create VPIN state (calculator + trading day) from consolidated cache
+        VPINState vpinState = vpinCache.get(vpinKey, k -> new VPINState(new AdaptiveVPINCalculator(minuteAvgVolume)));
+        AdaptiveVPINCalculator vpinCalc = vpinState.calculator;
+
         // Reset VPIN if we've crossed into a new trading day (market open)
-        LocalDate lastTradingDay = vpinLastTradingDay.getIfPresent(vpinKey);
-        if (lastTradingDay != null && !lastTradingDay.equals(currentTradingDay)) {
+        if (vpinState.lastTradingDay != null && !vpinState.lastTradingDay.equals(currentTradingDay)) {
             // New trading day detected - reset VPIN to prevent cross-day contamination
-            log.debug("VPIN reset for {}: {} -> {}", vpinKey, lastTradingDay, currentTradingDay);
+            log.debug("VPIN reset for {}: {} -> {}", vpinKey, vpinState.lastTradingDay, currentTradingDay);
             vpinCalc.reset();
         }
-        vpinLastTradingDay.put(vpinKey, currentTradingDay);
+        vpinState.lastTradingDay = currentTradingDay;
         
         // Update VPIN with candle data
         // #region agent log
@@ -1240,7 +1320,13 @@ public class UnifiedInstrumentCandleProcessor {
             // Calculate OI change from PREVIOUS window (not within current window)
             // FIX: Always use cross-window change for meaningful OI analysis
             String oiKey = buildOIKeyFromCandle(tick, windowedKey.key());
-            Long previousOIClose = previousOICloseCache.getIfPresent(oiKey);
+            // Parse oiKey (format: exchange:exchangeType:scripCode) for consolidated cache
+            String[] oiKeyParts = oiKey.split(":");
+            String oiExch = oiKeyParts.length > 0 ? oiKeyParts[0] : "N";
+            String oiExchType = oiKeyParts.length > 1 ? oiKeyParts[1] : "D";
+            String oiScripCode = oiKeyParts.length > 2 ? oiKeyParts[2] : scripCode;
+            InstrumentMetadata oiMeta = instrumentMetadataCache.getIfPresent(oiScripCode);
+            Long previousOIClose = oiMeta != null ? oiMeta.getOIClose(oiExch, oiExchType) : null;
 
             if (previousOIClose != null && previousOIClose > 0 && oi.getOiClose() != null) {
                 // Calculate change from previous window's close to current window's close
@@ -1260,22 +1346,35 @@ public class UnifiedInstrumentCandleProcessor {
                         oiKey, previousOIClose, oi.getOiClose(), oiChange,
                         String.format("%.2f", oiChangePercent));
                 }
+            } else if (oi.getOiOpen() != null && oi.getOiClose() != null && oi.getOiOpen() > 0) {
+                // BUG #1 FIX: Fallback to intra-window OI change when cross-window not available
+                // This happens on first candle of session, after processor restart, or cache eviction.
+                // Intra-window change (oiClose - oiOpen) is better than returning 0/null which
+                // breaks all downstream OI-based signals (oiInterpretation, biasConfidence, etc.)
+                Long oiChange = oi.getOiClose() - oi.getOiOpen();
+                Double oiChangePercent = (double) oiChange / oi.getOiOpen() * 100.0;
+
+                builder.oiChange(oiChange);
+                builder.oiChangePercent(oiChangePercent);
+
+                log.info("[OI-CHANGE-INTRAWINDOW] {} | oiOpen={} oiClose={} change={} changePct={}% | Using intra-window fallback (no previous close cached)",
+                    oiKey, oi.getOiOpen(), oi.getOiClose(), oiChange,
+                    String.format("%.3f", oiChangePercent));
             } else {
-                // FIX: First window or no previous OI - set to null (not enough data for cross-window change)
-                // Within-window OI change (oiClose - oiOpen in same window) is meaningless for sparse OI updates
-                // Traders need cross-window change to see actual OI buildups/reductions
+                // Truly no OI data available - set to null
                 builder.oiChange(null);
                 builder.oiChangePercent(null);
 
                 if (log.isDebugEnabled() && oi.getOiClose() != null) {
-                    log.debug("[OI-CHANGE-INIT] {} | currOI={} | No previous OI - first window",
-                        oiKey, oi.getOiClose());
+                    log.debug("[OI-CHANGE-NONE] {} | oiOpen={} oiClose={} | Cannot calculate OI change",
+                        oiKey, oi.getOiOpen(), oi.getOiClose());
                 }
             }
             
             // Update cache with current OI close for next window
             if (oi.getOiClose() != null) {
-                previousOICloseCache.put(oiKey, oi.getOiClose());
+                instrumentMetadataCache.get(oiScripCode, k -> new InstrumentMetadata())
+                        .setOIClose(oiExch, oiExchType, oi.getOiClose());
             }
 
             // ========== PHASE 5: OI CORRELATION METRICS ==========
@@ -2009,9 +2108,8 @@ public class UnifiedInstrumentCandleProcessor {
             log.info("🛑 Stopping UnifiedInstrumentCandleProcessor...");
             logVpinCacheStats();
             streams.close(Duration.ofSeconds(30));
-            vpinCalculators.invalidateAll();  // Clear cache on shutdown
-            vpinLastTradingDay.invalidateAll();  // Clear trading day tracking cache
-            previousOICloseCache.invalidateAll();  // Clear previous OI cache on shutdown
+            vpinCache.invalidateAll();  // Clear consolidated VPIN cache on shutdown
+            instrumentMetadataCache.invalidateAll();  // Clear consolidated metadata cache on shutdown
             log.info("✅ UnifiedInstrumentCandleProcessor stopped");
         }
     }
@@ -2021,9 +2119,9 @@ public class UnifiedInstrumentCandleProcessor {
      * Log VPIN cache statistics for monitoring
      */
     public void logVpinCacheStats() {
-        com.github.benmanes.caffeine.cache.stats.CacheStats stats = vpinCalculators.stats();
+        com.github.benmanes.caffeine.cache.stats.CacheStats stats = vpinCache.stats();
         log.info("VPIN Cache Stats: size={} hitRate={} evictionCount={} loadSuccessCount={}",
-                vpinCalculators.estimatedSize(),
+                vpinCache.estimatedSize(),
                 String.format("%.2f%%", stats.hitRate() * 100),
                 stats.evictionCount(),
                 stats.loadSuccessCount());
@@ -2043,6 +2141,34 @@ public class UnifiedInstrumentCandleProcessor {
     private Double getAverageAskDepth(OrderbookAggregate ob) {
         if (ob == null || ob.getTotalAskDepthCount() <= 0) return null;
         return ob.getTotalAskDepthSum() / ob.getTotalAskDepthCount();
+    }
+
+    /**
+     * 🔴 FIX: Get trading minutes per day based on exchange.
+     *
+     * Different exchanges have different trading hours:
+     * - NSE/BSE: 375 minutes (9:15 AM - 3:30 PM)
+     * - MCX: ~870 minutes (9:00 AM - 11:30 PM, with 30 min break 5:00-5:30 PM)
+     *   Morning session: 9:00 AM - 5:00 PM = 480 minutes
+     *   Evening session: 5:30 PM - 11:30 PM = 360 minutes
+     *   Total: 840 minutes (using 870 for buffer)
+     *
+     * This affects VPIN bucket sizing - using wrong trading minutes leads to
+     * incorrectly sized buckets (too large for MCX if using NSE hours).
+     *
+     * @param exchange The exchange code (N=NSE, B=BSE, M=MCX)
+     * @return Trading minutes per day for the exchange
+     */
+    private int getTradingMinutesForExchange(String exchange) {
+        if ("M".equalsIgnoreCase(exchange)) {
+            // MCX: 9:00 AM - 11:30 PM (with 30 min break)
+            // Morning: 9:00 - 17:00 = 480 min
+            // Evening: 17:30 - 23:30 = 360 min
+            // Total: 840 min (using 870 for buffer/overlap)
+            return 870;
+        }
+        // NSE/BSE: 9:15 AM - 3:30 PM = 375 minutes
+        return 375;
     }
 
     // ========== HELPER CLASSES ==========
