@@ -15,6 +15,7 @@ import com.kotsin.consumer.quant.model.QuantTradingSignal;
 import com.kotsin.consumer.quant.signal.QuantSignalGenerator;
 import com.kotsin.consumer.service.GreeksAggregator;
 import com.kotsin.consumer.service.IVSurfaceCalculator;
+import com.kotsin.consumer.service.QuantScoreCacheService;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.beans.factory.annotation.Value;
@@ -42,6 +43,7 @@ public class QuantScoreProcessor {
     private final QuantSignalGenerator signalGenerator;
     private final GreeksAggregator greeksAggregator;
     private final IVSurfaceCalculator ivSurfaceCalculator;
+    private final QuantScoreCacheService quantScoreCacheService;
 
     // Phase 1 SMTIS: Enriched calculator with historical context
     @Autowired(required = false)
@@ -83,12 +85,14 @@ public class QuantScoreProcessor {
             QuantScoreCalculator scoreCalculator,
             QuantSignalGenerator signalGenerator,
             GreeksAggregator greeksAggregator,
-            IVSurfaceCalculator ivSurfaceCalculator) {
+            IVSurfaceCalculator ivSurfaceCalculator,
+            QuantScoreCacheService quantScoreCacheService) {
         this.config = config;
         this.scoreCalculator = scoreCalculator;
         this.signalGenerator = signalGenerator;
         this.greeksAggregator = greeksAggregator;
         this.ivSurfaceCalculator = ivSurfaceCalculator;
+        this.quantScoreCacheService = quantScoreCacheService;
     }
 
     @PostConstruct
@@ -343,7 +347,7 @@ public class QuantScoreProcessor {
     }
 
     /**
-     * Emit QuantScore to dashboard topic
+     * Emit QuantScore to dashboard topic and cache to Redis for persistence.
      */
     public void emitScore(QuantScore score) {
         if (scoreProducer == null) {
@@ -368,6 +372,11 @@ public class QuantScoreProcessor {
                             result.getRecordMetadata().offset());
                     }
                 });
+
+            // FIX: Cache to Redis for dashboard persistence across restarts
+            if (quantScoreCacheService != null) {
+                quantScoreCacheService.cacheScore(score);
+            }
         } catch (Exception e) {
             log.error("Exception while emitting QuantScore for {}: {}",
                 score.getFamilyId(), e.getMessage(), e);

@@ -433,6 +433,11 @@ public class QuantScoreCalculator {
             .oiMomentum(oiMomentum)
             .futuresBuildup(family.getFuturesBuildup())
             .spotFuturePremium(family.getSpotFuturePremium() != null ? family.getSpotFuturePremium() : 0)
+            // FIX: Add raw OI data for transparency
+            .totalCallOI(family.getTotalCallOI())
+            .totalPutOI(family.getTotalPutOI())
+            .totalCallOIChange(family.getTotalCallOIChange())
+            .totalPutOIChange(family.getTotalPutOIChange())
             .build();
     }
 

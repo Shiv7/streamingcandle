@@ -253,6 +253,12 @@ public class QuantScore {
 
         private String futuresBuildup;
         private double spotFuturePremium;
+
+        // Raw OI data for transparency
+        private Long totalCallOI;
+        private Long totalPutOI;
+        private Long totalCallOIChange;
+        private Long totalPutOIChange;
     }
 
     // ========== PRICE ACTION SUMMARY ==========
