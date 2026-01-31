@@ -1124,7 +1124,7 @@ public class UnifiedInstrumentCandleProcessor {
         
         InstrumentCandle.InstrumentCandleBuilder builder = InstrumentCandle.builder()
             .scripCode(tick.getScripCode())
-            .symbol(tick.getScripCode())  // Use scripCode as symbol
+            .symbol(extractSymbolFromCompanyName(companyName, tick.getScripCode()))  // FIX: Extract symbol from companyName
             .companyName(companyName)
             .exchange(tick.getExchange())
             .exchangeType(tick.getExchangeType())
@@ -2030,6 +2030,50 @@ public class UnifiedInstrumentCandleProcessor {
         }
         
         return defaultVol;
+    }
+
+    /**
+     * Extract trading symbol from companyName.
+     *
+     * Examples:
+     * - "CRUDEOIL 17 FEB 2026 CE 6000.00" → "CRUDEOIL"
+     * - "RELIANCE" → "RELIANCE"
+     * - "BANK NIFTY 30 JAN 2025" → "BANKNIFTY"
+     * - "UNO MINDA 30 DEC 2025 CE 1280.00" → "UNOMINDA"
+     *
+     * @param companyName Full company/instrument name
+     * @param scripCode Fallback if extraction fails
+     * @return Extracted symbol or scripCode as fallback
+     */
+    private String extractSymbolFromCompanyName(String companyName, String scripCode) {
+        if (companyName == null || companyName.trim().isEmpty()) {
+            return scripCode;
+        }
+
+        String name = companyName.trim().toUpperCase();
+
+        // Handle special cases with spaces that should be combined
+        // "BANK NIFTY" → "BANKNIFTY", "UNO MINDA" → "UNOMINDA"
+        name = name.replace("BANK NIFTY", "BANKNIFTY")
+                   .replace("UNO MINDA", "UNOMINDA")
+                   .replace("FIN NIFTY", "FINNIFTY")
+                   .replace("NIFTY BANK", "BANKNIFTY");
+
+        // Split by space and get the first word (symbol)
+        String[] parts = name.split("\\s+");
+        if (parts.length == 0) {
+            return scripCode;
+        }
+
+        String symbol = parts[0];
+
+        // Validate: symbol should be alphabetic or alphanumeric
+        // Skip if it looks like a number (scripCode)
+        if (symbol.matches("^\\d+$")) {
+            return scripCode;  // It's a number, use scripCode
+        }
+
+        return symbol;
     }
 
     /**

@@ -283,11 +283,12 @@ public class OptionCandle {
             .oiChangePercent(candle.getOiChangePercent() != null ? candle.getOiChangePercent() : 0.0)
 
             // ========== GREEKS ==========
+            // FIX Issue #5: Calculate Greeks using Black-Scholes if missing from source
             .impliedVolatility(candle.getImpliedVolatility())
-            .delta(candle.getDelta())
-            .gamma(candle.getGamma())
-            .theta(candle.getTheta())
-            .vega(candle.getVega())
+            .delta(getOrCalculateDelta(candle, spotPrice))
+            .gamma(getOrCalculateGamma(candle, spotPrice))
+            .theta(getOrCalculateTheta(candle, spotPrice))
+            .vega(getOrCalculateVega(candle, spotPrice))
 
             // ========== ORDER FLOW & MICROSTRUCTURE (13 fields) ==========
             .ofi(candle.getOfi())
@@ -447,5 +448,171 @@ public class OptionCandle {
         }
 
         return components > 0 ? score / components : null;
+    }
+
+    // ========== FIX Issue #5: Greeks Calculation Helpers ==========
+
+    /**
+     * Get delta from candle or calculate using Black-Scholes if missing
+     */
+    private static Double getOrCalculateDelta(InstrumentCandle candle, Double spotPrice) {
+        if (candle.getDelta() != null && Math.abs(candle.getDelta()) > 0.001) {
+            return candle.getDelta();
+        }
+        BlackScholesResult bs = calculateBlackScholesGreeks(candle, spotPrice);
+        return bs != null ? bs.delta : null;
+    }
+
+    /**
+     * Get gamma from candle or calculate using Black-Scholes if missing
+     */
+    private static Double getOrCalculateGamma(InstrumentCandle candle, Double spotPrice) {
+        if (candle.getGamma() != null && Math.abs(candle.getGamma()) > 0.0001) {
+            return candle.getGamma();
+        }
+        BlackScholesResult bs = calculateBlackScholesGreeks(candle, spotPrice);
+        return bs != null ? bs.gamma : null;
+    }
+
+    /**
+     * Get theta from candle or calculate using Black-Scholes if missing
+     */
+    private static Double getOrCalculateTheta(InstrumentCandle candle, Double spotPrice) {
+        if (candle.getTheta() != null && Math.abs(candle.getTheta()) > 0.001) {
+            return candle.getTheta();
+        }
+        BlackScholesResult bs = calculateBlackScholesGreeks(candle, spotPrice);
+        return bs != null ? bs.theta : null;
+    }
+
+    /**
+     * Get vega from candle or calculate using Black-Scholes if missing
+     */
+    private static Double getOrCalculateVega(InstrumentCandle candle, Double spotPrice) {
+        if (candle.getVega() != null && Math.abs(candle.getVega()) > 0.01) {
+            return candle.getVega();
+        }
+        BlackScholesResult bs = calculateBlackScholesGreeks(candle, spotPrice);
+        return bs != null ? bs.vega : null;
+    }
+
+    /**
+     * Calculate Black-Scholes Greeks for option when exchange data is missing
+     * Uses the Black-Scholes-Merton model with India risk-free rate assumption
+     */
+    private static BlackScholesResult calculateBlackScholesGreeks(InstrumentCandle candle, Double spotPrice) {
+        if (candle == null || spotPrice == null || spotPrice <= 0) {
+            return null;
+        }
+
+        Double strike = candle.getStrikePrice();
+        String expiry = candle.getExpiry();
+        String optType = candle.getOptionType();
+
+        if (strike == null || strike <= 0 || expiry == null || optType == null) {
+            return null;
+        }
+
+        // Calculate days to expiry
+        int dte = estimateDTE(expiry);
+        if (dte <= 0) {
+            dte = 1; // Minimum 1 day
+        }
+        double timeToExpiryYears = dte / 365.0;
+
+        // Get IV or use 30% default
+        Double iv = candle.getImpliedVolatility();
+        double volatility = (iv != null && iv > 0 && iv < 2.0) ? iv : 0.30;
+
+        boolean isCall = "CE".equalsIgnoreCase(optType);
+
+        // Black-Scholes calculation
+        double riskFreeRate = 0.06; // India 10-year bond yield approximation
+
+        // Calculate d1 and d2
+        double d1 = (Math.log(spotPrice / strike) + (riskFreeRate + 0.5 * volatility * volatility) * timeToExpiryYears)
+                    / (volatility * Math.sqrt(timeToExpiryYears));
+        double d2 = d1 - volatility * Math.sqrt(timeToExpiryYears);
+
+        // Normal distribution values
+        double N_d1 = cumulativeNormalDistribution(d1);
+        double phi_d1 = normalPDF(d1);
+        double N_d2 = cumulativeNormalDistribution(d2);
+        double N_neg_d2 = cumulativeNormalDistribution(-d2);
+
+        // Calculate Greeks
+        double delta = isCall ? N_d1 : (N_d1 - 1.0);
+        double gamma = phi_d1 / (spotPrice * volatility * Math.sqrt(timeToExpiryYears));
+        double vega = spotPrice * phi_d1 * Math.sqrt(timeToExpiryYears) / 100.0; // Per 1% vol change
+
+        // Theta calculation
+        double term1 = -(spotPrice * phi_d1 * volatility) / (2.0 * Math.sqrt(timeToExpiryYears));
+        double term2 = -riskFreeRate * strike * Math.exp(-riskFreeRate * timeToExpiryYears);
+        term2 *= isCall ? N_d2 : N_neg_d2;
+        double theta = (term1 + term2) / 365.0; // Daily theta
+
+        return new BlackScholesResult(delta, gamma, theta, vega);
+    }
+
+    /**
+     * Estimate days to expiry from expiry string
+     */
+    private static int estimateDTE(String expiry) {
+        if (expiry == null || expiry.isEmpty()) {
+            return 30; // Default
+        }
+        try {
+            java.time.LocalDate expiryDate;
+            if (expiry.contains("-")) {
+                expiryDate = java.time.LocalDate.parse(expiry);
+            } else {
+                // NSE format: "27 JAN 2026"
+                java.time.format.DateTimeFormatter formatter = new java.time.format.DateTimeFormatterBuilder()
+                    .parseCaseInsensitive()
+                    .appendPattern("d MMM yyyy")
+                    .toFormatter(java.util.Locale.ENGLISH);
+                expiryDate = java.time.LocalDate.parse(expiry, formatter);
+            }
+            return (int) java.time.temporal.ChronoUnit.DAYS.between(java.time.LocalDate.now(), expiryDate);
+        } catch (Exception e) {
+            return 30; // Default
+        }
+    }
+
+    /**
+     * Cumulative standard normal distribution (Abramowitz and Stegun approximation)
+     */
+    private static double cumulativeNormalDistribution(double x) {
+        double a1 = 0.254829592, a2 = -0.284496736, a3 = 1.421413741;
+        double a4 = -1.453152027, a5 = 1.061405429, p = 0.3275911;
+
+        int sign = x < 0 ? -1 : 1;
+        x = Math.abs(x);
+
+        double t = 1.0 / (1.0 + p * x);
+        double y = 1.0 - (((((a5 * t + a4) * t) + a3) * t + a2) * t + a1) * t * Math.exp(-x * x);
+
+        return 0.5 * (1.0 + sign * y);
+    }
+
+    /**
+     * Standard normal probability density function
+     */
+    private static double normalPDF(double x) {
+        return (1.0 / Math.sqrt(2.0 * Math.PI)) * Math.exp(-0.5 * x * x);
+    }
+
+    /**
+     * Simple container for Black-Scholes calculation results
+     */
+    private static class BlackScholesResult {
+        final double delta, gamma, theta, vega;
+
+        BlackScholesResult(double delta, double gamma, double theta, double vega) {
+            this.delta = delta;
+            this.gamma = gamma;
+            this.theta = theta;
+            this.vega = vega;
+        }
     }
 }

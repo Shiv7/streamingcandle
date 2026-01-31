@@ -888,11 +888,27 @@ public class TickAggregate {
     }
 
     /**
-     * Round price to tick size for volume profile histogram
+     * Round price to tick size for volume profile histogram.
+     * FIX: Uses BigDecimal for precise decimal arithmetic to avoid
+     * floating point errors like 322.20000000000005 instead of 322.2
      */
     private double roundToTickSize(double price, double tickSize) {
         if (tickSize <= 0) return price;
-        return Math.round(price / tickSize) * tickSize;
+
+        // Use BigDecimal for precise decimal arithmetic
+        java.math.BigDecimal bdPrice = java.math.BigDecimal.valueOf(price);
+        java.math.BigDecimal bdTick = java.math.BigDecimal.valueOf(tickSize);
+
+        // Round to nearest tick: round(price / tickSize) * tickSize
+        java.math.BigDecimal divided = bdPrice.divide(bdTick, 0, java.math.RoundingMode.HALF_UP);
+        java.math.BigDecimal rounded = divided.multiply(bdTick);
+
+        // Scale to match tick size precision (e.g., 0.05 has scale 2)
+        int scale = bdTick.stripTrailingZeros().scale();
+        if (scale < 0) scale = 0;
+        rounded = rounded.setScale(scale, java.math.RoundingMode.HALF_UP);
+
+        return rounded.doubleValue();
     }
 
     /**

@@ -27,10 +27,10 @@ public class TradeOrderbookValidator {
     private static final double HIGH_CORRELATION = 0.7;
     private static final double EPSILON = 0.05;  // FIX: Increased from 0.01 to 0.05 to ignore small noise
 
-    // FIX: Minimum absolute thresholds to trigger CONFLICT
-    // Only flag CONFLICT when both trade imbalance AND OFI are significant
-    private static final long MIN_TRADE_IMBALANCE_FOR_CONFLICT = 1000;  // Min volume imbalance
-    private static final double MIN_OFI_FOR_CONFLICT = 10000.0;  // Min OFI magnitude
+    // FIX: Use RELATIVE thresholds instead of absolute values
+    // This works correctly for both high-volume and low-volume instruments
+    private static final double MIN_TRADE_IMBALANCE_RATIO = 0.20;  // 20% of total volume
+    private static final double MIN_OFI_RATIO = 0.15;  // 15% of average orderbook depth
 
     /**
      * Validation result with quality and reason
@@ -85,24 +85,34 @@ public class TradeOrderbookValidator {
         boolean tradePositive = tradeImbalance > 0;
         boolean ofiPositive = ofi > 0;
 
-        // FIX: Only flag CONFLICT when BOTH signals are significant
-        // Small imbalances in opposite directions are just noise, not conflict
-        boolean tradeSignificant = Math.abs(tradeImbalance) >= MIN_TRADE_IMBALANCE_FOR_CONFLICT;
-        boolean ofiSignificant = Math.abs(ofi) >= MIN_OFI_FOR_CONFLICT;
+        // FIX: Use RELATIVE thresholds - significant relative to the instrument's activity
+        // Trade imbalance is significant if it's >= 20% of total volume
+        long totalVolume = candle.getVolume();
+        double tradeImbalanceRatio = totalVolume > 0 ? Math.abs(tradeImbalance) / (double) totalVolume : 0.0;
+        boolean tradeSignificant = tradeImbalanceRatio >= MIN_TRADE_IMBALANCE_RATIO;
+
+        // OFI is significant if it's >= 15% of average orderbook depth
+        Double avgBidDepth = candle.getAverageBidDepth();
+        Double avgAskDepth = candle.getAverageAskDepth();
+        double avgDepth = (avgBidDepth != null && avgAskDepth != null)
+            ? (avgBidDepth + avgAskDepth) / 2
+            : 10000.0;  // Fallback if no depth data
+        double ofiRatio = avgDepth > 0 ? Math.abs(ofi) / avgDepth : 0.0;
+        boolean ofiSignificant = ofiRatio >= MIN_OFI_RATIO;
 
         if (tradePositive != ofiPositive && !tradeNearZero && !ofiNearZero) {
-            // Only CONFLICT if both signals are significant
+            // Only CONFLICT if both signals are significant relative to the instrument's activity
             if (tradeSignificant && ofiSignificant) {
                 // CONFLICT: Trade says buy, OFI says sell (or vice versa) with significant magnitude
                 return new ValidationResult(DataQuality.CONFLICT,
-                    String.format("Trade imbalance (%d) conflicts with OFI (%.2f)",
-                        tradeImbalance, ofi),
+                    String.format("Trade imbalance %d (%.1f%% of vol) conflicts with OFI %.2f (%.1f%% of depth)",
+                        tradeImbalance, tradeImbalanceRatio * 100, ofi, ofiRatio * 100),
                     -0.5);  // Negative correlation indicates conflict
             } else {
-                // FIX: Downgrade to WARNING if signals are weak
+                // FIX: Downgrade to WARNING if signals are relatively weak
                 return new ValidationResult(DataQuality.WARNING,
-                    String.format("Weak directional conflict: trade=%d (sig=%s), ofi=%.2f (sig=%s)",
-                        tradeImbalance, tradeSignificant, ofi, ofiSignificant),
+                    String.format("Weak directional conflict: trade=%d (%.1f%%), ofi=%.2f (%.1f%%)",
+                        tradeImbalance, tradeImbalanceRatio * 100, ofi, ofiRatio * 100),
                     -0.2);
             }
         }
