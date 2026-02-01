@@ -1,0 +1,495 @@
+package com.kotsin.consumer.aggregator;
+
+import com.kotsin.consumer.model.OrderBookSnapshot;
+import com.kotsin.consumer.model.OrderbookMetrics;
+import com.kotsin.consumer.model.Timeframe;
+import com.kotsin.consumer.repository.OrderbookMetricsRepository;
+import com.kotsin.consumer.service.RedisCacheService;
+import jakarta.annotation.PostConstruct;
+import jakarta.annotation.PreDestroy;
+import lombok.extern.slf4j.Slf4j;
+import org.apache.kafka.clients.consumer.ConsumerConfig;
+import org.apache.kafka.clients.consumer.ConsumerRecord;
+import org.apache.kafka.clients.consumer.ConsumerRecords;
+import org.apache.kafka.clients.consumer.KafkaConsumer;
+import org.apache.kafka.common.serialization.StringDeserializer;
+import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.beans.factory.annotation.Value;
+import org.springframework.kafka.support.serializer.JsonDeserializer;
+import org.springframework.stereotype.Component;
+
+import java.time.Duration;
+import java.time.Instant;
+import java.time.ZoneId;
+import java.time.ZonedDateTime;
+import java.time.format.DateTimeFormatter;
+import java.util.*;
+import java.util.concurrent.*;
+import java.util.concurrent.atomic.AtomicBoolean;
+
+/**
+ * OrderbookAggregator - Independent Kafka consumer for orderbook data.
+ *
+ * Responsibilities:
+ * 1. Consume from Orderbook topic
+ * 2. Aggregate orderbook snapshots into 1-minute metrics
+ * 3. Calculate OFI, Kyle's Lambda, depth metrics
+ * 4. Write to MongoDB (orderbook_metrics_1m)
+ * 5. Write to Redis (hot cache)
+ *
+ * Key Design:
+ * - INDEPENDENT: No joins with tick or OI data
+ * - SIMPLE: Only orderbook-derived metrics
+ * - WALL-CLOCK: Emits based on wall clock time
+ */
+@Component
+@Slf4j
+public class OrderbookAggregator {
+
+    private static final String LOG_PREFIX = "[OB-AGG]";
+
+    @Value("${v2.orderbook.aggregator.enabled:true}")
+    private boolean enabled;
+
+    @Value("${spring.kafka.bootstrap-servers:localhost:9092}")
+    private String bootstrapServers;
+
+    @Value("${v2.orderbook.input.topic:Orderbook}")
+    private String inputTopic;
+
+    @Value("${v2.orderbook.consumer.group:orderbook-aggregator-v2}")
+    private String consumerGroup;
+
+    @Value("${v2.orderbook.aggregator.threads:2}")
+    private int numThreads;
+
+    @Autowired
+    private OrderbookMetricsRepository orderbookRepository;
+
+    @Autowired
+    private RedisCacheService redisCacheService;
+
+    // Aggregation state
+    private final ConcurrentHashMap<String, OrderbookAggregateState> aggregationState = new ConcurrentHashMap<>();
+
+    private ExecutorService consumerExecutor;
+    private ScheduledExecutorService emissionScheduler;
+    private final AtomicBoolean running = new AtomicBoolean(false);
+
+    private volatile Instant currentWindowStart;
+    private volatile Instant currentWindowEnd;
+
+    private static final ZoneId IST = ZoneId.of("Asia/Kolkata");
+    private static final DateTimeFormatter TIME_FMT = DateTimeFormatter.ofPattern("HH:mm:ss");
+
+    @PostConstruct
+    public void start() {
+        if (!enabled) {
+            log.info("{} Disabled by configuration", LOG_PREFIX);
+            return;
+        }
+
+        log.info("{} Starting with threads={}, topic={}", LOG_PREFIX, numThreads, inputTopic);
+
+        running.set(true);
+
+        Instant now = Instant.now();
+        currentWindowStart = Timeframe.M1.alignToWindowStart(now);
+        currentWindowEnd = Timeframe.M1.getWindowEnd(currentWindowStart);
+
+        consumerExecutor = Executors.newFixedThreadPool(numThreads);
+        for (int i = 0; i < numThreads; i++) {
+            consumerExecutor.submit(this::consumeLoop);
+        }
+
+        emissionScheduler = Executors.newSingleThreadScheduledExecutor();
+        emissionScheduler.scheduleAtFixedRate(this::checkWindowEmission, 1, 1, TimeUnit.SECONDS);
+
+        log.info("{} Started successfully", LOG_PREFIX);
+    }
+
+    @PreDestroy
+    public void stop() {
+        log.info("{} Stopping...", LOG_PREFIX);
+        running.set(false);
+
+        if (emissionScheduler != null) emissionScheduler.shutdown();
+        if (consumerExecutor != null) {
+            consumerExecutor.shutdown();
+            try {
+                consumerExecutor.awaitTermination(30, TimeUnit.SECONDS);
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+            }
+        }
+
+        emitCurrentWindow();
+        log.info("{} Stopped", LOG_PREFIX);
+    }
+
+    private void consumeLoop() {
+        KafkaConsumer<String, OrderBookSnapshot> consumer = createConsumer();
+        consumer.subscribe(Collections.singletonList(inputTopic));
+
+        try {
+            while (running.get()) {
+                ConsumerRecords<String, OrderBookSnapshot> records = consumer.poll(Duration.ofMillis(100));
+
+                for (ConsumerRecord<String, OrderBookSnapshot> record : records) {
+                    try {
+                        processOrderbook(record.value(), record.timestamp());
+                    } catch (Exception e) {
+                        log.error("{} Error processing orderbook: {}", LOG_PREFIX, e.getMessage());
+                    }
+                }
+            }
+        } finally {
+            consumer.close();
+        }
+    }
+
+    private void processOrderbook(OrderBookSnapshot ob, long kafkaTimestamp) {
+        if (ob == null || ob.getToken() <= 0) return;
+
+        String key = ob.getExchange() + ":" + ob.getToken();
+        Instant obTime = Instant.ofEpochMilli(kafkaTimestamp);
+
+        OrderbookAggregateState state = aggregationState.computeIfAbsent(key,
+            k -> new OrderbookAggregateState(ob, currentWindowStart, currentWindowEnd));
+
+        state.update(ob, obTime);
+    }
+
+    private void checkWindowEmission() {
+        Instant now = Instant.now();
+
+        if (now.isAfter(currentWindowEnd.plusSeconds(2))) {
+            emitCurrentWindow();
+
+            currentWindowStart = currentWindowEnd;
+            currentWindowEnd = Timeframe.M1.getWindowEnd(currentWindowStart);
+
+            log.debug("{} Advanced to window: {} - {}",
+                LOG_PREFIX, formatTime(currentWindowStart), formatTime(currentWindowEnd));
+        }
+    }
+
+    private void emitCurrentWindow() {
+        if (aggregationState.isEmpty()) return;
+
+        Instant windowStart = currentWindowStart;
+        Instant windowEnd = currentWindowEnd;
+
+        log.info("{} Emitting window {} - {} with {} instruments",
+            LOG_PREFIX, formatTime(windowStart), formatTime(windowEnd), aggregationState.size());
+
+        List<OrderbookMetrics> metricsToSave = new ArrayList<>();
+
+        for (Map.Entry<String, OrderbookAggregateState> entry : aggregationState.entrySet()) {
+            OrderbookAggregateState state = entry.getValue();
+
+            if (state.getWindowStart().equals(windowStart) && state.getUpdateCount() > 0) {
+                OrderbookMetrics metrics = state.toOrderbookMetrics();
+                metricsToSave.add(metrics);
+
+                state.reset(currentWindowEnd, Timeframe.M1.getWindowEnd(currentWindowEnd));
+            }
+        }
+
+        if (!metricsToSave.isEmpty()) {
+            try {
+                orderbookRepository.saveAll(metricsToSave);
+                log.info("{} Saved {} metrics to MongoDB", LOG_PREFIX, metricsToSave.size());
+            } catch (Exception e) {
+                log.error("{} Failed to save to MongoDB: {}", LOG_PREFIX, e.getMessage());
+            }
+
+            try {
+                for (OrderbookMetrics m : metricsToSave) {
+                    redisCacheService.cacheOrderbookMetrics(m);
+                }
+            } catch (Exception e) {
+                log.error("{} Failed to cache in Redis: {}", LOG_PREFIX, e.getMessage());
+            }
+        }
+
+        Instant cutoff = Instant.now().minus(Duration.ofMinutes(5));
+        aggregationState.entrySet().removeIf(e -> e.getValue().getLastUpdate().isBefore(cutoff));
+    }
+
+    private KafkaConsumer<String, OrderBookSnapshot> createConsumer() {
+        Properties props = new Properties();
+        props.put(ConsumerConfig.BOOTSTRAP_SERVERS_CONFIG, bootstrapServers);
+        props.put(ConsumerConfig.GROUP_ID_CONFIG, consumerGroup);
+        props.put(ConsumerConfig.KEY_DESERIALIZER_CLASS_CONFIG, StringDeserializer.class);
+        props.put(ConsumerConfig.VALUE_DESERIALIZER_CLASS_CONFIG, JsonDeserializer.class);
+        props.put(JsonDeserializer.TRUSTED_PACKAGES, "com.kotsin.consumer.model");
+        props.put(ConsumerConfig.AUTO_OFFSET_RESET_CONFIG, "earliest");
+        props.put(ConsumerConfig.ENABLE_AUTO_COMMIT_CONFIG, "true");
+        props.put(ConsumerConfig.MAX_POLL_RECORDS_CONFIG, 2000);
+
+        return new KafkaConsumer<>(props);
+    }
+
+    private String formatTime(Instant instant) {
+        return ZonedDateTime.ofInstant(instant, IST).format(TIME_FMT);
+    }
+
+    /**
+     * Check if the aggregator is running.
+     */
+    public boolean isRunning() {
+        return running.get();
+    }
+
+    /**
+     * Get aggregator stats.
+     */
+    public Map<String, Object> getStats() {
+        Map<String, Object> stats = new HashMap<>();
+        stats.put("enabled", enabled);
+        stats.put("running", running.get());
+        stats.put("activeInstruments", aggregationState.size());
+        stats.put("currentWindowStart", currentWindowStart != null ? currentWindowStart.toString() : null);
+        stats.put("currentWindowEnd", currentWindowEnd != null ? currentWindowEnd.toString() : null);
+        return stats;
+    }
+
+    /**
+     * Internal state for orderbook aggregation.
+     */
+    private static class OrderbookAggregateState {
+        private final String symbol;
+        private final String scripCode;
+        private final String exchange;
+        private final String exchangeType;
+
+        private Instant windowStart;
+        private Instant windowEnd;
+        private Instant lastUpdate;
+
+        // OFI calculation
+        private double ofiSum;
+        private double previousBidQty;
+        private double previousAskQty;
+        private double previousBid;
+        private double previousAsk;
+
+        // Kyle's Lambda
+        private final List<Double> priceChanges = new ArrayList<>();
+        private final List<Double> signedVolumes = new ArrayList<>();
+        private double lastMidPrice;
+
+        // Spread metrics
+        private double spreadSum;
+        private double spreadSqSum;
+        private int tightSpreadCount;
+
+        // Depth metrics
+        private double bidDepthSum;
+        private double askDepthSum;
+        private double depthImbalanceSum;
+
+        // Anomaly detection
+        private int spoofingCount;
+        private boolean icebergBidDetected;
+        private boolean icebergAskDetected;
+        private int cancelCount;
+        private int totalOrders;
+
+        private int updateCount;
+
+        public OrderbookAggregateState(OrderBookSnapshot ob, Instant windowStart, Instant windowEnd) {
+            this.symbol = ob.getCompanyName() != null ? extractSymbol(ob.getCompanyName()) : String.valueOf(ob.getToken());
+            this.scripCode = String.valueOf(ob.getToken());
+            this.exchange = ob.getExchange();
+            this.exchangeType = ob.getExchangeType();
+            this.windowStart = windowStart;
+            this.windowEnd = windowEnd;
+            this.lastUpdate = Instant.now();
+
+            // Initialize previous values using correct method names
+            this.previousBid = ob.getBestBid();
+            this.previousAsk = ob.getBestAsk();
+            this.previousBidQty = getBidQty(ob);
+            this.previousAskQty = getAskQty(ob);
+            this.lastMidPrice = (previousBid + previousAsk) / 2;
+        }
+
+        public synchronized void update(OrderBookSnapshot ob, Instant obTime) {
+            double bid = ob.getBestBid();
+            double ask = ob.getBestAsk();
+            double bidQty = getBidQty(ob);
+            double askQty = getAskQty(ob);
+
+            // Calculate OFI
+            double bidDelta = 0;
+            double askDelta = 0;
+
+            if (bid >= previousBid) {
+                bidDelta = bidQty - (bid == previousBid ? previousBidQty : 0);
+            }
+            if (ask <= previousAsk) {
+                askDelta = askQty - (ask == previousAsk ? previousAskQty : 0);
+            }
+
+            ofiSum += bidDelta - askDelta;
+
+            // Kyle's Lambda - track price change vs signed volume
+            double midPrice = (bid + ask) / 2;
+            if (lastMidPrice > 0 && midPrice > 0) {
+                double priceChange = midPrice - lastMidPrice;
+                double signedVol = bidDelta - askDelta;
+                if (Math.abs(signedVol) > 0) {
+                    priceChanges.add(priceChange);
+                    signedVolumes.add(signedVol);
+                }
+            }
+            lastMidPrice = midPrice;
+
+            // Spread metrics
+            double spread = ask - bid;
+            if (spread > 0) {
+                spreadSum += spread;
+                spreadSqSum += spread * spread;
+                if (spread <= 0.05) {  // Tight spread threshold
+                    tightSpreadCount++;
+                }
+            }
+
+            // Depth metrics
+            Long totalBidDepthLong = ob.getTotalBidQty();
+            Long totalAskDepthLong = ob.getTotalOffQty();
+            double totalBidDepth = totalBidDepthLong != null ? totalBidDepthLong : bidQty;
+            double totalAskDepth = totalAskDepthLong != null ? totalAskDepthLong : askQty;
+            bidDepthSum += totalBidDepth;
+            askDepthSum += totalAskDepth;
+
+            double totalDepth = totalBidDepth + totalAskDepth;
+            if (totalDepth > 0) {
+                depthImbalanceSum += (totalBidDepth - totalAskDepth) / totalDepth;
+            }
+
+            // Update previous values
+            previousBid = bid;
+            previousAsk = ask;
+            previousBidQty = bidQty;
+            previousAskQty = askQty;
+
+            updateCount++;
+            lastUpdate = obTime;
+        }
+
+        private static double getBidQty(OrderBookSnapshot ob) {
+            if (ob.getBids() != null && !ob.getBids().isEmpty()) {
+                return ob.getBids().get(0).getQuantity();
+            }
+            return 0;
+        }
+
+        private static double getAskQty(OrderBookSnapshot ob) {
+            if (ob.getAsks() != null && !ob.getAsks().isEmpty()) {
+                return ob.getAsks().get(0).getQuantity();
+            }
+            return 0;
+        }
+
+        public OrderbookMetrics toOrderbookMetrics() {
+            double avgSpread = updateCount > 0 ? spreadSum / updateCount : 0;
+            double spreadVariance = updateCount > 1 ?
+                (spreadSqSum - spreadSum * spreadSum / updateCount) / (updateCount - 1) : 0;
+            double spreadVolatility = Math.sqrt(Math.max(0, spreadVariance));
+
+            double avgBidDepth = updateCount > 0 ? bidDepthSum / updateCount : 0;
+            double avgAskDepth = updateCount > 0 ? askDepthSum / updateCount : 0;
+            double avgDepthImbalance = updateCount > 0 ? depthImbalanceSum / updateCount : 0;
+
+            double kyleLambda = calculateKyleLambda();
+
+            double microprice = 0;
+            if (avgBidDepth + avgAskDepth > 0) {
+                microprice = (previousBid * avgAskDepth + previousAsk * avgBidDepth) /
+                             (avgBidDepth + avgAskDepth);
+            }
+
+            return OrderbookMetrics.builder()
+                .symbol(symbol)
+                .scripCode(scripCode)
+                .exchange(exchange)
+                .exchangeType(exchangeType)
+                .timestamp(windowEnd)
+                .windowStart(windowStart)
+                .windowEnd(windowEnd)
+                .ofi(ofiSum)
+                .ofiMomentum(0.0)  // Calculated by comparing with previous window
+                .kyleLambda(kyleLambda)
+                .microprice(microprice)
+                .bidAskSpread(avgSpread)
+                .spreadPercent(lastMidPrice > 0 ? avgSpread / lastMidPrice * 100 : 0)
+                .spreadVolatility(spreadVolatility)
+                .tightSpreadPercent(updateCount > 0 ? (double) tightSpreadCount / updateCount : 0)
+                .depthImbalance(avgDepthImbalance)
+                .weightedDepthImbalance(avgDepthImbalance)  // Simplified
+                .avgBidDepth(avgBidDepth)
+                .avgAskDepth(avgAskDepth)
+                .bidDepthSlope(0.0)  // Requires multi-level data
+                .askDepthSlope(0.0)
+                .depthConcentration(0.0)
+                .spoofingCount(spoofingCount)
+                .icebergBidDetected(icebergBidDetected)
+                .icebergAskDetected(icebergAskDetected)
+                .cancelRate(totalOrders > 0 ? (double) cancelCount / totalOrders : 0)
+                .updateCount(updateCount)
+                .lastUpdateTimestamp(lastUpdate)
+                .quality("VALID")
+                .staleness(System.currentTimeMillis() - lastUpdate.toEpochMilli())
+                .createdAt(Instant.now())
+                .build();
+        }
+
+        private double calculateKyleLambda() {
+            if (priceChanges.size() < 5) return 0;
+
+            // Simple linear regression: priceChange = lambda * signedVolume
+            double sumXY = 0, sumX2 = 0;
+            for (int i = 0; i < priceChanges.size(); i++) {
+                double x = signedVolumes.get(i);
+                double y = priceChanges.get(i);
+                sumXY += x * y;
+                sumX2 += x * x;
+            }
+
+            return sumX2 > 0 ? sumXY / sumX2 : 0;
+        }
+
+        public void reset(Instant newWindowStart, Instant newWindowEnd) {
+            this.windowStart = newWindowStart;
+            this.windowEnd = newWindowEnd;
+            this.ofiSum = 0;
+            this.priceChanges.clear();
+            this.signedVolumes.clear();
+            this.spreadSum = 0;
+            this.spreadSqSum = 0;
+            this.tightSpreadCount = 0;
+            this.bidDepthSum = 0;
+            this.askDepthSum = 0;
+            this.depthImbalanceSum = 0;
+            this.spoofingCount = 0;
+            this.icebergBidDetected = false;
+            this.icebergAskDetected = false;
+            this.cancelCount = 0;
+            this.totalOrders = 0;
+            this.updateCount = 0;
+        }
+
+        public Instant getWindowStart() { return windowStart; }
+        public Instant getLastUpdate() { return lastUpdate; }
+        public int getUpdateCount() { return updateCount; }
+
+        private static String extractSymbol(String companyName) {
+            if (companyName == null || companyName.isEmpty()) return null;
+            String[] parts = companyName.toUpperCase().trim().split("\\s+");
+            return parts.length > 0 ? parts[0] : null;
+        }
+    }
+}

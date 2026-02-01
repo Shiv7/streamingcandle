@@ -5,14 +5,19 @@ import lombok.Builder;
 import lombok.Data;
 import lombok.NoArgsConstructor;
 
+import java.time.Instant;
+import java.util.ArrayList;
+import java.util.HashMap;
+import java.util.List;
+import java.util.Map;
+
 /**
- * GateResult - Result of a gate evaluation
- * 
- * Encapsulates:
+ * GateResult - Result of passing signal through a quality gate.
+ *
+ * Contains:
  * - Pass/Fail status
- * - Reason for the result
- * - Optional position multiplier (for scaling based on conviction)
- * - Gate name for logging
+ * - Score contribution
+ * - Detailed reasoning
  */
 @Data
 @Builder
@@ -20,112 +25,97 @@ import lombok.NoArgsConstructor;
 @AllArgsConstructor
 public class GateResult {
 
-    private boolean passed;
     private String gateName;
+    private boolean passed;
+    private double score;            // 0-100 contribution
+    private double weight;           // Gate weight (0-1)
     private String reason;
-    private String detail;
-    private double positionMultiplier;  // 1.0 = normal, 0.7 = reduce, 1.2 = boost
+    private Instant timestamp;
 
-    // ========== Static Factory Methods ==========
+    @Builder.Default
+    private Map<String, Object> details = new HashMap<>();
 
-    /**
-     * Gate passed with default multiplier
-     */
-    public static GateResult pass() {
+    public double getWeightedScore() {
+        return passed ? score * weight : 0;
+    }
+
+    public static GateResult pass(String gateName, double score, double weight, String reason) {
         return GateResult.builder()
-                .passed(true)
-                .positionMultiplier(1.0)
-                .build();
+            .gateName(gateName)
+            .passed(true)
+            .score(score)
+            .weight(weight)
+            .reason(reason)
+            .timestamp(Instant.now())
+            .build();
+    }
+
+    public static GateResult fail(String gateName, double weight, String reason) {
+        return GateResult.builder()
+            .gateName(gateName)
+            .passed(false)
+            .score(0)
+            .weight(weight)
+            .reason(reason)
+            .timestamp(Instant.now())
+            .build();
     }
 
     /**
-     * Gate passed with reason
+     * Aggregate result from multiple gates.
      */
-    public static GateResult pass(String reason) {
-        return GateResult.builder()
-                .passed(true)
-                .reason(reason)
-                .positionMultiplier(1.0)
-                .build();
-    }
+    @Data
+    @Builder
+    @NoArgsConstructor
+    @AllArgsConstructor
+    public static class ChainResult {
+        private String symbol;
+        private String signalType;
+        private boolean passed;          // All required gates passed
+        private double totalScore;       // Weighted score (0-100)
+        private int gatesPassed;
+        private int gatesFailed;
+        private int totalGates;
+        @Builder.Default
+        private List<GateResult> gateResults = new ArrayList<>();
+        private String failureReason;    // First failure reason
+        private Instant timestamp;
 
-    /**
-     * Gate passed with position size adjustment
-     */
-    public static GateResult pass(String reason, double positionMultiplier) {
-        return GateResult.builder()
-                .passed(true)
-                .reason(reason)
-                .positionMultiplier(positionMultiplier)
-                .build();
-    }
+        public void addResult(GateResult result) {
+            gateResults.add(result);
+            totalGates++;
 
-    /**
-     * Gate failed with reason
-     */
-    public static GateResult fail(String reason) {
-        return GateResult.builder()
-                .passed(false)
-                .reason(reason)
-                .positionMultiplier(0.0)
-                .build();
-    }
+            if (result.isPassed()) {
+                gatesPassed++;
+                totalScore += result.getWeightedScore();
+            } else {
+                gatesFailed++;
+                if (failureReason == null) {
+                    failureReason = result.getReason();
+                }
+            }
+        }
 
-    /**
-     * Gate failed with reason and detail
-     */
-    public static GateResult fail(String reason, String detail) {
-        return GateResult.builder()
-                .passed(false)
-                .reason(reason)
-                .detail(detail)
-                .positionMultiplier(0.0)
-                .build();
-    }
+        public double getPassRate() {
+            return totalGates > 0 ? (double) gatesPassed / totalGates * 100 : 0;
+        }
 
-    // ========== Convenience Methods ==========
+        public boolean isHighQuality() {
+            return passed && totalScore >= 70;
+        }
 
-    /**
-     * Get formatted log message
-     */
-    public String toLogString() {
-        StringBuilder sb = new StringBuilder();
-        if (passed) {
-            sb.append("✅ PASSED");
-        } else {
-            sb.append("🚫 FAILED");
+        public List<String> getFailedGates() {
+            return gateResults.stream()
+                .filter(r -> !r.isPassed())
+                .map(GateResult::getGateName)
+                .toList();
         }
-        if (gateName != null) {
-            sb.append(" | gate=").append(gateName);
-        }
-        if (reason != null) {
-            sb.append(" | reason=").append(reason);
-        }
-        if (detail != null) {
-            sb.append(" | detail=").append(detail);
-        }
-        if (passed && positionMultiplier != 1.0) {
-            sb.append(" | multiplier=").append(String.format("%.2f", positionMultiplier));
-        }
-        return sb.toString();
-    }
 
-    /**
-     * Combine two gate results (AND logic)
-     */
-    public GateResult and(GateResult other) {
-        if (!this.passed) {
-            return this;
+        public List<String> getPassedGates() {
+            return gateResults.stream()
+                .filter(GateResult::isPassed)
+                .map(GateResult::getGateName)
+                .toList();
         }
-        if (!other.passed) {
-            return other;
-        }
-        // Both passed - combine multipliers
-        return GateResult.builder()
-                .passed(true)
-                .reason(this.reason + " & " + other.reason)
-                .positionMultiplier(this.positionMultiplier * other.positionMultiplier)
-                .build();
     }
 }
-

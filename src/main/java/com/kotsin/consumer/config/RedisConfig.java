@@ -40,7 +40,7 @@ public class RedisConfig {
     }
 
     @Bean
-    public RedisTemplate<String, Double> redisTemplate(RedisConnectionFactory connectionFactory) {
+    public RedisTemplate<String, Double> doubleRedisTemplate(RedisConnectionFactory connectionFactory) {
         RedisTemplate<String, Double> template = new RedisTemplate<>();
         template.setConnectionFactory(connectionFactory);
         template.setKeySerializer(new StringRedisSerializer());
@@ -48,6 +48,17 @@ public class RedisConfig {
         template.setValueSerializer(new org.springframework.data.redis.serializer.GenericToStringSerializer<>(Double.class));
         template.setHashKeySerializer(new StringRedisSerializer());
         template.setHashValueSerializer(new org.springframework.data.redis.serializer.GenericToStringSerializer<>(Double.class));
+        return template;
+    }
+
+    @Bean
+    public RedisTemplate<String, Object> redisTemplate(RedisConnectionFactory connectionFactory) {
+        RedisTemplate<String, Object> template = new RedisTemplate<>();
+        template.setConnectionFactory(connectionFactory);
+        template.setKeySerializer(new StringRedisSerializer());
+        template.setValueSerializer(new org.springframework.data.redis.serializer.GenericJackson2JsonRedisSerializer());
+        template.setHashKeySerializer(new StringRedisSerializer());
+        template.setHashValueSerializer(new org.springframework.data.redis.serializer.GenericJackson2JsonRedisSerializer());
         return template;
     }
 
