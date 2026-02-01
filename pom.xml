@@ -61,6 +61,12 @@
 			<artifactId>jackson-databind</artifactId>
 		</dependency>
 
+		<!-- Jackson Java 8 Date/Time support for Instant serialization -->
+		<dependency>
+			<groupId>com.fasterxml.jackson.datatype</groupId>
+			<artifactId>jackson-datatype-jsr310</artifactId>
+		</dependency>
+
 		<!-- OkHttp for 5paisa Historical API calls -->
 		<dependency>
 			<groupId>com.squareup.okhttp3</groupId>

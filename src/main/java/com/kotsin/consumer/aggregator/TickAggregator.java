@@ -19,12 +19,13 @@ import org.springframework.kafka.core.KafkaTemplate;
 import org.springframework.kafka.support.serializer.JsonDeserializer;
 import org.springframework.stereotype.Component;
 
-import java.time.Duration;
-import java.time.Instant;
-import java.time.ZoneId;
-import java.time.ZonedDateTime;
+import java.time.*;
 import java.time.format.DateTimeFormatter;
+import java.time.format.DateTimeParseException;
+import java.time.temporal.ChronoUnit;
 import java.util.*;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
 import java.util.concurrent.*;
 import java.util.concurrent.atomic.AtomicBoolean;
 
@@ -177,10 +178,6 @@ public class TickAggregator {
                     lastLogTime = System.currentTimeMillis();
                     pollCount = 0;
                     recordsReceived = 0;
-                }
-
-                if (!records.isEmpty()) {
-                    log.debug("{} Thread {} received {} records", LOG_PREFIX, threadName, records.count());
                 }
 
                 for (ConsumerRecord<String, TickData> record : records) {
@@ -498,7 +495,10 @@ public class TickAggregator {
             double buyPressure = volume > 0 ? (double) buyVolume / volume : 0.5;
             double sellPressure = volume > 0 ? (double) sellVolume / volume : 0.5;
 
-            return TickCandle.builder()
+            // Parse option metadata if applicable
+            OptionMetadata optionMeta = parseOptionMetadata(companyName);
+
+            TickCandle.TickCandleBuilder builder = TickCandle.builder()
                 .symbol(symbol)
                 .scripCode(scripCode)
                 .exchange(exchange)
@@ -539,8 +539,17 @@ public class TickAggregator {
                 .largeTradeCount(largeTradeCount)
                 .quality("VALID")
                 .processingLatencyMs(System.currentTimeMillis() - windowEnd.toEpochMilli())
-                .createdAt(Instant.now())
-                .build();
+                .createdAt(Instant.now());
+
+            // Add option metadata if parsed
+            if (optionMeta != null) {
+                builder.strikePrice(optionMeta.strikePrice)
+                       .optionType(optionMeta.optionType)
+                       .expiry(optionMeta.expiry)
+                       .daysToExpiry(optionMeta.daysToExpiry);
+            }
+
+            return builder.build();
         }
 
         public void reset(Instant newWindowStart, Instant newWindowEnd) {
@@ -594,5 +603,106 @@ public class TickAggregator {
 
             return scripCode;
         }
+
+        /**
+         * Parse option metadata from company name.
+         * Format examples:
+         * - "ICICIBANK 24 FEB 2026 CE 1360.00"
+         * - "NIFTY 30 JAN 2026 PE 23500.00"
+         * - "BANKNIFTY 29 JAN 2026 CE 50000.00"
+         */
+        private static OptionMetadata parseOptionMetadata(String companyName) {
+            if (companyName == null || companyName.isEmpty()) {
+                return null;
+            }
+
+            String upper = companyName.toUpperCase().trim();
+
+            // Check if it's an option (contains CE or PE)
+            if (!upper.contains(" CE ") && !upper.contains(" PE ") &&
+                !upper.endsWith(" CE") && !upper.endsWith(" PE")) {
+                return null;
+            }
+
+            OptionMetadata metadata = new OptionMetadata();
+
+            // Extract option type (CE or PE)
+            if (upper.contains(" CE ") || upper.endsWith(" CE")) {
+                metadata.optionType = "CE";
+            } else if (upper.contains(" PE ") || upper.endsWith(" PE")) {
+                metadata.optionType = "PE";
+            }
+
+            // Pattern to match: DD MMM YYYY (CE|PE) STRIKE
+            // Example: "24 FEB 2026 CE 1360.00"
+            Pattern pattern = Pattern.compile(
+                "(\\d{1,2})\\s+(JAN|FEB|MAR|APR|MAY|JUN|JUL|AUG|SEP|OCT|NOV|DEC)\\s+(\\d{4})\\s+(CE|PE)\\s+([\\d.]+)"
+            );
+            Matcher matcher = pattern.matcher(upper);
+
+            if (matcher.find()) {
+                try {
+                    // Parse expiry date
+                    int day = Integer.parseInt(matcher.group(1));
+                    String monthStr = matcher.group(2);
+                    int year = Integer.parseInt(matcher.group(3));
+
+                    Month month = switch (monthStr) {
+                        case "JAN" -> Month.JANUARY;
+                        case "FEB" -> Month.FEBRUARY;
+                        case "MAR" -> Month.MARCH;
+                        case "APR" -> Month.APRIL;
+                        case "MAY" -> Month.MAY;
+                        case "JUN" -> Month.JUNE;
+                        case "JUL" -> Month.JULY;
+                        case "AUG" -> Month.AUGUST;
+                        case "SEP" -> Month.SEPTEMBER;
+                        case "OCT" -> Month.OCTOBER;
+                        case "NOV" -> Month.NOVEMBER;
+                        case "DEC" -> Month.DECEMBER;
+                        default -> null;
+                    };
+
+                    if (month != null) {
+                        LocalDate expiryDate = LocalDate.of(year, month, day);
+                        metadata.expiry = expiryDate.toString(); // ISO format: "2026-02-24"
+
+                        // Calculate days to expiry
+                        LocalDate today = LocalDate.now(ZoneId.of("Asia/Kolkata"));
+                        metadata.daysToExpiry = (int) ChronoUnit.DAYS.between(today, expiryDate);
+                    }
+
+                    // Parse strike price
+                    metadata.strikePrice = Double.parseDouble(matcher.group(5));
+
+                } catch (Exception e) {
+                    // Parsing failed, metadata will have partial data
+                }
+            } else {
+                // Try alternative pattern: just extract strike from end
+                // Pattern: ends with number after CE/PE
+                Pattern strikePattern = Pattern.compile("(CE|PE)\\s+([\\d.]+)$");
+                Matcher strikeMatcher = strikePattern.matcher(upper);
+                if (strikeMatcher.find()) {
+                    try {
+                        metadata.strikePrice = Double.parseDouble(strikeMatcher.group(2));
+                    } catch (NumberFormatException e) {
+                        // Ignore
+                    }
+                }
+            }
+
+            return metadata;
+        }
+    }
+
+    /**
+     * Helper class to hold parsed option metadata.
+     */
+    private static class OptionMetadata {
+        Double strikePrice;
+        String optionType;  // "CE" or "PE"
+        String expiry;      // ISO date format "2026-02-24"
+        Integer daysToExpiry;
     }
 }
