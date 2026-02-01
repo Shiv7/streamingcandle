@@ -9,6 +9,10 @@ import com.kotsin.consumer.model.StrategyState;
 import com.kotsin.consumer.model.StrategyState.*;
 import com.kotsin.consumer.model.Timeframe;
 import com.kotsin.consumer.model.UnifiedCandle;
+import com.kotsin.consumer.model.MultiTimeframePivotState;
+import com.kotsin.consumer.model.CprAnalysis;
+import com.kotsin.consumer.model.ConfluenceResult;
+import com.kotsin.consumer.model.BounceSignal;
 import com.kotsin.consumer.papertrade.executor.PaperTradeExecutor;
 import com.kotsin.consumer.papertrade.model.PaperTrade.TradeDirection;
 import com.kotsin.consumer.regime.detector.RegimeDetector;
@@ -16,11 +20,14 @@ import com.kotsin.consumer.regime.model.MarketRegime;
 import com.kotsin.consumer.regime.model.MarketRegime.TradingMode;
 import com.kotsin.consumer.service.CandleService;
 import com.kotsin.consumer.service.StrategyStateService;
+import com.kotsin.consumer.service.PivotLevelService;
+import com.kotsin.consumer.service.HistoricalDataBootstrapService;
 import com.kotsin.consumer.session.tracker.SessionStructureTracker;
 import com.kotsin.consumer.session.model.SessionStructure;
 import com.kotsin.consumer.signal.calculator.FudkiiCalculator;
 import com.kotsin.consumer.signal.model.*;
 import com.kotsin.consumer.signal.processor.*;
+import com.kotsin.consumer.signal.analyzer.PivotConfluenceAnalyzer;
 import com.kotsin.consumer.signal.repository.TradingSignalRepository;
 import com.kotsin.consumer.smc.analyzer.SMCAnalyzer;
 import com.kotsin.consumer.stats.model.SignalHistory.SignalDirection;
@@ -36,6 +43,7 @@ import java.time.Instant;
 import java.util.*;
 import java.util.concurrent.*;
 import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.Optional;
 
 /**
  * SignalEngine - Main orchestrator for trading signal generation.
@@ -100,6 +108,17 @@ public class SignalEngine {
     @Autowired
     private PaperTradeExecutor paperTradeExecutor;
 
+    // ==================== PIVOT & HISTORICAL DATA INTEGRATION ====================
+
+    @Autowired
+    private PivotLevelService pivotLevelService;
+
+    @Autowired
+    private HistoricalDataBootstrapService historicalDataBootstrapService;
+
+    @Autowired
+    private PivotConfluenceAnalyzer pivotConfluenceAnalyzer;
+
     @Value("${signal.engine.enabled:true}")
     private boolean enabled;
 
@@ -109,8 +128,11 @@ public class SignalEngine {
     @Value("${signal.engine.papertrade.enabled:false}")
     private boolean paperTradeEnabled;
 
-    @Value("${signal.engine.symbols:NIFTY,BANKNIFTY}")
+    @Value("${signal.engine.symbols:}")
     private String symbolsConfig;
+
+    @Value("${signal.engine.dynamic.symbols:true}")
+    private boolean useDynamicSymbols;
 
     @Value("${signal.engine.timeframe:5m}")
     private String primaryTimeframe;
@@ -138,8 +160,8 @@ public class SignalEngine {
             return;
         }
 
-        log.info("{} Starting with symbols={}, timeframe={}",
-            LOG_PREFIX, symbolsConfig, primaryTimeframe);
+        log.info("{} Starting with dynamicSymbols={}, configuredSymbols={}, timeframe={}",
+            LOG_PREFIX, useDynamicSymbols, symbolsConfig, primaryTimeframe);
 
         running.set(true);
 
@@ -173,20 +195,61 @@ public class SignalEngine {
     }
 
     /**
-     * Process all configured symbols.
+     * Process all symbols - either from dynamic discovery or configuration.
      */
     private void processAllSymbols() {
         if (!running.get()) return;
 
-        String[] symbols = symbolsConfig.split(",");
+        Set<String> symbols = getSymbolsToProcess();
+        if (symbols.isEmpty()) {
+            log.debug("{} No symbols to process", LOG_PREFIX);
+            return;
+        }
+
         Timeframe tf = Timeframe.fromLabel(primaryTimeframe);
+        log.info("{} Processing {} symbols: {}", LOG_PREFIX, symbols.size(), symbols);
 
         for (String symbol : symbols) {
             try {
-                processSymbol(symbol.trim(), tf);
+                processSymbol(symbol, tf);
             } catch (Exception e) {
                 log.error("{} Error processing symbol={}: {}", LOG_PREFIX, symbol, e.getMessage());
             }
+        }
+    }
+
+    /**
+     * Get symbols to process - either dynamically from Redis or from config.
+     */
+    private Set<String> getSymbolsToProcess() {
+        if (useDynamicSymbols) {
+            // Get all symbols that have candle data in Redis
+            Set<String> cachedKeys = candleService.getAvailableSymbols();
+            if (cachedKeys == null || cachedKeys.isEmpty()) {
+                log.debug("{} No symbols found in Redis cache", LOG_PREFIX);
+                return Set.of();
+            }
+
+            // Extract symbol names from keys (format: tick:SYMBOL:1m:latest)
+            Set<String> symbols = new HashSet<>();
+            for (String key : cachedKeys) {
+                String[] parts = key.split(":");
+                if (parts.length >= 2) {
+                    symbols.add(parts[1]);
+                }
+            }
+            log.debug("{} Dynamic symbols discovered from Redis: {}", LOG_PREFIX, symbols.size());
+            return symbols;
+        } else {
+            // Use configured symbols
+            if (symbolsConfig == null || symbolsConfig.trim().isEmpty()) {
+                return Set.of();
+            }
+            Set<String> symbols = new HashSet<>();
+            for (String s : symbolsConfig.split(",")) {
+                symbols.add(s.trim());
+            }
+            return symbols;
         }
     }
 
@@ -234,6 +297,10 @@ public class SignalEngine {
             // Calculate FUDKII score
             FudkiiScore score = fudkiiCalculator.calculate(
                 current, history, vcpState, ipuState, pivotState);
+
+            // ==================== PIVOT CONFLUENCE ANALYSIS ====================
+            TraceContext.addStage("PIVOT_MTF");
+            analyzePivotConfluence(symbol, current, candles, score);
 
             // Get current signal for this symbol
             TradingSignal signal = activeSignals.get(symbol);
@@ -321,6 +388,131 @@ public class SignalEngine {
             );
         } catch (Exception e) {
             log.debug("{} {} Regime detection failed: {}",
+                LOG_PREFIX, TraceContext.getShortPrefix(), e.getMessage());
+        }
+    }
+
+    /**
+     * Analyze multi-timeframe pivot confluence and detect bounce signals.
+     * This enhances the FUDKII score based on:
+     * 1. CPR width analysis (thin CPR = high breakout probability)
+     * 2. Confluence detection (multiple pivots at same price = strong S/R)
+     * 3. Bounce detection (price reversal at pivot = top/bottom signal)
+     */
+    private void analyzePivotConfluence(String symbol, UnifiedCandle current,
+            List<UnifiedCandle> candles, FudkiiScore score) {
+        try {
+            // Get multi-timeframe pivot levels (exch and exchType from candle)
+            String exch = current.getExchange() != null ? current.getExchange() : "N";
+            String exchType = current.getExchangeType() != null ? current.getExchangeType() : "C";
+            String scripCode = current.getScripCode() != null ? current.getScripCode() : symbol;
+
+            // Diagnostic logging for scripCode mismatch debugging
+            log.debug("{} {} Pivot lookup: symbol={}, scripCode={}, exch={}, exchType={}, price={}",
+                LOG_PREFIX, TraceContext.getShortPrefix(),
+                symbol, scripCode, exch, exchType,
+                String.format("%.2f", current.getClose()));
+
+            Optional<MultiTimeframePivotState> pivotStateOpt = pivotLevelService.getOrLoadPivotLevels(
+                scripCode, exch, exchType);
+
+            if (pivotStateOpt.isEmpty() || !pivotStateOpt.get().isValid()) {
+                log.debug("{} {} No pivot levels available for {}",
+                    LOG_PREFIX, TraceContext.getShortPrefix(), symbol);
+                return;
+            }
+
+            MultiTimeframePivotState mtfPivots = pivotStateOpt.get();
+            double currentPrice = current.getClose();
+
+            // Sanity check: pivot should be within 50% of current price
+            // If not, there's likely a scripCode mismatch
+            if (mtfPivots.getDailyPivot() != null && mtfPivots.getDailyPivot().getPivot() > 0) {
+                double pivotPrice = mtfPivots.getDailyPivot().getPivot();
+                double deviation = Math.abs(currentPrice - pivotPrice) / pivotPrice;
+                if (deviation > 0.5) {
+                    log.warn("{} {} SCRIPCODE MISMATCH? symbol={}, scripCode={}, price={}, pivot={}, deviation={}%",
+                        LOG_PREFIX, TraceContext.getShortPrefix(),
+                        symbol, scripCode,
+                        String.format("%.2f", currentPrice),
+                        String.format("%.2f", pivotPrice),
+                        String.format("%.1f", deviation * 100));
+                    return; // Skip pivot analysis for this symbol - data is invalid
+                }
+            }
+
+            // 1. Analyze CPR characteristics
+            CprAnalysis cprAnalysis = pivotConfluenceAnalyzer.analyzeCpr(
+                mtfPivots.getDailyPivot(), currentPrice);
+
+            if (cprAnalysis != null && cprAnalysis.getCprWidthPercent() > 0) {
+                // Log CPR analysis for thin CPR (high probability setups)
+                if (cprAnalysis.getType() == CprAnalysis.CprType.ULTRA_THIN ||
+                    cprAnalysis.getType() == CprAnalysis.CprType.THIN) {
+                    log.info("{} {} CPR Alert: {} ({}%) - {} - Breakout Prob: {}%",
+                        LOG_PREFIX, TraceContext.getShortPrefix(),
+                        cprAnalysis.getType().name(),
+                        String.format("%.3f", cprAnalysis.getCprWidthPercent()),
+                        cprAnalysis.getPricePosition().name(),
+                        String.format("%.0f", cprAnalysis.getBreakoutProbability() * 100));
+
+                    // Boost score for thin CPR breakout scenarios
+                    if (cprAnalysis.getPricePosition() == CprAnalysis.PricePosition.ABOVE_CPR &&
+                        score.getDirection() == FudkiiScore.Direction.BULLISH) {
+                        score.addBoost("THIN_CPR_BULLISH", cprAnalysis.getBreakoutProbability() * 15);
+                    } else if (cprAnalysis.getPricePosition() == CprAnalysis.PricePosition.BELOW_CPR &&
+                        score.getDirection() == FudkiiScore.Direction.BEARISH) {
+                        score.addBoost("THIN_CPR_BEARISH", cprAnalysis.getBreakoutProbability() * 15);
+                    }
+                }
+            }
+
+            // 2. Check confluence at current price
+            ConfluenceResult confluence = pivotConfluenceAnalyzer.analyzeConfluence(
+                mtfPivots, currentPrice);
+
+            if (confluence != null && confluence.isHighConviction()) {
+                log.info("{} {} CONFLUENCE: {} at {} - {}",
+                    LOG_PREFIX, TraceContext.getShortPrefix(),
+                    confluence.getStrength().name(),
+                    String.format("%.2f", currentPrice),
+                    confluence.getDescription());
+
+                // Boost score for strong confluence
+                score.addBoost("CONFLUENCE_" + confluence.getStrength().name(),
+                    confluence.getConfidenceScore() * 10);
+            }
+
+            // 3. Detect bounce signals at pivot levels
+            BounceSignal bounce = pivotConfluenceAnalyzer.detectBounce(
+                mtfPivots, candles, currentPrice);
+
+            if (bounce != null && bounce.isHighConfidence()) {
+                log.info("{} {} BOUNCE SIGNAL: {} at {} ({}) - Confluence: {}, Quality: {}",
+                    LOG_PREFIX, TraceContext.getShortPrefix(),
+                    bounce.getType().name(),
+                    bounce.getLevelName(),
+                    String.format("%.2f", bounce.getLevel()),
+                    bounce.getConfluence(),
+                    bounce.getQualityScore());
+
+                // Boost score based on bounce signal
+                if (bounce.isBullish() && score.getDirection() == FudkiiScore.Direction.BULLISH) {
+                    score.addBoost("BULLISH_BOUNCE", bounce.getConfidence() * 20);
+                } else if (bounce.isBearish() && score.getDirection() == FudkiiScore.Direction.BEARISH) {
+                    score.addBoost("BEARISH_BOUNCE", bounce.getConfidence() * 20);
+                } else if (bounce.isBullish() && score.getDirection() != FudkiiScore.Direction.BULLISH) {
+                    // Bounce signal suggests direction change
+                    log.info("{} {} Direction conflict: Bounce suggests BULLISH but score is {}",
+                        LOG_PREFIX, TraceContext.getShortPrefix(), score.getDirection());
+                } else if (bounce.isBearish() && score.getDirection() != FudkiiScore.Direction.BEARISH) {
+                    log.info("{} {} Direction conflict: Bounce suggests BEARISH but score is {}",
+                        LOG_PREFIX, TraceContext.getShortPrefix(), score.getDirection());
+                }
+            }
+
+        } catch (Exception e) {
+            log.debug("{} {} Pivot confluence analysis failed: {}",
                 LOG_PREFIX, TraceContext.getShortPrefix(), e.getMessage());
         }
     }

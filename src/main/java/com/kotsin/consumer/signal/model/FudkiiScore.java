@@ -6,6 +6,8 @@ import lombok.Data;
 import lombok.NoArgsConstructor;
 
 import java.time.Instant;
+import java.util.HashMap;
+import java.util.Map;
 
 /**
  * FudkiiScore - Composite FUDKII signal score breakdown.
@@ -207,6 +209,58 @@ public class FudkiiScore {
      * Reason for current state.
      */
     private String reason;
+
+    // ==================== PIVOT CONFLUENCE BOOSTS ====================
+
+    /**
+     * Boosts from pivot confluence analysis.
+     * Map of boost name -> boost value.
+     */
+    @Builder.Default
+    private Map<String, Double> boosts = new HashMap<>();
+
+    /**
+     * Total boost from pivot confluence.
+     */
+    private double totalBoost;
+
+    /**
+     * Add a boost to the score from pivot confluence analysis.
+     */
+    public void addBoost(String boostName, double boostValue) {
+        if (boosts == null) {
+            boosts = new HashMap<>();
+        }
+        boosts.put(boostName, boostValue);
+        totalBoost = boosts.values().stream().mapToDouble(Double::doubleValue).sum();
+
+        // Update composite score with boost (capped at 100)
+        compositeScore = Math.min(100, compositeScore + boostValue);
+
+        // Update strength based on new composite
+        strength = SignalStrength.fromScore(compositeScore);
+    }
+
+    /**
+     * Get total boost value.
+     */
+    public double getTotalBoost() {
+        if (boosts == null || boosts.isEmpty()) return 0;
+        return boosts.values().stream().mapToDouble(Double::doubleValue).sum();
+    }
+
+    /**
+     * Get boost description for logging.
+     */
+    public String getBoostDescription() {
+        if (boosts == null || boosts.isEmpty()) return "No boosts";
+        StringBuilder sb = new StringBuilder();
+        boosts.forEach((name, value) -> {
+            if (sb.length() > 0) sb.append(", ");
+            sb.append(name).append(":+").append(String.format("%.1f", value));
+        });
+        return sb.toString();
+    }
 
     // ==================== ENUMS ====================
 
