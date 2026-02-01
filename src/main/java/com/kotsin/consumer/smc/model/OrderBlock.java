@@ -115,4 +115,11 @@ public class OrderBlock {
     public double getDistancePercent(double price) {
         return midpoint > 0 ? getDistanceFromZone(price) / midpoint * 100 : 0;
     }
+
+    /**
+     * Check if price is near the zone (within tolerance percent).
+     */
+    public boolean isPriceNearZone(double price, double tolerancePercent) {
+        return getDistancePercent(price) <= tolerancePercent;
+    }
 }

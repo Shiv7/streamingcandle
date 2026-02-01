@@ -222,10 +222,10 @@ public class OrderbookAggregator {
                 log.error("{} Failed to cache in Redis: {}", LOG_PREFIX, e.getMessage());
             }
 
-            // Publish to Kafka topic
+            // Publish to Kafka topic (keyed by scripCode for proper partitioning)
             try {
                 for (OrderbookMetrics m : metricsToSave) {
-                    kafkaTemplate.send(outputTopic, m.getSymbol(), m);
+                    kafkaTemplate.send(outputTopic, m.getScripCode(), m);
                 }
                 log.info("{} Published {} metrics to Kafka topic {}", LOG_PREFIX, metricsToSave.size(), outputTopic);
             } catch (Exception e) {

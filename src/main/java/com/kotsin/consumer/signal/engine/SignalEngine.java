@@ -32,6 +32,10 @@ import com.kotsin.consumer.signal.repository.TradingSignalRepository;
 import com.kotsin.consumer.smc.analyzer.SMCAnalyzer;
 import com.kotsin.consumer.stats.model.SignalHistory.SignalDirection;
 import com.kotsin.consumer.stats.tracker.SignalStatsTracker;
+import com.kotsin.consumer.enrichment.QuantScoreProducer;
+import com.kotsin.consumer.pattern.PatternAnalyzer;
+import com.kotsin.consumer.pattern.PatternAnalyzer.PatternResult;
+import com.kotsin.consumer.pattern.PatternSignalProducer;
 import jakarta.annotation.PostConstruct;
 import jakarta.annotation.PreDestroy;
 import lombok.extern.slf4j.Slf4j;
@@ -103,6 +107,9 @@ public class SignalEngine {
     private SMCAnalyzer smcAnalyzer;
 
     @Autowired
+    private com.kotsin.consumer.mtf.analyzer.MultiTimeframeAnalyzer mtfAnalyzer;
+
+    @Autowired
     private SignalStatsTracker statsTracker;
 
     @Autowired
@@ -118,6 +125,28 @@ public class SignalEngine {
 
     @Autowired
     private PivotConfluenceAnalyzer pivotConfluenceAnalyzer;
+
+    // ==================== STRATEGY TRIGGERS ====================
+
+    @Autowired
+    private com.kotsin.consumer.signal.trigger.FudkiiSignalTrigger fudkiiTrigger;
+
+    @Autowired
+    private com.kotsin.consumer.signal.trigger.PivotConfluenceTrigger pivotConfluenceTrigger;
+
+    @Autowired
+    private com.kotsin.consumer.indicator.calculator.BBSuperTrendCalculator bbstCalculator;
+
+    // ==================== PATTERN & QUANT SCORE PRODUCERS ====================
+
+    @Autowired
+    private PatternAnalyzer patternAnalyzer;
+
+    @Autowired
+    private PatternSignalProducer patternSignalProducer;
+
+    @Autowired
+    private QuantScoreProducer quantScoreProducer;
 
     @Value("${signal.engine.enabled:true}")
     private boolean enabled;
@@ -168,13 +197,15 @@ public class SignalEngine {
         // Start processing scheduler
         scheduler = Executors.newScheduledThreadPool(2);
 
-        // Process signals every 5 seconds
-        scheduler.scheduleAtFixedRate(this::processAllSymbols, 5, 5, TimeUnit.SECONDS);
+        // IMPORTANT: Wait 30 seconds for bootstrap to start loading data
+        // Then process signals every 5 seconds (only bootstrapped symbols will be processed)
+        log.info("{} Waiting 30s for bootstrap to load initial data before strategy processing...", LOG_PREFIX);
+        scheduler.scheduleAtFixedRate(this::processAllSymbols, 30, 5, TimeUnit.SECONDS);
 
-        // Check active signals for exits every second
-        scheduler.scheduleAtFixedRate(this::checkActiveSignals, 1, 1, TimeUnit.SECONDS);
+        // Check active signals for exits every second (start after 35s)
+        scheduler.scheduleAtFixedRate(this::checkActiveSignals, 35, 1, TimeUnit.SECONDS);
 
-        log.info("{} Started successfully", LOG_PREFIX);
+        log.info("{} Started successfully - will begin processing after bootstrap delay", LOG_PREFIX);
     }
 
     @PreDestroy
@@ -200,14 +231,36 @@ public class SignalEngine {
     private void processAllSymbols() {
         if (!running.get()) return;
 
+        // Check bootstrap status
+        var bootstrapStats = historicalDataBootstrapService.getStats();
+        log.info("{} Bootstrap status: {} total, {} success, {} in-progress, {} failed",
+            LOG_PREFIX, bootstrapStats.total(), bootstrapStats.success(),
+            bootstrapStats.inProgress(), bootstrapStats.failed());
+
+        if (bootstrapStats.success() == 0) {
+            log.info("{} No symbols bootstrapped yet, waiting...", LOG_PREFIX);
+            return;
+        }
+
         Set<String> symbols = getSymbolsToProcess();
         if (symbols.isEmpty()) {
             log.debug("{} No symbols to process", LOG_PREFIX);
             return;
         }
 
+        // Filter to only bootstrapped symbols
+        Set<String> bootstrappedSymbols = symbols.stream()
+            .filter(s -> historicalDataBootstrapService.isBootstrapped(s))
+            .collect(java.util.stream.Collectors.toSet());
+
+        if (bootstrappedSymbols.isEmpty()) {
+            log.debug("{} No bootstrapped symbols to process yet", LOG_PREFIX);
+            return;
+        }
+
         Timeframe tf = Timeframe.fromLabel(primaryTimeframe);
-        log.info("{} Processing {} symbols: {}", LOG_PREFIX, symbols.size(), symbols);
+        log.info("{} Processing {} bootstrapped symbols (out of {} total)",
+            LOG_PREFIX, bootstrappedSymbols.size(), symbols.size());
 
         for (String symbol : symbols) {
             try {
@@ -219,27 +272,28 @@ public class SignalEngine {
     }
 
     /**
-     * Get symbols to process - either dynamically from Redis or from config.
+     * Get scripCodes to process - either dynamically from Redis or from config.
+     * Note: The variable names use "symbol" for backward compatibility but values are scripCodes.
      */
     private Set<String> getSymbolsToProcess() {
         if (useDynamicSymbols) {
-            // Get all symbols that have candle data in Redis
-            Set<String> cachedKeys = candleService.getAvailableSymbols();
+            // Get all scripCodes that have candle data in Redis
+            Set<String> cachedKeys = candleService.getAvailableScripCodes();
             if (cachedKeys == null || cachedKeys.isEmpty()) {
-                log.debug("{} No symbols found in Redis cache", LOG_PREFIX);
+                log.debug("{} No scripCodes found in Redis cache", LOG_PREFIX);
                 return Set.of();
             }
 
-            // Extract symbol names from keys (format: tick:SYMBOL:1m:latest)
-            Set<String> symbols = new HashSet<>();
+            // Extract scripCode from keys (format: tick:SCRIPCODE:1m:latest)
+            Set<String> scripCodes = new HashSet<>();
             for (String key : cachedKeys) {
                 String[] parts = key.split(":");
                 if (parts.length >= 2) {
-                    symbols.add(parts[1]);
+                    scripCodes.add(parts[1]);
                 }
             }
-            log.debug("{} Dynamic symbols discovered from Redis: {}", LOG_PREFIX, symbols.size());
-            return symbols;
+            log.debug("{} Dynamic scripCodes discovered from Redis: {}", LOG_PREFIX, scripCodes.size());
+            return scripCodes;
         } else {
             // Use configured symbols
             if (symbolsConfig == null || symbolsConfig.trim().isEmpty()) {
@@ -261,6 +315,13 @@ public class SignalEngine {
         String traceId = TraceContext.start(symbol, timeframe.getLabel());
 
         try {
+            // CRITICAL: Skip processing if symbol not bootstrapped yet
+            if (!historicalDataBootstrapService.isBootstrapped(symbol)) {
+                log.debug("{} {} Skipping - not yet bootstrapped", LOG_PREFIX, symbol);
+                TraceContext.clear();
+                return;
+            }
+
             log.debug("{} {} Processing started", LOG_PREFIX, TraceContext.getShortPrefix());
 
             // Get recent candles
@@ -276,6 +337,26 @@ public class SignalEngine {
             log.debug("{} {} Candles loaded: count={}, price={}",
                 LOG_PREFIX, TraceContext.getShortPrefix(),
                 candles.size(), String.format("%.2f", current.getClose()));
+
+            // ==================== HISTORICAL DATA BOOTSTRAP ====================
+            // If we have insufficient history (<50 candles), trigger bootstrap to fetch 40 days from 5paisa API
+            if (candles.size() < 50 && !historicalDataBootstrapService.isBootstrapped(symbol)) {
+                String exch = current.getExchange();
+                String exchType = current.getExchangeType();
+                String symbolName = current.getSymbol();
+
+                log.info("{} {} Insufficient history ({} candles), triggering bootstrap from 5paisa API",
+                    LOG_PREFIX, TraceContext.getShortPrefix(), candles.size());
+
+                // Async bootstrap - will complete in background
+                historicalDataBootstrapService.bootstrapSymbol(symbol, symbolName, exch, exchType)
+                    .thenAccept(success -> {
+                        if (success) {
+                            log.info("{} Historical data bootstrap completed for {} - refresh on next cycle",
+                                LOG_PREFIX, symbol);
+                        }
+                    });
+            }
 
             // Update session structure
             TraceContext.addStage("SESSION");
@@ -298,16 +379,48 @@ public class SignalEngine {
             FudkiiScore score = fudkiiCalculator.calculate(
                 current, history, vcpState, ipuState, pivotState);
 
+            // ==================== PATTERN ANALYSIS ====================
+            TraceContext.addStage("PATTERN");
+            PatternResult patternResult = patternAnalyzer.analyze(current, history);
+            List<String> detectedPatterns = patternResult.getPatternNames();
+
+            // Publish pattern signals if patterns detected
+            if (patternResult.isHasHighConfidencePattern()) {
+                patternSignalProducer.publish(patternResult);
+            }
+
+            // ==================== PUBLISH QUANT SCORE ====================
+            TraceContext.addStage("QUANT_PUBLISH");
+            quantScoreProducer.publish(
+                current, score, vcpState, ipuState, pivotState, detectedPatterns);
+
             // ==================== PIVOT CONFLUENCE ANALYSIS ====================
             TraceContext.addStage("PIVOT_MTF");
             analyzePivotConfluence(symbol, current, candles, score);
 
+            // ==================== SMC ANALYSIS (Order Blocks, FVG, Liquidity) ====================
+            TraceContext.addStage("SMC");
+            analyzeSMC(symbol, primaryTimeframe, candles, score);
+
+            // ==================== MTF ANALYSIS (Multi-Timeframe) ====================
+            TraceContext.addStage("MTF");
+            analyzeMTF(symbol, candles, score);
+
+            // ==================== STRATEGY 1: FUDKII TRIGGER (ST + BB on 30m) ====================
+            TraceContext.addStage("FUDKII_TRIGGER");
+            var fudkiiResult = checkFudkiiTrigger(symbol, current);
+
+            // ==================== STRATEGY 2: PIVOT CONFLUENCE TRIGGER ====================
+            TraceContext.addStage("PIVOT_TRIGGER");
+            var pivotResult = checkPivotConfluenceTrigger(symbol, current);
+
             // Get current signal for this symbol
             TradingSignal signal = activeSignals.get(symbol);
 
-            // Process state machine
+            // Process state machine with strategy triggers
             TraceContext.addStage("STATE_MACHINE");
-            signal = processStateMachine(symbol, current, score, signal, pivotState, indicators);
+            signal = processStateMachineWithTriggers(symbol, current, score, signal, pivotState,
+                indicators, patternResult, fudkiiResult, pivotResult);
 
             // Update active signals map
             if (signal != null && signal.getState().isActive()) {
@@ -518,11 +631,198 @@ public class SignalEngine {
     }
 
     /**
+     * Analyze Smart Money Concepts (Order Blocks, FVG, Liquidity Zones).
+     * Boosts FUDKII score based on SMC alignment.
+     */
+    private void analyzeSMC(String symbol, String timeframe, List<UnifiedCandle> candles, FudkiiScore score) {
+        try {
+            if (candles == null || candles.size() < 5) {
+                return;
+            }
+
+            // Convert UnifiedCandle to SMCAnalyzer.CandleData
+            List<SMCAnalyzer.CandleData> smcCandles = new ArrayList<>();
+            for (UnifiedCandle c : candles) {
+                smcCandles.add(new SMCAnalyzer.CandleData(
+                    c.getTimestamp(),
+                    c.getOpen(),
+                    c.getHigh(),
+                    c.getLow(),
+                    c.getClose(),
+                    c.getVolume()
+                ));
+            }
+
+            // Run SMC analysis
+            SMCAnalyzer.SMCResult smcResult = smcAnalyzer.analyze(symbol, timeframe, smcCandles);
+
+            if (smcResult == null) {
+                return;
+            }
+
+            double currentPrice = candles.get(0).getClose();
+            boolean isBullish = score.getDirection() == FudkiiScore.Direction.BULLISH;
+
+            // Check for Order Block proximity
+            List<com.kotsin.consumer.smc.model.OrderBlock> validOBs = smcAnalyzer.getValidOrderBlocks(symbol);
+            for (com.kotsin.consumer.smc.model.OrderBlock ob : validOBs) {
+                if (ob.isPriceInZone(currentPrice) || ob.isPriceNearZone(currentPrice, 0.5)) {
+                    if (ob.isBullish() && isBullish) {
+                        score.addBoost("BULLISH_OB", 15);
+                        log.info("{} {} SMC: Price at BULLISH Order Block zone {}",
+                            LOG_PREFIX, TraceContext.getShortPrefix(),
+                            String.format("%.2f-%.2f", ob.getLow(), ob.getHigh()));
+                    } else if (ob.isBearish() && !isBullish) {
+                        score.addBoost("BEARISH_OB", 15);
+                        log.info("{} {} SMC: Price at BEARISH Order Block zone {}",
+                            LOG_PREFIX, TraceContext.getShortPrefix(),
+                            String.format("%.2f-%.2f", ob.getLow(), ob.getHigh()));
+                    }
+                    break; // Only boost for one OB
+                }
+            }
+
+            // Check for Fair Value Gap proximity
+            List<com.kotsin.consumer.smc.model.FairValueGap> validFVGs = smcAnalyzer.getValidFairValueGaps(symbol);
+            for (com.kotsin.consumer.smc.model.FairValueGap fvg : validFVGs) {
+                if (fvg.isPriceInGap(currentPrice) || fvg.isPriceNearGap(currentPrice, 0.3)) {
+                    if (fvg.isBullish() && isBullish) {
+                        score.addBoost("BULLISH_FVG", 10);
+                        log.info("{} {} SMC: Price at BULLISH FVG zone {}",
+                            LOG_PREFIX, TraceContext.getShortPrefix(),
+                            String.format("%.2f-%.2f", fvg.getLow(), fvg.getHigh()));
+                    } else if (fvg.isBearish() && !isBullish) {
+                        score.addBoost("BEARISH_FVG", 10);
+                        log.info("{} {} SMC: Price at BEARISH FVG zone {}",
+                            LOG_PREFIX, TraceContext.getShortPrefix(),
+                            String.format("%.2f-%.2f", fvg.getLow(), fvg.getHigh()));
+                    }
+                    break; // Only boost for one FVG
+                }
+            }
+
+            // Check for Liquidity sweep
+            List<com.kotsin.consumer.smc.model.LiquidityZone> unsweptLZ = smcAnalyzer.getUnsweptLiquidityZones(symbol);
+            for (com.kotsin.consumer.smc.model.LiquidityZone lz : unsweptLZ) {
+                double distance = Math.abs(currentPrice - lz.getLevel()) / currentPrice * 100;
+                if (distance < 0.5) { // Within 0.5% of liquidity level
+                    if (lz.isBuySide() && isBullish) {
+                        score.addBoost("BUY_SIDE_LIQ_TARGET", 8);
+                        log.info("{} {} SMC: Buy-side liquidity target near {}",
+                            LOG_PREFIX, TraceContext.getShortPrefix(),
+                            String.format("%.2f", lz.getLevel()));
+                    } else if (lz.isSellSide() && !isBullish) {
+                        score.addBoost("SELL_SIDE_LIQ_TARGET", 8);
+                        log.info("{} {} SMC: Sell-side liquidity target near {}",
+                            LOG_PREFIX, TraceContext.getShortPrefix(),
+                            String.format("%.2f", lz.getLevel()));
+                    }
+                    break;
+                }
+            }
+
+            // Check market structure alignment
+            SMCAnalyzer.MarketStructure ms = smcResult.getMarketStructure();
+            if (ms != null) {
+                if (ms.getTrend() == SMCAnalyzer.MarketStructure.Trend.BULLISH && isBullish) {
+                    score.addBoost("SMC_TREND_ALIGN", 5);
+                } else if (ms.getTrend() == SMCAnalyzer.MarketStructure.Trend.BEARISH && !isBullish) {
+                    score.addBoost("SMC_TREND_ALIGN", 5);
+                }
+            }
+
+        } catch (Exception e) {
+            log.debug("{} {} SMC analysis failed: {}",
+                LOG_PREFIX, TraceContext.getShortPrefix(), e.getMessage());
+        }
+    }
+
+    /**
+     * Analyze Multi-Timeframe alignment.
+     * Boosts FUDKII score based on MTF confluence.
+     */
+    private void analyzeMTF(String symbol, List<UnifiedCandle> candles, FudkiiScore score) {
+        try {
+            if (candles == null || candles.isEmpty()) {
+                return;
+            }
+
+            UnifiedCandle current = candles.get(0);
+            boolean isBullish = score.getDirection() == FudkiiScore.Direction.BULLISH;
+
+            // Build MTF metrics from available data
+            Map<String, com.kotsin.consumer.mtf.model.MultiTimeframeData.TimeframeMetrics> metricsMap = new HashMap<>();
+
+            // Add current timeframe metrics
+            com.kotsin.consumer.mtf.model.MultiTimeframeData.TimeframeMetrics m5Metrics =
+                com.kotsin.consumer.mtf.model.MultiTimeframeData.TimeframeMetrics.builder()
+                    .timeframe("5m")
+                    .high(current.getHigh())
+                    .low(current.getLow())
+                    .close(current.getClose())
+                    .rsi(50) // Default if not available
+                    .macdHistogram(0)
+                    .ema20(current.getClose())
+                    .ema50(current.getClose())
+                    .aboveEma20(true)
+                    .aboveEma50(true)
+                    .aboveVwap(true)
+                    .superTrendBullish(score.getDirection() == FudkiiScore.Direction.BULLISH)
+                    .build();
+            metricsMap.put("5m", m5Metrics);
+
+            // Run MTF analysis
+            com.kotsin.consumer.mtf.model.MultiTimeframeData mtfData = mtfAnalyzer.analyze(symbol, metricsMap);
+
+            if (mtfData == null) {
+                return;
+            }
+
+            // Boost based on alignment
+            com.kotsin.consumer.mtf.model.MultiTimeframeData.TrendAlignment alignment = mtfData.getOverallAlignment();
+            if (alignment == com.kotsin.consumer.mtf.model.MultiTimeframeData.TrendAlignment.FULLY_ALIGNED) {
+                score.addBoost("MTF_FULL_ALIGN", 15);
+                log.info("{} {} MTF: Full alignment detected",
+                    LOG_PREFIX, TraceContext.getShortPrefix());
+            } else if (alignment == com.kotsin.consumer.mtf.model.MultiTimeframeData.TrendAlignment.MOSTLY_ALIGNED) {
+                score.addBoost("MTF_PARTIAL_ALIGN", 8);
+            }
+
+            // Boost based on momentum alignment
+            if (mtfData.isMomentumAligned()) {
+                score.addBoost("MTF_MOMENTUM_ALIGN", 5);
+            }
+
+            // Boost based on level confluence
+            if (mtfData.isHasLevelConfluence()) {
+                score.addBoost("MTF_LEVEL_CONFLUENCE", 10);
+                log.info("{} {} MTF: Level confluence detected",
+                    LOG_PREFIX, TraceContext.getShortPrefix());
+            }
+
+            // Check signal matches direction
+            com.kotsin.consumer.mtf.model.MultiTimeframeData.MTFSignal mtfSignal = mtfData.getSignal();
+            if ((mtfSignal == com.kotsin.consumer.mtf.model.MultiTimeframeData.MTFSignal.STRONG_BUY ||
+                 mtfSignal == com.kotsin.consumer.mtf.model.MultiTimeframeData.MTFSignal.BUY) && isBullish) {
+                score.addBoost("MTF_SIGNAL_CONFIRM", 10);
+            } else if ((mtfSignal == com.kotsin.consumer.mtf.model.MultiTimeframeData.MTFSignal.STRONG_SELL ||
+                        mtfSignal == com.kotsin.consumer.mtf.model.MultiTimeframeData.MTFSignal.SELL) && !isBullish) {
+                score.addBoost("MTF_SIGNAL_CONFIRM", 10);
+            }
+
+        } catch (Exception e) {
+            log.debug("{} {} MTF analysis failed: {}",
+                LOG_PREFIX, TraceContext.getShortPrefix(), e.getMessage());
+        }
+    }
+
+    /**
      * Validate signal through gate chain.
      */
     private ChainResult validateThroughGates(String symbol, FudkiiScore score,
                                               TechnicalIndicators indicators, double price,
-                                              double target, double stopLoss) {
+                                              double target, double stopLoss,
+                                              PatternResult patternResult) {
         if (!gateEnabled || indicators == null) {
             return null;
         }
@@ -544,6 +844,8 @@ public class SignalEngine {
                       session != null && session.getSessionClose() > session.getVwap())
                 .fudkii(score.getCompositeScore())
                 .custom("macdHistogram", indicators.getMacdHistogram())
+                .custom("fudkiiScore", score)               // For QuantScoreGate
+                .custom("patternResult", patternResult)     // For PatternGate
                 .build();
 
             return gateChain.evaluate(symbol, "FUDKII", context);
@@ -563,7 +865,8 @@ public class SignalEngine {
             FudkiiScore score,
             TradingSignal currentSignal,
             PivotState pivotState,
-            TechnicalIndicators indicators) {
+            TechnicalIndicators indicators,
+            PatternResult patternResult) {
 
         double price = candle.getClose();
 
@@ -595,7 +898,7 @@ public class SignalEngine {
 
                 // Validate through gate chain before activating
                 ChainResult gateResult = validateThroughGates(
-                    symbol, score, indicators, price, levels.target1, levels.stop);
+                    symbol, score, indicators, price, levels.target1, levels.stop, patternResult);
 
                 if (gateResult != null && !gateResult.isPassed()) {
                     log.info("{} {} Signal blocked by gates: {}",
@@ -686,6 +989,240 @@ public class SignalEngine {
         }
 
         return currentSignal;
+    }
+
+    // ==================== STRATEGY TRIGGER METHODS ====================
+
+    /**
+     * Check Strategy 1: FUDKII trigger (SuperTrend flip + BB outside on 30m).
+     */
+    private com.kotsin.consumer.signal.trigger.FudkiiSignalTrigger.FudkiiTriggerResult checkFudkiiTrigger(
+            String symbol, UnifiedCandle current) {
+        try {
+            log.debug("{} {} Checking FUDKII trigger (ST+BB on 30m)", LOG_PREFIX, TraceContext.getShortPrefix());
+
+            var result = fudkiiTrigger.forceCheckTrigger(symbol);
+
+            if (result.isTriggered()) {
+                log.info("{} {} FUDKII TRIGGER FIRED: direction={}, reason={}",
+                    LOG_PREFIX, TraceContext.getShortPrefix(),
+                    result.getDirection(), result.getReason());
+            } else {
+                log.debug("{} {} FUDKII no trigger: {}", LOG_PREFIX, TraceContext.getShortPrefix(), result.getReason());
+            }
+
+            return result;
+        } catch (Exception e) {
+            log.warn("{} {} FUDKII trigger check failed: {}",
+                LOG_PREFIX, TraceContext.getShortPrefix(), e.getMessage());
+            return com.kotsin.consumer.signal.trigger.FudkiiSignalTrigger.FudkiiTriggerResult.noTrigger("Error: " + e.getMessage());
+        }
+    }
+
+    /**
+     * Check Strategy 2: Pivot Confluence trigger (HTF/LTF + Pivot + SMC + R:R).
+     */
+    private com.kotsin.consumer.signal.trigger.PivotConfluenceTrigger.PivotTriggerResult checkPivotConfluenceTrigger(
+            String symbol, UnifiedCandle current) {
+        try {
+            log.debug("{} {} Checking Pivot Confluence trigger", LOG_PREFIX, TraceContext.getShortPrefix());
+
+            String exch = current.getExchange() != null ? current.getExchange() : "N";
+            String exchType = current.getExchangeType() != null ? current.getExchangeType() : "C";
+
+            var result = pivotConfluenceTrigger.checkTrigger(symbol, exch, exchType);
+
+            if (result.isTriggered()) {
+                log.info("{} {} PIVOT CONFLUENCE TRIGGER FIRED: direction={}, score={}, R:R={}",
+                    LOG_PREFIX, TraceContext.getShortPrefix(),
+                    result.getDirection(),
+                    String.format("%.1f", result.getScore()),
+                    result.getRrCalc() != null ? String.format("%.2f", result.getRrCalc().getRiskReward()) : "N/A");
+            } else {
+                log.debug("{} {} Pivot Confluence no trigger: {}", LOG_PREFIX, TraceContext.getShortPrefix(), result.getReason());
+            }
+
+            return result;
+        } catch (Exception e) {
+            log.warn("{} {} Pivot Confluence trigger check failed: {}",
+                LOG_PREFIX, TraceContext.getShortPrefix(), e.getMessage());
+            return com.kotsin.consumer.signal.trigger.PivotConfluenceTrigger.PivotTriggerResult.noTrigger("Error: " + e.getMessage());
+        }
+    }
+
+    /**
+     * Process signal state machine with strategy triggers.
+     * This combines both FUDKII and Pivot Confluence strategies.
+     */
+    private TradingSignal processStateMachineWithTriggers(
+            String symbol,
+            UnifiedCandle candle,
+            FudkiiScore score,
+            TradingSignal currentSignal,
+            PivotState pivotState,
+            TechnicalIndicators indicators,
+            PatternResult patternResult,
+            com.kotsin.consumer.signal.trigger.FudkiiSignalTrigger.FudkiiTriggerResult fudkiiResult,
+            com.kotsin.consumer.signal.trigger.PivotConfluenceTrigger.PivotTriggerResult pivotResult) {
+
+        double price = candle.getClose();
+
+        // Check regime - avoid trading in AVOID mode
+        MarketRegime regime = regimeDetector.getCurrentRegime(symbol);
+        if (regime != null && regime.getRecommendedMode() == TradingMode.AVOID) {
+            log.debug("{} {} Skipping - market regime suggests AVOID",
+                LOG_PREFIX, TraceContext.getShortPrefix());
+            return currentSignal;
+        }
+
+        // ==================== STRATEGY TRIGGERS OVERRIDE ====================
+        // If either strategy triggers, we go directly to ACTIVE (skip WATCH)
+
+        // Strategy 1: FUDKII (ST flip + BB outside on 30m)
+        if (fudkiiResult != null && fudkiiResult.isTriggered()) {
+            log.info("{} {} STRATEGY 1 (FUDKII) ACTIVATED: {} at {}",
+                LOG_PREFIX, TraceContext.getShortPrefix(),
+                fudkiiResult.getDirection(), String.format("%.2f", price));
+
+            return createAndActivateSignal(
+                symbol, candle, score, pivotState, indicators, patternResult,
+                "FUDKII", fudkiiResult.getDirection().name(),
+                fudkiiResult.getReason(),
+                fudkiiResult.getBbst() != null ? fudkiiResult.getBbst().getSuperTrend() : price * 0.99
+            );
+        }
+
+        // Strategy 2: Pivot Confluence (HTF/LTF + Pivot + SMC + R:R)
+        if (pivotResult != null && pivotResult.isTriggered()) {
+            log.info("{} {} STRATEGY 2 (PIVOT CONFLUENCE) ACTIVATED: {} at {}, score={}",
+                LOG_PREFIX, TraceContext.getShortPrefix(),
+                pivotResult.getDirection(), String.format("%.2f", price),
+                String.format("%.1f", pivotResult.getScore()));
+
+            double stopLoss = pivotResult.getRrCalc() != null ?
+                pivotResult.getRrCalc().getStopLoss() : price * 0.99;
+
+            return createAndActivateSignal(
+                symbol, candle, score, pivotState, indicators, patternResult,
+                "PIVOT_CONFLUENCE", pivotResult.getDirection().name(),
+                pivotResult.getReason(), stopLoss
+            );
+        }
+
+        // ==================== FALLBACK: Original State Machine ====================
+        // If no strategy triggered, use the original FUDKII score-based flow
+        return processStateMachine(symbol, candle, score, currentSignal, pivotState, indicators, patternResult);
+    }
+
+    /**
+     * Create and immediately activate a signal from strategy trigger.
+     */
+    private TradingSignal createAndActivateSignal(
+            String symbol, UnifiedCandle candle, FudkiiScore score,
+            PivotState pivotState, TechnicalIndicators indicators, PatternResult patternResult,
+            String strategyName, String direction, String reason, double suggestedStop) {
+
+        double price = candle.getClose();
+        boolean bullish = "BULLISH".equals(direction);
+
+        // Create signal
+        TradingSignal signal = TradingSignal.builder()
+            .signalId(TradingSignal.generateSignalId(symbol, primaryTimeframe))
+            .symbol(symbol)
+            .scripCode(candle.getScripCode())
+            .exchange(candle.getExchange())
+            .companyName(candle.getCompanyName())
+            .timeframe(primaryTimeframe)
+            .state(SignalState.IDLE)
+            .createdAt(Instant.now())
+            .version(0)
+            .build();
+
+        // Set direction on score if needed
+        FudkiiScore adjustedScore = score;
+        if (bullish && score.getDirection() != FudkiiScore.Direction.BULLISH) {
+            adjustedScore = FudkiiScore.builder()
+                .compositeScore(score.getCompositeScore())
+                .direction(FudkiiScore.Direction.BULLISH)
+                .confidence(score.getConfidence())
+                .isWatchSetup(true)
+                .isActiveTrigger(true)
+                .reason(reason)
+                .build();
+        } else if (!bullish && score.getDirection() != FudkiiScore.Direction.BEARISH) {
+            adjustedScore = FudkiiScore.builder()
+                .compositeScore(score.getCompositeScore())
+                .direction(FudkiiScore.Direction.BEARISH)
+                .confidence(score.getConfidence())
+                .isWatchSetup(true)
+                .isActiveTrigger(true)
+                .reason(reason)
+                .build();
+        }
+
+        // Enter WATCH state
+        signal.enterWatch(adjustedScore, price, watchExpiryMinutes);
+
+        // Calculate entry levels
+        EntryLevels levels = new EntryLevels();
+        levels.entry = price;
+
+        // Stop loss from strategy or pivot
+        if (suggestedStop > 0 && suggestedStop != price) {
+            levels.stop = suggestedStop;
+        } else if (bullish && pivotState != null && !pivotState.getSupportLevels().isEmpty()) {
+            levels.stop = pivotState.getSupportLevels().get(0).getPrice() * 0.998;
+        } else if (!bullish && pivotState != null && !pivotState.getResistanceLevels().isEmpty()) {
+            levels.stop = pivotState.getResistanceLevels().get(0).getPrice() * 1.002;
+        } else {
+            levels.stop = bullish ? price * 0.98 : price * 1.02;
+        }
+
+        // Targets from pivot levels
+        if (bullish && pivotState != null && !pivotState.getResistanceLevels().isEmpty()) {
+            levels.target1 = pivotState.getResistanceLevels().get(0).getPrice();
+            levels.target2 = pivotState.getResistanceLevels().size() > 1 ?
+                pivotState.getResistanceLevels().get(1).getPrice() : levels.target1 * 1.02;
+        } else if (!bullish && pivotState != null && !pivotState.getSupportLevels().isEmpty()) {
+            levels.target1 = pivotState.getSupportLevels().get(0).getPrice();
+            levels.target2 = pivotState.getSupportLevels().size() > 1 ?
+                pivotState.getSupportLevels().get(1).getPrice() : levels.target1 * 0.98;
+        } else {
+            levels.target1 = bullish ? price * 1.02 : price * 0.98;
+            levels.target2 = bullish ? price * 1.04 : price * 0.96;
+        }
+
+        // Log detailed entry levels
+        log.info("{} {} {} Entry Levels: entry={}, stop={}, T1={}, T2={}, R:R={}",
+            LOG_PREFIX, TraceContext.getShortPrefix(), strategyName,
+            String.format("%.2f", levels.entry),
+            String.format("%.2f", levels.stop),
+            String.format("%.2f", levels.target1),
+            String.format("%.2f", levels.target2),
+            String.format("%.2f", Math.abs(levels.target1 - levels.entry) / Math.abs(levels.entry - levels.stop)));
+
+        // Immediately activate
+        signal.enterActive(adjustedScore, price, levels.entry, levels.stop, levels.target1, levels.target2);
+
+        // Record to stats
+        recordSignalToStats(signal, adjustedScore);
+
+        // Execute paper trade if enabled
+        if (paperTradeEnabled) {
+            executePaperTrade(signal, levels);
+        }
+
+        // Save and notify
+        saveAndNotify(signal, SignalEvent.ACTIVE_TRIGGERED);
+
+        log.info("{} {} {} SIGNAL ACTIVATED: {} {} at {} | Stop: {} | Target: {}",
+            LOG_PREFIX, TraceContext.getShortPrefix(), strategyName,
+            direction, symbol,
+            String.format("%.2f", price),
+            String.format("%.2f", levels.stop),
+            String.format("%.2f", levels.target1));
+
+        return signal;
     }
 
     /**

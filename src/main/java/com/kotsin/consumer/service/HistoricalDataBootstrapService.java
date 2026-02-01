@@ -9,10 +9,14 @@ import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Service;
 
+import com.fasterxml.jackson.databind.JsonNode;
+import com.fasterxml.jackson.databind.ObjectMapper;
 import jakarta.annotation.PostConstruct;
 import jakarta.annotation.PreDestroy;
+import org.springframework.web.client.RestTemplate;
 import java.time.LocalDate;
 import java.time.format.DateTimeFormatter;
+import java.util.ArrayList;
 import java.util.Comparator;
 import java.util.List;
 import java.util.Set;
@@ -53,7 +57,14 @@ public class HistoricalDataBootstrapService {
     @Value("${bootstrap.historical.delay-seconds:10}")
     private int delaySeconds;
 
+    @Value("${bootstrap.historical.startup.enabled:true}")
+    private boolean startupBootstrapEnabled;
+
+    @Value("${scripfinder.api.base-url:http://localhost:8102}")
+    private String scripFinderBaseUrl;
+
     private ExecutorService bootstrapExecutor;
+    private final ObjectMapper objectMapper = new ObjectMapper();
     private final ConcurrentHashMap<String, BootstrapStatus> bootstrapStatus = new ConcurrentHashMap<>();
 
     public enum BootstrapStatus {
@@ -76,6 +87,65 @@ public class HistoricalDataBootstrapService {
 
         log.info("{} Initialized with threads={}, historicalDays={}, delaySeconds={}",
             LOG_PREFIX, numThreads, historicalDays, delaySeconds);
+
+        // Trigger startup bootstrap after delay
+        if (startupBootstrapEnabled) {
+            CompletableFuture.runAsync(() -> {
+                try {
+                    log.info("{} Waiting {}s before startup bootstrap...", LOG_PREFIX, delaySeconds);
+                    Thread.sleep(delaySeconds * 1000L);
+                    triggerStartupBootstrap();
+                } catch (InterruptedException e) {
+                    Thread.currentThread().interrupt();
+                    log.warn("{} Startup bootstrap interrupted", LOG_PREFIX);
+                }
+            });
+        }
+    }
+
+    /**
+     * Trigger startup bootstrap by fetching scripCodes from scripFinder API.
+     */
+    private void triggerStartupBootstrap() {
+        log.info("{} Starting startup bootstrap from scripFinder API: {}", LOG_PREFIX, scripFinderBaseUrl);
+
+        try {
+            RestTemplate restTemplate = new RestTemplate();
+            String url = scripFinderBaseUrl + "/getDesiredWebSocket?tradingType=EQUITY";
+
+            String response = restTemplate.getForObject(url, String.class);
+            JsonNode root = objectMapper.readTree(response);
+
+            if (root.has("status") && root.get("status").asInt() == 200 && root.has("response")) {
+                JsonNode scripGroups = root.get("response");
+                List<InstrumentInfo> instruments = new ArrayList<>();
+
+                for (JsonNode group : scripGroups) {
+                    String scripCode = group.has("equityScripCode") ? group.get("equityScripCode").asText() : null;
+                    JsonNode equity = group.has("equity") ? group.get("equity") : null;
+
+                    if (scripCode != null && equity != null) {
+                        String symbol = equity.has("name") ? equity.get("name").asText() : scripCode;
+                        String exch = equity.has("exch") ? equity.get("exch").asText() : "N";
+                        String exchType = equity.has("exchType") ? equity.get("exchType").asText() : "C";
+
+                        instruments.add(new InstrumentInfo(scripCode, symbol, exch, exchType));
+                    }
+                }
+
+                log.info("{} Found {} instruments from scripFinder API", LOG_PREFIX, instruments.size());
+
+                if (!instruments.isEmpty()) {
+                    bootstrapSymbols(Set.copyOf(instruments));
+                }
+            } else {
+                log.warn("{} Invalid response from scripFinder API: {}", LOG_PREFIX,
+                    root.has("message") ? root.get("message").asText() : "unknown");
+            }
+
+        } catch (Exception e) {
+            log.error("{} Failed to fetch scripCodes from scripFinder API: {}", LOG_PREFIX, e.getMessage());
+        }
     }
 
     @PreDestroy

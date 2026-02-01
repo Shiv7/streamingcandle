@@ -334,18 +334,18 @@ public class TickAggregator {
             try {
                 for (TickCandle candle : candlesToSave) {
                     redisCacheService.cacheTickCandle(candle);
-                    // v2.1: Cache price for OI interpretation
-                    redisCacheService.cachePrice(candle.getSymbol(), candle.getClose());
+                    // v2.1: Cache price for OI interpretation (keyed by scripCode)
+                    redisCacheService.cachePrice(candle.getScripCode(), candle.getClose());
                 }
                 log.debug("{} Cached {} candles in Redis", LOG_PREFIX, candlesToSave.size());
             } catch (Exception e) {
                 log.error("{} Failed to cache in Redis: {}", LOG_PREFIX, e.getMessage());
             }
 
-            // Publish to Kafka topic
+            // Publish to Kafka topic (keyed by scripCode for proper partitioning)
             try {
                 for (TickCandle candle : candlesToSave) {
-                    kafkaTemplate.send(outputTopic, candle.getSymbol(), candle);
+                    kafkaTemplate.send(outputTopic, candle.getScripCode(), candle);
                 }
                 log.info("{} Published {} candles to Kafka topic {}", LOG_PREFIX, candlesToSave.size(), outputTopic);
             } catch (Exception e) {
