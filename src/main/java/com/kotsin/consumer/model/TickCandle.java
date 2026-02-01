@@ -92,7 +92,7 @@ public class TickCandle {
     private double poc;              // Point of Control (price with max volume)
     private double vah;              // Value Area High (70% volume upper bound)
     private double val;              // Value Area Low (70% volume lower bound)
-    private Map<Double, Long> volumeAtPrice;  // Sparse map: price → volume
+    private Map<String, Long> volumeAtPrice;  // Sparse map: price (as paise string) → volume
 
     // ==================== IMBALANCE BARS ====================
     private double volumeImbalance;   // Cumulative signed volume

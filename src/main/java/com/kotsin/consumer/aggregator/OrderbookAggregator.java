@@ -15,6 +15,7 @@ import org.apache.kafka.clients.consumer.KafkaConsumer;
 import org.apache.kafka.common.serialization.StringDeserializer;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.beans.factory.annotation.Value;
+import org.springframework.kafka.core.KafkaTemplate;
 import org.springframework.kafka.support.serializer.JsonDeserializer;
 import org.springframework.stereotype.Component;
 
@@ -63,11 +64,17 @@ public class OrderbookAggregator {
     @Value("${v2.orderbook.aggregator.threads:2}")
     private int numThreads;
 
+    @Value("${v2.orderbook.output.topic:orderbook-metrics-1m}")
+    private String outputTopic;
+
     @Autowired
     private OrderbookMetricsRepository orderbookRepository;
 
     @Autowired
     private RedisCacheService redisCacheService;
+
+    @Autowired
+    private KafkaTemplate<String, Object> kafkaTemplate;
 
     // Aggregation state
     private final ConcurrentHashMap<String, OrderbookAggregateState> aggregationState = new ConcurrentHashMap<>();
@@ -211,6 +218,16 @@ public class OrderbookAggregator {
             } catch (Exception e) {
                 log.error("{} Failed to cache in Redis: {}", LOG_PREFIX, e.getMessage());
             }
+
+            // Publish to Kafka topic
+            try {
+                for (OrderbookMetrics m : metricsToSave) {
+                    kafkaTemplate.send(outputTopic, m.getSymbol(), m);
+                }
+                log.info("{} Published {} metrics to Kafka topic {}", LOG_PREFIX, metricsToSave.size(), outputTopic);
+            } catch (Exception e) {
+                log.error("{} Failed to publish to Kafka: {}", LOG_PREFIX, e.getMessage());
+            }
         }
 
         Instant cutoff = Instant.now().minus(Duration.ofMinutes(5));
@@ -223,7 +240,10 @@ public class OrderbookAggregator {
         props.put(ConsumerConfig.GROUP_ID_CONFIG, consumerGroup);
         props.put(ConsumerConfig.KEY_DESERIALIZER_CLASS_CONFIG, StringDeserializer.class);
         props.put(ConsumerConfig.VALUE_DESERIALIZER_CLASS_CONFIG, JsonDeserializer.class);
-        props.put(JsonDeserializer.TRUSTED_PACKAGES, "com.kotsin.consumer.model");
+        props.put(JsonDeserializer.TRUSTED_PACKAGES, "com.kotsin.consumer.model,com.kotsin.optionDataProducer.model");
+        // FIX: Specify the target type explicitly since producer doesn't send type headers
+        props.put(JsonDeserializer.VALUE_DEFAULT_TYPE, OrderBookSnapshot.class.getName());
+        props.put(JsonDeserializer.USE_TYPE_INFO_HEADERS, "false");
         props.put(ConsumerConfig.AUTO_OFFSET_RESET_CONFIG, "earliest");
         props.put(ConsumerConfig.ENABLE_AUTO_COMMIT_CONFIG, "true");
         props.put(ConsumerConfig.MAX_POLL_RECORDS_CONFIG, 2000);

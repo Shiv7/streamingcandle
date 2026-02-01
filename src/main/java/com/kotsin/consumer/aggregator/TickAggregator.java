@@ -15,6 +15,7 @@ import org.apache.kafka.clients.consumer.KafkaConsumer;
 import org.apache.kafka.common.serialization.StringDeserializer;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.beans.factory.annotation.Value;
+import org.springframework.kafka.core.KafkaTemplate;
 import org.springframework.kafka.support.serializer.JsonDeserializer;
 import org.springframework.stereotype.Component;
 
@@ -65,11 +66,17 @@ public class TickAggregator {
     @Value("${v2.tick.aggregator.threads:4}")
     private int numThreads;
 
+    @Value("${v2.tick.output.topic:tick-candles-1m}")
+    private String outputTopic;
+
     @Autowired
     private TickCandleRepository tickCandleRepository;
 
     @Autowired
     private RedisCacheService redisCacheService;
+
+    @Autowired
+    private KafkaTemplate<String, Object> kafkaTemplate;
 
     // Aggregation state: key = "exchange:scripCode", value = TickAggregateState
     private final ConcurrentHashMap<String, TickAggregateState> aggregationState = new ConcurrentHashMap<>();
@@ -146,23 +153,49 @@ public class TickAggregator {
      * Main consumer loop - runs in thread pool.
      */
     private void consumeLoop() {
+        String threadName = Thread.currentThread().getName();
+        log.info("{} Consumer thread {} starting, connecting to {}", LOG_PREFIX, threadName, bootstrapServers);
+
         KafkaConsumer<String, TickData> consumer = createConsumer();
         consumer.subscribe(Collections.singletonList(inputTopic));
+        log.info("{} Thread {} subscribed to topic: {}", LOG_PREFIX, threadName, inputTopic);
+
+        long pollCount = 0;
+        long lastLogTime = System.currentTimeMillis();
+        int recordsReceived = 0;
 
         try {
             while (running.get()) {
                 ConsumerRecords<String, TickData> records = consumer.poll(Duration.ofMillis(100));
+                pollCount++;
+                recordsReceived += records.count();
+
+                // Log every 30 seconds
+                if (System.currentTimeMillis() - lastLogTime > 30000) {
+                    log.info("{} Thread {} stats: polls={}, recordsReceived={}, activeInstruments={}",
+                        LOG_PREFIX, threadName, pollCount, recordsReceived, aggregationState.size());
+                    lastLogTime = System.currentTimeMillis();
+                    pollCount = 0;
+                    recordsReceived = 0;
+                }
+
+                if (!records.isEmpty()) {
+                    log.debug("{} Thread {} received {} records", LOG_PREFIX, threadName, records.count());
+                }
 
                 for (ConsumerRecord<String, TickData> record : records) {
                     try {
                         processTick(record.value(), record.timestamp());
                     } catch (Exception e) {
-                        log.error("{} Error processing tick: {}", LOG_PREFIX, e.getMessage());
+                        log.error("{} Error processing tick: {}", LOG_PREFIX, e.getMessage(), e);
                     }
                 }
             }
+        } catch (Exception e) {
+            log.error("{} Thread {} consumer loop failed: {}", LOG_PREFIX, threadName, e.getMessage(), e);
         } finally {
             consumer.close();
+            log.info("{} Thread {} consumer closed", LOG_PREFIX, threadName);
         }
     }
 
@@ -191,13 +224,16 @@ public class TickAggregator {
 
         // Check if current window has closed (with 2 second grace)
         if (now.isAfter(currentWindowEnd.plusSeconds(2))) {
+            log.info("{} Window closed at {}, emitting {} instruments",
+                LOG_PREFIX, formatTime(currentWindowEnd), aggregationState.size());
+
             emitCurrentWindow();
 
             // Move to next window
             currentWindowStart = currentWindowEnd;
             currentWindowEnd = Timeframe.M1.getWindowEnd(currentWindowStart);
 
-            log.debug("{} Advanced to window: {} - {}",
+            log.info("{} Advanced to window: {} - {}",
                 LOG_PREFIX, formatTime(currentWindowStart), formatTime(currentWindowEnd));
         }
     }
@@ -247,6 +283,16 @@ public class TickAggregator {
             } catch (Exception e) {
                 log.error("{} Failed to cache in Redis: {}", LOG_PREFIX, e.getMessage());
             }
+
+            // Publish to Kafka topic
+            try {
+                for (TickCandle candle : candlesToSave) {
+                    kafkaTemplate.send(outputTopic, candle.getSymbol(), candle);
+                }
+                log.info("{} Published {} candles to Kafka topic {}", LOG_PREFIX, candlesToSave.size(), outputTopic);
+            } catch (Exception e) {
+                log.error("{} Failed to publish to Kafka: {}", LOG_PREFIX, e.getMessage());
+            }
         }
 
         // Clean up old states (instruments with no activity for 5 minutes)
@@ -263,7 +309,10 @@ public class TickAggregator {
         props.put(ConsumerConfig.GROUP_ID_CONFIG, consumerGroup);
         props.put(ConsumerConfig.KEY_DESERIALIZER_CLASS_CONFIG, StringDeserializer.class);
         props.put(ConsumerConfig.VALUE_DESERIALIZER_CLASS_CONFIG, JsonDeserializer.class);
-        props.put(JsonDeserializer.TRUSTED_PACKAGES, "com.kotsin.consumer.model");
+        props.put(JsonDeserializer.TRUSTED_PACKAGES, "com.kotsin.consumer.model,com.kotsin.optionDataProducer.model");
+        // FIX: Specify the target type explicitly since producer doesn't send type headers
+        props.put(JsonDeserializer.VALUE_DEFAULT_TYPE, TickData.class.getName());
+        props.put(JsonDeserializer.USE_TYPE_INFO_HEADERS, "false");
         props.put(ConsumerConfig.AUTO_OFFSET_RESET_CONFIG, "earliest");
         props.put(ConsumerConfig.ENABLE_AUTO_COMMIT_CONFIG, "true");
         props.put(ConsumerConfig.MAX_POLL_RECORDS_CONFIG, 2000);
@@ -326,8 +375,8 @@ public class TickAggregator {
         private long sellVolume;
         private long midpointVolume;
 
-        // Volume profile
-        private final Map<Double, Long> volumeAtPrice = new ConcurrentHashMap<>();
+        // Volume profile (key = price in paise as string to avoid MongoDB dot issues)
+        private final Map<String, Long> volumeAtPrice = new ConcurrentHashMap<>();
 
         // Imbalance tracking
         private double volumeImbalance;
@@ -392,9 +441,9 @@ public class TickAggregator {
                 midpointVolume += qty;  // At midpoint
             }
 
-            // Volume profile
-            double roundedPrice = Math.round(price * 100) / 100.0;  // Round to 2 decimals
-            volumeAtPrice.merge(roundedPrice, qty, Long::sum);
+            // Volume profile (store price in paise as string key to avoid MongoDB dot issues)
+            long priceInPaise = Math.round(price * 100);
+            volumeAtPrice.merge(String.valueOf(priceInPaise), qty, Long::sum);
 
             // Imbalance tracking
             int direction = price > lastPrice ? 1 : (price < lastPrice ? -1 : 0);
@@ -428,16 +477,22 @@ public class TickAggregator {
             double val = low;
 
             if (!volumeAtPrice.isEmpty()) {
-                // POC = price with max volume
+                // POC = price with max volume (convert from paise string back to price)
                 poc = volumeAtPrice.entrySet().stream()
                     .max(Map.Entry.comparingByValue())
-                    .map(Map.Entry::getKey)
+                    .map(e -> Long.parseLong(e.getKey()) / 100.0)
                     .orElse(close);
 
                 // VAH/VAL = 70% value area (simplified)
                 // For full implementation, sort by price and find 70% boundaries
-                vah = volumeAtPrice.keySet().stream().max(Double::compare).orElse(high);
-                val = volumeAtPrice.keySet().stream().min(Double::compare).orElse(low);
+                vah = volumeAtPrice.keySet().stream()
+                    .mapToLong(Long::parseLong)
+                    .max()
+                    .orElse((long)(high * 100)) / 100.0;
+                val = volumeAtPrice.keySet().stream()
+                    .mapToLong(Long::parseLong)
+                    .min()
+                    .orElse((long)(low * 100)) / 100.0;
             }
 
             double buyPressure = volume > 0 ? (double) buyVolume / volume : 0.5;

@@ -15,6 +15,7 @@ import org.apache.kafka.clients.consumer.KafkaConsumer;
 import org.apache.kafka.common.serialization.StringDeserializer;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.beans.factory.annotation.Value;
+import org.springframework.kafka.core.KafkaTemplate;
 import org.springframework.kafka.support.serializer.JsonDeserializer;
 import org.springframework.stereotype.Component;
 
@@ -68,11 +69,17 @@ public class OIAggregator {
     @Value("${v2.oi.aggregator.threads:2}")
     private int numThreads;
 
+    @Value("${v2.oi.output.topic:oi-metrics-1m}")
+    private String outputTopic;
+
     @Autowired
     private OIMetricsRepository oiRepository;
 
     @Autowired
     private RedisCacheService redisCacheService;
+
+    @Autowired
+    private KafkaTemplate<String, Object> kafkaTemplate;
 
     // Aggregation state: key = "exchange:token"
     private final ConcurrentHashMap<String, OIAggregateState> aggregationState = new ConcurrentHashMap<>();
@@ -216,6 +223,16 @@ public class OIAggregator {
             } catch (Exception e) {
                 log.error("{} Failed to cache in Redis: {}", LOG_PREFIX, e.getMessage());
             }
+
+            // Publish to Kafka topic
+            try {
+                for (OIMetrics m : metricsToSave) {
+                    kafkaTemplate.send(outputTopic, m.getSymbol(), m);
+                }
+                log.info("{} Published {} OI metrics to Kafka topic {}", LOG_PREFIX, metricsToSave.size(), outputTopic);
+            } catch (Exception e) {
+                log.error("{} Failed to publish to Kafka: {}", LOG_PREFIX, e.getMessage());
+            }
         }
 
         Instant cutoff = Instant.now().minus(Duration.ofMinutes(5));
@@ -228,7 +245,10 @@ public class OIAggregator {
         props.put(ConsumerConfig.GROUP_ID_CONFIG, consumerGroup);
         props.put(ConsumerConfig.KEY_DESERIALIZER_CLASS_CONFIG, StringDeserializer.class);
         props.put(ConsumerConfig.VALUE_DESERIALIZER_CLASS_CONFIG, JsonDeserializer.class);
-        props.put(JsonDeserializer.TRUSTED_PACKAGES, "com.kotsin.consumer.model");
+        props.put(JsonDeserializer.TRUSTED_PACKAGES, "com.kotsin.consumer.model,com.kotsin.optionDataProducer.model");
+        // FIX: Specify the target type explicitly since producer doesn't send type headers
+        props.put(JsonDeserializer.VALUE_DEFAULT_TYPE, OpenInterest.class.getName());
+        props.put(JsonDeserializer.USE_TYPE_INFO_HEADERS, "false");
         props.put(ConsumerConfig.AUTO_OFFSET_RESET_CONFIG, "earliest");
         props.put(ConsumerConfig.ENABLE_AUTO_COMMIT_CONFIG, "true");
         props.put(ConsumerConfig.MAX_POLL_RECORDS_CONFIG, 2000);

@@ -109,8 +109,11 @@ public class SignalEngine {
     @Value("${signal.engine.papertrade.enabled:false}")
     private boolean paperTradeEnabled;
 
-    @Value("${signal.engine.symbols:NIFTY,BANKNIFTY}")
+    @Value("${signal.engine.symbols:}")
     private String symbolsConfig;
+
+    @Value("${signal.engine.dynamic.symbols:true}")
+    private boolean useDynamicSymbols;
 
     @Value("${signal.engine.timeframe:5m}")
     private String primaryTimeframe;
@@ -138,8 +141,8 @@ public class SignalEngine {
             return;
         }
 
-        log.info("{} Starting with symbols={}, timeframe={}",
-            LOG_PREFIX, symbolsConfig, primaryTimeframe);
+        log.info("{} Starting with dynamicSymbols={}, configuredSymbols={}, timeframe={}",
+            LOG_PREFIX, useDynamicSymbols, symbolsConfig, primaryTimeframe);
 
         running.set(true);
 
@@ -173,20 +176,61 @@ public class SignalEngine {
     }
 
     /**
-     * Process all configured symbols.
+     * Process all symbols - either from dynamic discovery or configuration.
      */
     private void processAllSymbols() {
         if (!running.get()) return;
 
-        String[] symbols = symbolsConfig.split(",");
+        Set<String> symbols = getSymbolsToProcess();
+        if (symbols.isEmpty()) {
+            log.debug("{} No symbols to process", LOG_PREFIX);
+            return;
+        }
+
         Timeframe tf = Timeframe.fromLabel(primaryTimeframe);
+        log.info("{} Processing {} symbols: {}", LOG_PREFIX, symbols.size(), symbols);
 
         for (String symbol : symbols) {
             try {
-                processSymbol(symbol.trim(), tf);
+                processSymbol(symbol, tf);
             } catch (Exception e) {
                 log.error("{} Error processing symbol={}: {}", LOG_PREFIX, symbol, e.getMessage());
             }
+        }
+    }
+
+    /**
+     * Get symbols to process - either dynamically from Redis or from config.
+     */
+    private Set<String> getSymbolsToProcess() {
+        if (useDynamicSymbols) {
+            // Get all symbols that have candle data in Redis
+            Set<String> cachedKeys = candleService.getAvailableSymbols();
+            if (cachedKeys == null || cachedKeys.isEmpty()) {
+                log.debug("{} No symbols found in Redis cache", LOG_PREFIX);
+                return Set.of();
+            }
+
+            // Extract symbol names from keys (format: tick:SYMBOL:1m:latest)
+            Set<String> symbols = new HashSet<>();
+            for (String key : cachedKeys) {
+                String[] parts = key.split(":");
+                if (parts.length >= 2) {
+                    symbols.add(parts[1]);
+                }
+            }
+            log.debug("{} Dynamic symbols discovered from Redis: {}", LOG_PREFIX, symbols.size());
+            return symbols;
+        } else {
+            // Use configured symbols
+            if (symbolsConfig == null || symbolsConfig.trim().isEmpty()) {
+                return Set.of();
+            }
+            Set<String> symbols = new HashSet<>();
+            for (String s : symbolsConfig.split(",")) {
+                symbols.add(s.trim());
+            }
+            return symbols;
         }
     }
 
