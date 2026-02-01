@@ -37,6 +37,14 @@ public class FudkiiCalculator {
     @Value("${signal.confidence.min:0.5}")
     private double minConfidence;
 
+    // FIX #3: Make imbalance triggers optional (not mandatory)
+    @Value("${signal.active.require.imbalance:false}")
+    private boolean requireImbalance;
+
+    // Imbalance provides score boost but not required
+    @Value("${signal.active.imbalance.boost:15}")
+    private double imbalanceBoost;
+
     // Component weights
     private final FudkiiWeights weights;
 
@@ -450,16 +458,34 @@ public class FudkiiCalculator {
         // ACTIVE conditions:
         // 1. Score above active threshold
         // 2. High confidence
-        // 3. Imbalance confirmation (VIB or DIB)
+        // 3. [OPTIONAL] Imbalance confirmation (VIB or DIB) - provides boost but not required
         // 4. Break of structure or level
 
         if (score < activeThreshold || confidence < 0.6) {
+            log.debug("{} {} Active trigger check: score={} (min={}), confidence={} (min=0.6) - BELOW THRESHOLD",
+                LOG_PREFIX, TraceContext.getShortPrefix(),
+                String.format("%.1f", score), String.format("%.1f", activeThreshold),
+                String.format("%.2f", confidence));
             return false;
         }
 
-        // Need imbalance confirmation
-        if (!imbalance.vibTriggered && !imbalance.dibTriggered && !imbalance.trbTriggered) {
+        // FIX #3: Imbalance is now optional - provides boost but not required
+        boolean hasImbalance = imbalance.vibTriggered || imbalance.dibTriggered || imbalance.trbTriggered;
+
+        if (requireImbalance && !hasImbalance) {
+            log.debug("{} {} Active trigger check: Imbalance required but not present (VIB={}, DIB={}, TRB={})",
+                LOG_PREFIX, TraceContext.getShortPrefix(),
+                imbalance.vibTriggered, imbalance.dibTriggered, imbalance.trbTriggered);
             return false;
+        }
+
+        // Calculate effective score with imbalance boost
+        double effectiveScore = score;
+        if (hasImbalance) {
+            effectiveScore += imbalanceBoost;
+            log.debug("{} {} Imbalance detected - score boosted from {} to {}",
+                LOG_PREFIX, TraceContext.getShortPrefix(),
+                String.format("%.1f", score), String.format("%.1f", effectiveScore));
         }
 
         // Check for level break or BOS
@@ -469,19 +495,39 @@ public class FudkiiCalculator {
 
             for (PriceLevel level : pivotState.getResistanceLevels()) {
                 if (currentPrice > level.getPrice() && !level.isBroken()) {
+                    log.info("{} {} Active trigger: Breaking resistance at {} (price={})",
+                        LOG_PREFIX, TraceContext.getShortPrefix(),
+                        String.format("%.2f", level.getPrice()), String.format("%.2f", currentPrice));
                     return true; // Breaking resistance
                 }
             }
 
             for (PriceLevel level : pivotState.getSupportLevels()) {
                 if (currentPrice < level.getPrice() && !level.isBroken()) {
+                    log.info("{} {} Active trigger: Breaking support at {} (price={})",
+                        LOG_PREFIX, TraceContext.getShortPrefix(),
+                        String.format("%.2f", level.getPrice()), String.format("%.2f", currentPrice));
                     return true; // Breaking support
                 }
             }
         }
 
-        // High score with strong imbalance is enough
-        return score >= 70 && (imbalance.vibTriggered || imbalance.dibTriggered);
+        // FIX #3: High effective score is enough (with or without imbalance)
+        // Lower threshold if we have imbalance, higher if we don't
+        double requiredScore = hasImbalance ? 65 : 75;
+
+        if (effectiveScore >= requiredScore) {
+            log.info("{} {} Active trigger: High score {} >= {} (hasImbalance={})",
+                LOG_PREFIX, TraceContext.getShortPrefix(),
+                String.format("%.1f", effectiveScore), String.format("%.1f", requiredScore), hasImbalance);
+            return true;
+        }
+
+        log.debug("{} {} Active trigger check: Score {} < required {} (hasImbalance={})",
+            LOG_PREFIX, TraceContext.getShortPrefix(),
+            String.format("%.1f", effectiveScore), String.format("%.1f", requiredScore), hasImbalance);
+
+        return false;
     }
 
     private String buildReason(boolean isWatch, boolean isActive,

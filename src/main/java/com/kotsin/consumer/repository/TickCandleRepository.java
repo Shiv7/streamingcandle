@@ -90,4 +90,32 @@ public interface TickCandleRepository extends MongoRepository<TickCandle, String
      * Check if candle exists for symbol at timestamp.
      */
     boolean existsBySymbolAndTimestamp(String symbol, Instant timestamp);
+
+    // ==================== WINDOW-BASED QUERIES (for 30m aggregation) ====================
+
+    /**
+     * Find candles by scripCode where windowStart is between two timestamps.
+     * Used for aggregating 1m candles into 30m candles.
+     */
+    @Query("{ 'scripCode': ?0, 'windowStart': { $gte: ?1, $lt: ?2 } }")
+    List<TickCandle> findByScripCodeAndWindowStartBetween(String scripCode, Instant start, Instant end);
+
+    /**
+     * Find candles by scripCode where windowStart is after a timestamp.
+     * Used for fetching historical data for aggregation.
+     */
+    @Query("{ 'scripCode': ?0, 'windowStart': { $gte: ?1 } }")
+    List<TickCandle> findByScripCodeAndWindowStartAfter(String scripCode, Instant after);
+
+    /**
+     * Find recent candles by scripCode ordered by windowStart descending.
+     * Used for fetching the most recent candles.
+     */
+    List<TickCandle> findByScripCodeOrderByWindowStartDesc(String scripCode, Pageable pageable);
+
+    /**
+     * Find recent candles by scripCode (no Pageable, returns recent candles).
+     */
+    @Query(value = "{ 'scripCode': ?0 }", sort = "{ 'windowStart': -1 }")
+    List<TickCandle> findByScripCodeOrderByWindowStartDesc(String scripCode);
 }

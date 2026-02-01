@@ -348,10 +348,16 @@ public class CandleService {
         int candlesPerWindow = timeframe.getMinutes();
         int totalCandlesNeeded = count * candlesPerWindow;
 
+        log.debug("[CANDLE-SVC] getAggregatedHistory: scripCode={}, timeframe={}, count={}, totalCandlesNeeded={}",
+            scripCode, timeframe, count, totalCandlesNeeded);
+
         List<TickCandle> allTicks = tickCandleRepository.findByScripCodeOrderByTimestampDesc(
             scripCode, PageRequest.of(0, totalCandlesNeeded));
 
+        log.debug("[CANDLE-SVC] MongoDB returned {} 1m candles for scripCode={}", allTicks.size(), scripCode);
+
         if (allTicks.isEmpty()) {
+            log.warn("[CANDLE-SVC] No 1m candles found in MongoDB for scripCode={}", scripCode);
             return Collections.emptyList();
         }
 
@@ -361,6 +367,9 @@ public class CandleService {
         // Group by timeframe window
         Map<Instant, List<TickCandle>> windowGroups = allTicks.stream()
             .collect(Collectors.groupingBy(t -> timeframe.alignToWindowStart(t.getWindowStart())));
+
+        log.debug("[CANDLE-SVC] Grouped {} 1m candles into {} {} windows for scripCode={}",
+            allTicks.size(), windowGroups.size(), timeframe.getLabel(), scripCode);
 
         List<UnifiedCandle> result = new ArrayList<>();
 

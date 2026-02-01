@@ -362,4 +362,109 @@ public class RedisCacheService {
         }
         return null;
     }
+
+    // ==================== BBST STATE CACHING (for FudkiiSignalTrigger) ====================
+
+    private static final String BBST_STATE_PREFIX = "bbst:state:";
+    private static final String BBST_FLIP_PREFIX = "bbst:flip:";
+    private static final int BBST_STATE_TTL_HOURS = 24;
+
+    /**
+     * Cache BBSuperTrend state for a scripCode:timeframe.
+     * This allows state to persist across restarts.
+     */
+    public void cacheBBSTState(String scripCode, String timeframe, Object bbstState) {
+        if (scripCode == null || timeframe == null || bbstState == null) return;
+
+        try {
+            String key = BBST_STATE_PREFIX + scripCode + ":" + timeframe;
+            redisTemplate.opsForValue().set(key, bbstState,
+                Duration.ofHours(BBST_STATE_TTL_HOURS));
+            log.debug("[REDIS-CACHE] Cached BBST state for {}:{}", scripCode, timeframe);
+        } catch (Exception e) {
+            log.error("[REDIS-CACHE] Failed to cache BBST state for {}:{}: {}",
+                scripCode, timeframe, e.getMessage());
+        }
+    }
+
+    /**
+     * Get cached BBSuperTrend state for a scripCode:timeframe.
+     */
+    public Object getBBSTState(String scripCode, String timeframe) {
+        if (scripCode == null || timeframe == null) return null;
+
+        try {
+            String key = BBST_STATE_PREFIX + scripCode + ":" + timeframe;
+            return redisTemplate.opsForValue().get(key);
+        } catch (Exception e) {
+            log.debug("[REDIS-CACHE] Failed to get BBST state for {}:{}: {}",
+                scripCode, timeframe, e.getMessage());
+            return null;
+        }
+    }
+
+    /**
+     * Record a SuperTrend flip event with timestamp.
+     * Used for debouncing - flip is valid for debounce window.
+     *
+     * @param scripCode The script code
+     * @param timeframe The timeframe (e.g., "30m")
+     * @param direction The flip direction ("UP" or "DOWN")
+     * @param debounceMinutes How long the flip should be remembered
+     */
+    public void recordSTFlip(String scripCode, String timeframe, String direction, int debounceMinutes) {
+        if (scripCode == null || timeframe == null || direction == null) return;
+
+        try {
+            String key = BBST_FLIP_PREFIX + scripCode + ":" + timeframe;
+            String value = direction + ":" + Instant.now().toEpochMilli();
+            redisTemplate.opsForValue().set(key, value,
+                Duration.ofMinutes(debounceMinutes));
+            log.info("[REDIS-CACHE] Recorded ST flip for {}:{} -> {} (debounce={}min)",
+                scripCode, timeframe, direction, debounceMinutes);
+        } catch (Exception e) {
+            log.error("[REDIS-CACHE] Failed to record ST flip for {}:{}: {}",
+                scripCode, timeframe, e.getMessage());
+        }
+    }
+
+    /**
+     * Check if there's a recent ST flip within the debounce window.
+     *
+     * @return Array [direction, timestampMs] or null if no recent flip
+     */
+    public String[] getRecentSTFlip(String scripCode, String timeframe) {
+        if (scripCode == null || timeframe == null) return null;
+
+        try {
+            String key = BBST_FLIP_PREFIX + scripCode + ":" + timeframe;
+            Object value = redisTemplate.opsForValue().get(key);
+            if (value != null) {
+                String[] parts = value.toString().split(":");
+                if (parts.length == 2) {
+                    return parts; // [direction, timestampMs]
+                }
+            }
+        } catch (Exception e) {
+            log.debug("[REDIS-CACHE] Failed to get ST flip for {}:{}: {}",
+                scripCode, timeframe, e.getMessage());
+        }
+        return null;
+    }
+
+    /**
+     * Clear ST flip record (after signal is generated).
+     */
+    public void clearSTFlip(String scripCode, String timeframe) {
+        if (scripCode == null || timeframe == null) return;
+
+        try {
+            String key = BBST_FLIP_PREFIX + scripCode + ":" + timeframe;
+            redisTemplate.delete(key);
+            log.debug("[REDIS-CACHE] Cleared ST flip for {}:{}", scripCode, timeframe);
+        } catch (Exception e) {
+            log.debug("[REDIS-CACHE] Failed to clear ST flip for {}:{}: {}",
+                scripCode, timeframe, e.getMessage());
+        }
+    }
 }
