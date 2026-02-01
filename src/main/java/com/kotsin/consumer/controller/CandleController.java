@@ -157,12 +157,13 @@ public class CandleController {
     }
 
     /**
-     * Get available symbols with candle data.
+     * Get available scripCodes with candle data.
+     * Note: Returns scripCodes (unique instrument identifiers), not symbol names.
      */
     @GetMapping("/symbols")
-    public ResponseEntity<Set<String>> getAvailableSymbols() {
-        Set<String> symbols = candleService.getAvailableSymbols();
-        return ResponseEntity.ok(symbols);
+    public ResponseEntity<Set<String>> getAvailableScripCodes() {
+        Set<String> scripCodes = candleService.getAvailableScripCodes();
+        return ResponseEntity.ok(scripCodes);
     }
 
     /**

@@ -261,10 +261,10 @@ public class OIAggregator {
                 log.error("{} Failed to cache in Redis: {}", LOG_PREFIX, e.getMessage());
             }
 
-            // Publish to Kafka topic
+            // Publish to Kafka topic (keyed by scripCode for proper partitioning)
             try {
                 for (OIMetrics m : metricsToSave) {
-                    kafkaTemplate.send(outputTopic, m.getSymbol(), m);
+                    kafkaTemplate.send(outputTopic, m.getScripCode(), m);
                 }
                 log.info("{} Published {} OI metrics to Kafka topic {}", LOG_PREFIX, metricsToSave.size(), outputTopic);
             } catch (Exception e) {
@@ -412,9 +412,9 @@ public class OIAggregator {
             // OI acceleration = change in velocity
             double oiAcceleration = oiVelocity - previousVelocity;
 
-            // v2.1: Calculate interpretation IMMEDIATELY using cached price
+            // v2.1: Calculate interpretation IMMEDIATELY using cached price (keyed by scripCode)
             OIMetrics.OIInterpretation interpretation = calculateInterpretation(
-                oiChange, symbol, redisCacheService);
+                oiChange, scripCode, redisCacheService);
 
             // Calculate interpretation confidence based on OI change magnitude
             double interpretationConfidence = Math.min(1.0, Math.abs(oiChangePercent) / 5.0);
@@ -475,16 +475,17 @@ public class OIAggregator {
         /**
          * Calculate OI interpretation using cached price from Redis (v2.1).
          * Falls back to NEUTRAL if price not available.
+         * Uses scripCode for price lookup (unique instrument identifier).
          */
         private OIMetrics.OIInterpretation calculateInterpretation(
-                long oiChange, String symbol, RedisCacheService redisCacheService) {
-            
+                long oiChange, String scripCode, RedisCacheService redisCacheService) {
+
             if (redisCacheService == null) {
                 return OIMetrics.OIInterpretation.NEUTRAL;
             }
-            
-            Double lastPrice = redisCacheService.getLastPrice(symbol);
-            Double prevPrice = redisCacheService.getPreviousPrice(symbol);
+
+            Double lastPrice = redisCacheService.getLastPrice(scripCode);
+            Double prevPrice = redisCacheService.getPreviousPrice(scripCode);
             
             if (lastPrice == null || prevPrice == null || prevPrice <= 0) {
                 return OIMetrics.OIInterpretation.NEUTRAL;

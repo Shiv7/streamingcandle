@@ -38,9 +38,19 @@ public interface TickCandleRepository extends MongoRepository<TickCandle, String
     Optional<TickCandle> findBySymbolAndTimestamp(String symbol, Instant timestamp);
 
     /**
+     * Find candle by scripCode at specific timestamp.
+     */
+    Optional<TickCandle> findByScripCodeAndTimestamp(String scripCode, Instant timestamp);
+
+    /**
      * Find history (most recent first).
      */
     List<TickCandle> findBySymbolOrderByTimestampDesc(String symbol, Pageable pageable);
+
+    /**
+     * Find history by scripCode (most recent first).
+     */
+    List<TickCandle> findByScripCodeOrderByTimestampDesc(String scripCode, Pageable pageable);
 
     /**
      * Find candles in time range (for aggregation).

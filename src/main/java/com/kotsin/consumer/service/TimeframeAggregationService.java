@@ -180,37 +180,36 @@ public class TimeframeAggregationService {
     }
 
     /**
-     * Get symbols that have recent tick data (active in last 5 minutes).
+     * Get scripCodes that have recent tick data (active in last 5 minutes).
+     * Note: Variable names use "symbol" for backward compatibility but values are scripCodes.
      */
     private Set<String> getActiveSymbols() {
-        Set<String> symbols = new HashSet<>();
+        Set<String> scripCodes = new HashSet<>();
 
-        // Get from Redis cache
-        Set<String> cachedKeys = redisCacheService.getCachedSymbols();
+        // Get from Redis cache (keyed by scripCode)
+        Set<String> cachedKeys = redisCacheService.getCachedScripCodes();
         if (cachedKeys != null) {
             for (String key : cachedKeys) {
-                // Key format: tick:SYMBOL:1m:latest
+                // Key format: tick:SCRIPCODE:1m:latest
                 String[] parts = key.split(":");
                 if (parts.length >= 2) {
-                    symbols.add(parts[1]);
+                    scripCodes.add(parts[1]);
                 }
             }
         }
 
-        // If no cached symbols, query MongoDB for recent data
-        if (symbols.isEmpty()) {
+        // If no cached scripCodes, query MongoDB for recent data
+        if (scripCodes.isEmpty()) {
             Instant cutoff = Instant.now().minus(java.time.Duration.ofMinutes(5));
-            List<TickCandle> recentCandles = tickCandleRepository.findBySymbolOrderByTimestampDesc(
-                "*", PageRequest.of(0, 1000));
+            List<TickCandle> recentCandles = tickCandleRepository.findByTimestampBetween(
+                cutoff, Instant.now());
 
             for (TickCandle candle : recentCandles) {
-                if (candle.getTimestamp().isAfter(cutoff)) {
-                    symbols.add(candle.getSymbol());
-                }
+                scripCodes.add(candle.getScripCode());
             }
         }
 
-        return symbols;
+        return scripCodes;
     }
 
     /**

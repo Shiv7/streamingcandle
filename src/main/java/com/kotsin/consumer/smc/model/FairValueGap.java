@@ -115,6 +115,13 @@ public class FairValueGap {
     }
 
     /**
+     * Check if price is near the gap (within tolerance percent).
+     */
+    public boolean isPriceNearGap(double price, double tolerancePercent) {
+        return getDistancePercent(price) <= tolerancePercent;
+    }
+
+    /**
      * Update fill status based on current price.
      */
     public void updateFillStatus(double price) {

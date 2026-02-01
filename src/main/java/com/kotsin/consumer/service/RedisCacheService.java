@@ -17,14 +17,18 @@ import java.util.concurrent.TimeUnit;
 /**
  * RedisCacheService - Centralized Redis caching for v2 architecture.
  *
+ * IMPORTANT: All keys use scripCode (NOT symbol) to avoid mixing data from
+ * different instruments that share the same symbol name (e.g., SBICARD equity
+ * vs SBICARD options).
+ *
  * Key Structure:
- * - tick:{symbol}:1m:latest          → Latest TickCandle (TTL: 5min)
- * - tick:{symbol}:1m:history         → List of last 500 TickCandles (TTL: 24h)
- * - tick:{symbol}:{tf}:latest        → Aggregated candle for timeframe (TTL: 5min)
- * - tick:{symbol}:{tf}:history       → List of aggregated candles (TTL: 24h)
- * - ob:{symbol}:latest               → Latest OrderbookMetrics (TTL: 5min)
- * - oi:{symbol}:latest               → Latest OIMetrics (TTL: 5min)
- * - unified:{symbol}:{tf}:latest     → Latest UnifiedCandle (TTL: 5min)
+ * - tick:{scripCode}:1m:latest       → Latest TickCandle (TTL: 5min)
+ * - tick:{scripCode}:1m:history      → List of last 500 TickCandles (TTL: 24h)
+ * - tick:{scripCode}:{tf}:latest     → Aggregated candle for timeframe (TTL: 5min)
+ * - tick:{scripCode}:{tf}:history    → List of aggregated candles (TTL: 24h)
+ * - ob:{scripCode}:latest            → Latest OrderbookMetrics (TTL: 5min)
+ * - oi:{scripCode}:latest            → Latest OIMetrics (TTL: 5min)
+ * - unified:{scripCode}:{tf}:latest  → Latest UnifiedCandle (TTL: 5min)
  */
 @Service
 @Slf4j
@@ -42,96 +46,55 @@ public class RedisCacheService {
     @Value("${v2.cache.tick.history.max.size:500}")
     private int tickHistoryMaxSize;
 
-    @Value("${logging.trace.symbols:}")
-    private String traceSymbolsStr;
-    private Set<String> traceSymbols;
-
-    @jakarta.annotation.PostConstruct
-    public void init() {
-         this.traceSymbols = new java.util.HashSet<>();
-        if (traceSymbolsStr != null && !traceSymbolsStr.isBlank()) {
-            String[] parts = traceSymbolsStr.split(",");
-            for (String part : parts) {
-                traceSymbols.add(part.trim().toUpperCase());
-            }
-        }
-    }
-
-    private boolean shouldLog(String symbol) {
-         if (symbol == null) return false;
-         // For Redis writes, we only log if specific symbols are requested, 
-         // OR we log very sparsely if "ALL" is enabled to avoid spamming 
-         // (since Redis writes happen every minute for every symbol).
-         // Actually, let's just log if specific symbol is in list.
-         // If list is empty (ALL), we won't log every write to keep it clean,
-         // UNLESS we use a sampler.
-         // Let's rely on TickAggregator for the "pulse" and here just for confirmation if specific symbols are set.
-         // BUT user said "make it empty" to see ALL.
-         // So I should log basic stats or 1 sample.
-         
-         // User requested FULL LOGS (make it empty). So if empty, we return TRUE.
-         if (traceSymbols.isEmpty()) return true;
-         
-         return traceSymbols.contains(symbol);
-    }
-
     // ==================== TICK CANDLE CACHING ====================
 
     /**
      * Cache a tick candle (both latest and history).
+     * Uses scripCode as key to avoid mixing data from different instruments.
      */
     public void cacheTickCandle(TickCandle candle) {
-        if (candle == null || candle.getSymbol() == null) return;
+        if (candle == null || candle.getScripCode() == null) return;
 
-        String symbol = candle.getSymbol();
+        String scripCode = candle.getScripCode();
 
         try {
-            // Cache as latest
-            String latestKey = buildTickLatestKey(symbol, Timeframe.M1);
+            // Cache as latest (keyed by scripCode)
+            String latestKey = buildTickLatestKey(scripCode, Timeframe.M1);
             redisTemplate.opsForValue().set(latestKey, candle,
                 Duration.ofMinutes(tickLatestTtlMinutes));
 
-            if (shouldLog(symbol)) {
-                log.info("[REDIS-WRITE] Cached TickCandle for {}: {}", symbol, latestKey);
-            }
-
-            // Add to history list
-            String historyKey = buildTickHistoryKey(symbol, Timeframe.M1);
+            // Add to history list (keyed by scripCode)
+            String historyKey = buildTickHistoryKey(scripCode, Timeframe.M1);
             redisTemplate.opsForList().leftPush(historyKey, candle);
             redisTemplate.opsForList().trim(historyKey, 0, tickHistoryMaxSize - 1);
             redisTemplate.expire(historyKey, tickHistoryTtlHours, TimeUnit.HOURS);
 
         } catch (Exception e) {
-            log.error("[REDIS-CACHE] Failed to cache tick candle for {}: {}",
-                symbol, e.getMessage());
+            log.error("[REDIS-CACHE] Failed to cache tick candle for scripCode={}: {}",
+                scripCode, e.getMessage());
         }
     }
 
     /**
-     * Get latest tick candle.
+     * Get latest tick candle by scripCode.
      */
-    public TickCandle getLatestTickCandle(String symbol) {
-        String key = buildTickLatestKey(symbol, Timeframe.M1);
+    public TickCandle getLatestTickCandle(String scripCode) {
+        String key = buildTickLatestKey(scripCode, Timeframe.M1);
         try {
-            TickCandle result = (TickCandle) redisTemplate.opsForValue().get(key);
-            if (shouldLog(symbol)) {
-                log.info("[REDIS-READ] TickCandle for {}: {}", symbol, 
-                    result != null ? "found (close=" + result.getClose() + ")" : "MISS");
-            }
-            return result;
+            return (TickCandle) redisTemplate.opsForValue().get(key);
         } catch (Exception e) {
-            log.error("[REDIS-CACHE] Failed to get latest tick for {}: {}",
-                symbol, e.getMessage());
+            log.error("[REDIS-CACHE] Failed to get latest tick for scripCode={}: {}",
+                scripCode, e.getMessage());
             return null;
         }
     }
 
     /**
-     * Get tick candle history.
+     * Get tick candle history by scripCode.
      */
     @SuppressWarnings("unchecked")
-    public List<TickCandle> getTickHistory(String symbol, int count) {
-        String key = buildTickHistoryKey(symbol, Timeframe.M1);
+    public List<TickCandle> getTickHistory(String scripCode, int count) {
+        String key = buildTickHistoryKey(scripCode, Timeframe.M1);
         try {
             List<Object> raw = redisTemplate.opsForList().range(key, 0, count - 1);
             if (raw == null) return new ArrayList<>();
@@ -144,8 +107,8 @@ public class RedisCacheService {
             }
             return result;
         } catch (Exception e) {
-            log.error("[REDIS-CACHE] Failed to get tick history for {}: {}",
-                symbol, e.getMessage());
+            log.error("[REDIS-CACHE] Failed to get tick history for scripCode={}: {}",
+                scripCode, e.getMessage());
             return new ArrayList<>();
         }
     }
@@ -153,54 +116,49 @@ public class RedisCacheService {
     // ==================== AGGREGATED CANDLE CACHING ====================
 
     /**
-     * Cache aggregated candle (5m, 15m, etc.).
+     * Cache aggregated candle (5m, 15m, etc.) by scripCode.
      */
-    public void cacheAggregatedCandle(String symbol, Timeframe tf, UnifiedCandle candle) {
-        if (candle == null || symbol == null) return;
+    public void cacheAggregatedCandle(String scripCode, Timeframe tf, UnifiedCandle candle) {
+        if (candle == null || scripCode == null) return;
 
         try {
             // Cache as latest
-            String latestKey = buildUnifiedLatestKey(symbol, tf);
+            String latestKey = buildUnifiedLatestKey(scripCode, tf);
             redisTemplate.opsForValue().set(latestKey, candle,
                 Duration.ofMinutes(tickLatestTtlMinutes));
 
             // Add to history
-            String historyKey = buildUnifiedHistoryKey(symbol, tf);
+            String historyKey = buildUnifiedHistoryKey(scripCode, tf);
             redisTemplate.opsForList().leftPush(historyKey, candle);
             redisTemplate.opsForList().trim(historyKey, 0, tickHistoryMaxSize - 1);
             redisTemplate.expire(historyKey, tickHistoryTtlHours, TimeUnit.HOURS);
 
         } catch (Exception e) {
-            log.error("[REDIS-CACHE] Failed to cache aggregated candle for {}:{}: {}",
-                symbol, tf, e.getMessage());
+            log.error("[REDIS-CACHE] Failed to cache aggregated candle for scripCode={}:{}: {}",
+                scripCode, tf, e.getMessage());
         }
     }
 
     /**
-     * Get latest aggregated candle.
+     * Get latest aggregated candle by scripCode.
      */
-    public UnifiedCandle getLatestAggregatedCandle(String symbol, Timeframe tf) {
-        String key = buildUnifiedLatestKey(symbol, tf);
+    public UnifiedCandle getLatestAggregatedCandle(String scripCode, Timeframe tf) {
+        String key = buildUnifiedLatestKey(scripCode, tf);
         try {
-            UnifiedCandle result = (UnifiedCandle) redisTemplate.opsForValue().get(key);
-            if (shouldLog(symbol)) {
-                log.info("[REDIS-READ] UnifiedCandle for {}:{}: {}", symbol, tf.getLabel(),
-                    result != null ? "found (close=" + result.getClose() + ")" : "MISS");
-            }
-            return result;
+            return (UnifiedCandle) redisTemplate.opsForValue().get(key);
         } catch (Exception e) {
-            log.error("[REDIS-CACHE] Failed to get aggregated candle for {}:{}: {}",
-                symbol, tf, e.getMessage());
+            log.error("[REDIS-CACHE] Failed to get aggregated candle for scripCode={}:{}: {}",
+                scripCode, tf, e.getMessage());
             return null;
         }
     }
 
     /**
-     * Get aggregated candle history.
+     * Get aggregated candle history by scripCode.
      */
     @SuppressWarnings("unchecked")
-    public List<UnifiedCandle> getAggregatedHistory(String symbol, Timeframe tf, int count) {
-        String key = buildUnifiedHistoryKey(symbol, tf);
+    public List<UnifiedCandle> getAggregatedHistory(String scripCode, Timeframe tf, int count) {
+        String key = buildUnifiedHistoryKey(scripCode, tf);
         try {
             List<Object> raw = redisTemplate.opsForList().range(key, 0, count - 1);
             if (raw == null) return new ArrayList<>();
@@ -213,8 +171,8 @@ public class RedisCacheService {
             }
             return result;
         } catch (Exception e) {
-            log.error("[REDIS-CACHE] Failed to get aggregated history for {}:{}: {}",
-                symbol, tf, e.getMessage());
+            log.error("[REDIS-CACHE] Failed to get aggregated history for scripCode={}:{}: {}",
+                scripCode, tf, e.getMessage());
             return new ArrayList<>();
         }
     }
@@ -222,40 +180,31 @@ public class RedisCacheService {
     // ==================== ORDERBOOK METRICS CACHING ====================
 
     /**
-     * Cache orderbook metrics.
+     * Cache orderbook metrics by scripCode.
      */
     public void cacheOrderbookMetrics(OrderbookMetrics metrics) {
-        if (metrics == null || metrics.getSymbol() == null) return;
+        if (metrics == null || metrics.getScripCode() == null) return;
 
         try {
-            String key = buildOrderbookKey(metrics.getSymbol());
+            String key = buildOrderbookKey(metrics.getScripCode());
             redisTemplate.opsForValue().set(key, metrics,
                 Duration.ofMinutes(tickLatestTtlMinutes));
-                
-            if (shouldLog(metrics.getSymbol())) {
-                log.info("[REDIS-WRITE] Cached OrderbookMetrics for {}: {}", metrics.getSymbol(), key);
-            }
         } catch (Exception e) {
-            log.error("[REDIS-CACHE] Failed to cache orderbook for {}: {}",
-                metrics.getSymbol(), e.getMessage());
+            log.error("[REDIS-CACHE] Failed to cache orderbook for scripCode={}: {}",
+                metrics.getScripCode(), e.getMessage());
         }
     }
 
     /**
-     * Get latest orderbook metrics.
+     * Get latest orderbook metrics by scripCode.
      */
-    public OrderbookMetrics getLatestOrderbookMetrics(String symbol) {
-        String key = buildOrderbookKey(symbol);
+    public OrderbookMetrics getLatestOrderbookMetrics(String scripCode) {
+        String key = buildOrderbookKey(scripCode);
         try {
-            OrderbookMetrics result = (OrderbookMetrics) redisTemplate.opsForValue().get(key);
-            if (shouldLog(symbol)) {
-                log.info("[REDIS-READ] OrderbookMetrics for {}: {}", symbol,
-                    result != null ? "found (ofi=" + result.getOfi() + ")" : "MISS");
-            }
-            return result;
+            return (OrderbookMetrics) redisTemplate.opsForValue().get(key);
         } catch (Exception e) {
-            log.error("[REDIS-CACHE] Failed to get orderbook for {}: {}",
-                symbol, e.getMessage());
+            log.error("[REDIS-CACHE] Failed to get orderbook for scripCode={}: {}",
+                scripCode, e.getMessage());
             return null;
         }
     }
@@ -263,40 +212,31 @@ public class RedisCacheService {
     // ==================== OI METRICS CACHING ====================
 
     /**
-     * Cache OI metrics.
+     * Cache OI metrics by scripCode.
      */
     public void cacheOIMetrics(OIMetrics metrics) {
-        if (metrics == null || metrics.getSymbol() == null) return;
+        if (metrics == null || metrics.getScripCode() == null) return;
 
         try {
-            String key = buildOIKey(metrics.getSymbol());
+            String key = buildOIKey(metrics.getScripCode());
             redisTemplate.opsForValue().set(key, metrics,
                 Duration.ofMinutes(tickLatestTtlMinutes));
-
-            if (shouldLog(metrics.getSymbol())) {
-                log.info("[REDIS-WRITE] Cached OIMetrics for {}: {}", metrics.getSymbol(), key);
-            }
         } catch (Exception e) {
-            log.error("[REDIS-CACHE] Failed to cache OI for {}: {}",
-                metrics.getSymbol(), e.getMessage());
+            log.error("[REDIS-CACHE] Failed to cache OI for scripCode={}: {}",
+                metrics.getScripCode(), e.getMessage());
         }
     }
 
     /**
-     * Get latest OI metrics.
+     * Get latest OI metrics by scripCode.
      */
-    public OIMetrics getLatestOIMetrics(String symbol) {
-        String key = buildOIKey(symbol);
+    public OIMetrics getLatestOIMetrics(String scripCode) {
+        String key = buildOIKey(scripCode);
         try {
-            OIMetrics result = (OIMetrics) redisTemplate.opsForValue().get(key);
-            if (shouldLog(symbol)) {
-                log.info("[REDIS-READ] OIMetrics for {}: {}", symbol,
-                    result != null ? "found (oi=" + result.getOpenInterest() + ", interp=" + result.getInterpretation() + ")" : "MISS");
-            }
-            return result;
+            return (OIMetrics) redisTemplate.opsForValue().get(key);
         } catch (Exception e) {
-            log.error("[REDIS-CACHE] Failed to get OI for {}: {}",
-                symbol, e.getMessage());
+            log.error("[REDIS-CACHE] Failed to get OI for scripCode={}: {}",
+                scripCode, e.getMessage());
             return null;
         }
     }
@@ -304,56 +244,56 @@ public class RedisCacheService {
     // ==================== UTILITY METHODS ====================
 
     /**
-     * Get all cached symbols.
+     * Get all cached scripCodes (from tick candle keys).
      */
-    public Set<String> getCachedSymbols() {
+    public Set<String> getCachedScripCodes() {
         try {
             return redisTemplate.keys("tick:*:1m:latest");
         } catch (Exception e) {
-            log.error("[REDIS-CACHE] Failed to get cached symbols: {}", e.getMessage());
+            log.error("[REDIS-CACHE] Failed to get cached scripCodes: {}", e.getMessage());
             return Set.of();
         }
     }
 
     /**
-     * Clear cache for a symbol.
+     * Clear cache for a scripCode.
      */
-    public void clearSymbolCache(String symbol) {
+    public void clearScripCodeCache(String scripCode) {
         try {
-            Set<String> keys = redisTemplate.keys("*:" + symbol + ":*");
+            Set<String> keys = redisTemplate.keys("*:" + scripCode + ":*");
             if (keys != null && !keys.isEmpty()) {
                 redisTemplate.delete(keys);
             }
         } catch (Exception e) {
-            log.error("[REDIS-CACHE] Failed to clear cache for {}: {}",
-                symbol, e.getMessage());
+            log.error("[REDIS-CACHE] Failed to clear cache for scripCode={}: {}",
+                scripCode, e.getMessage());
         }
     }
 
     // ==================== KEY BUILDERS ====================
 
-    private String buildTickLatestKey(String symbol, Timeframe tf) {
-        return String.format("tick:%s:%s:latest", symbol, tf.getLabel());
+    private String buildTickLatestKey(String scripCode, Timeframe tf) {
+        return String.format("tick:%s:%s:latest", scripCode, tf.getLabel());
     }
 
-    private String buildTickHistoryKey(String symbol, Timeframe tf) {
-        return String.format("tick:%s:%s:history", symbol, tf.getLabel());
+    private String buildTickHistoryKey(String scripCode, Timeframe tf) {
+        return String.format("tick:%s:%s:history", scripCode, tf.getLabel());
     }
 
-    private String buildUnifiedLatestKey(String symbol, Timeframe tf) {
-        return String.format("unified:%s:%s:latest", symbol, tf.getLabel());
+    private String buildUnifiedLatestKey(String scripCode, Timeframe tf) {
+        return String.format("unified:%s:%s:latest", scripCode, tf.getLabel());
     }
 
-    private String buildUnifiedHistoryKey(String symbol, Timeframe tf) {
-        return String.format("unified:%s:%s:history", symbol, tf.getLabel());
+    private String buildUnifiedHistoryKey(String scripCode, Timeframe tf) {
+        return String.format("unified:%s:%s:history", scripCode, tf.getLabel());
     }
 
-    private String buildOrderbookKey(String symbol) {
-        return String.format("ob:%s:latest", symbol);
+    private String buildOrderbookKey(String scripCode) {
+        return String.format("ob:%s:latest", scripCode);
     }
 
-    private String buildOIKey(String symbol) {
-        return String.format("oi:%s:latest", symbol);
+    private String buildOIKey(String scripCode) {
+        return String.format("oi:%s:latest", scripCode);
     }
 
     // ==================== PRICE CACHE FOR OI INTERPRETATION (v2.1) ====================
@@ -362,15 +302,15 @@ public class RedisCacheService {
     private static final String PREV_PRICE_KEY_PREFIX = "prevprice:";
 
     /**
-     * Cache current price for a symbol (for OI interpretation).
+     * Cache current price for a scripCode (for OI interpretation).
      * Also stores previous price before updating.
      */
-    public void cachePrice(String symbol, double price) {
-        if (symbol == null || price <= 0) return;
-        
+    public void cachePrice(String scripCode, double price) {
+        if (scripCode == null || price <= 0) return;
+
         try {
-            String priceKey = PRICE_KEY_PREFIX + symbol;
-            String prevPriceKey = PREV_PRICE_KEY_PREFIX + symbol;
+            String priceKey = PRICE_KEY_PREFIX + scripCode;
+            String prevPriceKey = PREV_PRICE_KEY_PREFIX + scripCode;
             
             // Get current price to store as previous
             Object current = redisTemplate.opsForValue().get(priceKey);
@@ -380,45 +320,45 @@ public class RedisCacheService {
             }
             
             // Store new price
-            redisTemplate.opsForValue().set(priceKey, price, 
+            redisTemplate.opsForValue().set(priceKey, price,
                 Duration.ofMinutes(tickLatestTtlMinutes));
         } catch (Exception e) {
-            log.debug("[REDIS-CACHE] Failed to cache price for {}: {}", symbol, e.getMessage());
+            log.debug("[REDIS-CACHE] Failed to cache price for scripCode={}: {}", scripCode, e.getMessage());
         }
     }
 
     /**
-     * Get last known price for a symbol.
+     * Get last known price for a scripCode.
      */
-    public Double getLastPrice(String symbol) {
-        if (symbol == null) return null;
-        
+    public Double getLastPrice(String scripCode) {
+        if (scripCode == null) return null;
+
         try {
-            String key = PRICE_KEY_PREFIX + symbol;
+            String key = PRICE_KEY_PREFIX + scripCode;
             Object value = redisTemplate.opsForValue().get(key);
             if (value instanceof Number) {
                 return ((Number) value).doubleValue();
             }
         } catch (Exception e) {
-            log.debug("[REDIS-CACHE] Failed to get price for {}: {}", symbol, e.getMessage());
+            log.debug("[REDIS-CACHE] Failed to get price for scripCode={}: {}", scripCode, e.getMessage());
         }
         return null;
     }
 
     /**
-     * Get previous price for a symbol.
+     * Get previous price for a scripCode.
      */
-    public Double getPreviousPrice(String symbol) {
-        if (symbol == null) return null;
-        
+    public Double getPreviousPrice(String scripCode) {
+        if (scripCode == null) return null;
+
         try {
-            String key = PREV_PRICE_KEY_PREFIX + symbol;
+            String key = PREV_PRICE_KEY_PREFIX + scripCode;
             Object value = redisTemplate.opsForValue().get(key);
             if (value instanceof Number) {
                 return ((Number) value).doubleValue();
             }
         } catch (Exception e) {
-            log.debug("[REDIS-CACHE] Failed to get previous price for {}: {}", symbol, e.getMessage());
+            log.debug("[REDIS-CACHE] Failed to get previous price for scripCode={}: {}", scripCode, e.getMessage());
         }
         return null;
     }

@@ -16,6 +16,10 @@ import java.util.stream.Collectors;
  *
  * This is the main interface for strategies to fetch candle data.
  *
+ * IMPORTANT: All methods use scripCode (NOT symbol) to avoid mixing data from
+ * different instruments that share the same symbol name (e.g., SBICARD equity
+ * vs SBICARD options).
+ *
  * Responsibilities:
  * 1. Merge TickCandle + OrderbookMetrics + OIMetrics into UnifiedCandle
  * 2. Aggregate 1m candles to higher timeframes (5m, 15m, 30m, etc.)
@@ -27,6 +31,7 @@ import java.util.stream.Collectors;
  * - ON-DEMAND AGGREGATION: Higher timeframes computed from 1m candles
  * - CACHE-FIRST: Redis for hot data, MongoDB for historical
  * - EXPLICIT DATA AVAILABILITY: UnifiedCandle.hasOrderbook, hasOI flags
+ * - SCRIPCODE-KEYED: All lookups use scripCode for unique instrument identification
  */
 @Service
 @Slf4j
@@ -51,67 +56,67 @@ public class CandleService {
     // ==================== LATEST CANDLE ====================
 
     /**
-     * Get latest unified candle for a symbol.
+     * Get latest unified candle for a scripCode.
      *
-     * @param symbol Symbol (e.g., "NIFTY", "RELIANCE")
+     * @param scripCode scripCode (unique instrument identifier)
      * @return Latest UnifiedCandle with all available data
      */
-    public UnifiedCandle getLatestCandle(String symbol) {
-        return getLatestCandle(symbol, Timeframe.M1);
+    public UnifiedCandle getLatestCandle(String scripCode) {
+        return getLatestCandle(scripCode, Timeframe.M1);
     }
 
     /**
-     * Get latest unified candle for a symbol at specific timeframe.
+     * Get latest unified candle for a scripCode at specific timeframe.
      *
      * For 1m: returns latest 1m candle
      * For higher: aggregates last N 1m candles where N = timeframe.getMinutes()
      *
-     * @param symbol    Symbol
+     * @param scripCode scripCode (unique instrument identifier)
      * @param timeframe Desired timeframe
      * @return Latest UnifiedCandle for the timeframe
      */
-    public UnifiedCandle getLatestCandle(String symbol, Timeframe timeframe) {
+    public UnifiedCandle getLatestCandle(String scripCode, Timeframe timeframe) {
         if (timeframe == Timeframe.M1) {
-            return getLatest1mCandle(symbol);
+            return getLatest1mCandle(scripCode);
         }
 
         // For higher timeframes, aggregate from 1m candles
-        return aggregateLatestToTimeframe(symbol, timeframe);
+        return aggregateLatestToTimeframe(scripCode, timeframe);
     }
 
     /**
      * Get latest 1m unified candle (merged from tick + orderbook + OI).
      */
-    private UnifiedCandle getLatest1mCandle(String symbol) {
-        // Try Redis cache first
-        TickCandle tick = redisCacheService.getLatestTickCandle(symbol);
+    private UnifiedCandle getLatest1mCandle(String scripCode) {
+        // Try Redis cache first (keyed by scripCode)
+        TickCandle tick = redisCacheService.getLatestTickCandle(scripCode);
 
         if (tick == null) {
-            // Fallback to MongoDB
-            tick = tickCandleRepository.findTopBySymbolOrderByTimestampDesc(symbol)
+            // Fallback to MongoDB (query by scripCode)
+            tick = tickCandleRepository.findTopByScripCodeOrderByTimestampDesc(scripCode)
                 .orElse(null);
         }
 
         if (tick == null) {
-            log.debug("[CANDLE-SVC] No tick data for {}", symbol);
+            log.debug("[CANDLE-SVC] No tick data for scripCode={}", scripCode);
             return null;
         }
 
         UnifiedCandle candle = UnifiedCandle.fromTick(tick, Timeframe.M1);
 
-        // Merge orderbook metrics
-        OrderbookMetrics ob = redisCacheService.getLatestOrderbookMetrics(symbol);
+        // Merge orderbook metrics (keyed by scripCode)
+        OrderbookMetrics ob = redisCacheService.getLatestOrderbookMetrics(scripCode);
         if (ob == null) {
-            ob = orderbookMetricsRepository.findTopBySymbolOrderByTimestampDesc(symbol)
+            ob = orderbookMetricsRepository.findTopByScripCodeOrderByTimestampDesc(scripCode)
                 .orElse(null);
         }
         candle.withOrderbook(ob);
 
         // Merge OI metrics (for derivatives)
         if (tick.getInstrumentType() != null && tick.getInstrumentType().isDerivative()) {
-            OIMetrics oi = redisCacheService.getLatestOIMetrics(symbol);
+            OIMetrics oi = redisCacheService.getLatestOIMetrics(scripCode);
             if (oi == null) {
-                oi = oiMetricsRepository.findTopBySymbolOrderByTimestampDesc(symbol)
+                oi = oiMetricsRepository.findTopByScripCodeOrderByTimestampDesc(scripCode)
                     .orElse(null);
             }
 
@@ -128,20 +133,20 @@ public class CandleService {
     /**
      * Aggregate latest 1m candles to a higher timeframe.
      */
-    private UnifiedCandle aggregateLatestToTimeframe(String symbol, Timeframe timeframe) {
+    private UnifiedCandle aggregateLatestToTimeframe(String scripCode, Timeframe timeframe) {
         int candlesNeeded = timeframe.getMinutes();
 
-        // Get 1m candle history from Redis
-        List<TickCandle> ticks = redisCacheService.getTickHistory(symbol, candlesNeeded);
+        // Get 1m candle history from Redis (keyed by scripCode)
+        List<TickCandle> ticks = redisCacheService.getTickHistory(scripCode, candlesNeeded);
 
         if (ticks.isEmpty()) {
-            // Fallback to MongoDB
-            ticks = tickCandleRepository.findBySymbolOrderByTimestampDesc(
-                symbol, PageRequest.of(0, candlesNeeded));
+            // Fallback to MongoDB (query by scripCode)
+            ticks = tickCandleRepository.findByScripCodeOrderByTimestampDesc(
+                scripCode, PageRequest.of(0, candlesNeeded));
         }
 
         if (ticks.isEmpty()) {
-            log.debug("[CANDLE-SVC] No tick data for {} timeframe {}", symbol, timeframe);
+            log.debug("[CANDLE-SVC] No tick data for scripCode={} timeframe {}", scripCode, timeframe);
             return null;
         }
 
@@ -156,9 +161,9 @@ public class CandleService {
             Instant windowStart = ticks.get(0).getWindowStart();
             Instant windowEnd = ticks.get(ticks.size() - 1).getWindowEnd();
 
-            // Aggregate orderbook
+            // Aggregate orderbook (query by scripCode)
             List<OrderbookMetrics> obs = orderbookMetricsRepository
-                .findBySymbolAndTimestampBetween(symbol, windowStart, windowEnd);
+                .findByScripCodeAndTimestampBetween(scripCode, windowStart, windowEnd);
             if (!obs.isEmpty()) {
                 OrderbookMetrics aggregatedOb = aggregateOrderbookMetrics(obs);
                 aggregated.withOrderbook(aggregatedOb);
@@ -167,7 +172,7 @@ public class CandleService {
             // Aggregate OI (for derivatives)
             if (aggregated.isDerivative()) {
                 List<OIMetrics> ois = oiMetricsRepository
-                    .findBySymbolAndTimestampBetween(symbol, windowStart, windowEnd);
+                    .findByScripCodeAndTimestampBetween(scripCode, windowStart, windowEnd);
                 if (!ois.isEmpty()) {
                     // Use the last OI value (OI is cumulative)
                     OIMetrics latestOi = ois.get(ois.size() - 1);
@@ -192,25 +197,25 @@ public class CandleService {
     /**
      * Get unified candle at specific timestamp.
      *
-     * @param symbol    Symbol
+     * @param scripCode scripCode (unique instrument identifier)
      * @param timestamp Timestamp (will be aligned to window)
      * @param timeframe Desired timeframe
      * @return UnifiedCandle at the timestamp
      */
-    public UnifiedCandle getCandle(String symbol, Instant timestamp, Timeframe timeframe) {
+    public UnifiedCandle getCandle(String scripCode, Instant timestamp, Timeframe timeframe) {
         Instant windowStart = timeframe.alignToWindowStart(timestamp);
         Instant windowEnd = timeframe.getWindowEnd(windowStart);
 
         if (timeframe == Timeframe.M1) {
-            return get1mCandle(symbol, windowStart, windowEnd);
+            return get1mCandle(scripCode, windowStart, windowEnd);
         }
 
-        return getAggregatedCandle(symbol, windowStart, windowEnd, timeframe);
+        return getAggregatedCandle(scripCode, windowStart, windowEnd, timeframe);
     }
 
-    private UnifiedCandle get1mCandle(String symbol, Instant windowStart, Instant windowEnd) {
-        // Get tick candle
-        TickCandle tick = tickCandleRepository.findBySymbolAndTimestamp(symbol, windowEnd)
+    private UnifiedCandle get1mCandle(String scripCode, Instant windowStart, Instant windowEnd) {
+        // Get tick candle (query by scripCode)
+        TickCandle tick = tickCandleRepository.findByScripCodeAndTimestamp(scripCode, windowEnd)
             .orElse(null);
 
         if (tick == null) {
@@ -219,13 +224,13 @@ public class CandleService {
 
         UnifiedCandle candle = UnifiedCandle.fromTick(tick, Timeframe.M1);
 
-        // Merge orderbook
-        orderbookMetricsRepository.findBySymbolAndTimestamp(symbol, windowEnd)
+        // Merge orderbook (query by scripCode)
+        orderbookMetricsRepository.findByScripCodeAndTimestamp(scripCode, windowEnd)
             .ifPresent(candle::withOrderbook);
 
-        // Merge OI
+        // Merge OI (query by scripCode)
         if (candle.isDerivative()) {
-            OIMetrics oi = oiMetricsRepository.findBySymbolAndTimestamp(symbol, windowEnd)
+            OIMetrics oi = oiMetricsRepository.findByScripCodeAndTimestamp(scripCode, windowEnd)
                 .orElse(null);
             if (oi != null) {
                 oi = calculateOIInterpretation(oi, tick);
@@ -236,11 +241,11 @@ public class CandleService {
         return candle;
     }
 
-    private UnifiedCandle getAggregatedCandle(String symbol, Instant windowStart,
+    private UnifiedCandle getAggregatedCandle(String scripCode, Instant windowStart,
                                                Instant windowEnd, Timeframe timeframe) {
-        // Get all 1m candles in the window
+        // Get all 1m candles in the window (query by scripCode)
         List<TickCandle> ticks = tickCandleRepository
-            .findBySymbolAndTimestampBetween(symbol, windowStart, windowEnd);
+            .findByScripCodeAndTimestampBetween(scripCode, windowStart, windowEnd);
 
         if (ticks.isEmpty()) {
             return null;
@@ -250,17 +255,17 @@ public class CandleService {
 
         UnifiedCandle aggregated = aggregateTickCandles(ticks, timeframe);
 
-        // Aggregate orderbook
+        // Aggregate orderbook (query by scripCode)
         List<OrderbookMetrics> obs = orderbookMetricsRepository
-            .findBySymbolAndTimestampBetween(symbol, windowStart, windowEnd);
+            .findByScripCodeAndTimestampBetween(scripCode, windowStart, windowEnd);
         if (!obs.isEmpty()) {
             aggregated.withOrderbook(aggregateOrderbookMetrics(obs));
         }
 
-        // Aggregate OI
+        // Aggregate OI (query by scripCode)
         if (aggregated.isDerivative()) {
             List<OIMetrics> ois = oiMetricsRepository
-                .findBySymbolAndTimestampBetween(symbol, windowStart, windowEnd);
+                .findByScripCodeAndTimestampBetween(scripCode, windowStart, windowEnd);
             if (!ois.isEmpty()) {
                 OIMetrics latestOi = ois.get(ois.size() - 1);
 
@@ -279,24 +284,24 @@ public class CandleService {
     // ==================== CANDLE HISTORY ====================
 
     /**
-     * Get candle history for a symbol.
+     * Get candle history for a scripCode.
      *
-     * @param symbol    Symbol
+     * @param scripCode scripCode (unique instrument identifier)
      * @param timeframe Desired timeframe
      * @param count     Number of candles
      * @return List of UnifiedCandles (most recent first)
      */
-    public List<UnifiedCandle> getCandleHistory(String symbol, Timeframe timeframe, int count) {
+    public List<UnifiedCandle> getCandleHistory(String scripCode, Timeframe timeframe, int count) {
         if (timeframe == Timeframe.M1) {
-            return get1mHistory(symbol, count);
+            return get1mHistory(scripCode, count);
         }
 
-        return getAggregatedHistory(symbol, timeframe, count);
+        return getAggregatedHistory(scripCode, timeframe, count);
     }
 
-    private List<UnifiedCandle> get1mHistory(String symbol, int count) {
-        List<TickCandle> ticks = tickCandleRepository.findBySymbolOrderByTimestampDesc(
-            symbol, PageRequest.of(0, count));
+    private List<UnifiedCandle> get1mHistory(String scripCode, int count) {
+        List<TickCandle> ticks = tickCandleRepository.findByScripCodeOrderByTimestampDesc(
+            scripCode, PageRequest.of(0, count));
 
         if (ticks.isEmpty()) {
             return Collections.emptyList();
@@ -307,12 +312,12 @@ public class CandleService {
         Instant endTime = ticks.get(0).getWindowEnd();
 
         Map<Instant, OrderbookMetrics> obMap = orderbookMetricsRepository
-            .findBySymbolAndTimestampBetween(symbol, startTime, endTime)
+            .findByScripCodeAndTimestampBetween(scripCode, startTime, endTime)
             .stream()
             .collect(Collectors.toMap(OrderbookMetrics::getTimestamp, m -> m, (a, b) -> b));
 
         Map<Instant, OIMetrics> oiMap = oiMetricsRepository
-            .findBySymbolAndTimestampBetween(symbol, startTime, endTime)
+            .findByScripCodeAndTimestampBetween(scripCode, startTime, endTime)
             .stream()
             .collect(Collectors.toMap(OIMetrics::getTimestamp, m -> m, (a, b) -> b));
 
@@ -338,13 +343,13 @@ public class CandleService {
         return result;
     }
 
-    private List<UnifiedCandle> getAggregatedHistory(String symbol, Timeframe timeframe, int count) {
+    private List<UnifiedCandle> getAggregatedHistory(String scripCode, Timeframe timeframe, int count) {
         // Calculate how many 1m candles we need
         int candlesPerWindow = timeframe.getMinutes();
         int totalCandlesNeeded = count * candlesPerWindow;
 
-        List<TickCandle> allTicks = tickCandleRepository.findBySymbolOrderByTimestampDesc(
-            symbol, PageRequest.of(0, totalCandlesNeeded));
+        List<TickCandle> allTicks = tickCandleRepository.findByScripCodeOrderByTimestampDesc(
+            scripCode, PageRequest.of(0, totalCandlesNeeded));
 
         if (allTicks.isEmpty()) {
             return Collections.emptyList();
@@ -365,19 +370,19 @@ public class CandleService {
 
             UnifiedCandle aggregated = aggregateTickCandles(windowTicks, timeframe);
 
-            // Add orderbook and OI if available
+            // Add orderbook and OI if available (query by scripCode)
             Instant windowStart = windowTicks.get(0).getWindowStart();
             Instant windowEnd = windowTicks.get(windowTicks.size() - 1).getWindowEnd();
 
             List<OrderbookMetrics> obs = orderbookMetricsRepository
-                .findBySymbolAndTimestampBetween(symbol, windowStart, windowEnd);
+                .findByScripCodeAndTimestampBetween(scripCode, windowStart, windowEnd);
             if (!obs.isEmpty()) {
                 aggregated.withOrderbook(aggregateOrderbookMetrics(obs));
             }
 
             if (aggregated.isDerivative()) {
                 List<OIMetrics> ois = oiMetricsRepository
-                    .findBySymbolAndTimestampBetween(symbol, windowStart, windowEnd);
+                    .findByScripCodeAndTimestampBetween(scripCode, windowStart, windowEnd);
                 if (!ois.isEmpty()) {
                     OIMetrics latestOi = ois.get(ois.size() - 1);
                     double priceChange = (windowTicks.get(windowTicks.size() - 1).getClose() -
@@ -633,29 +638,29 @@ public class CandleService {
     // ==================== UTILITY METHODS ====================
 
     /**
-     * Check if data exists for a symbol.
+     * Check if data exists for a scripCode.
      */
-    public boolean hasData(String symbol) {
-        return tickCandleRepository.findTopBySymbolOrderByTimestampDesc(symbol).isPresent();
+    public boolean hasData(String scripCode) {
+        return tickCandleRepository.findTopByScripCodeOrderByTimestampDesc(scripCode).isPresent();
     }
 
     /**
-     * Get available symbols with data.
+     * Get available scripCodes with cached data.
      */
-    public Set<String> getAvailableSymbols() {
-        return redisCacheService.getCachedSymbols();
+    public Set<String> getAvailableScripCodes() {
+        return redisCacheService.getCachedScripCodes();
     }
 
     /**
-     * Get latest candles for multiple symbols (batch query).
+     * Get latest candles for multiple scripCodes (batch query).
      */
-    public Map<String, UnifiedCandle> getLatestCandles(List<String> symbols) {
+    public Map<String, UnifiedCandle> getLatestCandles(List<String> scripCodes) {
         Map<String, UnifiedCandle> result = new HashMap<>();
 
-        for (String symbol : symbols) {
-            UnifiedCandle candle = getLatestCandle(symbol);
+        for (String scripCode : scripCodes) {
+            UnifiedCandle candle = getLatestCandle(scripCode);
             if (candle != null) {
-                result.put(symbol, candle);
+                result.put(scripCode, candle);
             }
         }
 
@@ -663,15 +668,15 @@ public class CandleService {
     }
 
     /**
-     * Get latest candles for multiple symbols at specific timeframe.
+     * Get latest candles for multiple scripCodes at specific timeframe.
      */
-    public Map<String, UnifiedCandle> getLatestCandles(List<String> symbols, Timeframe timeframe) {
+    public Map<String, UnifiedCandle> getLatestCandles(List<String> scripCodes, Timeframe timeframe) {
         Map<String, UnifiedCandle> result = new HashMap<>();
 
-        for (String symbol : symbols) {
-            UnifiedCandle candle = getLatestCandle(symbol, timeframe);
+        for (String scripCode : scripCodes) {
+            UnifiedCandle candle = getLatestCandle(scripCode, timeframe);
             if (candle != null) {
-                result.put(symbol, candle);
+                result.put(scripCode, candle);
             }
         }
 

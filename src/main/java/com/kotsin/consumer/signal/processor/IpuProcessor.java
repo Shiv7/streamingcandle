@@ -67,19 +67,21 @@ public class IpuProcessor {
         double momentum = calculateMomentumContext(candle, history);
         double exhaustion = calculateExhaustion(candle, history);
         double urgency = calculateUrgency(candle, history);
+        double vpinScore = calculateVpinScore(candle, history);
         String direction = determineDirection(candle, history);
 
-        // Composite IPU score
-        double ipuScore = calculateCompositeScore(instProxy, momentum, exhaustion, urgency);
+        // Composite IPU score (now includes VPIN)
+        double ipuScore = calculateCompositeScore(instProxy, momentum, exhaustion, urgency, vpinScore);
 
-        log.debug("{} {} IPU complete: score={}, direction={}, exhaustion={}, instProxy={}, momentum={}, urgency={}",
+        log.debug("{} {} IPU complete: score={}, direction={}, exhaustion={}, instProxy={}, momentum={}, urgency={}, vpin={}",
             LOG_PREFIX, TraceContext.getShortPrefix(),
             String.format("%.3f", ipuScore),
             direction,
             String.format("%.3f", exhaustion),
             String.format("%.3f", instProxy),
             String.format("%.3f", momentum),
-            String.format("%.3f", urgency));
+            String.format("%.3f", urgency),
+            String.format("%.3f", vpinScore));
 
         return IpuSnapshot.builder()
             .timestamp(candle.getTimestamp())
@@ -320,16 +322,60 @@ public class IpuProcessor {
     }
 
     /**
+     * Calculate VPIN score.
+     * High VPIN indicates informed trading activity (institutional).
+     */
+    private double calculateVpinScore(UnifiedCandle candle, List<UnifiedCandle> history) {
+        double vpin = candle.getVpin();
+
+        // VPIN is already 0-1, but we need to check for valid values
+        if (vpin <= 0 || Double.isNaN(vpin)) {
+            return 0;
+        }
+
+        double score = 0;
+
+        // 1. Current VPIN level (0-0.5 score)
+        // VPIN > 0.5 indicates high probability of informed trading
+        score += Math.min(0.5, vpin);
+
+        // 2. VPIN spike (compare to recent average)
+        if (history != null && !history.isEmpty()) {
+            double avgVpin = getAverageVpin(history);
+            if (avgVpin > 0) {
+                double vpinSpike = vpin / avgVpin;
+                // Score boost for VPIN spike
+                score += Math.min(0.3, (vpinSpike - 1) * 0.15);
+            }
+        }
+
+        // 3. Consistent high VPIN (0-0.2 score)
+        if (history != null && history.size() >= 3) {
+            int highVpinCount = 0;
+            for (int i = 0; i < Math.min(3, history.size()); i++) {
+                if (history.get(i).getVpin() > 0.4) highVpinCount++;
+            }
+            if (highVpinCount >= 2) {
+                score += 0.2;
+            }
+        }
+
+        return Math.min(1, score);
+    }
+
+    /**
      * Calculate composite IPU score.
      */
     private double calculateCompositeScore(double instProxy, double momentum,
-                                           double exhaustion, double urgency) {
+                                           double exhaustion, double urgency, double vpinScore) {
         // Higher exhaustion reduces score
         double exhaustionPenalty = 1 - (exhaustion * 0.3);
 
-        double raw = (instProxy * 0.30 +
-                     momentum * 0.30 +
-                     urgency * 0.40) * exhaustionPenalty;
+        // Include VPIN in composite calculation
+        double raw = (instProxy * 0.25 +
+                     momentum * 0.25 +
+                     urgency * 0.30 +
+                     vpinScore * 0.20) * exhaustionPenalty;
 
         return Math.min(1, Math.max(0, raw));
     }
@@ -456,6 +502,14 @@ public class IpuProcessor {
         return history.stream()
             .filter(c -> c != null)
             .mapToInt(UnifiedCandle::getTickCount)
+            .average().orElse(0);
+    }
+
+    private double getAverageVpin(List<UnifiedCandle> history) {
+        if (history == null || history.isEmpty()) return 0;
+        return history.stream()
+            .filter(c -> c != null && c.getVpin() > 0)
+            .mapToDouble(UnifiedCandle::getVpin)
             .average().orElse(0);
     }
 
