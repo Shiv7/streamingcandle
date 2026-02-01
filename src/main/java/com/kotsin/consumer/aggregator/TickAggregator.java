@@ -1,5 +1,6 @@
 package com.kotsin.consumer.aggregator;
 
+import com.kotsin.consumer.logging.TraceContext;
 import com.kotsin.consumer.model.TickData;
 import com.kotsin.consumer.model.TickCandle;
 import com.kotsin.consumer.model.Timeframe;
@@ -74,6 +75,11 @@ public class TickAggregator {
     @Value("${v2.tick.output.topic:tick-candles-1m}")
     private String outputTopic;
 
+    @Value("${logging.trace.symbols:}")
+    private String traceSymbolsStr;
+    private Set<String> traceSymbols;
+    private final java.util.concurrent.atomic.AtomicLong tickTraceCounter = new java.util.concurrent.atomic.AtomicLong(0);
+
     @Autowired
     private TickCandleRepository tickCandleRepository;
 
@@ -129,6 +135,18 @@ public class TickAggregator {
         emissionScheduler.scheduleAtFixedRate(this::checkWindowEmission, 1, 1, TimeUnit.SECONDS);
 
         log.info("{} Started successfully", LOG_PREFIX);
+
+        // Parse trace symbols
+        this.traceSymbols = new HashSet<>();
+        if (traceSymbolsStr != null && !traceSymbolsStr.isBlank()) {
+            String[] parts = traceSymbolsStr.split(",");
+            for (String part : parts) {
+                traceSymbols.add(part.trim().toUpperCase());
+            }
+            log.info("{} Trace logging enabled for symbols: {}", LOG_PREFIX, traceSymbols);
+        } else {
+            log.info("{} Trace logging enabled for ALL symbols (FULL - NO SAMPLING)", LOG_PREFIX);
+        }
     }
 
     @PreDestroy
@@ -206,6 +224,8 @@ public class TickAggregator {
     private void processTick(TickData tick, long kafkaTimestamp) {
         if (tick == null || tick.getScripCode() == null) return;
 
+
+      //  log.info("tick data  is : {}",tick);
         // DATA QUALITY VALIDATION (v2.1)
         String validationError = validateTick(tick);
         if (validationError != null) {
@@ -213,17 +233,41 @@ public class TickAggregator {
             return;
         }
 
+        if (validationError != null) {
+            log.debug("{} Rejected tick {}: {}", LOG_PREFIX, tick.getScripCode(), validationError);
+            return;
+        }
+
         String key = buildKey(tick);
-        
-        // USE EVENT TIME from tick, not Kafka timestamp (v2.1)
-        Instant tickTime = parseEventTime(tick, kafkaTimestamp);
+        // Extract symbol for logging check
+        String symbol = TickAggregateState.extractSymbol(tick.getCompanyName(), tick.getScripCode());
 
-        // Get or create aggregation state
-        TickAggregateState state = aggregationState.computeIfAbsent(key,
-            k -> new TickAggregateState(tick, currentWindowStart, currentWindowEnd));
+        // [TICK-TRACE] Log sampling
+        long count = tickTraceCounter.incrementAndGet();
+        // [TICK-TRACE] Log everything if list is empty, or specific symbol
+        boolean specificSymbol = traceSymbols.contains(symbol);
+        boolean shouldLog = specificSymbol || traceSymbols.isEmpty();
 
-        // Update aggregation
-        state.update(tick, tickTime);
+        if (shouldLog) {
+            log.info("[TICK-TRACE] Received tick for {}: Price={}, Vol={}, Time={}", 
+                symbol, tick.getLastRate(), tick.getLastQuantity(), tick.getTickDt());
+        }
+
+        // Start trace context
+        TraceContext.start(symbol, "1m");
+        try {
+            // USE EVENT TIME from tick, not Kafka timestamp (v2.1)
+            Instant tickTime = parseEventTime(tick, kafkaTimestamp);
+
+            // Get or create aggregation state
+            TickAggregateState state = aggregationState.computeIfAbsent(key,
+                k -> new TickAggregateState(tick, currentWindowStart, currentWindowEnd));
+
+            // Update aggregation
+            state.update(tick, tickTime);
+        } finally {
+            TraceContext.clear();
+        }
     }
 
     /**
@@ -256,19 +300,6 @@ public class TickAggregator {
         if (tick.getLastRate() <= 0) {
             return "Price <= 0";
         }
-        
-        // Check quantity > 0
-        if (tick.getLastQuantity() <= 0) {
-            return "Quantity <= 0";
-        }
-        
-        // Check crossed market (bid > ask)
-        double bid = tick.getBidRate();
-        double ask = tick.getOfferRate();
-        if (bid > 0 && ask > 0 && bid > ask) {
-            return "Crossed market: bid > ask";
-        }
-        
         return null; // Valid
     }
 
@@ -325,7 +356,17 @@ public class TickAggregator {
             // Batch save to MongoDB
             try {
                 tickCandleRepository.saveAll(candlesToSave);
-            log.info("{} Saved {} candles to MongoDB", LOG_PREFIX, candlesToSave.size());
+                log.info("{} Saved {} candles to MongoDB", LOG_PREFIX, candlesToSave.size());
+                
+                // Trace individual saves if enabled
+                if (traceSymbols != null && !traceSymbols.isEmpty()) {
+                    for (TickCandle c : candlesToSave) {
+                        if (traceSymbols.contains(c.getSymbol()) || traceSymbols.contains(c.getScripCode())) {
+                            log.info("[MONGO-WRITE] TickCandle saved for {} @ {} | Close: {} | Vol: {}", 
+                                c.getSymbol(), formatTime(c.getWindowEnd()), c.getClose(), c.getVolume());
+                        }
+                    }
+                }
             } catch (Exception e) {
                 log.error("{} Failed to save to MongoDB: {}", LOG_PREFIX, e.getMessage());
             }
@@ -732,6 +773,8 @@ public class TickAggregator {
 
             return scripCode;
         }
+
+
 
         /**
          * Parse option metadata from company name.

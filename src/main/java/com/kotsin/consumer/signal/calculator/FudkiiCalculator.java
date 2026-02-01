@@ -299,12 +299,18 @@ public class FudkiiCalculator {
             }
         }
 
-        // Kyle score: lower lambda = better liquidity = higher score
+        // Kyle score: We use a dual interpretation:
+        // 1. Lower lambda = better liquidity = easier entry/exit
+        // 2. Higher lambda = more price impact = institutional activity detected
+        // For SIGNAL QUALITY: higher price impact (institutional) = stronger signal
         double avgLambda = getAverageKyleLambda(history);
         if (avgLambda > 0) {
-            result.score = Math.max(0, 1 - (result.lambda / (avgLambda * 2)));
+            // Normalize: lambda at 2x average = score of 1.0 (strong institutional)
+            // lambda at 0.5x average = score of 0.25 (low activity)
+            double normalizedLambda = result.lambda / avgLambda;
+            result.score = Math.min(1.0, Math.max(0, normalizedLambda * 0.5));
         } else {
-            result.score = 0.5; // Default
+            result.score = 0.5; // Default when no history
         }
 
         return result;
@@ -360,7 +366,9 @@ public class FudkiiCalculator {
         result.suggestsReversal = suggestsReversal != null && suggestsReversal;
 
         // Intensity score based on OI change magnitude
-        result.score = Math.min(1, Math.abs(result.oiChangePercent) / 10.0);
+        // Threshold reduced from 10% to 3% for intraday sensitivity
+        // (Most intraday OI changes are 0.5-3%, so 10% was too high)
+        result.score = Math.min(1, Math.abs(result.oiChangePercent) / 3.0);
 
         // Boost for clear interpretations
         if (result.interpretation != OIInterpretation.NEUTRAL) {

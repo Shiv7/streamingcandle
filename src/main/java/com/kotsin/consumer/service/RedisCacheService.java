@@ -42,6 +42,39 @@ public class RedisCacheService {
     @Value("${v2.cache.tick.history.max.size:500}")
     private int tickHistoryMaxSize;
 
+    @Value("${logging.trace.symbols:}")
+    private String traceSymbolsStr;
+    private Set<String> traceSymbols;
+
+    @jakarta.annotation.PostConstruct
+    public void init() {
+         this.traceSymbols = new java.util.HashSet<>();
+        if (traceSymbolsStr != null && !traceSymbolsStr.isBlank()) {
+            String[] parts = traceSymbolsStr.split(",");
+            for (String part : parts) {
+                traceSymbols.add(part.trim().toUpperCase());
+            }
+        }
+    }
+
+    private boolean shouldLog(String symbol) {
+         if (symbol == null) return false;
+         // For Redis writes, we only log if specific symbols are requested, 
+         // OR we log very sparsely if "ALL" is enabled to avoid spamming 
+         // (since Redis writes happen every minute for every symbol).
+         // Actually, let's just log if specific symbol is in list.
+         // If list is empty (ALL), we won't log every write to keep it clean,
+         // UNLESS we use a sampler.
+         // Let's rely on TickAggregator for the "pulse" and here just for confirmation if specific symbols are set.
+         // BUT user said "make it empty" to see ALL.
+         // So I should log basic stats or 1 sample.
+         
+         // User requested FULL LOGS (make it empty). So if empty, we return TRUE.
+         if (traceSymbols.isEmpty()) return true;
+         
+         return traceSymbols.contains(symbol);
+    }
+
     // ==================== TICK CANDLE CACHING ====================
 
     /**
@@ -57,6 +90,10 @@ public class RedisCacheService {
             String latestKey = buildTickLatestKey(symbol, Timeframe.M1);
             redisTemplate.opsForValue().set(latestKey, candle,
                 Duration.ofMinutes(tickLatestTtlMinutes));
+
+            if (shouldLog(symbol)) {
+                log.info("[REDIS-WRITE] Cached TickCandle for {}: {}", symbol, latestKey);
+            }
 
             // Add to history list
             String historyKey = buildTickHistoryKey(symbol, Timeframe.M1);
@@ -76,7 +113,12 @@ public class RedisCacheService {
     public TickCandle getLatestTickCandle(String symbol) {
         String key = buildTickLatestKey(symbol, Timeframe.M1);
         try {
-            return (TickCandle) redisTemplate.opsForValue().get(key);
+            TickCandle result = (TickCandle) redisTemplate.opsForValue().get(key);
+            if (shouldLog(symbol)) {
+                log.info("[REDIS-READ] TickCandle for {}: {}", symbol, 
+                    result != null ? "found (close=" + result.getClose() + ")" : "MISS");
+            }
+            return result;
         } catch (Exception e) {
             log.error("[REDIS-CACHE] Failed to get latest tick for {}: {}",
                 symbol, e.getMessage());
@@ -140,7 +182,12 @@ public class RedisCacheService {
     public UnifiedCandle getLatestAggregatedCandle(String symbol, Timeframe tf) {
         String key = buildUnifiedLatestKey(symbol, tf);
         try {
-            return (UnifiedCandle) redisTemplate.opsForValue().get(key);
+            UnifiedCandle result = (UnifiedCandle) redisTemplate.opsForValue().get(key);
+            if (shouldLog(symbol)) {
+                log.info("[REDIS-READ] UnifiedCandle for {}:{}: {}", symbol, tf.getLabel(),
+                    result != null ? "found (close=" + result.getClose() + ")" : "MISS");
+            }
+            return result;
         } catch (Exception e) {
             log.error("[REDIS-CACHE] Failed to get aggregated candle for {}:{}: {}",
                 symbol, tf, e.getMessage());
@@ -184,6 +231,10 @@ public class RedisCacheService {
             String key = buildOrderbookKey(metrics.getSymbol());
             redisTemplate.opsForValue().set(key, metrics,
                 Duration.ofMinutes(tickLatestTtlMinutes));
+                
+            if (shouldLog(metrics.getSymbol())) {
+                log.info("[REDIS-WRITE] Cached OrderbookMetrics for {}: {}", metrics.getSymbol(), key);
+            }
         } catch (Exception e) {
             log.error("[REDIS-CACHE] Failed to cache orderbook for {}: {}",
                 metrics.getSymbol(), e.getMessage());
@@ -196,7 +247,12 @@ public class RedisCacheService {
     public OrderbookMetrics getLatestOrderbookMetrics(String symbol) {
         String key = buildOrderbookKey(symbol);
         try {
-            return (OrderbookMetrics) redisTemplate.opsForValue().get(key);
+            OrderbookMetrics result = (OrderbookMetrics) redisTemplate.opsForValue().get(key);
+            if (shouldLog(symbol)) {
+                log.info("[REDIS-READ] OrderbookMetrics for {}: {}", symbol,
+                    result != null ? "found (ofi=" + result.getOfi() + ")" : "MISS");
+            }
+            return result;
         } catch (Exception e) {
             log.error("[REDIS-CACHE] Failed to get orderbook for {}: {}",
                 symbol, e.getMessage());
@@ -216,6 +272,10 @@ public class RedisCacheService {
             String key = buildOIKey(metrics.getSymbol());
             redisTemplate.opsForValue().set(key, metrics,
                 Duration.ofMinutes(tickLatestTtlMinutes));
+
+            if (shouldLog(metrics.getSymbol())) {
+                log.info("[REDIS-WRITE] Cached OIMetrics for {}: {}", metrics.getSymbol(), key);
+            }
         } catch (Exception e) {
             log.error("[REDIS-CACHE] Failed to cache OI for {}: {}",
                 metrics.getSymbol(), e.getMessage());
@@ -228,7 +288,12 @@ public class RedisCacheService {
     public OIMetrics getLatestOIMetrics(String symbol) {
         String key = buildOIKey(symbol);
         try {
-            return (OIMetrics) redisTemplate.opsForValue().get(key);
+            OIMetrics result = (OIMetrics) redisTemplate.opsForValue().get(key);
+            if (shouldLog(symbol)) {
+                log.info("[REDIS-READ] OIMetrics for {}: {}", symbol,
+                    result != null ? "found (oi=" + result.getOpenInterest() + ", interp=" + result.getInterpretation() + ")" : "MISS");
+            }
+            return result;
         } catch (Exception e) {
             log.error("[REDIS-CACHE] Failed to get OI for {}: {}",
                 symbol, e.getMessage());

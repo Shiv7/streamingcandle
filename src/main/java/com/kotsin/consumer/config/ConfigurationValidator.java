@@ -29,19 +29,7 @@ public class ConfigurationValidator {
     
     @Value("${spring.kafka.streams.application-id:}")
     private String applicationId;
-    
-    @Value("${unified.input.topic.ticks:}")
-    private String ticksTopic;
-    
-    @Value("${unified.input.topic.oi:}")
-    private String oiTopic;
-    
-    @Value("${unified.input.topic.orderbook:}")
-    private String orderbookTopic;
-    
-    @Value("${unified.output.topic.instrument:}")
-    private String instrumentOutputTopic;
-    
+
     @Value("${spring.data.mongodb.uri:}")
     private String mongoUri;
     
@@ -72,23 +60,7 @@ public class ConfigurationValidator {
             errors.add("spring.kafka.streams.application-id is not configured");
         }
         
-        // Validate input topics
-        if (isNullOrEmpty(ticksTopic)) {
-            errors.add("unified.input.topic.ticks is not configured");
-        }
-        
-        if (isNullOrEmpty(oiTopic)) {
-            errors.add("unified.input.topic.oi is not configured");
-        }
-        
-        if (isNullOrEmpty(orderbookTopic)) {
-            errors.add("unified.input.topic.orderbook is not configured");
-        }
-        
-        // Validate output topics (NEW: instrument candle topic instead of legacy)
-        if (isNullOrEmpty(instrumentOutputTopic)) {
-            log.warn("⚠️ unified.output.topic.instrument is not configured - using default 'instrument-candle-1m'");
-        }
+
         
         // Validate MongoDB configuration
         if (isNullOrEmpty(mongoUri)) {
@@ -118,8 +90,6 @@ public class ConfigurationValidator {
         log.info("📋 Configuration Summary:");
         log.info("  Kafka Bootstrap Servers: {}", bootstrapServers);
         log.info("  Application ID: {}", applicationId);
-        log.info("  Input Topics: ticks={}, oi={}, orderbook={}", ticksTopic, oiTopic, orderbookTopic);
-        log.info("  Output Topics: instrument={}", instrumentOutputTopic);
         log.info("  MongoDB URI: {}", maskUri(mongoUri));
         log.info("  Trading Hours: {} - {}", nseStartTime, nseEndTime);
     }

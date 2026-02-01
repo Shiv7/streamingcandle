@@ -143,6 +143,10 @@ public class SignalEngine {
     @Value("${signal.active.expiry.hours:4}")
     private int activeExpiryHours;
 
+    @Value("${logging.trace.symbols:}")
+    private String traceSymbolsStr;
+    private final java.util.concurrent.atomic.AtomicLong discoveryLogCounter = new java.util.concurrent.atomic.AtomicLong(0);
+
     // Active signals by symbol
     private final ConcurrentHashMap<String, TradingSignal> activeSignals = new ConcurrentHashMap<>();
 
@@ -225,6 +229,17 @@ public class SignalEngine {
         if (useDynamicSymbols) {
             // Get all symbols that have candle data in Redis
             Set<String> cachedKeys = candleService.getAvailableSymbols();
+            
+            // [DISCOVERY] Log every 12th scan (approx 1 minute)
+            long runCount = discoveryLogCounter.incrementAndGet();
+            if (runCount % 12 == 1) { // Log on 1st, 13th, etc.
+                if (cachedKeys == null || cachedKeys.isEmpty()) {
+                     log.info("[DISCOVERY] Scan found 0 symbols in Redis. Keys pattern: tick:*:1m:latest");
+                } else {
+                     log.info("[DISCOVERY] Scan found {} symbols in Redis", cachedKeys.size());
+                }
+            }
+
             if (cachedKeys == null || cachedKeys.isEmpty()) {
                 log.debug("{} No symbols found in Redis cache", LOG_PREFIX);
                 return Set.of();

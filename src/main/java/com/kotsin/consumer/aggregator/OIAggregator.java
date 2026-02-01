@@ -81,8 +81,13 @@ public class OIAggregator {
     @Autowired
     private KafkaTemplate<String, Object> kafkaTemplate;
 
-    // Aggregation state: key = "exchange:token"
+// Aggregation state: key = "exchange:token"
     private final ConcurrentHashMap<String, OIAggregateState> aggregationState = new ConcurrentHashMap<>();
+
+    @Value("${logging.trace.symbols:}")
+    private String traceSymbolsStr;
+    private Set<String> traceSymbols;
+    private final java.util.concurrent.atomic.AtomicLong traceCounter = new java.util.concurrent.atomic.AtomicLong(0);
 
     private ExecutorService consumerExecutor;
     private ScheduledExecutorService emissionScheduler;
@@ -118,6 +123,18 @@ public class OIAggregator {
         emissionScheduler.scheduleAtFixedRate(this::checkWindowEmission, 1, 1, TimeUnit.SECONDS);
 
         log.info("{} Started successfully", LOG_PREFIX);
+
+        // Parse trace symbols
+        this.traceSymbols = new HashSet<>();
+        if (traceSymbolsStr != null && !traceSymbolsStr.isBlank()) {
+            String[] parts = traceSymbolsStr.split(",");
+            for (String part : parts) {
+                traceSymbols.add(part.trim().toUpperCase());
+            }
+            log.info("{} Trace logging enabled for symbols: {}", LOG_PREFIX, traceSymbols);
+        } else {
+            log.info("{} Trace logging enabled for ALL symbols (FULL - NO SAMPLING)", LOG_PREFIX);
+        }
     }
 
     @PreDestroy
@@ -165,6 +182,15 @@ public class OIAggregator {
 
         String key = oi.getExchange() + ":" + oi.getToken();
         Instant oiTime = Instant.ofEpochMilli(kafkaTimestamp);
+        
+        // [OI-TRACE] Log everything if list is empty, or specific symbol
+        boolean isSpecific = (traceSymbols != null && !traceSymbols.isEmpty() && traceSymbols.contains(String.valueOf(oi.getToken())));
+        boolean shouldLog = isSpecific || (traceSymbols == null || traceSymbols.isEmpty());
+                           
+        if (shouldLog) {
+            log.info("[OI-TRACE] Received OI for {}: OI={}, Time={}", 
+                oi.getToken(), oi.getOpenInterest(), oiTime);
+        }
 
         OIAggregateState state = aggregationState.computeIfAbsent(key,
             k -> new OIAggregateState(oi, currentWindowStart, currentWindowEnd));
@@ -213,6 +239,16 @@ public class OIAggregator {
             try {
                 oiRepository.saveAll(metricsToSave);
                 log.info("{} Saved {} OI metrics to MongoDB", LOG_PREFIX, metricsToSave.size());
+
+                // Trace individual saves if enabled
+                if (traceSymbols != null && !traceSymbols.isEmpty()) {
+                    for (OIMetrics m : metricsToSave) {
+                        if (traceSymbols.contains(m.getSymbol()) || traceSymbols.contains(m.getScripCode())) {
+                            log.info("[MONGO-WRITE] OIMetrics saved for {} @ {} | OI: {} | Interp: {}", 
+                                m.getSymbol(), formatTime(m.getWindowEnd()), m.getOpenInterest(), m.getInterpretation());
+                        }
+                    }
+                }
             } catch (Exception e) {
                 log.error("{} Failed to save to MongoDB: {}", LOG_PREFIX, e.getMessage());
             }

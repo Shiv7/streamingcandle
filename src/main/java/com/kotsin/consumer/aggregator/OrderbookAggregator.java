@@ -81,6 +81,11 @@ public class OrderbookAggregator {
 
     // Aggregation state
     private final ConcurrentHashMap<String, OrderbookAggregateState> aggregationState = new ConcurrentHashMap<>();
+    
+    @Value("${logging.trace.symbols:}")
+    private String traceSymbolsStr;
+    private Set<String> traceSymbols;
+    private final java.util.concurrent.atomic.AtomicLong traceCounter = new java.util.concurrent.atomic.AtomicLong(0);
 
     private ExecutorService consumerExecutor;
     private ScheduledExecutorService emissionScheduler;
@@ -116,6 +121,18 @@ public class OrderbookAggregator {
         emissionScheduler.scheduleAtFixedRate(this::checkWindowEmission, 1, 1, TimeUnit.SECONDS);
 
         log.info("{} Started successfully", LOG_PREFIX);
+
+        // Parse trace symbols
+        this.traceSymbols = new HashSet<>();
+        if (traceSymbolsStr != null && !traceSymbolsStr.isBlank()) {
+            String[] parts = traceSymbolsStr.split(",");
+            for (String part : parts) {
+                traceSymbols.add(part.trim().toUpperCase());
+            }
+            log.info("{} Trace logging enabled for symbols: {}", LOG_PREFIX, traceSymbols);
+        } else {
+            log.info("{} Trace logging enabled for ALL symbols (FULL - NO SAMPLING)", LOG_PREFIX);
+        }
     }
 
     @PreDestroy
@@ -163,6 +180,17 @@ public class OrderbookAggregator {
 
         String key = ob.getExchange() + ":" + ob.getToken();
         Instant obTime = Instant.ofEpochMilli(kafkaTimestamp);
+        
+        // [OB-TRACE] Log everything if list is empty, or specific symbol
+        boolean isSpecific = (traceSymbols != null && !traceSymbols.isEmpty() && traceSymbols.contains(String.valueOf(ob.getToken())));
+        boolean shouldLog = isSpecific || (traceSymbols == null || traceSymbols.isEmpty());
+                           
+        if (shouldLog) {
+            int bidCount = ob.getBids() != null ? ob.getBids().size() : 0;
+            int askCount = ob.getAsks() != null ? ob.getAsks().size() : 0;
+            log.info("[OB-TRACE] Received Orderbook for {}: Bids={}, Asks={}, Time={}", 
+                ob.getToken(), bidCount, askCount, obTime);
+        }
 
         OrderbookAggregateState state = aggregationState.computeIfAbsent(key,
             k -> new OrderbookAggregateState(ob, currentWindowStart, currentWindowEnd));
@@ -210,6 +238,16 @@ public class OrderbookAggregator {
             try {
                 orderbookRepository.saveAll(metricsToSave);
                 log.info("{} Saved {} metrics to MongoDB", LOG_PREFIX, metricsToSave.size());
+
+                // Trace individual saves if enabled
+                if (traceSymbols != null && !traceSymbols.isEmpty()) {
+                    for (OrderbookMetrics m : metricsToSave) {
+                        if (traceSymbols.contains(m.getSymbol()) || traceSymbols.contains(m.getScripCode())) {
+                            log.info("[MONGO-WRITE] OrderbookMetrics saved for {} @ {} | OFI: {} | Spread: {}", 
+                                m.getSymbol(), formatTime(m.getWindowEnd()), m.getOfi(), m.getBidAskSpread());
+                        }
+                    }
+                }
             } catch (Exception e) {
                 log.error("{} Failed to save to MongoDB: {}", LOG_PREFIX, e.getMessage());
             }
