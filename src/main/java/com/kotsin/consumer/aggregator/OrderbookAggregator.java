@@ -27,6 +27,8 @@ import java.time.format.DateTimeFormatter;
 import java.util.*;
 import java.util.concurrent.*;
 import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicReference;
+import java.util.concurrent.atomic.AtomicLong;
 
 /**
  * OrderbookAggregator - Independent Kafka consumer for orderbook data.
@@ -81,6 +83,12 @@ public class OrderbookAggregator {
 
     // Aggregation state
     private final ConcurrentHashMap<String, OrderbookAggregateState> aggregationState = new ConcurrentHashMap<>();
+
+    // Max event time seen (Atomic for thread safety)
+    private final AtomicReference<Instant> maxEventTime = new AtomicReference<>(Instant.EPOCH);
+    
+    // Track wall-clock time of last data arrival (for idle flushing)
+    private final AtomicLong lastDataArrivalMillis = new AtomicLong(System.currentTimeMillis());
     
     @Value("${logging.trace.symbols:}")
     private String traceSymbolsStr;
@@ -91,6 +99,7 @@ public class OrderbookAggregator {
     private ScheduledExecutorService emissionScheduler;
     private final AtomicBoolean running = new AtomicBoolean(false);
 
+    // Current window end (global tracker for emission progress)
     private volatile Instant currentWindowStart;
     private volatile Instant currentWindowEnd;
 
@@ -104,13 +113,17 @@ public class OrderbookAggregator {
             return;
         }
 
-        log.info("{} Starting with threads={}, topic={}", LOG_PREFIX, numThreads, inputTopic);
+        log.info("{} Starting with threads={}, topic={}, MODE=STRICT_EVENT_TIME", LOG_PREFIX, numThreads, inputTopic);
 
         running.set(true);
 
-        Instant now = Instant.now();
-        currentWindowStart = Timeframe.M1.alignToWindowStart(now);
-        currentWindowEnd = Timeframe.M1.getWindowEnd(currentWindowStart);
+        // Initialize current window from epoch - will catch up based on data
+        currentWindowStart = Instant.EPOCH;
+        currentWindowEnd = Instant.EPOCH;
+        maxEventTime.set(Instant.EPOCH);
+        lastDataArrivalMillis.set(System.currentTimeMillis());
+        
+        log.info("{} [STRICT-EVENT-TIME] Window will be initialized from first Orderbook event time", LOG_PREFIX);
 
         consumerExecutor = Executors.newFixedThreadPool(numThreads);
         for (int i = 0; i < numThreads; i++) {
@@ -192,53 +205,122 @@ public class OrderbookAggregator {
                 ob.getToken(), bidCount, askCount, obTime);
         }
 
-        OrderbookAggregateState state = aggregationState.computeIfAbsent(key,
-            k -> new OrderbookAggregateState(ob, currentWindowStart, currentWindowEnd));
+        // Update last data arrival time (Wall Clock)
+        lastDataArrivalMillis.set(System.currentTimeMillis());
+
+        // Track max event time ATOMICALLY
+        // accumulateAndGet: update only if new time is after current
+        Instant currentMax = maxEventTime.accumulateAndGet(obTime, 
+            (current, newTime) -> newTime.isAfter(current) ? newTime : current);
+
+        // Initialize current window tracker if needed
+        if (currentWindowStart.equals(Instant.EPOCH) ||
+            obTime.isBefore(currentWindowStart.minusSeconds(60))) {
+            currentWindowStart = Timeframe.M1.alignToWindowStart(obTime);
+            currentWindowEnd = Timeframe.M1.getWindowEnd(currentWindowStart);
+            log.info("{} [STRICT-EVENT-TIME] Initialized window from OB tick: {} - {}",
+                LOG_PREFIX, formatTime(currentWindowStart), formatTime(currentWindowEnd));
+        }
+
+        // Determine which window this OB tick belongs to (STRICT EVENT TIME)
+        final Instant tickWindowStart = Timeframe.M1.alignToWindowStart(obTime);
+        final Instant tickWindowEnd = Timeframe.M1.getWindowEnd(tickWindowStart);
+
+        // Composite key: exchange:token:windowStartMillis
+        String stateKey = key + ":" + tickWindowStart.toEpochMilli();
+
+        OrderbookAggregateState state = aggregationState.computeIfAbsent(stateKey,
+            k -> new OrderbookAggregateState(ob, tickWindowStart, tickWindowEnd));
 
         state.update(ob, obTime);
     }
 
+    /**
+     * Check if current window should be emitted.
+     * STRICT EVENT TIME MODE: Reference is always maxEventTime
+     */
     private void checkWindowEmission() {
-        Instant now = Instant.now();
+        // STRICT EVENT TIME: Reference is typically maxEventTime
+        Instant referenceTime = maxEventTime.get();
 
-        if (now.isAfter(currentWindowEnd.plusSeconds(2))) {
+        // IDLE FLUSH LOGIC (Critique Fix #3)
+        long timeSinceLastData = System.currentTimeMillis() - lastDataArrivalMillis.get();
+        if (timeSinceLastData > 60000) { // 1 minute idle
+            Instant now = Instant.now();
+            if (now.isAfter(referenceTime)) {
+                referenceTime = now;
+                if (timeSinceLastData > 61000 && timeSinceLastData < 62000) { 
+                    log.info("{} [IDLE-FLUSH] System idle for {}ms, forcing time to {}", 
+                        LOG_PREFIX, timeSinceLastData, formatTime(referenceTime));
+                }
+            }
+        }
+
+        // Skip if no data yet (and not idle)
+        if (referenceTime.equals(Instant.EPOCH)) {
+            return;
+        }
+
+        // Use WHILE loop to emit ALL closed windows up to referenceTime
+        int windowsEmitted = 0;
+        while (referenceTime.isAfter(currentWindowEnd.plusSeconds(2))) {
+            if (windowsEmitted == 0) {
+                log.info("{} [STRICT-EVENT-TIME] Catching up: current window {} -> reference time {}",
+                    LOG_PREFIX, formatTime(currentWindowEnd), formatTime(referenceTime));
+            }
+
             emitCurrentWindow();
+            windowsEmitted++;
 
+            // Move to next window
             currentWindowStart = currentWindowEnd;
             currentWindowEnd = Timeframe.M1.getWindowEnd(currentWindowStart);
 
-            log.debug("{} Advanced to window: {} - {}",
-                LOG_PREFIX, formatTime(currentWindowStart), formatTime(currentWindowEnd));
+            // Safety: limit iterations to prevent infinite loop
+            if (windowsEmitted > 500) {
+                log.warn("{} [STRICT-EVENT-TIME] Too many windows to emit ({}), breaking. Current: {}, Reference: {}",
+                    LOG_PREFIX, windowsEmitted, formatTime(currentWindowEnd), formatTime(referenceTime));
+                break;
+            }
+        }
+
+        if (windowsEmitted > 0) {
+            log.debug("{} [STRICT-EVENT-TIME] Emitted {} windows, now at: {} - {}",
+                LOG_PREFIX, windowsEmitted, formatTime(currentWindowStart), formatTime(currentWindowEnd));
         }
     }
 
     private void emitCurrentWindow() {
         if (aggregationState.isEmpty()) return;
 
-        Instant windowStart = currentWindowStart;
         Instant windowEnd = currentWindowEnd;
-
-        log.info("{} Emitting window {} - {} with {} instruments",
-            LOG_PREFIX, formatTime(windowStart), formatTime(windowEnd), aggregationState.size());
-
         List<OrderbookMetrics> metricsToSave = new ArrayList<>();
+        List<String> keysToRemove = new ArrayList<>();
 
         for (Map.Entry<String, OrderbookAggregateState> entry : aggregationState.entrySet()) {
+            String stateKey = entry.getKey();
             OrderbookAggregateState state = entry.getValue();
 
-            if (state.getWindowStart().equals(windowStart) && state.getUpdateCount() > 0) {
+            // STRICT EVENT TIME CHECK:
+            // Emit if state's window has fully passed relative to our current tracking window
+            boolean shouldEmit = state.getUpdateCount() > 0 &&
+                                 state.getWindowEnd() != null &&
+                                 !state.getWindowEnd().isAfter(windowEnd);
+
+            if (shouldEmit) {
                 OrderbookMetrics metrics = state.toOrderbookMetrics();
                 metricsToSave.add(metrics);
-
-                state.reset(currentWindowEnd, Timeframe.M1.getWindowEnd(currentWindowEnd));
+                keysToRemove.add(stateKey);
             }
         }
 
         if (!metricsToSave.isEmpty()) {
+            log.info("{} Emitting {} OB metrics for window end {}", 
+                LOG_PREFIX, metricsToSave.size(), formatTime(windowEnd));
+
             try {
                 orderbookRepository.saveAll(metricsToSave);
-                log.info("{} Saved {} metrics to MongoDB", LOG_PREFIX, metricsToSave.size());
-
+                
                 // Trace individual saves if enabled
                 if (traceSymbols != null && !traceSymbols.isEmpty()) {
                     for (OrderbookMetrics m : metricsToSave) {
@@ -260,18 +342,24 @@ public class OrderbookAggregator {
                 log.error("{} Failed to cache in Redis: {}", LOG_PREFIX, e.getMessage());
             }
 
-            // Publish to Kafka topic (keyed by scripCode for proper partitioning)
+            // Publish to Kafka topic
             try {
                 for (OrderbookMetrics m : metricsToSave) {
                     kafkaTemplate.send(outputTopic, m.getScripCode(), m);
                 }
-                log.info("{} Published {} metrics to Kafka topic {}", LOG_PREFIX, metricsToSave.size(), outputTopic);
+                log.info("{} Published {} OB metrics", LOG_PREFIX, metricsToSave.size());
             } catch (Exception e) {
                 log.error("{} Failed to publish to Kafka: {}", LOG_PREFIX, e.getMessage());
             }
         }
 
-        Instant cutoff = Instant.now().minus(Duration.ofMinutes(5));
+        // Remove emitted states
+        for (String key : keysToRemove) {
+            aggregationState.remove(key);
+        }
+
+        // Cleanup stale states
+        Instant cutoff = currentWindowEnd.minus(Duration.ofMinutes(5));
         aggregationState.entrySet().removeIf(e -> e.getValue().getLastUpdate().isBefore(cutoff));
     }
 
@@ -482,6 +570,7 @@ public class OrderbookAggregator {
             }
 
             return OrderbookMetrics.builder()
+                .id(scripCode + "_" + windowEnd.toEpochMilli()) // IDEMPOTENCY FIX
                 .symbol(symbol)
                 .scripCode(scripCode)
                 .exchange(exchange)
@@ -553,6 +642,7 @@ public class OrderbookAggregator {
         }
 
         public Instant getWindowStart() { return windowStart; }
+        public Instant getWindowEnd() { return windowEnd; }
         public Instant getLastUpdate() { return lastUpdate; }
         public int getUpdateCount() { return updateCount; }
 

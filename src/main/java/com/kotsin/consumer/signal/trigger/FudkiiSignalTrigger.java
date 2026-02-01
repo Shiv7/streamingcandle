@@ -16,6 +16,7 @@ import lombok.Data;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.beans.factory.annotation.Value;
+import org.springframework.kafka.core.KafkaTemplate;
 import org.springframework.stereotype.Component;
 
 import jakarta.annotation.PostConstruct;
@@ -73,8 +74,14 @@ public class FudkiiSignalTrigger {
     @Autowired
     private FastAnalyticsClient fastAnalyticsClient;
 
+    @Autowired
+    private KafkaTemplate<String, Object> kafkaTemplate;
+
     @Value("${fudkii.trigger.enabled:true}")
     private boolean enabled;
+
+    @Value("${fudkii.trigger.kafka.topic:kotsin_FUDKII}")
+    private String fudkiiKafkaTopic;
 
     @Value("${fudkii.trigger.timeframe:30m}")
     private String triggerTimeframe;
@@ -279,6 +286,9 @@ public class FudkiiSignalTrigger {
             if (result.isTriggered()) {
                 log.info("{} {} *** FUDKII SIGNAL TRIGGERED *** direction={}, reason={}",
                     LOG_PREFIX, scripCode, result.getDirection(), result.getReason());
+
+                // Publish to Kafka topic
+                publishToKafka(scripCode, result);
             }
 
             return result;
@@ -758,12 +768,12 @@ public class FudkiiSignalTrigger {
         double gapToLower = (close - bbst.getBbLower()) / close * 100;
 
         if (stFlipped && bbst.getTrend() == TrendDirection.UP && !aboveUpper && gapToUpper < 1.0) {
-            log.warn("{} {} NEAR-MISS BULLISH: ST flipped UP, price {:.2f}% below BB_upper",
-                LOG_PREFIX, scripCode, gapToUpper);
+            log.warn("{} {} NEAR-MISS BULLISH: ST flipped UP, price {}% below BB_upper",
+                LOG_PREFIX, scripCode, String.format("%.2f", gapToUpper));
         }
         if (stFlipped && bbst.getTrend() == TrendDirection.DOWN && !belowLower && gapToLower < 1.0) {
-            log.warn("{} {} NEAR-MISS BEARISH: ST flipped DOWN, price {:.2f}% above BB_lower",
-                LOG_PREFIX, scripCode, gapToLower);
+            log.warn("{} {} NEAR-MISS BEARISH: ST flipped DOWN, price {}% above BB_lower",
+                LOG_PREFIX, scripCode, String.format("%.2f", gapToLower));
         }
         if (!stFlipped && aboveUpper) {
             log.warn("{} {} NEAR-MISS: Price above BB_upper but ST did not flip", LOG_PREFIX, scripCode);
@@ -814,6 +824,41 @@ public class FudkiiSignalTrigger {
      */
     public Optional<BBSuperTrend> getBbstState(String scripCode) {
         return Optional.ofNullable(lastBbstState.get(scripCode));
+    }
+
+    /**
+     * Publish FUDKII trigger result to Kafka.
+     */
+    private void publishToKafka(String scripCode, FudkiiTriggerResult result) {
+        try {
+            // Build a serializable DTO for Kafka
+            Map<String, Object> payload = new HashMap<>();
+            payload.put("scripCode", scripCode);
+            payload.put("triggered", result.isTriggered());
+            payload.put("direction", result.getDirection() != null ? result.getDirection().name() : null);
+            payload.put("reason", result.getReason());
+            payload.put("triggerPrice", result.getTriggerPrice());
+            payload.put("triggerTime", result.getTriggerTime() != null ? result.getTriggerTime().toString() : null);
+            payload.put("triggerScore", result.getTriggerScore());
+
+            // Add BBST details if available
+            if (result.getBbst() != null) {
+                BBSuperTrend bbst = result.getBbst();
+                payload.put("bbUpper", bbst.getBbUpper());
+                payload.put("bbMiddle", bbst.getBbMiddle());
+                payload.put("bbLower", bbst.getBbLower());
+                payload.put("superTrend", bbst.getSuperTrend());
+                payload.put("trend", bbst.getTrend() != null ? bbst.getTrend().name() : null);
+                payload.put("trendChanged", bbst.isTrendChanged());
+                payload.put("pricePosition", bbst.getPricePosition() != null ? bbst.getPricePosition().name() : null);
+            }
+
+            kafkaTemplate.send(fudkiiKafkaTopic, scripCode, payload);
+            log.info("{} {} Published FUDKII trigger to Kafka topic: {}", LOG_PREFIX, scripCode, fudkiiKafkaTopic);
+
+        } catch (Exception e) {
+            log.error("{} {} Failed to publish to Kafka: {}", LOG_PREFIX, scripCode, e.getMessage());
+        }
     }
 
     // ==================== INNER CLASSES ====================

@@ -153,13 +153,16 @@ public class QuantScoreProducer {
             }
         }
 
-        // Calculate volume ratio (using volume delta as proxy for activity)
-        double volumeRatio = 1.0;
-        // Note: avgVolume20 not available on UnifiedCandle, use volumeDelta ratio instead
+        // Calculate directional imbalance: |buyVolume - sellVolume| / totalVolume
+        // Range 0-1: 0 = balanced, 1 = completely one-sided
+        // Note: This measures order flow imbalance, not relative volume vs average
+        double directionalImbalance = 0.0;
         if (candle.getVolume() > 0 && candle.getVolumeDelta() != 0) {
-            // Use volume delta as a proxy for activity level
-            volumeRatio = Math.abs((double) candle.getVolumeDelta()) / candle.getVolume();
+            directionalImbalance = Math.abs((double) candle.getVolumeDelta()) / candle.getVolume();
         }
+
+        // High volume activity is indicated by strong directional imbalance (> 50% one-sided)
+        boolean highVolumeActivity = directionalImbalance > 0.5;
 
         return QuantScoreDTO.builder()
             .scripCode(candle.getScripCode())
@@ -184,8 +187,8 @@ public class QuantScoreProducer {
             .nearestResistance(nearestResistance)
             .currentPrice(candle.getClose())
             .atrPercent(null)  // ATR not available on UnifiedCandle
-            .volumeRatio(volumeRatio)
-            .highVolume(volumeRatio > 0.3)  // Adjusted threshold for delta ratio
+            .volumeRatio(directionalImbalance)  // Renamed: actually represents directional imbalance
+            .highVolume(highVolumeActivity)  // True when > 50% one-sided flow
             .build();
     }
 
@@ -226,11 +229,15 @@ public class QuantScoreProducer {
     // ==================== HELPER SCORE CALCULATIONS ====================
 
     /**
-     * Normalize score to 0-100 range.
+     * Normalize score to -100 to +100 range, preserving direction.
+     * Positive = bullish signal, Negative = bearish signal.
+     * The magnitude indicates strength.
      */
     private double normalize(Double value) {
         if (value == null) return 0;
-        return Math.max(0, Math.min(100, Math.abs(value) * 100));
+        // Preserve sign for directional information
+        // Clamp to -100 to +100 range
+        return Math.max(-100, Math.min(100, value * 100));
     }
 
     /**

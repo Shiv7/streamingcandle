@@ -41,6 +41,7 @@ import jakarta.annotation.PreDestroy;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.beans.factory.annotation.Value;
+import org.springframework.kafka.core.KafkaTemplate;
 import org.springframework.stereotype.Service;
 
 import java.time.Instant;
@@ -148,8 +149,14 @@ public class SignalEngine {
     @Autowired
     private QuantScoreProducer quantScoreProducer;
 
+    @Autowired
+    private KafkaTemplate<String, Object> kafkaTemplate;
+
     @Value("${signal.engine.enabled:true}")
     private boolean enabled;
+
+    @Value("${signal.engine.kafka.topic:trading-signals-v2}")
+    private String tradingSignalsTopic;
 
     @Value("${signal.engine.gate.enabled:true}")
     private boolean gateEnabled;
@@ -1473,6 +1480,9 @@ public class SignalEngine {
                 LOG_PREFIX, TraceContext.getShortPrefix(), e.getMessage());
         }
 
+        // Publish to Kafka topic
+        publishTradingSignalToKafka(signal, event);
+
         // Notify listeners
         for (SignalListener listener : listeners) {
             try {
@@ -1488,6 +1498,57 @@ public class SignalEngine {
             event, signal.getDirection(),
             String.format("%.2f", signal.getCurrentPrice()),
             String.format("%.1f", signal.getCurrentScore().getCompositeScore()));
+    }
+
+    /**
+     * Publish TradingSignal to Kafka topic.
+     */
+    private void publishTradingSignalToKafka(TradingSignal signal, SignalEvent event) {
+        try {
+            // Build a serializable payload for Kafka
+            Map<String, Object> payload = new HashMap<>();
+            payload.put("signalId", signal.getSignalId());
+            payload.put("symbol", signal.getSymbol());
+            payload.put("scripCode", signal.getScripCode());
+            payload.put("exchange", signal.getExchange());
+            payload.put("companyName", signal.getCompanyName());
+            payload.put("timeframe", signal.getTimeframe());
+            payload.put("state", signal.getState() != null ? signal.getState().name() : null);
+            payload.put("event", event.name());
+            payload.put("direction", signal.getDirection() != null ? signal.getDirection().name() : null);
+            payload.put("currentPrice", signal.getCurrentPrice());
+            payload.put("entryPrice", signal.getEntryPrice());
+            payload.put("stopLoss", signal.getStopLoss());
+            payload.put("target1", signal.getTarget1());
+            payload.put("target2", signal.getTarget2());
+            payload.put("createdAt", signal.getCreatedAt() != null ? signal.getCreatedAt().toString() : null);
+            payload.put("watchedAt", signal.getWatchedAt() != null ? signal.getWatchedAt().toString() : null);
+            payload.put("triggeredAt", signal.getTriggeredAt() != null ? signal.getTriggeredAt().toString() : null);
+            payload.put("completedAt", signal.getCompletedAt() != null ? signal.getCompletedAt().toString() : null);
+            payload.put("exitReason", signal.getExitReason() != null ? signal.getExitReason().name() : null);
+            payload.put("actualExit", signal.getActualExit());
+
+            // Add score info if available
+            FudkiiScore score = signal.getCurrentScore();
+            if (score != null) {
+                payload.put("compositeScore", score.getCompositeScore());
+                payload.put("confidence", score.getConfidence());
+                payload.put("scoreDirection", score.getDirection() != null ? score.getDirection().name() : null);
+                payload.put("isWatchSetup", score.isWatchSetup());
+                payload.put("isActiveTrigger", score.isActiveTrigger());
+                payload.put("reason", score.getReason());
+            }
+
+            payload.put("publishedAt", Instant.now().toString());
+
+            kafkaTemplate.send(tradingSignalsTopic, signal.getScripCode(), payload);
+            log.info("{} {} Published TradingSignal to Kafka topic: {} (event={})",
+                LOG_PREFIX, signal.getSymbol(), tradingSignalsTopic, event);
+
+        } catch (Exception e) {
+            log.error("{} {} Failed to publish TradingSignal to Kafka: {}",
+                LOG_PREFIX, signal.getSymbol(), e.getMessage());
+        }
     }
 
     // ==================== PUBLIC API ====================

@@ -30,6 +30,8 @@ import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 import java.util.concurrent.*;
 import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicReference;
+import java.util.concurrent.atomic.AtomicLong;
 
 /**
  * TickAggregator - Independent Kafka consumer for tick data.
@@ -79,14 +81,16 @@ public class TickAggregator {
     @Value("${logging.trace.symbols:}")
     private String traceSymbolsStr;
     private Set<String> traceSymbols;
-    private final java.util.concurrent.atomic.AtomicLong tickTraceCounter = new java.util.concurrent.atomic.AtomicLong(0);
 
-    // Event-time windowing for replay mode
-    @Value("${v2.tick.aggregator.event-time-mode:false}")
-    private boolean eventTimeMode;
+    // Event-time windowing is now STRICT (v2.2) results in no wall-clock dependency
+    // @Value("${v2.tick.aggregator.event-time-mode:false}")
+    // private boolean eventTimeMode;
 
-    // Max event time seen (for event-time windowing)
-    private volatile Instant maxEventTime = Instant.EPOCH;
+    // Max event time seen (Atomic for thread safety)
+    private final AtomicReference<Instant> maxEventTime = new AtomicReference<>(Instant.EPOCH);
+    
+    // Track wall-clock time of last data arrival (for idle flushing)
+    private final AtomicLong lastDataArrivalMillis = new AtomicLong(System.currentTimeMillis());
 
     @Autowired
     private TickCandleRepository tickCandleRepository;
@@ -100,8 +104,9 @@ public class TickAggregator {
     @Autowired
     private FudkiiSignalTrigger fudkiiSignalTrigger;
 
-    // Aggregation state: key = "exchange:scripCode", value = TickAggregateState
-    private final ConcurrentHashMap<String, TickAggregateState> aggregationState = new ConcurrentHashMap<>();
+    // Aggregation state: key = "exchange:scripCode:windowStartMillis", value = TickAggregateState
+    // Package-private for testing
+    final ConcurrentHashMap<String, TickAggregateState> aggregationState = new ConcurrentHashMap<>();
 
     // Executor for consumer threads
     private ExecutorService consumerExecutor;
@@ -112,7 +117,7 @@ public class TickAggregator {
     // Shutdown flag
     private final AtomicBoolean running = new AtomicBoolean(false);
 
-    // Current window
+    // Current window end (global tracker for emission progress)
     private volatile Instant currentWindowStart;
     private volatile Instant currentWindowEnd;
 
@@ -126,24 +131,18 @@ public class TickAggregator {
             return;
         }
 
-        log.info("{} Starting with threads={}, topic={}, consumerGroup={}, eventTimeMode={}",
-            LOG_PREFIX, numThreads, inputTopic, consumerGroup, eventTimeMode);
+        log.info("{} Starting with threads={}, topic={}, consumerGroup={}, MODE=STRICT_EVENT_TIME",
+            LOG_PREFIX, numThreads, inputTopic, consumerGroup);
 
         running.set(true);
 
-        // Initialize current window
-        if (eventTimeMode) {
-            // In event-time mode, window will be initialized from first tick
-            currentWindowStart = Instant.EPOCH;
-            currentWindowEnd = Instant.EPOCH;
-            maxEventTime = Instant.EPOCH;
-            log.info("{} [EVENT-TIME] Window will be initialized from first tick event time", LOG_PREFIX);
-        } else {
-            // Wall clock mode
-            Instant now = Instant.now();
-            currentWindowStart = Timeframe.M1.alignToWindowStart(now);
-            currentWindowEnd = Timeframe.M1.getWindowEnd(currentWindowStart);
-        }
+        // Initialize current window from epoch - will catch up based on data
+        currentWindowStart = Instant.EPOCH;
+        currentWindowEnd = Instant.EPOCH;
+        maxEventTime.set(Instant.EPOCH);
+        lastDataArrivalMillis.set(System.currentTimeMillis());
+        
+        log.info("{} [STRICT-EVENT-TIME] Window will be initialized from first tick event time", LOG_PREFIX);
 
         // Start consumer threads
         consumerExecutor = Executors.newFixedThreadPool(numThreads);
@@ -242,7 +241,11 @@ public class TickAggregator {
     /**
      * Process a single tick with data quality validation.
      */
-    private void processTick(TickData tick, long kafkaTimestamp) {
+    /**
+     * Process a single tick with data quality validation.
+     * Package-private for testing.
+     */
+    void processTick(TickData tick, long kafkaTimestamp) {
         if (tick == null || tick.getScripCode() == null) return;
 
 
@@ -254,17 +257,10 @@ public class TickAggregator {
             return;
         }
 
-        if (validationError != null) {
-            log.debug("{} Rejected tick {}: {}", LOG_PREFIX, tick.getScripCode(), validationError);
-            return;
-        }
-
         String key = buildKey(tick);
         // Extract symbol for logging check
         String symbol = TickAggregateState.extractSymbol(tick.getCompanyName(), tick.getScripCode());
 
-        // [TICK-TRACE] Log sampling
-        long count = tickTraceCounter.incrementAndGet();
         // [TICK-TRACE] Log everything if list is empty, or specific symbol
         boolean specificSymbol = traceSymbols.contains(symbol);
         boolean shouldLog = specificSymbol || traceSymbols.isEmpty();
@@ -277,45 +273,39 @@ public class TickAggregator {
         // Start trace context
         TraceContext.start(symbol, "1m");
         try {
-            // USE EVENT TIME from tick, not Kafka timestamp (v2.1)
+            // USE EVENT TIME from tick, not Kafka timestamp (STRICT v2.2)
             Instant tickTime = parseEventTime(tick, kafkaTimestamp);
+            
+            // Update last data arrival time (Wall Clock)
+            lastDataArrivalMillis.set(System.currentTimeMillis());
 
-            // Track max event time for event-time windowing
-            if (eventTimeMode && tickTime.isAfter(maxEventTime)) {
-                maxEventTime = tickTime;
-                // Initialize current window tracker based on first event time
-                if (currentWindowStart.equals(Instant.EPOCH) ||
-                    tickTime.isBefore(currentWindowStart.minusSeconds(60))) {
-                    currentWindowStart = Timeframe.M1.alignToWindowStart(tickTime);
-                    currentWindowEnd = Timeframe.M1.getWindowEnd(currentWindowStart);
-                    log.info("{} [EVENT-TIME] Initialized window from tick: {} - {}",
-                        LOG_PREFIX, formatTime(currentWindowStart), formatTime(currentWindowEnd));
-                }
+            // Track max event time ATOMICALLY
+            // accumulateAndGet: update only if new time is after current
+            Instant currentMax = maxEventTime.accumulateAndGet(tickTime, 
+                (current, newTime) -> newTime.isAfter(current) ? newTime : current);
+
+            // Initialize current window tracker if needed
+            if (currentWindowStart.equals(Instant.EPOCH) ||
+                tickTime.isBefore(currentWindowStart.minusSeconds(60))) {
+                currentWindowStart = Timeframe.M1.alignToWindowStart(tickTime);
+                currentWindowEnd = Timeframe.M1.getWindowEnd(currentWindowStart);
+                log.info("{} [STRICT-EVENT-TIME] Initialized window from tick: {} - {}",
+                    LOG_PREFIX, formatTime(currentWindowStart), formatTime(currentWindowEnd));
             }
 
-            // Determine which window this tick belongs to
-            final Instant tickWindowStart;
-            final Instant tickWindowEnd;
-            final String stateKey;
-
-            if (eventTimeMode) {
-                // EVENT-TIME MODE: Use tick's event time to determine window
-                // Use composite key: scripCode:windowStartMillis to have one state per (instrument, window)
-                tickWindowStart = Timeframe.M1.alignToWindowStart(tickTime);
-                tickWindowEnd = Timeframe.M1.getWindowEnd(tickWindowStart);
-                stateKey = key + ":" + tickWindowStart.toEpochMilli();
-            } else {
-                // WALL-CLOCK MODE: Use current window
-                tickWindowStart = currentWindowStart;
-                tickWindowEnd = currentWindowEnd;
-                stateKey = key;
-            }
+            // Determine which window this tick belongs to (STRICT EVENT TIME)
+            final Instant tickWindowStart = Timeframe.M1.alignToWindowStart(tickTime);
+            final Instant tickWindowEnd = Timeframe.M1.getWindowEnd(tickWindowStart);
+            
+            // Composite key: scripCode:windowStartMillis
+            // This ensures each window states are unique and independent
+            final String stateKey = key + ":" + tickWindowStart.toEpochMilli();
 
             // Get or create aggregation state for this (instrument, window) pair
             TickAggregateState state = aggregationState.computeIfAbsent(stateKey,
                 k -> new TickAggregateState(tick, tickWindowStart, tickWindowEnd));
 
-            // Update aggregation (no need to check window mismatch - key includes window)
+            // Update aggregation
             state.update(tick, tickTime);
         } finally {
             TraceContext.clear();
@@ -357,34 +347,49 @@ public class TickAggregator {
 
     /**
      * Check if current window should be emitted.
-     * Uses event time in event-time mode, wall clock otherwise.
-     *
-     * IMPORTANT: In event-time mode, uses WHILE loop to emit ALL closed windows
-     * up to maxEventTime. This handles replay scenarios where event time jumps
-     * by minutes or hours between scheduler runs.
+     * STRICT EVENT TIME MODE:
+     * - Reference time is always maxEventTime (derived from latest data)
+     * - Emits windows that have closed relative to maxEventTime
      */
-    private void checkWindowEmission() {
-        // DEBUG: Log eventTimeMode value
-        log.debug("{} checkWindowEmission: eventTimeMode={}, maxEventTime={}",
-            LOG_PREFIX, eventTimeMode, maxEventTime);
+    /**
+     * Check if current window should be emitted.
+     * STRICT EVENT TIME MODE:
+     * - Reference time is always maxEventTime (derived from latest data)
+     * - Emits windows that have closed relative to maxEventTime
+     * Package-private for testing.
+     */
+    void checkWindowEmission() {
+        // STRICT EVENT TIME: Reference is typically maxEventTime
+        Instant referenceTime = maxEventTime.get();
+        boolean isIdleFlush = false;
 
-        // Use event time in event-time mode, wall clock otherwise
-        Instant referenceTime = eventTimeMode ? maxEventTime : Instant.now();
+        // IDLE FLUSH LOGIC (Critique Fix #3)
+        // If no data for > 60 seconds, use Wall Clock to force Close
+        long timeSinceLastData = System.currentTimeMillis() - lastDataArrivalMillis.get();
+        if (timeSinceLastData > 60000) { // 1 minute idle
+            Instant now = Instant.now();
+            if (now.isAfter(referenceTime)) {
+                referenceTime = now;
+                isIdleFlush = true;
+                if (timeSinceLastData > 61000 && timeSinceLastData < 62000) { // Log once roughly
+                    log.info("{} [IDLE-FLUSH] System idle for {}ms, forcing time to {}", 
+                        LOG_PREFIX, timeSinceLastData, formatTime(referenceTime));
+                }
+            }
+        }
 
-        // Skip if no data yet in event-time mode
-        if (eventTimeMode && maxEventTime.equals(Instant.EPOCH)) {
+        // Skip if no data yet (and not idle)
+        if (referenceTime.equals(Instant.EPOCH)) {
             return;
         }
 
-        String timeMode = eventTimeMode ? "[EVENT-TIME]" : "[WALL-CLOCK]";
-
-        // CRITICAL FIX: Use WHILE loop to emit ALL closed windows up to referenceTime
-        // This handles replay scenarios where event time advances faster than wall clock
+        // Use WHILE loop to emit ALL closed windows up to referenceTime
+        // This handles burst scenarios where event time jumps
         int windowsEmitted = 0;
         while (referenceTime.isAfter(currentWindowEnd.plusSeconds(2))) {
             if (windowsEmitted == 0) {
-                log.info("{} {} Catching up: current window {} -> reference time {}",
-                    LOG_PREFIX, timeMode, formatTime(currentWindowEnd), formatTime(referenceTime));
+                log.info("{} [STRICT-EVENT-TIME] Catching up: current window {} -> reference time {}",
+                    LOG_PREFIX, formatTime(currentWindowEnd), formatTime(referenceTime));
             }
 
             emitCurrentWindow();
@@ -394,24 +399,26 @@ public class TickAggregator {
             currentWindowStart = currentWindowEnd;
             currentWindowEnd = Timeframe.M1.getWindowEnd(currentWindowStart);
 
-            // Safety: limit iterations to prevent infinite loop (max 500 windows = ~8 hours)
+            // Safety: limit iterations to prevent infinite loop
             if (windowsEmitted > 500) {
-                log.warn("{} {} Too many windows to emit ({}), breaking. Current: {}, Reference: {}",
-                    LOG_PREFIX, timeMode, windowsEmitted, formatTime(currentWindowEnd), formatTime(referenceTime));
+                log.warn("{} [STRICT-EVENT-TIME] Too many windows to emit ({}), breaking. Current: {}, Reference: {}",
+                    LOG_PREFIX, windowsEmitted, formatTime(currentWindowEnd), formatTime(referenceTime));
                 break;
             }
         }
 
         if (windowsEmitted > 0) {
-            log.info("{} {} Emitted {} windows, now at: {} - {}",
-                LOG_PREFIX, timeMode, windowsEmitted, formatTime(currentWindowStart), formatTime(currentWindowEnd));
+            log.info("{} [STRICT-EVENT-TIME] Emitted {} windows, now at: {} - {}",
+                LOG_PREFIX, windowsEmitted, formatTime(currentWindowStart), formatTime(currentWindowEnd));
         }
     }
 
     /**
      * Emit all candles for closed windows.
-     * In event-time mode with composite keys, each state represents one (instrument, window) pair.
-     * Emit states whose window has closed, then REMOVE them from the map.
+     * STRICT EVENT TIME MODE:
+     * - Scans all active states
+     * - Emits any state whose windowEnd <= current tracking windowEnd
+     * - REMOVES emitted states from map
      */
     private void emitCurrentWindow() {
         if (aggregationState.isEmpty()) return;
@@ -424,37 +431,20 @@ public class TickAggregator {
             String stateKey = entry.getKey();
             TickAggregateState state = entry.getValue();
 
-            // Check if this window has closed
-            boolean shouldEmit;
-            if (eventTimeMode) {
-                // Event-time mode: emit if window has closed (windowEnd <= current tracking windowEnd)
-                // and state has data
-                shouldEmit = state.getTickCount() > 0 &&
-                             state.getWindowEnd() != null &&
-                             !state.getWindowEnd().isAfter(windowEnd);
-            } else {
-                // Wall-clock mode: only emit exact match
-                shouldEmit = state.getWindowStart().equals(currentWindowStart) && state.getTickCount() > 0;
-            }
+            // STRICT EVENT TIME CHECK:
+            // Emit if state's window has fully passed relative to our current tracking window
+            boolean shouldEmit = state.getTickCount() > 0 &&
+                                 state.getWindowEnd() != null &&
+                                 !state.getWindowEnd().isAfter(windowEnd);
 
             if (shouldEmit) {
                 TickCandle candle = state.toTickCandle();
                 candlesToSave.add(candle);
-
-                // In event-time mode with composite keys, REMOVE the state after emit
-                // (each key is unique per window, so we don't need to reset)
-                if (eventTimeMode) {
-                    keysToRemove.add(stateKey);
-                } else {
-                    // Wall-clock mode: reset for next window
-                    Instant nextWindowStart = state.getWindowEnd();
-                    Instant nextWindowEnd = Timeframe.M1.getWindowEnd(nextWindowStart);
-                    state.reset(nextWindowStart, nextWindowEnd);
-                }
+                keysToRemove.add(stateKey);
             }
         }
 
-        // Remove emitted states (event-time mode only)
+        // Remove emitted states
         for (String key : keysToRemove) {
             aggregationState.remove(key);
         }
@@ -518,20 +508,13 @@ public class TickAggregator {
         }
 
         // Clean up old states (instruments with no activity for 5 minutes)
-        // FIX: In event-time mode, use currentWindowEnd (emission progress) instead of maxEventTime
-        //
-        // CRITICAL: maxEventTime is updated by consumer threads independently of emission.
-        // While this method blocks processing FUDKII triggers, consumer threads can advance
-        // maxEventTime by hours. Using maxEventTime would delete states before they're emitted.
-        //
-        // currentWindowEnd tracks what has been EMITTED, so cleanup only removes states
-        // whose windows have already been processed.
-        Instant referenceForCleanup = eventTimeMode ? currentWindowEnd : Instant.now();
-        Instant cutoff = referenceForCleanup.minus(Duration.ofMinutes(5));
+        // STRICT EVENT TIME: Use currentWindowEnd (which tracks emission progress)
+        // States that are significantly behind emission progress are stale
+        Instant cutoff = currentWindowEnd.minus(Duration.ofMinutes(5));
         int statesBefore = aggregationState.size();
         aggregationState.entrySet().removeIf(e -> e.getValue().getLastUpdate().isBefore(cutoff));
         int statesRemoved = statesBefore - aggregationState.size();
-        if (statesRemoved > 0 && eventTimeMode) {
+        if (statesRemoved > 0) {
             log.info("{} [CLEANUP] Removed {} old states, cutoff={} (based on emission progress {})",
                 LOG_PREFIX, statesRemoved, formatTime(cutoff), formatTime(currentWindowEnd));
         }
@@ -807,6 +790,7 @@ public class TickAggregator {
             OptionMetadata optionMeta = parseOptionMetadata(companyName);
 
             TickCandle.TickCandleBuilder builder = TickCandle.builder()
+                .id(scripCode + "_" + windowEnd.toEpochMilli()) // IDEMPOTENCY FIX
                 .symbol(symbol)
                 .scripCode(scripCode)
                 .exchange(exchange)

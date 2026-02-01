@@ -148,29 +148,57 @@ public class QuantScoreGate implements SignalGate {
 
     /**
      * Count how many FUDKII components align with the signal direction.
+     * For NEUTRAL direction, components near zero are considered aligned.
      */
     private int countAlignedComponents(FudkiiScore score, String direction) {
         boolean bullish = "BULLISH".equals(direction);
+        boolean bearish = "BEARISH".equals(direction);
+        boolean neutral = !bullish && !bearish;
         int aligned = 0;
 
-        // Flow (OFI) - positive = bullish
-        if ((score.getFlowScore() > 0) == bullish) aligned++;
+        // Threshold for considering a score as "neutral"
+        double neutralThreshold = 0.1;
+
+        // Flow (OFI) - positive = bullish, negative = bearish, near-zero = neutral
+        double flowScore = score.getFlowScore();
+        if (neutral) {
+            if (Math.abs(flowScore) < neutralThreshold) aligned++;
+        } else if ((flowScore > 0) == bullish) {
+            aligned++;
+        }
 
         // Urgency bias - follows direction
-        if ((score.getUrgencyBias() > 0) == bullish) aligned++;
+        double urgencyBias = score.getUrgencyBias();
+        if (neutral) {
+            if (Math.abs(urgencyBias) < neutralThreshold) aligned++;
+        } else if ((urgencyBias > 0) == bullish) {
+            aligned++;
+        }
 
         // Direction - follows bias
-        if ((score.getDirectionScore() > 0) == bullish) aligned++;
+        double directionScore = score.getDirectionScore();
+        if (neutral) {
+            if (Math.abs(directionScore) < neutralThreshold) aligned++;
+        } else if ((directionScore > 0) == bullish) {
+            aligned++;
+        }
 
         // Imbalance - buy/sell pressure
-        if ((score.getImbalanceScore() > 0) == bullish) aligned++;
+        double imbalanceScore = score.getImbalanceScore();
+        if (neutral) {
+            if (Math.abs(imbalanceScore) < neutralThreshold) aligned++;
+        } else if ((imbalanceScore > 0) == bullish) {
+            aligned++;
+        }
 
-        // Kyle score (always positive, check microprice deviation)
+        // Kyle score - check microprice deviation
         double microDev = score.getMicropriceDeviation();
-        if (microDev != 0) {
+        if (neutral) {
+            if (Math.abs(microDev) < neutralThreshold) aligned++;
+        } else if (microDev != 0) {
             if ((microDev > 0) == bullish) aligned++;
         } else {
-            aligned++; // Neutral (zero deviation), count as aligned
+            aligned++; // Zero deviation, count as aligned for directional signals
         }
 
         // Intensity (OI) - check interpretation
@@ -178,7 +206,15 @@ public class QuantScoreGate implements SignalGate {
         if (interp != null) {
             boolean oiBullish = interp == FudkiiScore.OIInterpretation.LONG_BUILDUP ||
                                interp == FudkiiScore.OIInterpretation.SHORT_COVERING;
-            if (oiBullish == bullish) aligned++;
+            boolean oiBearish = interp == FudkiiScore.OIInterpretation.SHORT_BUILDUP ||
+                               interp == FudkiiScore.OIInterpretation.LONG_UNWINDING;
+            if (neutral) {
+                if (interp == FudkiiScore.OIInterpretation.NEUTRAL) aligned++;
+            } else if (oiBullish == bullish) {
+                aligned++;
+            }
+        } else if (neutral) {
+            aligned++; // No OI interpretation = neutral, aligned with neutral direction
         }
 
         return aligned;
