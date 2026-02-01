@@ -290,4 +290,71 @@ public class RedisCacheService {
     private String buildOIKey(String symbol) {
         return String.format("oi:%s:latest", symbol);
     }
+
+    // ==================== PRICE CACHE FOR OI INTERPRETATION (v2.1) ====================
+
+    private static final String PRICE_KEY_PREFIX = "price:";
+    private static final String PREV_PRICE_KEY_PREFIX = "prevprice:";
+
+    /**
+     * Cache current price for a symbol (for OI interpretation).
+     * Also stores previous price before updating.
+     */
+    public void cachePrice(String symbol, double price) {
+        if (symbol == null || price <= 0) return;
+        
+        try {
+            String priceKey = PRICE_KEY_PREFIX + symbol;
+            String prevPriceKey = PREV_PRICE_KEY_PREFIX + symbol;
+            
+            // Get current price to store as previous
+            Object current = redisTemplate.opsForValue().get(priceKey);
+            if (current != null) {
+                redisTemplate.opsForValue().set(prevPriceKey, current, 
+                    Duration.ofMinutes(tickLatestTtlMinutes));
+            }
+            
+            // Store new price
+            redisTemplate.opsForValue().set(priceKey, price, 
+                Duration.ofMinutes(tickLatestTtlMinutes));
+        } catch (Exception e) {
+            log.debug("[REDIS-CACHE] Failed to cache price for {}: {}", symbol, e.getMessage());
+        }
+    }
+
+    /**
+     * Get last known price for a symbol.
+     */
+    public Double getLastPrice(String symbol) {
+        if (symbol == null) return null;
+        
+        try {
+            String key = PRICE_KEY_PREFIX + symbol;
+            Object value = redisTemplate.opsForValue().get(key);
+            if (value instanceof Number) {
+                return ((Number) value).doubleValue();
+            }
+        } catch (Exception e) {
+            log.debug("[REDIS-CACHE] Failed to get price for {}: {}", symbol, e.getMessage());
+        }
+        return null;
+    }
+
+    /**
+     * Get previous price for a symbol.
+     */
+    public Double getPreviousPrice(String symbol) {
+        if (symbol == null) return null;
+        
+        try {
+            String key = PREV_PRICE_KEY_PREFIX + symbol;
+            Object value = redisTemplate.opsForValue().get(key);
+            if (value instanceof Number) {
+                return ((Number) value).doubleValue();
+            }
+        } catch (Exception e) {
+            log.debug("[REDIS-CACHE] Failed to get previous price for {}: {}", symbol, e.getMessage());
+        }
+        return null;
+    }
 }

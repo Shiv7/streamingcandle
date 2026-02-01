@@ -41,6 +41,9 @@ import java.util.concurrent.atomic.AtomicBoolean;
  * - INDEPENDENT: No joins with tick or OI data
  * - SIMPLE: Only orderbook-derived metrics
  * - WALL-CLOCK: Emits based on wall clock time
+ *
+ * v2.1 Quant Fixes:
+ * - Rolling Kyle's Lambda (50-observation window, persists across minutes)
  */
 @Component
 @Slf4j
@@ -275,7 +278,8 @@ public class OrderbookAggregator {
         private double previousBid;
         private double previousAsk;
 
-        // Kyle's Lambda
+        // Kyle's Lambda - rolling window (v2.1: persists across resets)
+        private static final int KYLE_LAMBDA_WINDOW = 50;  // Rolling window size
         private final List<Double> priceChanges = new ArrayList<>();
         private final List<Double> signedVolumes = new ArrayList<>();
         private double lastMidPrice;
@@ -336,6 +340,7 @@ public class OrderbookAggregator {
             ofiSum += bidDelta - askDelta;
 
             // Kyle's Lambda - track price change vs signed volume
+            // v2.1: Keep ROLLING window of observations
             double midPrice = (bid + ask) / 2;
             if (lastMidPrice > 0 && midPrice > 0) {
                 double priceChange = midPrice - lastMidPrice;
@@ -343,6 +348,12 @@ public class OrderbookAggregator {
                 if (Math.abs(signedVol) > 0) {
                     priceChanges.add(priceChange);
                     signedVolumes.add(signedVol);
+                    
+                    // Keep rolling window capped (v2.1)
+                    while (priceChanges.size() > KYLE_LAMBDA_WINDOW) {
+                        priceChanges.remove(0);
+                        signedVolumes.remove(0);
+                    }
                 }
             }
             lastMidPrice = midPrice;
@@ -466,8 +477,9 @@ public class OrderbookAggregator {
             this.windowStart = newWindowStart;
             this.windowEnd = newWindowEnd;
             this.ofiSum = 0;
-            this.priceChanges.clear();
-            this.signedVolumes.clear();
+            // v2.1: DON'T clear priceChanges/signedVolumes - keep rolling window
+            // this.priceChanges.clear();
+            // this.signedVolumes.clear();
             this.spreadSum = 0;
             this.spreadSqSum = 0;
             this.tightSpreadCount = 0;

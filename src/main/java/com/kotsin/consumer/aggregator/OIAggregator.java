@@ -43,9 +43,9 @@ import java.util.concurrent.atomic.AtomicBoolean;
  * - SIMPLE: Only OI-derived metrics
  * - WALL-CLOCK: Emits based on wall clock time
  *
- * OI Interpretation (requires price change from tick data):
- * - OI interpretation is set to NEUTRAL by default
- * - Full interpretation requires CandleService to correlate with tick price
+ * v2.1 Quant Fixes:
+ * - Immediate OI interpretation using cached price from Redis
+ * - No longer defers interpretation to query time
  */
 @Component
 @Slf4j
@@ -194,7 +194,8 @@ public class OIAggregator {
             OIAggregateState state = entry.getValue();
 
             if (state.getWindowStart().equals(windowStart) && state.getUpdateCount() > 0) {
-                OIMetrics metrics = state.toOIMetrics();
+                // v2.1: Calculate interpretation NOW using cached price
+                OIMetrics metrics = state.toOIMetrics(redisCacheService);
                 metricsToSave.add(metrics);
 
                 state.reset(currentWindowEnd, Timeframe.M1.getWindowEnd(currentWindowEnd));
@@ -341,7 +342,7 @@ public class OIAggregator {
             lastUpdate = oiTime;
         }
 
-        public OIMetrics toOIMetrics() {
+        public OIMetrics toOIMetrics(RedisCacheService redisCacheService) {
             long oiChange = oiClose - oiOpen;
             double oiChangePercent = oiOpen > 0 ? (double) oiChange / oiOpen * 100 : 0;
 
@@ -355,13 +356,16 @@ public class OIAggregator {
             // OI acceleration = change in velocity
             double oiAcceleration = oiVelocity - previousVelocity;
 
-            // Default interpretation to NEUTRAL
-            // Full interpretation requires price data from TickAggregator
-            // CandleService will calculate proper interpretation at query time
-            OIMetrics.OIInterpretation interpretation = OIMetrics.OIInterpretation.NEUTRAL;
+            // v2.1: Calculate interpretation IMMEDIATELY using cached price
+            OIMetrics.OIInterpretation interpretation = calculateInterpretation(
+                oiChange, symbol, redisCacheService);
 
             // Calculate interpretation confidence based on OI change magnitude
             double interpretationConfidence = Math.min(1.0, Math.abs(oiChangePercent) / 5.0);
+            
+            // v2.1: suggestsReversal based on short covering or long unwinding
+            boolean suggestsReversal = (interpretation == OIMetrics.OIInterpretation.SHORT_COVERING ||
+                                        interpretation == OIMetrics.OIInterpretation.LONG_UNWINDING);
 
             return OIMetrics.builder()
                 .symbol(symbol)
@@ -385,7 +389,7 @@ public class OIAggregator {
                 .dailyOIChangePercent(dailyOIChangePercent)
                 .interpretation(interpretation)
                 .interpretationConfidence(interpretationConfidence)
-                .suggestsReversal(false)  // Calculated at query time with price data
+                .suggestsReversal(suggestsReversal)
                 .oiVelocity(oiVelocity)
                 .oiAcceleration(oiAcceleration)
                 .updateCount(updateCount)
@@ -410,6 +414,45 @@ public class OIAggregator {
             this.oiLow = this.oiClose;
             this.firstUpdate = true;
             this.updateCount = 0;
+        }
+
+        /**
+         * Calculate OI interpretation using cached price from Redis (v2.1).
+         * Falls back to NEUTRAL if price not available.
+         */
+        private OIMetrics.OIInterpretation calculateInterpretation(
+                long oiChange, String symbol, RedisCacheService redisCacheService) {
+            
+            if (redisCacheService == null) {
+                return OIMetrics.OIInterpretation.NEUTRAL;
+            }
+            
+            Double lastPrice = redisCacheService.getLastPrice(symbol);
+            Double prevPrice = redisCacheService.getPreviousPrice(symbol);
+            
+            if (lastPrice == null || prevPrice == null || prevPrice <= 0) {
+                return OIMetrics.OIInterpretation.NEUTRAL;
+            }
+            
+            double priceChange = lastPrice - prevPrice;
+            
+            // Standard OI interpretation matrix:
+            // OI ↑ + Price ↑ = LONG_BUILDUP (bullish)
+            // OI ↓ + Price ↑ = SHORT_COVERING (bullish)
+            // OI ↑ + Price ↓ = SHORT_BUILDUP (bearish)
+            // OI ↓ + Price ↓ = LONG_UNWINDING (bearish)
+            
+            if (oiChange > 0 && priceChange > 0) {
+                return OIMetrics.OIInterpretation.LONG_BUILDUP;
+            } else if (oiChange < 0 && priceChange > 0) {
+                return OIMetrics.OIInterpretation.SHORT_COVERING;
+            } else if (oiChange > 0 && priceChange < 0) {
+                return OIMetrics.OIInterpretation.SHORT_BUILDUP;
+            } else if (oiChange < 0 && priceChange < 0) {
+                return OIMetrics.OIInterpretation.LONG_UNWINDING;
+            }
+            
+            return OIMetrics.OIInterpretation.NEUTRAL;
         }
 
         /**

@@ -40,9 +40,13 @@ import java.util.concurrent.atomic.AtomicBoolean;
  * - SIMPLE: Single responsibility - only tick aggregation
  * - NO JOINS: Does not join with orderbook or OI
  * - INDEPENDENT: Runs in its own thread, no Kafka Streams state stores
- * - WALL-CLOCK: Emits based on wall clock time, not stream time
+ * - EVENT-TIME: Uses tick event time for window assignment (v2.1)
  *
- * This replaces the tick aggregation part of UnifiedInstrumentCandleProcessor.
+ * v2.1 Quant Fixes:
+ * - Event time based windowing (uses tickDt, not wall clock)
+ * - Lee-Ready trade classification (uses previous midpoint)
+ * - Volume-based VPIN (10k share buckets, not time-based)
+ * - Data quality validation (rejects bad ticks)
  */
 @Component
 @Slf4j
@@ -167,13 +171,22 @@ public class TickAggregator {
     }
 
     /**
-     * Process a single tick.
+     * Process a single tick with data quality validation.
      */
     private void processTick(TickData tick, long kafkaTimestamp) {
         if (tick == null || tick.getScripCode() == null) return;
 
+        // DATA QUALITY VALIDATION (v2.1)
+        String validationError = validateTick(tick);
+        if (validationError != null) {
+            log.debug("{} Rejected tick {}: {}", LOG_PREFIX, tick.getScripCode(), validationError);
+            return;
+        }
+
         String key = buildKey(tick);
-        Instant tickTime = Instant.ofEpochMilli(kafkaTimestamp);
+        
+        // USE EVENT TIME from tick, not Kafka timestamp (v2.1)
+        Instant tickTime = parseEventTime(tick, kafkaTimestamp);
 
         // Get or create aggregation state
         TickAggregateState state = aggregationState.computeIfAbsent(key,
@@ -181,6 +194,52 @@ public class TickAggregator {
 
         // Update aggregation
         state.update(tick, tickTime);
+    }
+
+    /**
+     * Parse event time from tick's tickDt field.
+     * Falls back to Kafka timestamp if parsing fails.
+     */
+    private Instant parseEventTime(TickData tick, long kafkaFallback) {
+        String tickDt = tick.getTickDt();
+        if (tickDt != null && tickDt.contains("Date(")) {
+            try {
+                String num = tickDt.replaceAll("[^0-9]", "");
+                long eventTime = Long.parseLong(num);
+                // Sanity check: within reasonable range (2020-2050)
+                if (eventTime >= 1577836800000L && eventTime <= 2524608000000L) {
+                    return Instant.ofEpochMilli(eventTime);
+                }
+            } catch (NumberFormatException e) {
+                // Fall through to use Kafka timestamp
+            }
+        }
+        return Instant.ofEpochMilli(kafkaFallback);
+    }
+
+    /**
+     * Validate tick data quality.
+     * Returns error message if invalid, null if valid.
+     */
+    private String validateTick(TickData tick) {
+        // Check price > 0
+        if (tick.getLastRate() <= 0) {
+            return "Price <= 0";
+        }
+        
+        // Check quantity > 0
+        if (tick.getLastQuantity() <= 0) {
+            return "Quantity <= 0";
+        }
+        
+        // Check crossed market (bid > ask)
+        double bid = tick.getBidRate();
+        double ask = tick.getOfferRate();
+        if (bid > 0 && ask > 0 && bid > ask) {
+            return "Crossed market: bid > ask";
+        }
+        
+        return null; // Valid
     }
 
     /**
@@ -233,7 +292,7 @@ public class TickAggregator {
             // Batch save to MongoDB
             try {
                 tickCandleRepository.saveAll(candlesToSave);
-                log.info("{} Saved {} candles to MongoDB", LOG_PREFIX, candlesToSave.size());
+            log.info("{} Saved {} candles to MongoDB", LOG_PREFIX, candlesToSave.size());
             } catch (Exception e) {
                 log.error("{} Failed to save to MongoDB: {}", LOG_PREFIX, e.getMessage());
             }
@@ -242,6 +301,8 @@ public class TickAggregator {
             try {
                 for (TickCandle candle : candlesToSave) {
                     redisCacheService.cacheTickCandle(candle);
+                    // v2.1: Cache price for OI interpretation
+                    redisCacheService.cachePrice(candle.getSymbol(), candle.getClose());
                 }
                 log.debug("{} Cached {} candles in Redis", LOG_PREFIX, candlesToSave.size());
             } catch (Exception e) {
@@ -321,10 +382,11 @@ public class TickAggregator {
         private long volume;
         private double valueSum;  // For VWAP calculation
 
-        // Trade classification
+        // Trade classification (Lee-Ready algorithm v2.1)
         private long buyVolume;
         private long sellVolume;
         private long midpointVolume;
+        private double previousMidpoint;  // For Lee-Ready: compare to PREVIOUS midpoint
 
         // Volume profile
         private final Map<Double, Long> volumeAtPrice = new ConcurrentHashMap<>();
@@ -334,6 +396,13 @@ public class TickAggregator {
         private double dollarImbalance;
         private int tickRuns;
         private int lastTickDirection;  // 1 = up, -1 = down, 0 = neutral
+
+        // VPIN calculation (volume-based buckets v2.1)
+        private static final int VPIN_BUCKET_SIZE = 10000;  // 10k shares per bucket
+        private static final int VPIN_NUM_BUCKETS = 50;     // Average over 50 buckets
+        private long currentBucketVolume;
+        private long currentBucketBuyVolume;
+        private final java.util.LinkedList<Double> vpinBuckets = new java.util.LinkedList<>();
 
         // Stats
         private int tickCount;
@@ -378,19 +447,46 @@ public class TickAggregator {
             volume += qty;
             valueSum += price * qty;
 
-            // Trade classification (simplified Lee-Ready)
-            // Use bidRate and offerRate (the correct field names in TickData)
+            // Calculate current midpoint
             double bid = tick.getBidRate() > 0 ? tick.getBidRate() : price;
             double ask = tick.getOfferRate() > 0 ? tick.getOfferRate() : price;
             double midpoint = (bid + ask) / 2;
 
-            if (price > midpoint + 0.001) {
-                buyVolume += qty;  // Aggressive buy
-            } else if (price < midpoint - 0.001) {
-                sellVolume += qty;  // Aggressive sell
+            // LEE-READY TRADE CLASSIFICATION (v2.1)
+            // Compare price to PREVIOUS midpoint, not current midpoint
+            boolean isBuy = false;
+            if (previousMidpoint > 0) {
+                if (price > previousMidpoint) {
+                    buyVolume += qty;  // Uptick = aggressive buy
+                    isBuy = true;
+                } else if (price < previousMidpoint) {
+                    sellVolume += qty;  // Downtick = aggressive sell
+                } else {
+                    // At previous midpoint - use tick direction as tiebreaker
+                    if (lastTickDirection > 0) {
+                        buyVolume += qty;
+                        isBuy = true;
+                    } else if (lastTickDirection < 0) {
+                        sellVolume += qty;
+                    } else {
+                        midpointVolume += qty;  // True midpoint trade
+                    }
+                }
             } else {
-                midpointVolume += qty;  // At midpoint
+                // First tick - use current midpoint comparison
+                if (price > midpoint + 0.001) {
+                    buyVolume += qty;
+                    isBuy = true;
+                } else if (price < midpoint - 0.001) {
+                    sellVolume += qty;
+                } else {
+                    midpointVolume += qty;
+                }
             }
+            previousMidpoint = midpoint;  // Store for next tick
+
+            // VOLUME-BASED VPIN UPDATE (v2.1)
+            updateVpinBucket(qty, isBuy);
 
             // Volume profile
             double roundedPrice = Math.round(price * 100) / 100.0;  // Round to 2 decimals
@@ -417,6 +513,39 @@ public class TickAggregator {
             tickCount++;
             lastPrice = price;
             lastUpdate = tickTime;
+        }
+
+        /**
+         * Update VPIN volume bucket (v2.1).
+         * When bucket fills, calculate imbalance and add to rolling list.
+         */
+        private void updateVpinBucket(long qty, boolean isBuy) {
+            currentBucketVolume += qty;
+            if (isBuy) currentBucketBuyVolume += qty;
+            
+            if (currentBucketVolume >= VPIN_BUCKET_SIZE) {
+                // Bucket complete - calculate imbalance
+                double imbalance = Math.abs(2.0 * currentBucketBuyVolume - currentBucketVolume) 
+                                   / currentBucketVolume;
+                vpinBuckets.addLast(imbalance);
+                
+                // Keep rolling window
+                while (vpinBuckets.size() > VPIN_NUM_BUCKETS) {
+                    vpinBuckets.removeFirst();
+                }
+                
+                // Reset bucket
+                currentBucketVolume = 0;
+                currentBucketBuyVolume = 0;
+            }
+        }
+
+        /**
+         * Calculate VPIN as average imbalance across buckets (v2.1).
+         */
+        private double calculateVPIN() {
+            if (vpinBuckets.isEmpty()) return 0.0;
+            return vpinBuckets.stream().mapToDouble(d -> d).average().orElse(0.0);
         }
 
         public TickCandle toTickCandle() {
@@ -467,8 +596,8 @@ public class TickAggregator {
                 .volumeDelta(buyVolume - sellVolume)
                 .buyPressure(buyPressure)
                 .sellPressure(sellPressure)
-                .vpin(0.0)  // VPIN requires bucket tracking, simplified here
-                .vpinBucketSize(0.0)
+                .vpin(calculateVPIN())  // Volume-based VPIN (v2.1)
+                .vpinBucketSize((double) VPIN_BUCKET_SIZE)
                 .poc(poc)
                 .vah(vah)
                 .val(val)
