@@ -82,6 +82,11 @@ public interface TickCandleRepository extends MongoRepository<TickCandle, String
     long countBySymbol(String symbol);
 
     /**
+     * Count candles for a scripCode.
+     */
+    long countByScripCode(String scripCode);
+
+    /**
      * Delete old candles (for manual cleanup if TTL not used).
      */
     void deleteByTimestampBefore(Instant timestamp);

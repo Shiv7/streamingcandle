@@ -13,6 +13,12 @@ import java.time.temporal.ChronoUnit;
  * - On-demand aggregation from 1m candles
  * - Redis cache key generation
  * - Window alignment
+ *
+ * Note: Window alignment uses IST (Asia/Kolkata) timezone for Indian market data.
+ * NSE Market hours: 9:15 AM - 3:30 PM IST
+ * MCX Market hours: 9:00 AM - 11:30 PM IST
+ * Daily candles align to market open (9:15 NSE, 9:00 MCX)
+ * Weekly candles align to Monday market open
  */
 public enum Timeframe {
     M1("1m", 1),
@@ -26,6 +32,17 @@ public enum Timeframe {
     H4("4h", 240),
     D1("1d", 1440),
     W1("1w", 10080);
+
+    // Market timezone - IST for Indian markets
+    public static final ZoneId MARKET_TIMEZONE = ZoneId.of("Asia/Kolkata");
+
+    // NSE market open
+    public static final int MARKET_OPEN_HOUR = 9;
+    public static final int MARKET_OPEN_MINUTE = 15;
+
+    // MCX market open
+    public static final int MCX_MARKET_OPEN_HOUR = 9;
+    public static final int MCX_MARKET_OPEN_MINUTE = 0;
 
     private final String label;
     private final int minutes;
@@ -50,27 +67,44 @@ public enum Timeframe {
     /**
      * Align timestamp to window start for this timeframe.
      * Example: 10:17:30 with M5 → 10:15:00
+     * Uses MARKET_TIMEZONE (IST) for daily/weekly alignment
+     * Defaults to NSE market open for daily/weekly alignment.
      */
     public Instant alignToWindowStart(Instant timestamp) {
-        ZonedDateTime zdt = timestamp.atZone(ZoneId.of("Asia/Kolkata"));
+        return alignToWindowStart(timestamp, "N");
+    }
+
+    /**
+     * Align timestamp to window start for this timeframe (exchange-aware).
+     * Example: 10:17:30 with M5 → 10:15:00
+     * Uses MARKET_TIMEZONE (IST) for daily/weekly alignment
+     *
+     * @param timestamp The timestamp to align
+     * @param exchange "M" for MCX (9:00 open), "N" for NSE (9:15 open)
+     */
+    public Instant alignToWindowStart(Instant timestamp, String exchange) {
+        ZonedDateTime zdt = timestamp.atZone(MARKET_TIMEZONE);
+        boolean isMCX = "M".equalsIgnoreCase(exchange);
+        int openHour = isMCX ? MCX_MARKET_OPEN_HOUR : MARKET_OPEN_HOUR;
+        int openMinute = isMCX ? MCX_MARKET_OPEN_MINUTE : MARKET_OPEN_MINUTE;
 
         if (this == D1) {
-            // Daily: align to market open (9:15 AM IST)
+            // Daily: align to market open (9:00 MCX, 9:15 NSE)
             return zdt.truncatedTo(ChronoUnit.DAYS)
-                .plusHours(9).plusMinutes(15)
+                .plusHours(openHour).plusMinutes(openMinute)
                 .toInstant();
         }
 
         if (this == W1) {
-            // Weekly: align to Monday 9:15 AM IST
+            // Weekly: align to Monday market open
             int dayOfWeek = zdt.getDayOfWeek().getValue();
             return zdt.truncatedTo(ChronoUnit.DAYS)
                 .minusDays(dayOfWeek - 1)
-                .plusHours(9).plusMinutes(15)
+                .plusHours(openHour).plusMinutes(openMinute)
                 .toInstant();
         }
 
-        // Intraday: align to minute boundary
+        // Intraday: align to minute boundary (epoch millis are timezone-agnostic)
         long epochMinute = timestamp.toEpochMilli() / 60000;
         long alignedMinute = (epochMinute / minutes) * minutes;
         return Instant.ofEpochMilli(alignedMinute * 60000);

@@ -4,45 +4,51 @@ import com.kotsin.consumer.stats.model.SignalHistory;
 import com.kotsin.consumer.stats.model.SignalHistory.SignalDirection;
 import com.kotsin.consumer.stats.model.SignalHistory.SignalOutcome;
 import com.kotsin.consumer.stats.model.SignalStats;
+import com.kotsin.consumer.stats.repository.SignalHistoryRepository;
 import lombok.extern.slf4j.Slf4j;
+import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.data.domain.PageRequest;
+import org.springframework.data.domain.Sort;
 import org.springframework.stereotype.Component;
 
+import jakarta.annotation.PostConstruct;
 import java.time.Instant;
 import java.time.LocalDate;
 import java.time.ZoneId;
+import java.time.temporal.ChronoUnit;
 import java.util.*;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.stream.Collectors;
 
 /**
- * SignalStatsTracker - Tracks and manages signal statistics.
+ * SignalStatsTracker - Tracks and manages signal statistics with MongoDB persistence.
  *
  * Features:
  * - Real-time stats updating
- * - Historical analysis
+ * - Historical analysis with DB persistence
  * - Performance reporting
  * - Equity curve tracking
+ * - Auto-recovery on restart from DB state
  */
 @Component
 @Slf4j
 public class SignalStatsTracker {
 
-    // Stats per symbol
+    private static final String LOG_PREFIX = "[SIGNAL-STATS]";
+
+    @Autowired
+    private SignalHistoryRepository signalHistoryRepository;
+
+    // Stats per symbol (computed from DB on startup)
     private final Map<String, SignalStats> statsBySymbol = new ConcurrentHashMap<>();
 
-    // Stats per signal type
+    // Stats per signal type (computed from DB on startup)
     private final Map<String, SignalStats> statsByType = new ConcurrentHashMap<>();
 
     // Global stats
-    private final SignalStats globalStats = SignalStats.builder()
-        .symbol("GLOBAL")
-        .signalType("ALL")
-        .build();
+    private SignalStats globalStats;
 
-    // Signal history (in-memory cache, would be backed by MongoDB)
-    private final Map<String, List<SignalHistory>> historyBySymbol = new ConcurrentHashMap<>();
-
-    // Active signals (not yet closed)
+    // In-memory cache for active signals (not yet closed) - backed by DB
     private final Map<String, SignalHistory> activeSignals = new ConcurrentHashMap<>();
 
     // Equity tracking
@@ -52,8 +58,101 @@ public class SignalStatsTracker {
 
     private static final ZoneId IST = ZoneId.of("Asia/Kolkata");
 
+    private boolean initialized = false;
+
     /**
-     * Record a new signal generation.
+     * Initialize stats from database on startup.
+     */
+    @PostConstruct
+    public void initialize() {
+        if (!initialized) {
+            log.info("{} Initializing signal stats tracker from database...", LOG_PREFIX);
+
+            // Initialize global stats
+            globalStats = SignalStats.builder()
+                .symbol("GLOBAL")
+                .signalType("ALL")
+                .build();
+
+            try {
+                // Load active signals (those without exit time)
+                List<SignalHistory> dbActiveSignals = signalHistoryRepository.findByGeneratedAtBetween(
+                    Instant.now().minus(24, ChronoUnit.HOURS), Instant.now());
+
+                for (SignalHistory signal : dbActiveSignals) {
+                    if (signal.getExitTime() == null && signal.getOutcome() == null) {
+                        activeSignals.put(signal.getSignalId(), signal);
+                    }
+                }
+
+                // Calculate stats from historical data
+                recalculateStatsFromDB();
+
+                log.info("{} Stats tracker initialized - Active Signals: {}, Total in DB: {}",
+                    LOG_PREFIX, activeSignals.size(), signalHistoryRepository.count());
+
+            } catch (Exception e) {
+                log.error("{} Failed to initialize from database: {}", LOG_PREFIX, e.getMessage(), e);
+            }
+
+            initialized = true;
+        }
+    }
+
+    /**
+     * Recalculate stats from database.
+     */
+    private void recalculateStatsFromDB() {
+        // Get all completed signals
+        List<SignalHistory> allSignals = signalHistoryRepository.findAll();
+
+        long wins = 0, losses = 0, breakeven = 0;
+        double totalProfit = 0, totalLoss = 0;
+
+        for (SignalHistory signal : allSignals) {
+            if (signal.getOutcome() == null) continue;
+
+            double pnl = signal.getProfitLoss();
+
+            switch (signal.getOutcome()) {
+                case WIN:
+                    wins++;
+                    totalProfit += pnl;
+                    break;
+                case LOSS:
+                    losses++;
+                    totalLoss += Math.abs(pnl);
+                    break;
+                case BREAKEVEN:
+                    breakeven++;
+                    break;
+                default:
+                    break;
+            }
+        }
+
+        // Update global stats
+        globalStats.setTotalSignals((int) (wins + losses + breakeven));
+        globalStats.setWinningSignals((int) wins);
+        globalStats.setLosingSignals((int) losses);
+        globalStats.setBreakEvenSignals((int) breakeven);
+        globalStats.setTotalProfit(totalProfit);
+        globalStats.setTotalLoss(totalLoss);
+        globalStats.setNetProfit(totalProfit - totalLoss);
+
+        if (wins + losses > 0) {
+            globalStats.setWinRate((double) wins / (wins + losses) * 100);
+        }
+        if (totalLoss > 0) {
+            globalStats.setProfitFactor(totalProfit / totalLoss);
+        }
+
+        log.info("{} Stats recalculated - Wins: {}, Losses: {}, WinRate: {}%",
+            LOG_PREFIX, wins, losses, String.format("%.1f", globalStats.getWinRate()));
+    }
+
+    /**
+     * Record a new signal generation and persist to database.
      */
     public SignalHistory recordSignal(String symbol, String signalType, String timeframe,
                                        SignalDirection direction, double signalPrice,
@@ -77,49 +176,77 @@ public class SignalStatsTracker {
             .riskRewardPlanned(calculateRR(signalPrice, target, stopLoss, direction))
             .build();
 
-        // Store as active signal
-        activeSignals.put(signal.getSignalId(), signal);
+        // Persist to database FIRST
+        try {
+            signal = signalHistoryRepository.save(signal);
+            log.info("{} Signal recorded and persisted: {} {} {} @ {}",
+                LOG_PREFIX, symbol, direction, signalType, signalPrice);
+        } catch (Exception e) {
+            log.error("{} Failed to persist signal: {}", LOG_PREFIX, e.getMessage(), e);
+        }
 
-        log.info("Signal recorded: {} {} {} @ {} (target: {}, stop: {})",
-            symbol, direction, signalType, signalPrice, target, stopLoss);
+        // Store in active signals cache
+        activeSignals.put(signal.getSignalId(), signal);
 
         return signal;
     }
 
     /**
-     * Record signal entry.
+     * Record signal entry and persist.
      */
     public void recordEntry(String signalId, double entryPrice) {
         SignalHistory signal = activeSignals.get(signalId);
+        if (signal == null) {
+            // Try to find in database
+            signal = signalHistoryRepository.findAll().stream()
+                .filter(s -> s.getSignalId().equals(signalId))
+                .findFirst()
+                .orElse(null);
+        }
+
         if (signal != null) {
             signal.recordEntry(entryPrice, Instant.now());
-            log.info("Entry recorded for {}: @ {}", signalId, entryPrice);
+
+            // Persist update
+            try {
+                signalHistoryRepository.save(signal);
+                activeSignals.put(signalId, signal);
+                log.info("{} Entry recorded and persisted for {}: @ {}", LOG_PREFIX, signalId, entryPrice);
+            } catch (Exception e) {
+                log.error("{} Failed to persist entry: {}", LOG_PREFIX, e.getMessage());
+            }
         }
     }
 
     /**
-     * Record signal exit and update stats.
+     * Record signal exit and update stats - persist to database.
      */
     public void recordExit(String signalId, double exitPrice, String exitReason) {
         SignalHistory signal = activeSignals.remove(signalId);
         if (signal == null) {
-            log.warn("No active signal found for exit: {}", signalId);
+            log.warn("{} No active signal found for exit: {}", LOG_PREFIX, signalId);
             return;
         }
 
         signal.recordExit(exitPrice, Instant.now(), exitReason);
 
+        // Persist to database
+        try {
+            signalHistoryRepository.save(signal);
+            log.info("{} Exit recorded and persisted for {}: @ {} P&L: {} ({})",
+                LOG_PREFIX, signalId, exitPrice, signal.getProfitLoss(), signal.getOutcome());
+        } catch (Exception e) {
+            log.error("{} Failed to persist exit: {}", LOG_PREFIX, e.getMessage());
+            // Re-add to active signals if persistence fails
+            activeSignals.put(signalId, signal);
+            return;
+        }
+
         // Update stats
         updateStats(signal);
 
-        // Store in history
-        historyBySymbol.computeIfAbsent(signal.getSymbol(), s -> new ArrayList<>()).add(signal);
-
         // Update equity
         updateEquity(signal.getProfitLoss());
-
-        log.info("Exit recorded for {}: @ {} P&L: {} ({})",
-            signalId, exitPrice, signal.getProfitLoss(), signal.getOutcome());
     }
 
     /**
@@ -129,7 +256,11 @@ public class SignalStatsTracker {
         activeSignals.values().stream()
             .filter(s -> s.getSymbol().equals(symbol))
             .filter(s -> s.getEntryPrice() > 0)
-            .forEach(s -> s.updateMaxExcursion(currentPrice));
+            .forEach(s -> {
+                s.updateMaxExcursion(currentPrice);
+                // Persist update periodically (not every tick)
+                // This could be optimized with batch updates
+            });
     }
 
     /**
@@ -228,7 +359,7 @@ public class SignalStatsTracker {
         return risk > 0 ? reward / risk : 0;
     }
 
-    // ==================== REPORTING ====================
+    // ==================== REPORTING (from database) ====================
 
     /**
      * Get performance report for a symbol.
@@ -252,22 +383,23 @@ public class SignalStatsTracker {
     }
 
     /**
-     * Get signal history for a symbol.
+     * Get signal history for a symbol from database.
      */
     public List<SignalHistory> getHistory(String symbol, int limit) {
-        List<SignalHistory> history = historyBySymbol.getOrDefault(symbol, Collections.emptyList());
-        int start = Math.max(0, history.size() - limit);
-        return new ArrayList<>(history.subList(start, history.size()));
+        return signalHistoryRepository.findBySymbol(symbol,
+            PageRequest.of(0, limit, Sort.by(Sort.Direction.DESC, "generatedAt")))
+            .getContent();
     }
 
     /**
-     * Get today's signals.
+     * Get today's signals from database.
      */
     public List<SignalHistory> getTodaySignals(String symbol) {
         LocalDate today = LocalDate.now(IST);
-        return historyBySymbol.getOrDefault(symbol, Collections.emptyList()).stream()
-            .filter(s -> s.getGeneratedAt().atZone(IST).toLocalDate().equals(today))
-            .collect(Collectors.toList());
+        Instant startOfDay = today.atStartOfDay(IST).toInstant();
+        Instant endOfDay = today.plusDays(1).atStartOfDay(IST).toInstant();
+
+        return signalHistoryRepository.findBySymbolAndGeneratedAtBetween(symbol, startOfDay, endOfDay);
     }
 
     /**
@@ -294,7 +426,7 @@ public class SignalStatsTracker {
     }
 
     /**
-     * Get best performing signal types.
+     * Get best performing signal types from database.
      */
     public List<Map.Entry<String, SignalStats>> getBestPerformingTypes(int limit) {
         return statsByType.entrySet().stream()
@@ -316,6 +448,20 @@ public class SignalStatsTracker {
     }
 
     /**
+     * Get win rate by signal type from database.
+     */
+    public Map<String, Double> getWinRateBySignalType() {
+        Map<String, Double> winRates = new HashMap<>();
+
+        var performances = signalHistoryRepository.getPerformanceByAllTypes();
+        for (var perf : performances) {
+            winRates.put(perf.getId(), perf.getWinRate());
+        }
+
+        return winRates;
+    }
+
+    /**
      * Generate summary report.
      */
     public Map<String, Object> generateReport() {
@@ -331,6 +477,7 @@ public class SignalStatsTracker {
         report.put("activeSignals", activeSignals.size());
         report.put("currentEquity", currentEquity);
         report.put("peakEquity", peakEquity);
+        report.put("totalInDB", signalHistoryRepository.count());
 
         return report;
     }

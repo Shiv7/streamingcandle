@@ -3,28 +3,37 @@ package com.kotsin.consumer.papertrade.executor;
 import com.kotsin.consumer.papertrade.model.PaperTrade;
 import com.kotsin.consumer.papertrade.model.PaperTrade.TradeDirection;
 import com.kotsin.consumer.papertrade.model.PaperTrade.TradeStatus;
+import com.kotsin.consumer.papertrade.repository.PaperTradeRepository;
 import lombok.extern.slf4j.Slf4j;
+import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Component;
 
+import jakarta.annotation.PostConstruct;
 import java.time.Instant;
 import java.util.*;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.stream.Collectors;
 
 /**
- * PaperTradeExecutor - Simulated trading execution engine.
+ * PaperTradeExecutor - Simulated trading execution engine with MongoDB persistence.
  *
  * Features:
  * - Order management (market, limit, stop)
- * - Position tracking
+ * - Position tracking with DB persistence
  * - Risk management (position sizing, max positions)
  * - P&L tracking
- * - Trade history
+ * - Trade history persisted to MongoDB
+ * - Auto-recovery on restart from DB state
  */
 @Component
 @Slf4j
 public class PaperTradeExecutor {
+
+    private static final String LOG_PREFIX = "[PAPER-TRADE]";
+
+    @Autowired
+    private PaperTradeRepository paperTradeRepository;
 
     @Value("${papertrade.initial.capital:100000}")
     private double initialCapital;
@@ -38,11 +47,8 @@ public class PaperTradeExecutor {
     @Value("${papertrade.commission.per.trade:20}")
     private double commissionPerTrade;
 
-    // Active trades
+    // In-memory cache for fast access (backed by MongoDB)
     private final Map<String, PaperTrade> openTrades = new ConcurrentHashMap<>();
-
-    // Closed trades history
-    private final List<PaperTrade> tradeHistory = Collections.synchronizedList(new ArrayList<>());
 
     // Account state
     private double availableCapital;
@@ -55,23 +61,58 @@ public class PaperTradeExecutor {
     private boolean initialized = false;
 
     /**
-     * Initialize the paper trading account.
+     * Initialize the paper trading account and load state from DB.
      */
+    @PostConstruct
     public void initialize() {
         if (!initialized) {
-            availableCapital = initialCapital;
-            usedMargin = 0;
-            unrealizedPnL = 0;
-            realizedPnL = 0;
-            peakEquity = initialCapital;
+            log.info("{} Initializing paper trading executor...", LOG_PREFIX);
+
+            // Load open positions from database
+            List<PaperTrade> dbOpenTrades = paperTradeRepository.findAllOpenPositions();
+
+            if (!dbOpenTrades.isEmpty()) {
+                log.info("{} Recovered {} open positions from database", LOG_PREFIX, dbOpenTrades.size());
+                for (PaperTrade trade : dbOpenTrades) {
+                    openTrades.put(trade.getTradeId(), trade);
+                }
+
+                // Calculate used margin from open positions
+                usedMargin = dbOpenTrades.stream()
+                    .mapToDouble(PaperTrade::getPositionValue)
+                    .sum();
+
+                // Calculate unrealized P&L
+                unrealizedPnL = dbOpenTrades.stream()
+                    .mapToDouble(PaperTrade::getUnrealizedPnL)
+                    .sum();
+            }
+
+            // Calculate realized P&L from closed trades
+            long winningTrades = paperTradeRepository.countWinningTrades();
+            long losingTrades = paperTradeRepository.countLosingTrades();
+
+            // Get all closed trades for P&L calculation
+            List<PaperTrade> closedTrades = paperTradeRepository.findByStatus(TradeStatus.CLOSED);
+            realizedPnL = closedTrades.stream()
+                .mapToDouble(PaperTrade::getRealizedPnL)
+                .sum();
+
+            // Initialize capital (initial - used + realized)
+            availableCapital = initialCapital - usedMargin + realizedPnL;
+            peakEquity = Math.max(initialCapital, getEquity());
             maxDrawdown = 0;
+
             initialized = true;
-            log.info("Paper trading initialized with capital: {}", initialCapital);
+
+            log.info("{} Paper trading initialized - Capital: {}, Open Positions: {}, Realized P&L: {}, Total Trades: {}",
+                LOG_PREFIX, availableCapital, openTrades.size(), realizedPnL, closedTrades.size());
+            log.info("{} Historical Stats - Wins: {}, Losses: {}", LOG_PREFIX, winningTrades, losingTrades);
         }
     }
 
     /**
-     * Execute a market order.
+     * Execute a market order and persist to database.
      */
     public PaperTrade executeMarketOrder(String symbol, TradeDirection direction,
                                           double currentPrice, double target, double stopLoss,
@@ -81,20 +122,20 @@ public class PaperTradeExecutor {
 
         // Check if we can open new position
         if (!canOpenPosition(symbol)) {
-            log.warn("Cannot open position for {}: max positions reached or existing position", symbol);
+            log.warn("{} Cannot open position for {}: max positions reached or existing position", LOG_PREFIX, symbol);
             return null;
         }
 
         // Calculate position size based on risk
         int quantity = calculatePositionSize(currentPrice, stopLoss, direction);
         if (quantity <= 0) {
-            log.warn("Position size too small for {} at risk level", symbol);
+            log.warn("{} Position size too small for {} at risk level", LOG_PREFIX, symbol);
             return null;
         }
 
         double positionValue = currentPrice * quantity;
         if (positionValue > availableCapital) {
-            log.warn("Insufficient capital for {}: need {} have {}", symbol, positionValue, availableCapital);
+            log.warn("{} Insufficient capital for {}: need {} have {}", LOG_PREFIX, symbol, positionValue, availableCapital);
             return null;
         }
 
@@ -122,32 +163,57 @@ public class PaperTradeExecutor {
             .isTrailingActive(false)
             .build();
 
-        // Update account
+        // Persist to database FIRST
+        try {
+            trade = paperTradeRepository.save(trade);
+            log.info("{} Trade persisted to database: {}", LOG_PREFIX, trade.getTradeId());
+        } catch (Exception e) {
+            log.error("{} Failed to persist trade to database: {}", LOG_PREFIX, e.getMessage(), e);
+            return null;
+        }
+
+        // Update account state
         availableCapital -= positionValue;
         usedMargin += positionValue;
 
-        // Store trade
+        // Store in memory cache
         openTrades.put(trade.getTradeId(), trade);
 
-        log.info("Opened {} {} position: {} @ {} (target: {}, stop: {}, qty: {})",
-            direction, symbol, trade.getTradeId(), currentPrice, target, stopLoss, quantity);
+        log.info("{} Opened {} {} position: {} @ {} (target: {}, stop: {}, qty: {})",
+            LOG_PREFIX, direction, symbol, trade.getTradeId(), currentPrice, target, stopLoss, quantity);
 
         return trade;
     }
 
     /**
-     * Close an open position.
+     * Close an open position and persist to database.
      */
     public PaperTrade closePosition(String tradeId, double exitPrice, String reason) {
         PaperTrade trade = openTrades.remove(tradeId);
         if (trade == null) {
-            log.warn("No open trade found: {}", tradeId);
-            return null;
+            // Try to find in database
+            Optional<PaperTrade> dbTrade = paperTradeRepository.findByTradeId(tradeId);
+            if (dbTrade.isEmpty() || dbTrade.get().getStatus() != TradeStatus.OPEN) {
+                log.warn("{} No open trade found: {}", LOG_PREFIX, tradeId);
+                return null;
+            }
+            trade = dbTrade.get();
         }
 
         trade.close(exitPrice, reason);
 
-        // Update account
+        // Persist closed trade to database
+        try {
+            trade = paperTradeRepository.save(trade);
+            log.info("{} Closed trade persisted to database: {} - Reason: {}", LOG_PREFIX, tradeId, reason);
+        } catch (Exception e) {
+            log.error("{} Failed to persist closed trade: {}", LOG_PREFIX, e.getMessage(), e);
+            // Re-add to open trades since persistence failed
+            openTrades.put(tradeId, trade);
+            return null;
+        }
+
+        // Update account state
         usedMargin -= trade.getPositionValue();
         availableCapital += trade.getPositionValue() + trade.getRealizedPnL();
         realizedPnL += trade.getRealizedPnL();
@@ -162,17 +228,14 @@ public class PaperTradeExecutor {
             maxDrawdown = drawdown;
         }
 
-        // Store in history
-        tradeHistory.add(trade);
-
-        log.info("Closed {} position: {} @ {} P&L: {} ({})",
-            trade.getSymbol(), tradeId, exitPrice, trade.getRealizedPnL(), reason);
+        log.info("{} Closed {} position: {} @ {} P&L: {} ({}) | Total Realized: {}",
+            LOG_PREFIX, trade.getSymbol(), tradeId, exitPrice, trade.getRealizedPnL(), reason, realizedPnL);
 
         return trade;
     }
 
     /**
-     * Update all open positions with new prices.
+     * Update all open positions with new prices and persist changes.
      */
     public void updatePositions(Map<String, Double> priceMap) {
         unrealizedPnL = 0;
@@ -182,6 +245,14 @@ public class PaperTradeExecutor {
             if (price != null) {
                 trade.updatePrice(price);
                 unrealizedPnL += trade.getUnrealizedPnL();
+
+                // Persist updated trade
+                try {
+                    paperTradeRepository.save(trade);
+                } catch (Exception e) {
+                    log.error("{} Failed to persist price update for {}: {}",
+                        LOG_PREFIX, trade.getTradeId(), e.getMessage());
+                }
             }
         }
     }
@@ -198,6 +269,13 @@ public class PaperTradeExecutor {
         if (trade == null) return null;
 
         trade.updatePrice(close);
+
+        // Persist the price update
+        try {
+            paperTradeRepository.save(trade);
+        } catch (Exception e) {
+            log.error("{} Failed to persist price update: {}", LOG_PREFIX, e.getMessage());
+        }
 
         // Check stop loss
         if (trade.shouldStopOut(high, low)) {
@@ -224,7 +302,10 @@ public class PaperTradeExecutor {
             trade.setTrailingStop(trade.isLong() ?
                 trade.getCurrentPrice() * (1 - trailingPercent / 100) :
                 trade.getCurrentPrice() * (1 + trailingPercent / 100));
-            log.info("Trailing stop enabled for {}: {}%", tradeId, trailingPercent);
+
+            // Persist change
+            paperTradeRepository.save(trade);
+            log.info("{} Trailing stop enabled for {}: {}%", LOG_PREFIX, tradeId, trailingPercent);
         }
     }
 
@@ -235,7 +316,11 @@ public class PaperTradeExecutor {
         PaperTrade trade = openTrades.get(tradeId);
         if (trade != null) {
             trade.setStopLoss(newStop);
-            log.info("Stop loss modified for {}: {}", tradeId, newStop);
+            trade.setLastUpdated(Instant.now());
+
+            // Persist change
+            paperTradeRepository.save(trade);
+            log.info("{} Stop loss modified for {}: {}", LOG_PREFIX, tradeId, newStop);
         }
     }
 
@@ -246,7 +331,26 @@ public class PaperTradeExecutor {
         PaperTrade trade = openTrades.get(tradeId);
         if (trade != null) {
             trade.setTargetPrice(newTarget);
-            log.info("Target modified for {}: {}", tradeId, newTarget);
+            trade.setLastUpdated(Instant.now());
+
+            // Persist change
+            paperTradeRepository.save(trade);
+            log.info("{} Target modified for {}: {}", LOG_PREFIX, tradeId, newTarget);
+        }
+    }
+
+    /**
+     * Move stop to breakeven.
+     */
+    public void moveStopToBreakeven(String tradeId) {
+        PaperTrade trade = openTrades.get(tradeId);
+        if (trade != null && trade.getUnrealizedPnL() > 0) {
+            trade.setStopLoss(trade.getEntryPrice());
+            trade.setLastUpdated(Instant.now());
+
+            // Persist change
+            paperTradeRepository.save(trade);
+            log.info("{} Stop moved to breakeven for {}: {}", LOG_PREFIX, tradeId, trade.getEntryPrice());
         }
     }
 
@@ -290,9 +394,13 @@ public class PaperTradeExecutor {
             return false;
         }
 
-        // Check if already have position in symbol
-        return openTrades.values().stream()
-            .noneMatch(t -> t.getSymbol().equals(symbol));
+        // Check if already have position in symbol (memory cache)
+        if (openTrades.values().stream().anyMatch(t -> t.getSymbol().equals(symbol))) {
+            return false;
+        }
+
+        // Also check database for safety
+        return !paperTradeRepository.existsOpenPositionBySymbol(symbol);
     }
 
     private double calculateRR(double entry, double target, double stop, TradeDirection dir) {
@@ -342,19 +450,39 @@ public class PaperTradeExecutor {
             .orElse(null);
     }
 
+    /**
+     * Get trade history from database (not in-memory).
+     */
     public List<PaperTrade> getTradeHistory() {
-        return new ArrayList<>(tradeHistory);
+        return paperTradeRepository.findByStatus(TradeStatus.CLOSED);
     }
 
+    /**
+     * Get recent trades from database.
+     */
     public List<PaperTrade> getRecentTrades(int limit) {
-        int start = Math.max(0, tradeHistory.size() - limit);
-        return new ArrayList<>(tradeHistory.subList(start, tradeHistory.size()));
+        return paperTradeRepository.findRecentClosedTrades(
+            org.springframework.data.domain.PageRequest.of(0, limit,
+                org.springframework.data.domain.Sort.by(org.springframework.data.domain.Sort.Direction.DESC, "exitTime")));
+    }
+
+    /**
+     * Get trade by signal ID.
+     */
+    public List<PaperTrade> getTradesBySignalId(String signalId) {
+        return paperTradeRepository.findBySignalId(signalId);
     }
 
     // ==================== STATISTICS ====================
 
     public Map<String, Object> getAccountSummary() {
         Map<String, Object> summary = new HashMap<>();
+
+        // Get counts from database for accuracy
+        long totalTrades = paperTradeRepository.countByStatus(TradeStatus.CLOSED);
+        long wins = paperTradeRepository.countWinningTrades();
+        long losses = paperTradeRepository.countLosingTrades();
+        long breakeven = paperTradeRepository.countBreakevenTrades();
 
         summary.put("initialCapital", initialCapital);
         summary.put("currentEquity", getEquity());
@@ -364,19 +492,22 @@ public class PaperTradeExecutor {
         summary.put("realizedPnL", realizedPnL);
         summary.put("maxDrawdown", String.format("%.2f%%", maxDrawdown));
         summary.put("openPositions", openTrades.size());
-        summary.put("totalTrades", tradeHistory.size());
+        summary.put("totalTrades", totalTrades);
+        summary.put("wins", wins);
+        summary.put("losses", losses);
+        summary.put("breakeven", breakeven);
 
         // Win rate
-        long wins = tradeHistory.stream().filter(t -> t.getRealizedPnL() > 0).count();
-        double winRate = tradeHistory.size() > 0 ? (double) wins / tradeHistory.size() * 100 : 0;
+        double winRate = (wins + losses) > 0 ? (double) wins / (wins + losses) * 100 : 0;
         summary.put("winRate", String.format("%.2f%%", winRate));
 
-        // Profit factor
-        double totalWins = tradeHistory.stream()
+        // Profit factor from database
+        List<PaperTrade> closedTrades = paperTradeRepository.findByStatus(TradeStatus.CLOSED);
+        double totalWins = closedTrades.stream()
             .filter(t -> t.getRealizedPnL() > 0)
             .mapToDouble(PaperTrade::getRealizedPnL)
             .sum();
-        double totalLosses = Math.abs(tradeHistory.stream()
+        double totalLosses = Math.abs(closedTrades.stream()
             .filter(t -> t.getRealizedPnL() < 0)
             .mapToDouble(PaperTrade::getRealizedPnL)
             .sum());
@@ -387,7 +518,8 @@ public class PaperTradeExecutor {
     }
 
     public Map<String, Double> getPnLBySymbol() {
-        return tradeHistory.stream()
+        List<PaperTrade> closedTrades = paperTradeRepository.findByStatus(TradeStatus.CLOSED);
+        return closedTrades.stream()
             .collect(Collectors.groupingBy(
                 PaperTrade::getSymbol,
                 Collectors.summingDouble(PaperTrade::getRealizedPnL)
@@ -395,11 +527,35 @@ public class PaperTradeExecutor {
     }
 
     public Map<String, Double> getPnLBySignalType() {
-        return tradeHistory.stream()
+        List<PaperTrade> closedTrades = paperTradeRepository.findByStatus(TradeStatus.CLOSED);
+        return closedTrades.stream()
             .filter(t -> t.getSignalType() != null)
             .collect(Collectors.groupingBy(
                 PaperTrade::getSignalType,
                 Collectors.summingDouble(PaperTrade::getRealizedPnL)
             ));
+    }
+
+    /**
+     * Get win rate by signal type.
+     */
+    public Map<String, Double> getWinRateBySignalType() {
+        Map<String, Double> winRates = new HashMap<>();
+
+        // Get unique signal types
+        List<PaperTrade> allTrades = paperTradeRepository.findByStatus(TradeStatus.CLOSED);
+        Set<String> signalTypes = allTrades.stream()
+            .map(PaperTrade::getSignalType)
+            .filter(Objects::nonNull)
+            .collect(Collectors.toSet());
+
+        for (String signalType : signalTypes) {
+            long wins = paperTradeRepository.countWinsBySignalType(signalType);
+            long losses = paperTradeRepository.countLossesBySignalType(signalType);
+            double winRate = (wins + losses) > 0 ? (double) wins / (wins + losses) * 100 : 0;
+            winRates.put(signalType, winRate);
+        }
+
+        return winRates;
     }
 }

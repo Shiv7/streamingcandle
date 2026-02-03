@@ -7,6 +7,7 @@ import com.kotsin.consumer.model.Timeframe;
 import com.kotsin.consumer.repository.TickCandleRepository;
 import com.kotsin.consumer.service.RedisCacheService;
 import com.kotsin.consumer.signal.trigger.FudkiiSignalTrigger;
+import com.kotsin.consumer.event.CandleBoundaryPublisher;
 import jakarta.annotation.PostConstruct;
 import jakarta.annotation.PreDestroy;
 import lombok.extern.slf4j.Slf4j;
@@ -32,6 +33,7 @@ import java.util.concurrent.*;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicReference;
 import java.util.concurrent.atomic.AtomicLong;
+import java.util.concurrent.locks.ReentrantLock;
 
 /**
  * TickAggregator - Independent Kafka consumer for tick data.
@@ -104,6 +106,9 @@ public class TickAggregator {
     @Autowired
     private FudkiiSignalTrigger fudkiiSignalTrigger;
 
+    @Autowired
+    private CandleBoundaryPublisher candleBoundaryPublisher;
+
     // Aggregation state: key = "exchange:scripCode:windowStartMillis", value = TickAggregateState
     // Package-private for testing
     final ConcurrentHashMap<String, TickAggregateState> aggregationState = new ConcurrentHashMap<>();
@@ -118,6 +123,8 @@ public class TickAggregator {
     private final AtomicBoolean running = new AtomicBoolean(false);
 
     // Current window end (global tracker for emission progress)
+    // Bug #6 FIX: Use lock for atomic compound updates instead of just volatile
+    private final ReentrantLock windowLock = new ReentrantLock();
     private volatile Instant currentWindowStart;
     private volatile Instant currentWindowEnd;
 
@@ -273,8 +280,9 @@ public class TickAggregator {
         // Start trace context
         TraceContext.start(symbol, "1m");
         try {
-            // USE EVENT TIME from tick, not Kafka timestamp (STRICT v2.2)
-            Instant tickTime = parseEventTime(tick, kafkaTimestamp);
+            // Use Kafka timestamp for consistency with OI and Orderbook aggregators
+            // (tick.getTickDt() from 5paisa API has IST/UTC encoding issues)
+            Instant tickTime = Instant.ofEpochMilli(kafkaTimestamp);
             
             // Update last data arrival time (Wall Clock)
             lastDataArrivalMillis.set(System.currentTimeMillis());
@@ -312,35 +320,20 @@ public class TickAggregator {
         }
     }
 
-    /**
-     * Parse event time from tick's tickDt field.
-     * Falls back to Kafka timestamp if parsing fails.
-     */
-    private Instant parseEventTime(TickData tick, long kafkaFallback) {
-        String tickDt = tick.getTickDt();
-        if (tickDt != null && tickDt.contains("Date(")) {
-            try {
-                String num = tickDt.replaceAll("[^0-9]", "");
-                long eventTime = Long.parseLong(num);
-                // Sanity check: within reasonable range (2020-2050)
-                if (eventTime >= 1577836800000L && eventTime <= 2524608000000L) {
-                    return Instant.ofEpochMilli(eventTime);
-                }
-            } catch (NumberFormatException e) {
-                // Fall through to use Kafka timestamp
-            }
-        }
-        return Instant.ofEpochMilli(kafkaFallback);
-    }
 
     /**
      * Validate tick data quality.
      * Returns error message if invalid, null if valid.
+     * Bug #5 FIX: Added quantity validation
      */
     private String validateTick(TickData tick) {
         // Check price > 0
         if (tick.getLastRate() <= 0) {
             return "Price <= 0";
+        }
+        // Bug #5 FIX: Validate quantity is positive
+        if (tick.getLastQuantity() <= 0) {
+            return "Quantity <= 0";
         }
         return null; // Valid
     }
@@ -359,57 +352,82 @@ public class TickAggregator {
      * Package-private for testing.
      */
     void checkWindowEmission() {
-        // STRICT EVENT TIME: Reference is typically maxEventTime
-        Instant referenceTime = maxEventTime.get();
-        boolean isIdleFlush = false;
+        // Bug #6 FIX: Use lock for thread-safe window boundary updates
+        windowLock.lock();
+        try {
+            // STRICT EVENT TIME: Reference is typically maxEventTime
+            Instant referenceTime = maxEventTime.get();
 
-        // IDLE FLUSH LOGIC (Critique Fix #3)
-        // If no data for > 60 seconds, use Wall Clock to force Close
-        long timeSinceLastData = System.currentTimeMillis() - lastDataArrivalMillis.get();
-        if (timeSinceLastData > 60000) { // 1 minute idle
-            Instant now = Instant.now();
-            if (now.isAfter(referenceTime)) {
-                referenceTime = now;
-                isIdleFlush = true;
-                if (timeSinceLastData > 61000 && timeSinceLastData < 62000) { // Log once roughly
-                    log.info("{} [IDLE-FLUSH] System idle for {}ms, forcing time to {}", 
-                        LOG_PREFIX, timeSinceLastData, formatTime(referenceTime));
+            // Bug #4 FIX: Improved idle flush logic
+            // Instead of mixing wall-clock with event-time directly,
+            // only advance by ONE window at a time during idle periods
+            long timeSinceLastData = System.currentTimeMillis() - lastDataArrivalMillis.get();
+            if (timeSinceLastData > 60000) { // 1 minute idle
+                // During idle, only advance event time by one window period
+                // This prevents massive catch-up loops when wall-clock is far ahead
+                Instant maxIdleAdvance = currentWindowEnd.plusSeconds(60);
+                if (maxIdleAdvance.isAfter(referenceTime)) {
+                    referenceTime = maxIdleAdvance;
+                    if (timeSinceLastData > 61000 && timeSinceLastData < 62000) {
+                        log.info("{} [IDLE-FLUSH] System idle for {}ms, advancing by 1 window to {}",
+                            LOG_PREFIX, timeSinceLastData, formatTime(referenceTime));
+                    }
                 }
             }
-        }
 
-        // Skip if no data yet (and not idle)
-        if (referenceTime.equals(Instant.EPOCH)) {
-            return;
-        }
-
-        // Use WHILE loop to emit ALL closed windows up to referenceTime
-        // This handles burst scenarios where event time jumps
-        int windowsEmitted = 0;
-        while (referenceTime.isAfter(currentWindowEnd.plusSeconds(2))) {
-            if (windowsEmitted == 0) {
-                log.info("{} [STRICT-EVENT-TIME] Catching up: current window {} -> reference time {}",
-                    LOG_PREFIX, formatTime(currentWindowEnd), formatTime(referenceTime));
+            // Skip if no data yet
+            if (referenceTime.equals(Instant.EPOCH)) {
+                return;
             }
 
-            emitCurrentWindow();
-            windowsEmitted++;
-
-            // Move to next window
-            currentWindowStart = currentWindowEnd;
-            currentWindowEnd = Timeframe.M1.getWindowEnd(currentWindowStart);
-
-            // Safety: limit iterations to prevent infinite loop
-            if (windowsEmitted > 500) {
-                log.warn("{} [STRICT-EVENT-TIME] Too many windows to emit ({}), breaking. Current: {}, Reference: {}",
-                    LOG_PREFIX, windowsEmitted, formatTime(currentWindowEnd), formatTime(referenceTime));
-                break;
+            // Bug #4 FIX: Skip processing if data is too old (likely historical replay)
+            // If current window is more than 2 hours behind reference, skip to near reference
+            long windowsBehind = Duration.between(currentWindowEnd, referenceTime).toMinutes();
+            if (windowsBehind > 120) {
+                log.warn("{} [STRICT-EVENT-TIME] Window {} hours behind reference {}, fast-forwarding",
+                    LOG_PREFIX, windowsBehind / 60, formatTime(referenceTime));
+                // Skip to 2 minutes before reference time
+                currentWindowStart = Timeframe.M1.alignToWindowStart(referenceTime.minusSeconds(120));
+                currentWindowEnd = Timeframe.M1.getWindowEnd(currentWindowStart);
+                // Clear old states that would never be emitted
+                Instant cutoff = currentWindowStart.minusSeconds(300);
+                aggregationState.entrySet().removeIf(e ->
+                    e.getValue().getWindowEnd() != null &&
+                    e.getValue().getWindowEnd().isBefore(cutoff));
+                log.info("{} [STRICT-EVENT-TIME] Fast-forwarded to window: {} - {}",
+                    LOG_PREFIX, formatTime(currentWindowStart), formatTime(currentWindowEnd));
+                return;
             }
-        }
 
-        if (windowsEmitted > 0) {
-            log.info("{} [STRICT-EVENT-TIME] Emitted {} windows, now at: {} - {}",
-                LOG_PREFIX, windowsEmitted, formatTime(currentWindowStart), formatTime(currentWindowEnd));
+            // Use WHILE loop to emit ALL closed windows up to referenceTime
+            int windowsEmitted = 0;
+            while (referenceTime.isAfter(currentWindowEnd.plusSeconds(2))) {
+                if (windowsEmitted == 0) {
+                    log.info("{} [STRICT-EVENT-TIME] Catching up: current window {} -> reference time {}",
+                        LOG_PREFIX, formatTime(currentWindowEnd), formatTime(referenceTime));
+                }
+
+                emitCurrentWindow();
+                windowsEmitted++;
+
+                // Move to next window
+                currentWindowStart = currentWindowEnd;
+                currentWindowEnd = Timeframe.M1.getWindowEnd(currentWindowStart);
+
+                // Safety: limit iterations to prevent infinite loop
+                if (windowsEmitted > 500) {
+                    log.warn("{} [STRICT-EVENT-TIME] Too many windows to emit ({}), breaking. Current: {}, Reference: {}",
+                        LOG_PREFIX, windowsEmitted, formatTime(currentWindowEnd), formatTime(referenceTime));
+                    break;
+                }
+            }
+
+            if (windowsEmitted > 0) {
+                log.info("{} [STRICT-EVENT-TIME] Emitted {} windows, now at: {} - {}",
+                    LOG_PREFIX, windowsEmitted, formatTime(currentWindowStart), formatTime(currentWindowEnd));
+            }
+        } finally {
+            windowLock.unlock();
         }
     }
 
@@ -496,6 +514,17 @@ public class TickAggregator {
                 log.error("{} Failed to check FUDKII trigger: {}", LOG_PREFIX, e.getMessage());
             }
 
+            // Publish boundary events for HTF analysis (event-driven architecture)
+            try {
+                for (TickCandle candle : candlesToSave) {
+                    if (candle.getScripCode() != null) {
+                        candleBoundaryPublisher.onCandleClose(candle);
+                    }
+                }
+            } catch (Exception e) {
+                log.error("{} Failed to publish boundary events: {}", LOG_PREFIX, e.getMessage());
+            }
+
             // Publish to Kafka topic (keyed by scripCode for proper partitioning)
             try {
                 for (TickCandle candle : candlesToSave) {
@@ -507,16 +536,21 @@ public class TickAggregator {
             }
         }
 
-        // Clean up old states (instruments with no activity for 5 minutes)
+        // Bug #17 FIX: Clean up old states safely by collecting keys first
         // STRICT EVENT TIME: Use currentWindowEnd (which tracks emission progress)
-        // States that are significantly behind emission progress are stale
         Instant cutoff = currentWindowEnd.minus(Duration.ofMinutes(5));
-        int statesBefore = aggregationState.size();
-        aggregationState.entrySet().removeIf(e -> e.getValue().getLastUpdate().isBefore(cutoff));
-        int statesRemoved = statesBefore - aggregationState.size();
-        if (statesRemoved > 0) {
+        List<String> staleKeys = new ArrayList<>();
+        for (Map.Entry<String, TickAggregateState> entry : aggregationState.entrySet()) {
+            if (entry.getValue().getLastUpdate().isBefore(cutoff)) {
+                staleKeys.add(entry.getKey());
+            }
+        }
+        for (String key : staleKeys) {
+            aggregationState.remove(key);
+        }
+        if (!staleKeys.isEmpty()) {
             log.info("{} [CLEANUP] Removed {} old states, cutoff={} (based on emission progress {})",
-                LOG_PREFIX, statesRemoved, formatTime(cutoff), formatTime(currentWindowEnd));
+                LOG_PREFIX, staleKeys.size(), formatTime(cutoff), formatTime(currentWindowEnd));
         }
     }
 
@@ -597,6 +631,8 @@ public class TickAggregator {
         private double previousMidpoint;  // For Lee-Ready: compare to PREVIOUS midpoint
 
         // Volume profile (key = price in paise as string to avoid MongoDB dot issues)
+        // Bug #8 FIX: Limit max entries to prevent unbounded growth
+        private static final int MAX_VOLUME_PROFILE_ENTRIES = 500;
         private final Map<String, Long> volumeAtPrice = new ConcurrentHashMap<>();
 
         // Imbalance tracking
@@ -661,34 +697,26 @@ public class TickAggregator {
             double midpoint = (bid + ask) / 2;
 
             // LEE-READY TRADE CLASSIFICATION (v2.1)
-            // Compare price to PREVIOUS midpoint, not current midpoint
+            // Bug #1 FIX: Use consistent logic for first tick and subsequent ticks
+            // For first tick, use current midpoint as the reference (no previous exists)
+            // For all ticks, apply the same tiebreaker logic
             boolean isBuy = false;
-            if (previousMidpoint > 0) {
-                if (price > previousMidpoint) {
-                    buyVolume += qty;  // Uptick = aggressive buy
-                    isBuy = true;
-                } else if (price < previousMidpoint) {
-                    sellVolume += qty;  // Downtick = aggressive sell
-                } else {
-                    // At previous midpoint - use tick direction as tiebreaker
-                    if (lastTickDirection > 0) {
-                        buyVolume += qty;
-                        isBuy = true;
-                    } else if (lastTickDirection < 0) {
-                        sellVolume += qty;
-                    } else {
-                        midpointVolume += qty;  // True midpoint trade
-                    }
-                }
+            double referenceMidpoint = previousMidpoint > 0 ? previousMidpoint : midpoint;
+
+            if (price > referenceMidpoint + 0.001) {
+                buyVolume += qty;  // Above midpoint = aggressive buy
+                isBuy = true;
+            } else if (price < referenceMidpoint - 0.001) {
+                sellVolume += qty;  // Below midpoint = aggressive sell
             } else {
-                // First tick - use current midpoint comparison
-                if (price > midpoint + 0.001) {
+                // At midpoint - use tick direction as tiebreaker (consistent for all ticks)
+                if (lastTickDirection > 0) {
                     buyVolume += qty;
                     isBuy = true;
-                } else if (price < midpoint - 0.001) {
+                } else if (lastTickDirection < 0) {
                     sellVolume += qty;
                 } else {
-                    midpointVolume += qty;
+                    midpointVolume += qty;  // True midpoint trade
                 }
             }
             previousMidpoint = midpoint;  // Store for next tick
@@ -696,9 +724,14 @@ public class TickAggregator {
             // VOLUME-BASED VPIN UPDATE (v2.1)
             updateVpinBucket(qty, isBuy);
 
-            // Volume profile (store price in paise as string key to avoid MongoDB dot issues)
+            // Bug #8 FIX: Volume profile with size limit
+            // Store price in paise as string key to avoid MongoDB dot issues
             long priceInPaise = Math.round(price * 100);
-            volumeAtPrice.merge(String.valueOf(priceInPaise), qty, Long::sum);
+            String priceKey = String.valueOf(priceInPaise);
+            if (volumeAtPrice.containsKey(priceKey) || volumeAtPrice.size() < MAX_VOLUME_PROFILE_ENTRIES) {
+                volumeAtPrice.merge(priceKey, qty, Long::sum);
+            }
+            // If at max entries and new price, skip to prevent unbounded growth
 
             // Imbalance tracking
             int direction = price > lastPrice ? 1 : (price < lastPrice ? -1 : 0);
@@ -783,8 +816,22 @@ public class TickAggregator {
                     .orElse((long)(low * 100)) / 100.0;
             }
 
-            double buyPressure = volume > 0 ? (double) buyVolume / volume : 0.5;
-            double sellPressure = volume > 0 ? (double) sellVolume / volume : 0.5;
+            // Bug #11 FIX: Calculate buy/sell pressure with validation
+            // Total classified volume should match (buy + sell + midpoint = volume)
+            long classifiedVolume = buyVolume + sellVolume + midpointVolume;
+            double buyPressure, sellPressure;
+            if (classifiedVolume > 0) {
+                buyPressure = (double) buyVolume / classifiedVolume;
+                sellPressure = (double) sellVolume / classifiedVolume;
+            } else if (volume > 0) {
+                // Fallback: use total volume if classification failed
+                buyPressure = (double) buyVolume / volume;
+                sellPressure = (double) sellVolume / volume;
+            } else {
+                // No volume: neutral pressure
+                buyPressure = 0.5;
+                sellPressure = 0.5;
+            }
 
             // Parse option metadata if applicable
             OptionMetadata optionMeta = parseOptionMetadata(companyName);
@@ -830,7 +877,9 @@ public class TickAggregator {
                 .ticksPerSecond(tickCount / 60.0)
                 .largeTradeCount(largeTradeCount)
                 .quality("VALID")
-                .processingLatencyMs(System.currentTimeMillis() - windowEnd.toEpochMilli())
+                // Bug #15 FIX: processingLatencyMs should measure actual staleness
+                // (time since last update, not since window end which mixes time domains)
+                .processingLatencyMs(System.currentTimeMillis() - lastUpdate.toEpochMilli())
                 .createdAt(Instant.now());
 
             // Add option metadata if parsed

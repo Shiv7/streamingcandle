@@ -33,17 +33,31 @@ public class SessionStructureTracker {
     // VWAP calculation helpers
     private final Map<String, VwapAccumulator> vwapAccumulators = new ConcurrentHashMap<>();
 
-    // Indian market times
-    private static final LocalTime MARKET_OPEN = LocalTime.of(9, 15);
-    private static final LocalTime MARKET_CLOSE = LocalTime.of(15, 30);
-    private static final LocalTime OR_15_END = LocalTime.of(9, 30);
-    private static final LocalTime OR_30_END = LocalTime.of(9, 45);
-    private static final LocalTime OR_60_END = LocalTime.of(10, 15);
+    // NSE market times
+    private static final LocalTime NSE_MARKET_OPEN = LocalTime.of(9, 15);
+    private static final LocalTime NSE_MARKET_CLOSE = LocalTime.of(15, 30);
+    private static final LocalTime NSE_OR_15_END = LocalTime.of(9, 30);
+    private static final LocalTime NSE_OR_30_END = LocalTime.of(9, 45);
+    private static final LocalTime NSE_OR_60_END = LocalTime.of(10, 15);
+
+    // MCX market times (9:00 AM - 11:30 PM IST)
+    private static final LocalTime MCX_MARKET_OPEN = LocalTime.of(9, 0);
+    private static final LocalTime MCX_MARKET_CLOSE = LocalTime.of(23, 30);
+    private static final LocalTime MCX_OR_15_END = LocalTime.of(9, 15);
+    private static final LocalTime MCX_OR_30_END = LocalTime.of(9, 30);
+    private static final LocalTime MCX_OR_60_END = LocalTime.of(10, 0);
+
+    // Defaults for backward compatibility
+    private static final LocalTime MARKET_OPEN = NSE_MARKET_OPEN;
+    private static final LocalTime MARKET_CLOSE = NSE_MARKET_CLOSE;
+    private static final LocalTime OR_15_END = NSE_OR_15_END;
+    private static final LocalTime OR_30_END = NSE_OR_30_END;
+    private static final LocalTime OR_60_END = NSE_OR_60_END;
 
     private static final ZoneId IST = ZoneId.of("Asia/Kolkata");
 
     /**
-     * Update session structure with new candle data.
+     * Update session structure with new candle data (defaults to NSE).
      *
      * @param symbol     Symbol identifier
      * @param timestamp  Candle timestamp
@@ -57,10 +71,33 @@ public class SessionStructureTracker {
     public SessionStructure update(String symbol, Instant timestamp,
                                     double open, double high, double low,
                                     double close, long volume) {
+        return update(symbol, timestamp, open, high, low, close, volume, "N");
+    }
+
+    /**
+     * Update session structure with new candle data (exchange-aware).
+     *
+     * @param symbol     Symbol identifier
+     * @param timestamp  Candle timestamp
+     * @param open       Open price
+     * @param high       High price
+     * @param low        Low price
+     * @param close      Close price
+     * @param volume     Volume
+     * @param exchange   Exchange ("M" for MCX, "N" for NSE)
+     * @return Updated SessionStructure
+     */
+    public SessionStructure update(String symbol, Instant timestamp,
+                                    double open, double high, double low,
+                                    double close, long volume, String exchange) {
 
         LocalDateTime ldt = LocalDateTime.ofInstant(timestamp, IST);
         LocalDate today = ldt.toLocalDate();
         LocalTime time = ldt.toLocalTime();
+
+        // Exchange-aware market times
+        boolean isMCX = "M".equalsIgnoreCase(exchange);
+        LocalTime marketOpen = isMCX ? MCX_MARKET_OPEN : NSE_MARKET_OPEN;
 
         SessionStructure session = sessionMap.computeIfAbsent(symbol,
             s -> initializeSession(s, today));
@@ -73,12 +110,12 @@ public class SessionStructureTracker {
             vwapAccumulators.remove(symbol);
         }
 
-        // Update session segment
-        session.setCurrentSegment(SessionStructure.getSegmentForTime(time));
+        // Update session segment (exchange-aware)
+        session.setCurrentSegment(getSegmentForTime(time, exchange));
         session.setLastUpdate(timestamp);
 
-        // Pre-market handling
-        if (time.isBefore(MARKET_OPEN)) {
+        // Pre-market handling (exchange-aware)
+        if (time.isBefore(marketOpen)) {
             updatePreMarket(session, high, low);
             return session;
         }
@@ -95,8 +132,8 @@ public class SessionStructureTracker {
         session.setSessionVolume(session.getSessionVolume() + volume);
         session.setSessionValue(session.getSessionValue() + (close * volume));
 
-        // Update Opening Range
-        updateOpeningRange(session, time, high, low);
+        // Update Opening Range (exchange-aware)
+        updateOpeningRange(session, time, high, low, exchange);
 
         // Update VWAP
         updateVwap(symbol, session, close, volume);
@@ -168,35 +205,87 @@ public class SessionStructureTracker {
     }
 
     /**
-     * Update Opening Range levels.
+     * Update Opening Range levels (defaults to NSE).
      */
     private void updateOpeningRange(SessionStructure session, LocalTime time,
                                      double high, double low) {
+        updateOpeningRange(session, time, high, low, "N");
+    }
+
+    /**
+     * Update Opening Range levels (exchange-aware).
+     */
+    private void updateOpeningRange(SessionStructure session, LocalTime time,
+                                     double high, double low, String exchange) {
         if (session.isOpeningRangeComplete()) {
             return;
         }
 
+        // Get exchange-specific OR end times
+        boolean isMCX = "M".equalsIgnoreCase(exchange);
+        LocalTime or15End = isMCX ? MCX_OR_15_END : NSE_OR_15_END;
+        LocalTime or30End = isMCX ? MCX_OR_30_END : NSE_OR_30_END;
+        LocalTime or60End = isMCX ? MCX_OR_60_END : NSE_OR_60_END;
+
         // 15-minute range
-        if (!time.isAfter(OR_15_END)) {
+        if (!time.isAfter(or15End)) {
             session.setOpeningRangeHigh15(Math.max(session.getOpeningRangeHigh15(), high));
             session.setOpeningRangeLow15(session.getOpeningRangeLow15() == 0 ? low :
                 Math.min(session.getOpeningRangeLow15(), low));
         }
 
         // 30-minute range
-        if (!time.isAfter(OR_30_END)) {
+        if (!time.isAfter(or30End)) {
             session.setOpeningRangeHigh30(Math.max(session.getOpeningRangeHigh30(), high));
             session.setOpeningRangeLow30(session.getOpeningRangeLow30() == 0 ? low :
                 Math.min(session.getOpeningRangeLow30(), low));
         }
 
         // 60-minute range
-        if (!time.isAfter(OR_60_END)) {
+        if (!time.isAfter(or60End)) {
             session.setOpeningRangeHigh60(Math.max(session.getOpeningRangeHigh60(), high));
             session.setOpeningRangeLow60(session.getOpeningRangeLow60() == 0 ? low :
                 Math.min(session.getOpeningRangeLow60(), low));
         } else {
             session.setOpeningRangeComplete(true);
+        }
+    }
+
+    /**
+     * Get session segment for time (exchange-aware).
+     */
+    private SessionSegment getSegmentForTime(LocalTime time, String exchange) {
+        boolean isMCX = "M".equalsIgnoreCase(exchange);
+        LocalTime marketOpen = isMCX ? MCX_MARKET_OPEN : NSE_MARKET_OPEN;
+        LocalTime marketClose = isMCX ? MCX_MARKET_CLOSE : NSE_MARKET_CLOSE;
+
+        if (time.isBefore(marketOpen)) {
+            return SessionSegment.PRE_MARKET;
+        }
+        if (time.isAfter(marketClose)) {
+            return SessionSegment.POST_MARKET;
+        }
+
+        if (isMCX) {
+            // MCX segments: Morning (9:00-12:00), Afternoon (12:00-18:00), Evening (18:00-23:30)
+            if (time.isBefore(LocalTime.of(12, 0))) {
+                return SessionSegment.MORNING;
+            } else if (time.isBefore(LocalTime.of(18, 0))) {
+                return SessionSegment.AFTERNOON;
+            } else {
+                return SessionSegment.CLOSING; // Use CLOSING for MCX evening session
+            }
+        } else {
+            // NSE segments
+            if (time.isBefore(LocalTime.of(11, 30))) {
+                return SessionSegment.MORNING;
+            } else if (time.isBefore(LocalTime.of(13, 30))) {
+                return SessionSegment.MIDDAY;
+            } else if (time.isBefore(LocalTime.of(15, 0))) {
+                return SessionSegment.AFTERNOON;
+            } else {
+                return SessionSegment.CLOSING;
+            }
         }
     }
 

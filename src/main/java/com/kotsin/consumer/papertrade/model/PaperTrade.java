@@ -5,6 +5,9 @@ import lombok.Builder;
 import lombok.Data;
 import lombok.NoArgsConstructor;
 import org.springframework.data.annotation.Id;
+import org.springframework.data.mongodb.core.index.CompoundIndex;
+import org.springframework.data.mongodb.core.index.CompoundIndexes;
+import org.springframework.data.mongodb.core.index.Indexed;
 import org.springframework.data.mongodb.core.mapping.Document;
 
 import java.time.Instant;
@@ -17,21 +20,39 @@ import java.time.Instant;
  * - Entry/Exit information
  * - P&L calculations
  * - Risk management
+ *
+ * Persisted to MongoDB with indexes for:
+ * - Fast lookup by tradeId, symbol, signalId
+ * - Status-based queries for open/closed positions
+ * - Time-range queries for history
  */
 @Data
 @Builder
 @NoArgsConstructor
 @AllArgsConstructor
 @Document(collection = "paper_trades")
+@CompoundIndexes({
+    @CompoundIndex(name = "symbol_status_idx", def = "{'symbol': 1, 'status': 1}"),
+    @CompoundIndex(name = "status_exitTime_idx", def = "{'status': 1, 'exitTime': -1}"),
+    @CompoundIndex(name = "signalType_status_idx", def = "{'signalType': 1, 'status': 1}"),
+    @CompoundIndex(name = "createdAt_idx", def = "{'createdAt': -1}")
+})
 public class PaperTrade {
 
     @Id
     private String id;
 
     // ==================== IDENTIFICATION ====================
+    @Indexed(unique = true)
     private String tradeId;
+
+    @Indexed
     private String symbol;
+
+    @Indexed
     private String signalId;             // Link to originating signal
+
+    @Indexed
     private String signalType;
 
     // ==================== POSITION DETAILS ====================
@@ -66,7 +87,10 @@ public class PaperTrade {
     private double commission;           // Simulated commission
 
     // ==================== STATUS ====================
+    @Indexed
     private TradeStatus status;
+
+    @Indexed
     private String exitReason;
     private int fillCount;               // Partial fills
 

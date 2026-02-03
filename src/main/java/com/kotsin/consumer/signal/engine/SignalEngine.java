@@ -1,5 +1,6 @@
 package com.kotsin.consumer.signal.engine;
 
+import com.kotsin.consumer.event.CandleBoundaryEvent;
 import com.kotsin.consumer.gate.GateChain;
 import com.kotsin.consumer.gate.model.GateResult.ChainResult;
 import com.kotsin.consumer.indicator.calculator.TechnicalIndicatorCalculator;
@@ -10,6 +11,7 @@ import com.kotsin.consumer.model.StrategyState.*;
 import com.kotsin.consumer.model.Timeframe;
 import com.kotsin.consumer.model.UnifiedCandle;
 import com.kotsin.consumer.model.MultiTimeframePivotState;
+import com.kotsin.consumer.model.PivotLevels;
 import com.kotsin.consumer.model.CprAnalysis;
 import com.kotsin.consumer.model.ConfluenceResult;
 import com.kotsin.consumer.model.BounceSignal;
@@ -41,6 +43,7 @@ import jakarta.annotation.PreDestroy;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.beans.factory.annotation.Value;
+import org.springframework.context.event.EventListener;
 import org.springframework.kafka.core.KafkaTemplate;
 import org.springframework.stereotype.Service;
 
@@ -127,6 +130,9 @@ public class SignalEngine {
     @Autowired
     private PivotConfluenceAnalyzer pivotConfluenceAnalyzer;
 
+    @Autowired
+    private com.kotsin.consumer.service.ATRService atrService;
+
     // ==================== STRATEGY TRIGGERS ====================
 
     @Autowired
@@ -149,6 +155,14 @@ public class SignalEngine {
     @Autowired
     private QuantScoreProducer quantScoreProducer;
 
+    // ==================== OPTIONS INTEGRATION ====================
+
+    @Autowired
+    private com.kotsin.consumer.options.service.OptionStrikeSelector optionStrikeSelector;
+
+    @Autowired
+    private com.kotsin.consumer.options.service.ScripGroupService scripGroupService;
+
     @Autowired
     private KafkaTemplate<String, Object> kafkaTemplate;
 
@@ -157,6 +171,12 @@ public class SignalEngine {
 
     @Value("${signal.engine.kafka.topic:trading-signals-v2}")
     private String tradingSignalsTopic;
+
+    @Value("${signal.engine.option.recommendations.topic:option-recommendations}")
+    private String optionRecommendationsTopic;
+
+    @Value("${signal.engine.option.selection.enabled:true}")
+    private boolean optionSelectionEnabled;
 
     @Value("${signal.engine.gate.enabled:true}")
     private boolean gateEnabled;
@@ -172,6 +192,13 @@ public class SignalEngine {
 
     @Value("${signal.engine.timeframe:5m}")
     private String primaryTimeframe;
+
+    // Multi-timeframe pattern detection configuration
+    @Value("${pattern.detection.timeframes:5m,15m,30m,1h,4h,1d}")
+    private String patternDetectionTimeframes;
+
+    @Value("${pattern.detection.mtf.enabled:true}")
+    private boolean mtfPatternDetectionEnabled;
 
     @Value("${signal.watch.expiry.minutes:30}")
     private int watchExpiryMinutes;
@@ -315,6 +342,57 @@ public class SignalEngine {
     }
 
     /**
+     * Event-driven processing for candle boundary events.
+     * This is triggered when a timeframe boundary is crossed (e.g., 15m, 30m, 1h).
+     * More efficient than poll-based as it only runs when needed.
+     */
+    @EventListener
+    public void onCandleBoundary(CandleBoundaryEvent event) {
+        if (!enabled || !running.get()) {
+            return;
+        }
+
+        CandleBoundaryEvent.CandleBoundaryData data = event.getData();
+        String scripCode = data.getScripCode();
+        Timeframe timeframe = data.getTimeframe();
+
+        // Skip if symbol not bootstrapped
+        if (!historicalDataBootstrapService.isBootstrapped(scripCode)) {
+            return;
+        }
+
+        log.debug("{} [EVENT] {} boundary crossed for {} at {}",
+            LOG_PREFIX, timeframe.getLabel(), scripCode, data.getWindowEnd());
+
+        // Route to appropriate processing based on timeframe
+        switch (timeframe) {
+            case M15:
+                // 15m boundary - PivotConfluenceTrigger LTF check will be triggered via its own listener
+                log.debug("{} {} 15m boundary - LTF confirmation will be refreshed", LOG_PREFIX, scripCode);
+                break;
+
+            case M30:
+                // 30m boundary - FudkiiSignalTrigger processes this
+                log.debug("{} {} 30m boundary - FUDKII trigger processed via onCandleClose", LOG_PREFIX, scripCode);
+                break;
+
+            case H1:
+            case H4:
+                // HTF boundaries - recalculate bias
+                log.info("{} {} {} boundary - HTF bias will be refreshed", LOG_PREFIX, scripCode, timeframe.getLabel());
+                break;
+
+            case D1:
+                // Daily close - full refresh
+                log.info("{} {} Daily close - full strategy refresh", LOG_PREFIX, scripCode);
+                break;
+
+            default:
+                break;
+        }
+    }
+
+    /**
      * Process a single symbol.
      */
     public void processSymbol(String symbol, Timeframe timeframe) {
@@ -338,7 +416,12 @@ public class SignalEngine {
                 return;
             }
 
+            // Bug #3 & #12 FIX: Safe access to candles list
             UnifiedCandle current = candles.get(0);
+            if (current == null) {
+                log.debug("{} {} First candle is null, skipping", LOG_PREFIX, TraceContext.getShortPrefix());
+                return;
+            }
             List<UnifiedCandle> history = candles.size() > 1 ? candles.subList(1, candles.size()) : List.of();
 
             log.debug("{} {} Candles loaded: count={}, price={}",
@@ -365,9 +448,10 @@ public class SignalEngine {
                     });
             }
 
-            // Update session structure
+            // Update session structure (exchange-aware for MCX/NSE)
             TraceContext.addStage("SESSION");
-            updateSessionStructure(symbol, current);
+            String exchange = current.getExchange() != null ? current.getExchange() : "N";
+            updateSessionStructure(symbol, current, exchange);
 
             // Calculate technical indicators
             TraceContext.addStage("INDICATORS");
@@ -388,12 +472,19 @@ public class SignalEngine {
 
             // ==================== PATTERN ANALYSIS ====================
             TraceContext.addStage("PATTERN");
-            PatternResult patternResult = patternAnalyzer.analyze(current, history);
+            // Pass the actual timeframe to pattern analyzer (was hardcoded to 5m before)
+            PatternResult patternResult = patternAnalyzer.analyze(current, history, timeframe.getLabel());
             List<String> detectedPatterns = patternResult.getPatternNames();
 
             // Publish pattern signals if patterns detected
             if (patternResult.isHasHighConfidencePattern()) {
                 patternSignalProducer.publish(patternResult);
+            }
+
+            // ==================== MULTI-TIMEFRAME PATTERN DETECTION ====================
+            // Detect patterns on additional timeframes (15m, 30m, 1h, 4h, 1d)
+            if (mtfPatternDetectionEnabled) {
+                detectMTFPatterns(symbol, timeframe.getLabel());
             }
 
             // ==================== PUBLISH QUANT SCORE ====================
@@ -454,9 +545,9 @@ public class SignalEngine {
     }
 
     /**
-     * Update session structure from candle data.
+     * Update session structure from candle data (exchange-aware).
      */
-    private void updateSessionStructure(String symbol, UnifiedCandle candle) {
+    private void updateSessionStructure(String symbol, UnifiedCandle candle, String exchange) {
         try {
             sessionTracker.update(
                 symbol,
@@ -465,7 +556,8 @@ public class SignalEngine {
                 candle.getHigh(),
                 candle.getLow(),
                 candle.getClose(),
-                candle.getVolume()
+                candle.getVolume(),
+                exchange  // Pass exchange for MCX/NSE-aware session tracking
             );
         } catch (Exception e) {
             log.debug("{} {} Session structure update failed: {}",
@@ -745,6 +837,57 @@ public class SignalEngine {
     }
 
     /**
+     * Detect patterns on multiple timeframes.
+     * Supports: 5m, 15m, 30m, 1h, 2h, 4h, 1d
+     */
+    private void detectMTFPatterns(String symbol, String currentTimeframe) {
+        if (patternDetectionTimeframes == null || patternDetectionTimeframes.isEmpty()) {
+            return;
+        }
+
+        String[] timeframes = patternDetectionTimeframes.split(",");
+        for (String tfLabel : timeframes) {
+            tfLabel = tfLabel.trim();
+
+            // Skip if same as current (already processed)
+            if (tfLabel.equalsIgnoreCase(currentTimeframe)) {
+                continue;
+            }
+
+            try {
+                Timeframe tf = Timeframe.fromLabel(tfLabel);
+                if (tf == null) {
+                    log.debug("{} {} Unknown timeframe: {}", LOG_PREFIX, symbol, tfLabel);
+                    continue;
+                }
+
+                // Get candles for this timeframe
+                List<UnifiedCandle> candles = candleService.getCandleHistory(symbol, tf, 50);
+                if (candles == null || candles.isEmpty()) {
+                    continue;
+                }
+
+                UnifiedCandle current = candles.get(0);
+                List<UnifiedCandle> history = candles.size() > 1 ? candles.subList(1, candles.size()) : List.of();
+
+                // Analyze patterns for this timeframe
+                PatternResult patternResult = patternAnalyzer.analyze(current, history, tfLabel);
+
+                // Publish if high confidence patterns found
+                if (patternResult.isHasHighConfidencePattern()) {
+                    patternSignalProducer.publish(patternResult);
+                    log.debug("{} {} [{}] MTF patterns detected: {}",
+                        LOG_PREFIX, symbol, tfLabel, patternResult.getPatternNames());
+                }
+
+            } catch (Exception e) {
+                log.debug("{} {} MTF pattern detection failed for {}: {}",
+                    LOG_PREFIX, symbol, tfLabel, e.getMessage());
+            }
+        }
+    }
+
+    /**
      * Analyze Multi-Timeframe alignment.
      * Boosts FUDKII score based on MTF confluence.
      */
@@ -824,12 +967,12 @@ public class SignalEngine {
     }
 
     /**
-     * Validate signal through gate chain.
+     * Validate signal through gate chain (exchange-aware for MCX/NSE).
      */
     private ChainResult validateThroughGates(String symbol, FudkiiScore score,
                                               TechnicalIndicators indicators, double price,
                                               double target, double stopLoss,
-                                              PatternResult patternResult) {
+                                              PatternResult patternResult, String exchange) {
         if (!gateEnabled || indicators == null) {
             return null;
         }
@@ -850,6 +993,7 @@ public class SignalEngine {
                 .vwap(session != null ? session.getVwap() : 0,
                       session != null && session.getSessionClose() > session.getVwap())
                 .fudkii(score.getCompositeScore())
+                .exchange(exchange != null ? exchange : "N")  // MCX/NSE aware gate evaluation
                 .custom("macdHistogram", indicators.getMacdHistogram())
                 .custom("fudkiiScore", score)               // For QuantScoreGate
                 .custom("patternResult", patternResult)     // For PatternGate
@@ -903,9 +1047,10 @@ public class SignalEngine {
                 // Calculate entry levels
                 EntryLevels levels = calculateEntryLevels(score, pivotState, price);
 
-                // Validate through gate chain before activating
+                // Validate through gate chain before activating (exchange-aware)
                 ChainResult gateResult = validateThroughGates(
-                    symbol, score, indicators, price, levels.target1, levels.stop, patternResult);
+                    symbol, score, indicators, price, levels.target1, levels.stop, patternResult,
+                    candle.getExchange());
 
                 if (gateResult != null && !gateResult.isPassed()) {
                     log.info("{} {} Signal blocked by gates: {}",
@@ -1170,43 +1315,63 @@ public class SignalEngine {
         // Enter WATCH state
         signal.enterWatch(adjustedScore, price, watchExpiryMinutes);
 
-        // Calculate entry levels
-        EntryLevels levels = new EntryLevels();
-        levels.entry = price;
-
-        // Stop loss from strategy or pivot
-        if (suggestedStop > 0 && suggestedStop != price) {
-            levels.stop = suggestedStop;
-        } else if (bullish && pivotState != null && !pivotState.getSupportLevels().isEmpty()) {
-            levels.stop = pivotState.getSupportLevels().get(0).getPrice() * 0.998;
-        } else if (!bullish && pivotState != null && !pivotState.getResistanceLevels().isEmpty()) {
-            levels.stop = pivotState.getResistanceLevels().get(0).getPrice() * 1.002;
-        } else {
-            levels.stop = bullish ? price * 0.98 : price * 1.02;
+        // Get MTF pivot state for proper pivot-to-pivot distance calculation
+        MultiTimeframePivotState mtfPivotState = null;
+        try {
+            String scripCode = candle.getScripCode();
+            String exchange = candle.getExchange();
+            if (scripCode != null && exchange != null) {
+                mtfPivotState = pivotLevelService.getOrLoadPivotLevels(scripCode, exchange, "C").orElse(null);
+            }
+        } catch (Exception e) {
+            log.warn("{} Failed to get MTF pivot state for {}: {}", LOG_PREFIX, symbol, e.getMessage());
         }
 
-        // Targets from pivot levels
-        if (bullish && pivotState != null && !pivotState.getResistanceLevels().isEmpty()) {
-            levels.target1 = pivotState.getResistanceLevels().get(0).getPrice();
-            levels.target2 = pivotState.getResistanceLevels().size() > 1 ?
-                pivotState.getResistanceLevels().get(1).getPrice() : levels.target1 * 1.02;
-        } else if (!bullish && pivotState != null && !pivotState.getSupportLevels().isEmpty()) {
-            levels.target1 = pivotState.getSupportLevels().get(0).getPrice();
-            levels.target2 = pivotState.getSupportLevels().size() > 1 ?
-                pivotState.getSupportLevels().get(1).getPrice() : levels.target1 * 0.98;
-        } else {
-            levels.target1 = bullish ? price * 1.02 : price * 0.98;
-            levels.target2 = bullish ? price * 1.04 : price * 0.96;
+        // Set symbol on score for ATR lookup
+        FudkiiScore scoreWithSymbol = FudkiiScore.builder()
+            .symbol(candle.getScripCode())
+            .compositeScore(adjustedScore.getCompositeScore())
+            .direction(adjustedScore.getDirection())
+            .confidence(adjustedScore.getConfidence())
+            .isWatchSetup(adjustedScore.isWatchSetup())
+            .isActiveTrigger(adjustedScore.isActiveTrigger())
+            .reason(adjustedScore.getReason())
+            .build();
+
+        // Calculate entry levels using proper pivot-to-pivot distances
+        EntryLevels levels = calculateEntryLevels(scoreWithSymbol, pivotState, price, mtfPivotState);
+
+        // Override stop if strategy provided a specific stop (e.g., from pattern)
+        if (suggestedStop > 0 && suggestedStop != price) {
+            // Validate suggested stop is reasonable (at least 1% away)
+            double suggestedDistance = Math.abs(price - suggestedStop);
+            double minDistance = price * 0.005; // At least 0.5%
+            if (suggestedDistance >= minDistance) {
+                levels.stop = suggestedStop;
+                // Recalculate targets based on new stop
+                double risk = Math.abs(levels.entry - levels.stop);
+                if (bullish) {
+                    levels.target1 = levels.entry + (risk * 2);
+                    levels.target2 = levels.entry + (risk * 3);
+                } else {
+                    levels.target1 = levels.entry - (risk * 2);
+                    levels.target2 = levels.entry - (risk * 3);
+                }
+                log.info("{} {} {} Using strategy-suggested stop: {}", LOG_PREFIX, TraceContext.getShortPrefix(),
+                    strategyName, String.format("%.2f", suggestedStop));
+            }
         }
 
         // Log detailed entry levels
-        log.info("{} {} {} Entry Levels: entry={}, stop={}, T1={}, T2={}, R:R={}",
+        double risk = Math.abs(levels.entry - levels.stop);
+        log.info("{} {} {} Entry Levels: entry={}, stop={}, T1={}, T2={}, R:R={}, Risk%={:.2f}%",
             LOG_PREFIX, TraceContext.getShortPrefix(), strategyName,
             String.format("%.2f", levels.entry),
             String.format("%.2f", levels.stop),
             String.format("%.2f", levels.target1),
             String.format("%.2f", levels.target2),
-            String.format("%.2f", Math.abs(levels.target1 - levels.entry) / Math.abs(levels.entry - levels.stop)));
+            String.format("%.2f", Math.abs(levels.target1 - levels.entry) / risk),
+            (risk / levels.entry) * 100);
 
         // Immediately activate
         signal.enterActive(adjustedScore, price, levels.entry, levels.stop, levels.target1, levels.target2);
@@ -1253,39 +1418,313 @@ public class SignalEngine {
     }
 
     /**
-     * Calculate entry, stop, and target levels.
+     * Calculate entry, stop, and target levels using proper pivot-to-pivot distances.
+     *
+     * FIX: Uses actual pivot levels from MultiTimeframePivotState for realistic stop/target.
+     * Validates against ATR to avoid stops that are too tight for normal volatility.
      */
     private EntryLevels calculateEntryLevels(FudkiiScore score, PivotState pivotState, double price) {
+        return calculateEntryLevels(score, pivotState, price, null);
+    }
+
+    /**
+     * Calculate entry levels with full pivot state for proper pivot-to-pivot distances.
+     */
+    private EntryLevels calculateEntryLevels(FudkiiScore score, PivotState pivotState, double price,
+                                              MultiTimeframePivotState mtfPivotState) {
         EntryLevels levels = new EntryLevels();
-
         boolean bullish = score.getDirection() == FudkiiScore.Direction.BULLISH;
-
-        // Entry is current price
         levels.entry = price;
 
-        // Stop loss from nearest support/resistance
-        if (bullish && pivotState != null && !pivotState.getSupportLevels().isEmpty()) {
-            PriceLevel nearestSupport = pivotState.getSupportLevels().get(0);
-            levels.stop = nearestSupport.getPrice() * 0.998; // Slightly below
-        } else if (!bullish && pivotState != null && !pivotState.getResistanceLevels().isEmpty()) {
-            PriceLevel nearestResistance = pivotState.getResistanceLevels().get(0);
-            levels.stop = nearestResistance.getPrice() * 1.002; // Slightly above
-        } else {
-            // Default: 1% stop
-            levels.stop = bullish ? price * 0.99 : price * 1.01;
+        // Get ATR for minimum stop distance validation (use 15m ATR)
+        String scripCode = score.getSymbol() != null ? score.getSymbol() : "UNKNOWN";
+        com.kotsin.consumer.service.ATRService.ATRData atrData = atrService != null ?
+            atrService.getATR(scripCode, Timeframe.M15) : null;
+        double atr = atrData != null ? atrData.getAtr() : price * 0.01; // Fallback 1%
+        double minStopDistance = atr * 1.5; // Minimum 1.5x ATR for stop
+
+        // ==================== STOP LOSS CALCULATION ====================
+        // Priority: 1) MTF Pivot levels, 2) PivotState levels, 3) ATR-based
+
+        double stopFromPivot = 0;
+        String stopSource = "DEFAULT";
+
+        if (mtfPivotState != null) {
+            // Use actual pivot levels from Daily/Weekly/Monthly
+            PivotLevels dailyPivot = mtfPivotState.getDailyPivot();
+            PivotLevels weeklyPivot = mtfPivotState.getWeeklyPivot();
+
+            if (bullish) {
+                // LONG: Stop below nearest support pivot
+                double bestSupport = findBestSupportForStop(price, dailyPivot, weeklyPivot, minStopDistance);
+                if (bestSupport > 0) {
+                    stopFromPivot = bestSupport * 0.998; // Slightly below the support
+                    stopSource = "PIVOT_SUPPORT";
+                }
+            } else {
+                // SHORT: Stop above nearest resistance pivot
+                double bestResistance = findBestResistanceForStop(price, dailyPivot, weeklyPivot, minStopDistance);
+                if (bestResistance > 0) {
+                    stopFromPivot = bestResistance * 1.002; // Slightly above the resistance
+                    stopSource = "PIVOT_RESISTANCE";
+                }
+            }
         }
 
-        // Targets based on risk-reward
-        double risk = Math.abs(levels.entry - levels.stop);
-        if (bullish) {
-            levels.target1 = levels.entry + (risk * 2);   // 2R target
-            levels.target2 = levels.entry + (risk * 3);   // 3R target
-        } else {
-            levels.target1 = levels.entry - (risk * 2);
-            levels.target2 = levels.entry - (risk * 3);
+        // Fallback to PivotState (swing levels) if no MTF pivot found
+        if (stopFromPivot == 0 && pivotState != null) {
+            if (bullish && pivotState.getSupportLevels() != null && !pivotState.getSupportLevels().isEmpty()) {
+                PriceLevel nearestSupport = pivotState.getSupportLevels().get(0);
+                if (nearestSupport != null && nearestSupport.getPrice() < price) {
+                    double distance = price - nearestSupport.getPrice();
+                    if (distance >= minStopDistance) {
+                        stopFromPivot = nearestSupport.getPrice() * 0.998;
+                        stopSource = "SWING_SUPPORT";
+                    }
+                }
+            } else if (!bullish && pivotState.getResistanceLevels() != null && !pivotState.getResistanceLevels().isEmpty()) {
+                PriceLevel nearestResistance = pivotState.getResistanceLevels().get(0);
+                if (nearestResistance != null && nearestResistance.getPrice() > price) {
+                    double distance = nearestResistance.getPrice() - price;
+                    if (distance >= minStopDistance) {
+                        stopFromPivot = nearestResistance.getPrice() * 1.002;
+                        stopSource = "SWING_RESISTANCE";
+                    }
+                }
+            }
         }
+
+        // Final stop: use pivot-based if valid, otherwise ATR-based
+        if (stopFromPivot > 0) {
+            levels.stop = stopFromPivot;
+        } else {
+            // ATR-based stop (2x ATR for more room)
+            levels.stop = bullish ? price - (atr * 2.0) : price + (atr * 2.0);
+            stopSource = "ATR_BASED";
+        }
+
+        // Validate stop distance is reasonable (at least 1x ATR)
+        double actualStopDistance = Math.abs(levels.entry - levels.stop);
+        if (actualStopDistance < atr) {
+            // Stop too tight, use ATR-based
+            levels.stop = bullish ? price - (atr * 1.5) : price + (atr * 1.5);
+            stopSource = "ATR_ADJUSTED";
+            actualStopDistance = atr * 1.5;
+        }
+
+        // ==================== TARGET CALCULATION ====================
+        // Priority: 1) Next pivot level, 2) Risk-multiple based
+
+        double targetFromPivot = 0;
+        double target2FromPivot = 0;
+        String targetSource = "DEFAULT";
+
+        if (mtfPivotState != null) {
+            PivotLevels dailyPivot = mtfPivotState.getDailyPivot();
+            PivotLevels weeklyPivot = mtfPivotState.getWeeklyPivot();
+
+            if (bullish) {
+                // LONG: Target at next resistance pivot
+                double[] targets = findResistanceTargets(price, dailyPivot, weeklyPivot, actualStopDistance);
+                if (targets[0] > 0) {
+                    targetFromPivot = targets[0];
+                    target2FromPivot = targets[1] > 0 ? targets[1] : targets[0] * 1.02;
+                    targetSource = "PIVOT_RESISTANCE";
+                }
+            } else {
+                // SHORT: Target at next support pivot
+                double[] targets = findSupportTargets(price, dailyPivot, weeklyPivot, actualStopDistance);
+                if (targets[0] > 0) {
+                    targetFromPivot = targets[0];
+                    target2FromPivot = targets[1] > 0 ? targets[1] : targets[0] * 0.98;
+                    targetSource = "PIVOT_SUPPORT";
+                }
+            }
+        }
+
+        // Use pivot targets if they provide at least 1.5R
+        if (targetFromPivot > 0) {
+            double potentialReward = Math.abs(targetFromPivot - levels.entry);
+            double rr = potentialReward / actualStopDistance;
+            if (rr >= 1.5) {
+                levels.target1 = targetFromPivot;
+                levels.target2 = target2FromPivot;
+            } else {
+                // Pivot target too close, use R-multiple
+                levels.target1 = bullish ? levels.entry + (actualStopDistance * 2) : levels.entry - (actualStopDistance * 2);
+                levels.target2 = bullish ? levels.entry + (actualStopDistance * 3) : levels.entry - (actualStopDistance * 3);
+                targetSource = "R_MULTIPLE";
+            }
+        } else {
+            // No pivot target found, use R-multiple
+            levels.target1 = bullish ? levels.entry + (actualStopDistance * 2) : levels.entry - (actualStopDistance * 2);
+            levels.target2 = bullish ? levels.entry + (actualStopDistance * 3) : levels.entry - (actualStopDistance * 3);
+            targetSource = "R_MULTIPLE";
+        }
+
+        // Log the calculation details
+        double finalRR = Math.abs(levels.target1 - levels.entry) / actualStopDistance;
+        log.info("{} {} Entry Levels Calculated: entry={}, stop={} ({}), T1={} ({}), T2={}, R:R={:.2f}, ATR={:.2f}",
+            LOG_PREFIX, scripCode,
+            String.format("%.2f", levels.entry),
+            String.format("%.2f", levels.stop), stopSource,
+            String.format("%.2f", levels.target1), targetSource,
+            String.format("%.2f", levels.target2),
+            finalRR, atr);
 
         return levels;
+    }
+
+    /**
+     * Find the best support level for stop placement.
+     * Returns a support that gives at least minDistance from price.
+     */
+    private double findBestSupportForStop(double price, PivotLevels daily, PivotLevels weekly, double minDistance) {
+        List<Double> supports = new ArrayList<>();
+
+        if (daily != null) {
+            if (daily.getS1() > 0 && daily.getS1() < price) supports.add(daily.getS1());
+            if (daily.getS2() > 0 && daily.getS2() < price) supports.add(daily.getS2());
+            if (daily.getS3() > 0 && daily.getS3() < price) supports.add(daily.getS3());
+            if (daily.getBc() > 0 && daily.getBc() < price) supports.add(daily.getBc());
+            if (daily.getCamS3() > 0 && daily.getCamS3() < price) supports.add(daily.getCamS3());
+        }
+        if (weekly != null) {
+            if (weekly.getS1() > 0 && weekly.getS1() < price) supports.add(weekly.getS1());
+            if (weekly.getPivot() > 0 && weekly.getPivot() < price) supports.add(weekly.getPivot());
+        }
+
+        // Sort descending (nearest first)
+        supports.sort((a, b) -> Double.compare(b, a));
+
+        // Find the nearest support that gives at least minDistance
+        for (double support : supports) {
+            double distance = price - support;
+            if (distance >= minDistance && distance <= price * 0.05) { // Max 5% stop
+                return support;
+            }
+        }
+
+        // If none found with minDistance, return the nearest one (might be tighter)
+        if (!supports.isEmpty() && (price - supports.get(0)) >= minDistance * 0.5) {
+            return supports.get(0);
+        }
+
+        return 0;
+    }
+
+    /**
+     * Find the best resistance level for stop placement (SHORT trades).
+     */
+    private double findBestResistanceForStop(double price, PivotLevels daily, PivotLevels weekly, double minDistance) {
+        List<Double> resistances = new ArrayList<>();
+
+        if (daily != null) {
+            if (daily.getR1() > 0 && daily.getR1() > price) resistances.add(daily.getR1());
+            if (daily.getR2() > 0 && daily.getR2() > price) resistances.add(daily.getR2());
+            if (daily.getR3() > 0 && daily.getR3() > price) resistances.add(daily.getR3());
+            if (daily.getTc() > 0 && daily.getTc() > price) resistances.add(daily.getTc());
+            if (daily.getCamR3() > 0 && daily.getCamR3() > price) resistances.add(daily.getCamR3());
+        }
+        if (weekly != null) {
+            if (weekly.getR1() > 0 && weekly.getR1() > price) resistances.add(weekly.getR1());
+            if (weekly.getPivot() > 0 && weekly.getPivot() > price) resistances.add(weekly.getPivot());
+        }
+
+        // Sort ascending (nearest first)
+        resistances.sort(Double::compare);
+
+        // Find the nearest resistance that gives at least minDistance
+        for (double resistance : resistances) {
+            double distance = resistance - price;
+            if (distance >= minDistance && distance <= price * 0.05) { // Max 5% stop
+                return resistance;
+            }
+        }
+
+        if (!resistances.isEmpty() && (resistances.get(0) - price) >= minDistance * 0.5) {
+            return resistances.get(0);
+        }
+
+        return 0;
+    }
+
+    /**
+     * Find resistance levels for targets (LONG trades).
+     * Returns [target1, target2].
+     */
+    private double[] findResistanceTargets(double price, PivotLevels daily, PivotLevels weekly, double risk) {
+        List<Double> resistances = new ArrayList<>();
+
+        if (daily != null) {
+            if (daily.getR1() > 0 && daily.getR1() > price) resistances.add(daily.getR1());
+            if (daily.getR2() > 0 && daily.getR2() > price) resistances.add(daily.getR2());
+            if (daily.getR3() > 0 && daily.getR3() > price) resistances.add(daily.getR3());
+            if (daily.getTc() > 0 && daily.getTc() > price) resistances.add(daily.getTc());
+        }
+        if (weekly != null) {
+            if (weekly.getR1() > 0 && weekly.getR1() > price) resistances.add(weekly.getR1());
+            if (weekly.getR2() > 0 && weekly.getR2() > price) resistances.add(weekly.getR2());
+        }
+
+        // Sort ascending
+        resistances.sort(Double::compare);
+
+        double target1 = 0, target2 = 0;
+        double minReward = risk * 1.5; // Minimum 1.5R
+
+        for (double r : resistances) {
+            double reward = r - price;
+            if (reward >= minReward) {
+                if (target1 == 0) {
+                    target1 = r;
+                } else if (r > target1) {
+                    target2 = r;
+                    break;
+                }
+            }
+        }
+
+        return new double[]{target1, target2};
+    }
+
+    /**
+     * Find support levels for targets (SHORT trades).
+     * Returns [target1, target2].
+     */
+    private double[] findSupportTargets(double price, PivotLevels daily, PivotLevels weekly, double risk) {
+        List<Double> supports = new ArrayList<>();
+
+        if (daily != null) {
+            if (daily.getS1() > 0 && daily.getS1() < price) supports.add(daily.getS1());
+            if (daily.getS2() > 0 && daily.getS2() < price) supports.add(daily.getS2());
+            if (daily.getS3() > 0 && daily.getS3() < price) supports.add(daily.getS3());
+            if (daily.getBc() > 0 && daily.getBc() < price) supports.add(daily.getBc());
+        }
+        if (weekly != null) {
+            if (weekly.getS1() > 0 && weekly.getS1() < price) supports.add(weekly.getS1());
+            if (weekly.getS2() > 0 && weekly.getS2() < price) supports.add(weekly.getS2());
+        }
+
+        // Sort descending (nearest first)
+        supports.sort((a, b) -> Double.compare(b, a));
+
+        double target1 = 0, target2 = 0;
+        double minReward = risk * 1.5; // Minimum 1.5R
+
+        for (double s : supports) {
+            double reward = price - s;
+            if (reward >= minReward) {
+                if (target1 == 0) {
+                    target1 = s;
+                } else if (s < target1) {
+                    target2 = s;
+                    break;
+                }
+            }
+        }
+
+        return new double[]{target1, target2};
     }
 
     /**
@@ -1314,6 +1753,9 @@ public class SignalEngine {
      * Check active signals for exit conditions.
      */
     private void checkActiveSignals() {
+        // Collect symbols to remove after iteration to avoid ConcurrentModificationException
+        List<String> symbolsToRemove = new ArrayList<>();
+
         for (Map.Entry<String, TradingSignal> entry : activeSignals.entrySet()) {
             try {
                 String symbol = entry.getKey();
@@ -1332,16 +1774,21 @@ public class SignalEngine {
                 if (signal.isStopHit(price)) {
                     signal.enterComplete(TradingSignal.ExitReason.STOP_HIT, price);
                     saveAndNotify(signal, SignalEvent.STOPPED_OUT);
-                    activeSignals.remove(symbol);
+                    symbolsToRemove.add(symbol);
                 } else if (signal.isTargetHit(price)) {
                     signal.enterComplete(TradingSignal.ExitReason.TARGET_HIT, price);
                     saveAndNotify(signal, SignalEvent.TARGET_HIT);
-                    activeSignals.remove(symbol);
+                    symbolsToRemove.add(symbol);
                 }
             } catch (Exception e) {
                 log.error("{} Error checking signal for symbol={}: {}",
                     LOG_PREFIX, entry.getKey(), e.getMessage());
             }
+        }
+
+        // Remove completed signals after iteration
+        for (String symbol : symbolsToRemove) {
+            activeSignals.remove(symbol);
         }
     }
 
@@ -1374,7 +1821,7 @@ public class SignalEngine {
     }
 
     /**
-     * Execute paper trade for activated signal.
+     * Execute paper trade for activated signal and link trade ID back to signal.
      */
     private void executePaperTrade(TradingSignal signal, EntryLevels levels) {
         if (!paperTradeEnabled) return;
@@ -1383,7 +1830,8 @@ public class SignalEngine {
             TradeDirection direction = signal.getDirection() == FudkiiScore.Direction.BULLISH ?
                 TradeDirection.LONG : TradeDirection.SHORT;
 
-            paperTradeExecutor.executeMarketOrder(
+            // Execute paper trade and capture the returned trade
+            com.kotsin.consumer.papertrade.model.PaperTrade paperTrade = paperTradeExecutor.executeMarketOrder(
                 signal.getSymbol(),
                 direction,
                 levels.entry,
@@ -1392,24 +1840,35 @@ public class SignalEngine {
                 signal.getSignalId(),
                 "FUDKII"
             );
+
+            // Link paper trade ID back to the signal for tracking
+            if (paperTrade != null) {
+                signal.setPaperTradeId(paperTrade.getTradeId());
+                log.info("{} {} Paper trade linked to signal: {} -> {}",
+                    LOG_PREFIX, TraceContext.getShortPrefix(),
+                    signal.getSignalId(), paperTrade.getTradeId());
+            }
         } catch (Exception e) {
-            log.debug("{} {} Paper trade execution failed: {}",
-                LOG_PREFIX, TraceContext.getShortPrefix(), e.getMessage());
+            log.error("{} {} Paper trade execution failed: {}",
+                LOG_PREFIX, TraceContext.getShortPrefix(), e.getMessage(), e);
         }
     }
 
     /**
      * Record signal exit to stats.
+     * Bug #3 FIX: Safe list access
      */
     private void recordExitToStats(TradingSignal signal, double exitPrice, String reason) {
         try {
             // Find active signal in stats tracker and record exit
-            List<com.kotsin.consumer.stats.model.SignalHistory> activeSignals =
+            List<com.kotsin.consumer.stats.model.SignalHistory> signalHistoryList =
                 statsTracker.getActiveSignals(signal.getSymbol());
 
-            if (!activeSignals.isEmpty()) {
-                com.kotsin.consumer.stats.model.SignalHistory history = activeSignals.get(0);
-                statsTracker.recordExit(history.getSignalId(), exitPrice, reason);
+            if (signalHistoryList != null && !signalHistoryList.isEmpty()) {
+                com.kotsin.consumer.stats.model.SignalHistory history = signalHistoryList.get(0);
+                if (history != null && history.getSignalId() != null) {
+                    statsTracker.recordExit(history.getSignalId(), exitPrice, reason);
+                }
             }
         } catch (Exception e) {
             log.debug("{} {} Stats exit recording failed: {}",
@@ -1483,6 +1942,12 @@ public class SignalEngine {
         // Publish to Kafka topic
         publishTradingSignalToKafka(signal, event);
 
+        // ==================== OPTION SELECTION FOR ACTIVE SIGNALS ====================
+        // When signal becomes ACTIVE, select optimal option for trading
+        if (event == SignalEvent.ACTIVE_TRIGGERED && optionSelectionEnabled) {
+            selectAndPublishOptionRecommendation(signal);
+        }
+
         // Notify listeners
         for (SignalListener listener : listeners) {
             try {
@@ -1498,6 +1963,99 @@ public class SignalEngine {
             event, signal.getDirection(),
             String.format("%.2f", signal.getCurrentPrice()),
             String.format("%.1f", signal.getCurrentScore().getCompositeScore()));
+    }
+
+    /**
+     * Select optimal option for a trading signal and publish recommendation.
+     */
+    private void selectAndPublishOptionRecommendation(TradingSignal signal) {
+        try {
+            // Check if this symbol has derivatives
+            String symbol = signal.getSymbol();
+            if (!scripGroupService.hasDerivatives(symbol)) {
+                log.debug("{} {} No derivatives available for {}",
+                    LOG_PREFIX, TraceContext.getShortPrefix(), symbol);
+                return;
+            }
+
+            // Select optimal option
+            com.kotsin.consumer.options.service.OptionStrikeSelector.OptionRecommendation recommendation =
+                optionStrikeSelector.selectOption(signal);
+
+            if (recommendation == null || !recommendation.isHasRecommendation()) {
+                log.debug("{} {} No option recommendation for {}: {}",
+                    LOG_PREFIX, TraceContext.getShortPrefix(), symbol,
+                    recommendation != null ? recommendation.getNoRecommendationReason() : "null");
+                return;
+            }
+
+            // Publish option recommendation to Kafka
+            publishOptionRecommendation(signal, recommendation);
+
+            log.info("{} {} OPTION RECOMMENDATION: {} {} {} @ {} | delta={} | OI={} | {}",
+                LOG_PREFIX, TraceContext.getShortPrefix(),
+                recommendation.getDirection(),
+                recommendation.getOptionType(),
+                String.format("%.0f", recommendation.getStrike()),
+                String.format("%.2f", recommendation.getSpotPrice()),
+                String.format("%.2f", recommendation.getEstimatedDelta()),
+                recommendation.getOpenInterest(),
+                recommendation.getReason());
+
+        } catch (Exception e) {
+            log.error("{} {} Error selecting option for {}: {}",
+                LOG_PREFIX, TraceContext.getShortPrefix(), signal.getSymbol(), e.getMessage());
+        }
+    }
+
+    /**
+     * Publish option recommendation to Kafka topic.
+     */
+    private void publishOptionRecommendation(TradingSignal signal,
+            com.kotsin.consumer.options.service.OptionStrikeSelector.OptionRecommendation recommendation) {
+        try {
+            Map<String, Object> payload = new java.util.LinkedHashMap<>();
+
+            // Signal reference
+            payload.put("signalId", signal.getSignalId());
+            payload.put("signalSymbol", signal.getSymbol());
+            payload.put("signalDirection", signal.getDirection() != null ? signal.getDirection().name() : null);
+
+            // Option recommendation
+            payload.put("underlying", recommendation.getUnderlying());
+            payload.put("scripCode", recommendation.getScripCode());
+            payload.put("strike", recommendation.getStrike());
+            payload.put("optionType", recommendation.getOptionType());
+            payload.put("direction", recommendation.getDirection());
+            payload.put("spotPrice", recommendation.getSpotPrice());
+            payload.put("moneyness", recommendation.getMoneyness() != null ? recommendation.getMoneyness().name() : null);
+            payload.put("distanceFromSpot", recommendation.getDistanceFromSpot());
+            payload.put("openInterest", recommendation.getOpenInterest());
+            payload.put("oiChange", recommendation.getOiChange());
+            payload.put("oiInterpretation", recommendation.getOiInterpretation() != null ?
+                recommendation.getOiInterpretation().name() : null);
+            payload.put("estimatedDelta", recommendation.getEstimatedDelta());
+            payload.put("expiry", recommendation.getExpiry());
+            payload.put("confidence", recommendation.getConfidence());
+            payload.put("reason", recommendation.getReason());
+            payload.put("timestamp", recommendation.getTimestamp() != null ?
+                recommendation.getTimestamp().toString() : null);
+
+            // Signal entry levels for reference
+            payload.put("signalEntry", recommendation.getSignalEntry());
+            payload.put("signalStop", recommendation.getSignalStop());
+            payload.put("signalTarget", recommendation.getSignalTarget());
+
+            kafkaTemplate.send(optionRecommendationsTopic, signal.getSymbol(), payload);
+
+            log.debug("{} {} Published option recommendation to Kafka: {} {} {}",
+                LOG_PREFIX, TraceContext.getShortPrefix(),
+                recommendation.getOptionType(), recommendation.getStrike(), recommendation.getUnderlying());
+
+        } catch (Exception e) {
+            log.error("{} {} Failed to publish option recommendation: {}",
+                LOG_PREFIX, TraceContext.getShortPrefix(), e.getMessage());
+        }
     }
 
     /**

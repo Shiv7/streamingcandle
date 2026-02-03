@@ -76,4 +76,18 @@ public interface OIMetricsRepository extends MongoRepository<OIMetrics, String> 
      * Delete old metrics.
      */
     void deleteByTimestampBefore(Instant timestamp);
+
+    /**
+     * Find all distinct option instruments by underlying symbol.
+     * Returns latest metrics for each scripCode.
+     */
+    @Query("{ 'underlyingSymbol': ?0, 'optionType': { $exists: true, $ne: null } }")
+    List<OIMetrics> findOptionsByUnderlyingSymbol(String underlyingSymbol);
+
+    /**
+     * Find all option metrics after a certain timestamp.
+     * Used for building option instrument cache.
+     */
+    @Query("{ 'optionType': { $exists: true, $ne: null }, 'timestamp': { $gte: ?0 } }")
+    List<OIMetrics> findAllOptionsAfter(Instant cutoff);
 }

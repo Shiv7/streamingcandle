@@ -30,7 +30,7 @@ import java.util.stream.Collectors;
  * FudkiiSignalTrigger - Handles Strategy 1: SuperTrend + Bollinger Band trigger.
  *
  * CORRECT APPROACH:
- * 1. On each 1m candle close, check if it's a 30m boundary (xx:15 or xx:45)
+ * 1. On each 1m candle close, check if it's a 30m boundary (exchange-aware)
  * 2. If yes, aggregate last 30 1m candles into a new 30m candle
  * 3. Append to cached historical 30m candles
  * 4. Calculate BB(20,2) and SuperTrend(10,3) on combined data
@@ -43,6 +43,14 @@ import java.util.stream.Collectors;
  * NSE 30m CANDLE BOUNDARIES (IST):
  * 9:15-9:45, 9:45-10:15, 10:15-10:45, 10:45-11:15, 11:15-11:45, 11:45-12:15,
  * 12:15-12:45, 12:45-13:15, 13:15-13:45, 13:45-14:15, 14:15-14:45, 14:45-15:15, 15:15-15:30
+ *
+ * MCX 30m CANDLE BOUNDARIES (IST):
+ * 9:00-9:30, 9:30-10:00, 10:00-10:30, ... 22:30-23:00, 23:00-23:30
+ *
+ * FIX (2026-02-02):
+ * - Added MCX support with exchange-aware market hours and boundaries
+ * - Added historical data merging from API + MongoDB
+ * - Pass window start time to calculator for state persistence
  */
 @Component
 @Slf4j
@@ -54,10 +62,16 @@ public class FudkiiSignalTrigger {
     private static final DateTimeFormatter CANDLE_TIME_FMT = DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm");
 
     // NSE market timing
-    private static final int MARKET_OPEN_HOUR = 9;
-    private static final int MARKET_OPEN_MINUTE = 15;
-    private static final int MARKET_CLOSE_HOUR = 15;
-    private static final int MARKET_CLOSE_MINUTE = 30;
+    private static final int NSE_MARKET_OPEN_HOUR = 9;
+    private static final int NSE_MARKET_OPEN_MINUTE = 15;
+    private static final int NSE_MARKET_CLOSE_HOUR = 15;
+    private static final int NSE_MARKET_CLOSE_MINUTE = 30;
+
+    // MCX market timing
+    private static final int MCX_MARKET_OPEN_HOUR = 9;
+    private static final int MCX_MARKET_OPEN_MINUTE = 0;
+    private static final int MCX_MARKET_CLOSE_HOUR = 23;
+    private static final int MCX_MARKET_CLOSE_MINUTE = 30;
 
     @Autowired
     private BBSuperTrendCalculator bbstCalculator;
@@ -101,8 +115,17 @@ public class FudkiiSignalTrigger {
     @Value("${fudkii.trigger.log.near.misses:true}")
     private boolean logNearMisses;
 
+    @Value("${fudkii.trigger.bootstrap.days-back:5}")
+    private int bootstrapDaysBack;
+
+    @Value("${fudkii.trigger.mcx.enabled:true}")
+    private boolean mcxEnabled;
+
     // Cache for historical 30m candles per symbol (already aggregated)
-    private final Map<String, List<Candle30m>> historical30mCandles = new ConcurrentHashMap<>();
+    // Limited to MAX_CACHED_CANDLES per symbol to prevent unbounded memory growth
+    // FIX: Use CopyOnWriteArrayList for thread safety (ConcurrentHashMap only protects the map, not the list)
+    private final Map<String, java.util.concurrent.CopyOnWriteArrayList<Candle30m>> historical30mCandles = new ConcurrentHashMap<>();
+    private static final int MAX_CACHED_CANDLES = 100; // ~50 trading hours worth of 30m candles
 
     // Cache for last BBST state per symbol
     private final Map<String, BBSuperTrend> lastBbstState = new ConcurrentHashMap<>();
@@ -114,14 +137,20 @@ public class FudkiiSignalTrigger {
     // Prevents repeated API calls for scripCodes that fail (e.g., F&O symbols returning 503)
     private final Set<String> apiAttemptedScripCodes = ConcurrentHashMap.newKeySet();
 
-    // Track scripCodes with insufficient data (no API available)
-    private final Set<String> insufficientDataScripCodes = ConcurrentHashMap.newKeySet();
+    // Track scripCodes with insufficient data (no API available) - with expiry timestamp
+    // Key: scripCode, Value: timestamp when added (for expiry check)
+    private final Map<String, Instant> insufficientDataScripCodes = new ConcurrentHashMap<>();
+
+    // Negative cache TTL: retry after 4 hours
+    private static final Duration INSUFFICIENT_DATA_TTL = Duration.ofHours(4);
 
     @PostConstruct
     public void init() {
-        log.info("{} Initializing FUDKII trigger with CORRECT 30m boundary approach", LOG_PREFIX);
+        log.info("{} Initializing FUDKII trigger with exchange-aware 30m boundary approach", LOG_PREFIX);
         log.info("{} BB Period: {}, ST Period: {}, Require Both Conditions: {}",
             LOG_PREFIX, bbPeriod, stPeriod, requireBothConditions);
+        log.info("{} MCX Support: {}, Bootstrap Days Back: {}",
+            LOG_PREFIX, mcxEnabled, bootstrapDaysBack);
     }
 
     /**
@@ -134,6 +163,20 @@ public class FudkiiSignalTrigger {
         }
 
         try {
+            // Determine exchange from candle
+            String exchange = candle1m.getExchange();
+            if (exchange == null || exchange.isEmpty()) {
+                // FIX: Log when exchange is missing - this could indicate a data pipeline issue
+                log.debug("{} {} Exchange is null/empty, defaulting to NSE. " +
+                    "This may cause incorrect boundary detection for MCX symbols.", LOG_PREFIX, scripCode);
+                exchange = "N"; // Default to NSE
+            }
+
+            // Check if MCX is enabled
+            if ("M".equalsIgnoreCase(exchange) && !mcxEnabled) {
+                return FudkiiTriggerResult.noTrigger("MCX FUDKII trigger disabled");
+            }
+
             // Get candle time in IST
             Instant candleTime = candle1m.getWindowEnd();
             if (candleTime == null) {
@@ -146,27 +189,25 @@ public class FudkiiSignalTrigger {
             int hour = istTime.getHour();
 
             // Debug log for boundary detection
-            if (minute == 15 || minute == 45 || minute == 14 || minute == 44) {
-                log.info("{} {} Candle time: {} IST (hour={}, minute={})",
-                    LOG_PREFIX, scripCode, istTime.format(TIME_FMT), hour, minute);
+            if (is30mBoundary(minute, exchange) || isNearBoundary(minute, exchange)) {
+                log.info("{} {} [{}] Candle time: {} IST (hour={}, minute={})",
+                    LOG_PREFIX, scripCode, exchange, istTime.format(TIME_FMT), hour, minute);
             }
 
-            // Check if this is a 30m boundary (minute == 15 or minute == 45)
-            boolean is30mBoundary = (minute == 15 || minute == 45);
-
-            if (!is30mBoundary) {
+            // Check if this is a 30m boundary based on exchange
+            if (!is30mBoundary(minute, exchange)) {
                 return FudkiiTriggerResult.noTrigger("Not a 30m boundary");
             }
 
-            // Check market hours
-            if (!isMarketHours(istTime)) {
-                log.info("{} {} At 30m boundary but outside market hours: {} IST",
-                    LOG_PREFIX, scripCode, istTime.format(TIME_FMT));
+            // Check market hours based on exchange
+            if (!isMarketHours(istTime, exchange)) {
+                log.info("{} {} [{}] At 30m boundary but outside market hours: {} IST",
+                    LOG_PREFIX, scripCode, exchange, istTime.format(TIME_FMT));
                 return FudkiiTriggerResult.noTrigger("Outside market hours");
             }
 
             // Check if we already processed this 30m window
-            Instant windowEnd = get30mWindowEnd(istTime);
+            Instant windowEnd = get30mWindowEnd(istTime, exchange);
             Instant lastProcessed = lastProcessed30mWindow.get(scripCode);
             if (lastProcessed != null && lastProcessed.equals(windowEnd)) {
                 log.debug("{} {} Already processed 30m window ending at {}",
@@ -174,14 +215,14 @@ public class FudkiiSignalTrigger {
                 return FudkiiTriggerResult.noTrigger("Already processed this 30m window");
             }
 
-            log.info("{} ========== 30m BOUNDARY REACHED for {} at {} IST ==========",
-                LOG_PREFIX, scripCode, istTime.format(TIME_FMT));
+            log.info("{} ========== 30m BOUNDARY REACHED for {} [{}] at {} IST ==========",
+                LOG_PREFIX, scripCode, exchange, istTime.format(TIME_FMT));
 
             // Calculate the 30m window boundaries
-            Instant windowStart = get30mWindowStart(istTime);
+            Instant windowStart = get30mWindowStart(istTime, exchange);
 
-            log.info("{} {} 30m Window: {} to {}",
-                LOG_PREFIX, scripCode,
+            log.info("{} {} [{}] 30m Window: {} to {}",
+                LOG_PREFIX, scripCode, exchange,
                 windowStart.atZone(IST).format(CANDLE_TIME_FMT),
                 windowEnd.atZone(IST).format(CANDLE_TIME_FMT));
 
@@ -206,8 +247,8 @@ public class FudkiiSignalTrigger {
                 String.format("%.2f", newCandle30m.close),
                 newCandle30m.volume);
 
-            // Step 3: Get historical 30m candles (from cache or build from DB)
-            List<Candle30m> historicalCandles = getOrBuildHistorical30mCandles(scripCode, windowStart);
+            // Step 3: Get historical 30m candles (from cache or build from DB + API)
+            List<Candle30m> historicalCandles = getOrBuildHistorical30mCandles(scripCode, exchange, windowStart);
 
             log.info("{} {} Historical 30m candles: {} candles", LOG_PREFIX, scripCode, historicalCandles.size());
 
@@ -231,8 +272,12 @@ public class FudkiiSignalTrigger {
             List<Candle30m> allCandles = new ArrayList<>(historicalCandles);
             allCandles.add(newCandle30m);
 
-            // Update cache with new historical data
-            historical30mCandles.put(scripCode, allCandles);
+            // Update cache with new historical data (with size limit)
+            if (allCandles.size() > MAX_CACHED_CANDLES) {
+                allCandles = new ArrayList<>(allCandles.subList(allCandles.size() - MAX_CACHED_CANDLES, allCandles.size()));
+            }
+            // FIX: Use CopyOnWriteArrayList for thread safety
+            historical30mCandles.put(scripCode, new java.util.concurrent.CopyOnWriteArrayList<>(allCandles));
 
             log.info("{} {} TOTAL 30m candles for calculation: {} (historical) + 1 (new) = {}",
                 LOG_PREFIX, scripCode, historicalCandles.size(), allCandles.size());
@@ -251,16 +296,18 @@ public class FudkiiSignalTrigger {
             double[] closes = new double[n];
             double[] highs = new double[n];
             double[] lows = new double[n];
+            Instant[] windowStarts = new Instant[n];  // For intelligent state matching
 
             for (int i = 0; i < n; i++) {
                 Candle30m c = allCandles.get(i);
                 closes[i] = c.close;
                 highs[i] = c.high;
                 lows[i] = c.low;
+                windowStarts[i] = c.windowStart;  // Pass timestamps for state context validation
             }
 
-            // Step 7: Calculate BB and SuperTrend
-            BBSuperTrend bbst = bbstCalculator.calculate(scripCode, "30m", closes, highs, lows);
+            // Step 7: Calculate BB and SuperTrend (pass window timestamps for intelligent state handling)
+            BBSuperTrend bbst = bbstCalculator.calculate(scripCode, "30m", closes, highs, lows, windowStarts, windowStart);
 
             // Detailed BB/ST logging
             log.info("{} {} ========== BB & SUPERTREND CALCULATION ==========", LOG_PREFIX, scripCode);
@@ -300,77 +347,132 @@ public class FudkiiSignalTrigger {
     }
 
     /**
-     * Get 30m window start time based on IST time.
-     * When at boundary (minute == 15 or 45), returns the START of the window that just CLOSED.
-     * NSE 30m windows: 9:15-9:45, 9:45-10:15, 10:15-10:45, etc.
-     *
-     * At 12:15 -> window 11:45-12:15 just closed -> return 11:45
-     * At 12:45 -> window 12:15-12:45 just closed -> return 12:15
+     * Check if minute is a 30m boundary for the given exchange.
+     * NSE: xx:15 and xx:45
+     * MCX: xx:00 and xx:30
      */
-    private Instant get30mWindowStart(ZonedDateTime istTime) {
+    private boolean is30mBoundary(int minute, String exchange) {
+        if ("M".equalsIgnoreCase(exchange)) {
+            // MCX: boundaries at :00 and :30
+            return minute == 0 || minute == 30;
+        } else {
+            // NSE (default): boundaries at :15 and :45
+            return minute == 15 || minute == 45;
+        }
+    }
+
+    /**
+     * Check if minute is near a 30m boundary (for debug logging).
+     */
+    private boolean isNearBoundary(int minute, String exchange) {
+        if ("M".equalsIgnoreCase(exchange)) {
+            return minute == 59 || minute == 29;
+        } else {
+            return minute == 14 || minute == 44;
+        }
+    }
+
+    /**
+     * Get 30m window start time based on IST time and exchange.
+     * When at boundary, returns the START of the window that just CLOSED.
+     */
+    private Instant get30mWindowStart(ZonedDateTime istTime, String exchange) {
         int minute = istTime.getMinute();
         ZonedDateTime windowStart;
 
-        if (minute == 15) {
-            // At xx:15, the window that just closed is (xx-1):45 to xx:15
-            windowStart = istTime.minusMinutes(30).withSecond(0).withNano(0);
-        } else if (minute == 45) {
-            // At xx:45, the window that just closed is xx:15 to xx:45
-            windowStart = istTime.minusMinutes(30).withSecond(0).withNano(0);
-        } else if (minute > 45) {
-            // After xx:45, current window started at xx:45
-            windowStart = istTime.withMinute(45).withSecond(0).withNano(0);
-        } else if (minute > 15) {
-            // After xx:15, current window started at xx:15
-            windowStart = istTime.withMinute(15).withSecond(0).withNano(0);
+        if ("M".equalsIgnoreCase(exchange)) {
+            // MCX: windows at :00 and :30
+            if (minute == 0) {
+                // At xx:00, window that closed is (xx-1):30 to xx:00
+                windowStart = istTime.minusMinutes(30).withSecond(0).withNano(0);
+            } else if (minute == 30) {
+                // At xx:30, window that closed is xx:00 to xx:30
+                windowStart = istTime.minusMinutes(30).withSecond(0).withNano(0);
+            } else if (minute > 30) {
+                // Current window started at xx:30
+                windowStart = istTime.withMinute(30).withSecond(0).withNano(0);
+            } else {
+                // Current window started at xx:00
+                windowStart = istTime.withMinute(0).withSecond(0).withNano(0);
+            }
         } else {
-            // Before xx:15, current window started at (xx-1):45
-            windowStart = istTime.minusHours(1).withMinute(45).withSecond(0).withNano(0);
+            // NSE: windows at :15 and :45
+            if (minute == 15) {
+                // At xx:15, the window that just closed is (xx-1):45 to xx:15
+                windowStart = istTime.minusMinutes(30).withSecond(0).withNano(0);
+            } else if (minute == 45) {
+                // At xx:45, the window that just closed is xx:15 to xx:45
+                windowStart = istTime.minusMinutes(30).withSecond(0).withNano(0);
+            } else if (minute > 45) {
+                // After xx:45, current window started at xx:45
+                windowStart = istTime.withMinute(45).withSecond(0).withNano(0);
+            } else if (minute > 15) {
+                // After xx:15, current window started at xx:15
+                windowStart = istTime.withMinute(15).withSecond(0).withNano(0);
+            } else {
+                // Before xx:15, current window started at (xx-1):45
+                windowStart = istTime.minusHours(1).withMinute(45).withSecond(0).withNano(0);
+            }
         }
 
         return windowStart.toInstant();
     }
 
     /**
-     * Get 30m window end time based on IST time.
-     * When at boundary (minute == 15 or 45), returns that boundary time.
+     * Get 30m window end time based on IST time and exchange.
+     * When at boundary, returns that boundary time.
      */
-    private Instant get30mWindowEnd(ZonedDateTime istTime) {
+    private Instant get30mWindowEnd(ZonedDateTime istTime, String exchange) {
         int minute = istTime.getMinute();
         ZonedDateTime windowEnd;
 
-        if (minute == 15 || minute == 45) {
-            // At boundary, this is the end of the window that just closed
-            windowEnd = istTime.withSecond(0).withNano(0);
-        } else if (minute < 15) {
-            windowEnd = istTime.withMinute(15).withSecond(0).withNano(0);
-        } else if (minute < 45) {
-            windowEnd = istTime.withMinute(45).withSecond(0).withNano(0);
+        if ("M".equalsIgnoreCase(exchange)) {
+            // MCX: boundaries at :00 and :30
+            if (minute == 0 || minute == 30) {
+                windowEnd = istTime.withSecond(0).withNano(0);
+            } else if (minute < 30) {
+                windowEnd = istTime.withMinute(30).withSecond(0).withNano(0);
+            } else {
+                windowEnd = istTime.plusHours(1).withMinute(0).withSecond(0).withNano(0);
+            }
         } else {
-            windowEnd = istTime.plusHours(1).withMinute(15).withSecond(0).withNano(0);
+            // NSE: boundaries at :15 and :45
+            if (minute == 15 || minute == 45) {
+                windowEnd = istTime.withSecond(0).withNano(0);
+            } else if (minute < 15) {
+                windowEnd = istTime.withMinute(15).withSecond(0).withNano(0);
+            } else if (minute < 45) {
+                windowEnd = istTime.withMinute(45).withSecond(0).withNano(0);
+            } else {
+                windowEnd = istTime.plusHours(1).withMinute(15).withSecond(0).withNano(0);
+            }
         }
 
         return windowEnd.toInstant();
     }
 
     /**
-     * Check if time is within market hours.
+     * Check if time is within market hours for the given exchange.
      */
-    private boolean isMarketHours(ZonedDateTime istTime) {
+    private boolean isMarketHours(ZonedDateTime istTime, String exchange) {
         int hour = istTime.getHour();
         int minute = istTime.getMinute();
 
-        // Before market open
-        if (hour < MARKET_OPEN_HOUR || (hour == MARKET_OPEN_HOUR && minute < MARKET_OPEN_MINUTE)) {
-            return false;
+        if ("M".equalsIgnoreCase(exchange)) {
+            // MCX: 9:00 AM - 11:30 PM
+            if (hour < MCX_MARKET_OPEN_HOUR) return false;
+            if (hour == MCX_MARKET_OPEN_HOUR && minute < MCX_MARKET_OPEN_MINUTE) return false;
+            if (hour > MCX_MARKET_CLOSE_HOUR) return false;
+            if (hour == MCX_MARKET_CLOSE_HOUR && minute > MCX_MARKET_CLOSE_MINUTE) return false;
+            return true;
+        } else {
+            // NSE (default): 9:15 AM - 3:30 PM
+            if (hour < NSE_MARKET_OPEN_HOUR) return false;
+            if (hour == NSE_MARKET_OPEN_HOUR && minute < NSE_MARKET_OPEN_MINUTE) return false;
+            if (hour > NSE_MARKET_CLOSE_HOUR) return false;
+            if (hour == NSE_MARKET_CLOSE_HOUR && minute > NSE_MARKET_CLOSE_MINUTE) return false;
+            return true;
         }
-
-        // After market close
-        if (hour > MARKET_CLOSE_HOUR || (hour == MARKET_CLOSE_HOUR && minute > MARKET_CLOSE_MINUTE)) {
-            return false;
-        }
-
-        return true;
     }
 
     /**
@@ -413,22 +515,30 @@ public class FudkiiSignalTrigger {
 
     /**
      * Get or build historical 30m candles for a symbol.
-     * Priority: 1) Cache, 2) MongoDB, 3) 5paisa API (only once per scripCode)
+     * Priority: 1) Cache, 2) MongoDB + API merge
      *
-     * IMPORTANT: API is called ONLY ONCE per scripCode. Failed attempts are cached
-     * to avoid repeated calls for the same scripCode.
+     * FIX: Now merges MongoDB and API data to ensure complete history.
      */
-    private List<Candle30m> getOrBuildHistorical30mCandles(String scripCode, Instant beforeTime) {
-        // Check if this scripCode is already marked as having insufficient data
-        if (insufficientDataScripCodes.contains(scripCode)) {
-            log.debug("{} {} Skipping - already marked as insufficient data", LOG_PREFIX, scripCode);
-            return new ArrayList<>();
+    private List<Candle30m> getOrBuildHistorical30mCandles(String scripCode, String exchange, Instant beforeTime) {
+        // Check if this scripCode is already marked as having insufficient data (with TTL check)
+        Instant markedAt = insufficientDataScripCodes.get(scripCode);
+        if (markedAt != null) {
+            if (Instant.now().isBefore(markedAt.plus(INSUFFICIENT_DATA_TTL))) {
+                log.debug("{} {} Skipping - marked as insufficient data (will retry after TTL)", LOG_PREFIX, scripCode);
+                return new ArrayList<>();
+            } else {
+                // TTL expired, remove from cache and retry
+                insufficientDataScripCodes.remove(scripCode);
+                apiAttemptedScripCodes.remove(scripCode); // Also allow API retry
+                log.info("{} {} TTL expired for insufficient data cache, retrying...", LOG_PREFIX, scripCode);
+            }
         }
 
-        // Check cache first
-        List<Candle30m> cached = historical30mCandles.get(scripCode);
+        // Check cache first (thread-safe access to CopyOnWriteArrayList)
+        java.util.concurrent.CopyOnWriteArrayList<Candle30m> cached = historical30mCandles.get(scripCode);
         if (cached != null && cached.size() >= 21) {
             // Filter to only include candles before the current window
+            // CopyOnWriteArrayList is safe for iteration without explicit synchronization
             List<Candle30m> filtered = cached.stream()
                 .filter(c -> c.windowStart.isBefore(beforeTime))
                 .collect(Collectors.toList());
@@ -437,67 +547,84 @@ public class FudkiiSignalTrigger {
             }
         }
 
-        // Try MongoDB first
-        log.info("{} {} Trying to build historical 30m candles from MongoDB...", LOG_PREFIX, scripCode);
-        Instant startDate = beforeTime.minus(Duration.ofDays(40));
+        // Build historical data from MongoDB first
+        log.info("{} {} Building historical 30m candles from MongoDB...", LOG_PREFIX, scripCode);
+        Instant startDate = beforeTime.minus(Duration.ofDays(bootstrapDaysBack));
         List<TickCandle> all1mCandles = tickCandleRepository.findByScripCodeAndWindowStartAfter(
             scripCode, startDate);
 
-        List<Candle30m> historical = new ArrayList<>();
+        List<Candle30m> mongoCandles = new ArrayList<>();
 
         if (!all1mCandles.isEmpty()) {
             log.info("{} {} Found {} 1m candles in MongoDB", LOG_PREFIX, scripCode, all1mCandles.size());
-            historical = buildHistorical30mFromMongoDB(scripCode, all1mCandles, beforeTime);
+            mongoCandles = buildHistorical30mFromMongoDB(scripCode, exchange, all1mCandles, beforeTime);
         }
 
-        // If MongoDB doesn't have enough data, fetch from 5paisa API
-        // BUT ONLY IF WE HAVEN'T ALREADY TRIED FOR THIS SCRIPCODE
-        if (historical.size() < 21) {
-            if (apiAttemptedScripCodes.contains(scripCode)) {
-                // Already tried API for this scripCode - don't retry
-                log.debug("{} {} MongoDB has only {} 30m candles, API already attempted - skipping",
-                    LOG_PREFIX, scripCode, historical.size());
-            } else {
-                // First time trying API for this scripCode
-                log.info("{} {} MongoDB has only {} 30m candles, fetching from 5paisa API (first attempt)...",
-                    LOG_PREFIX, scripCode, historical.size());
+        // If MongoDB doesn't have enough data for proper ATR warmup, fetch from API
+        // FIX: Increased threshold from 21 to 50 for accurate SuperTrend calculation
+        int minCandlesForAccurateCalc = 50;
+        if (mongoCandles.size() < minCandlesForAccurateCalc && !apiAttemptedScripCodes.contains(scripCode)) {
+            log.info("{} {} MongoDB has only {} 30m candles (need {} for accurate calculation), fetching from API...",
+                LOG_PREFIX, scripCode, mongoCandles.size(), minCandlesForAccurateCalc);
 
-                // Mark as attempted BEFORE the call (even if it fails)
-                apiAttemptedScripCodes.add(scripCode);
+            apiAttemptedScripCodes.add(scripCode);
 
-                List<Candle30m> apiCandles = fetchHistorical30mFromAPI(scripCode, beforeTime);
+            List<Candle30m> apiCandles = fetchHistorical30mFromAPI(scripCode, exchange, beforeTime);
 
-                if (!apiCandles.isEmpty()) {
-                    historical = apiCandles;
-                    log.info("{} {} Successfully fetched {} 30m candles from API",
-                        LOG_PREFIX, scripCode, historical.size());
-                } else {
-                    log.warn("{} {} API returned no data - will not retry for this scripCode",
-                        LOG_PREFIX, scripCode);
+            if (!apiCandles.isEmpty()) {
+                // Merge: use TreeMap to deduplicate by windowStart, prefer MongoDB for overlaps
+                Map<Instant, Candle30m> merged = new TreeMap<>();
+
+                // Add API candles first (older/backup data)
+                for (Candle30m c : apiCandles) {
+                    merged.put(c.getWindowStart(), c);
                 }
+
+                // Override with MongoDB candles (more accurate live data)
+                for (Candle30m c : mongoCandles) {
+                    merged.put(c.getWindowStart(), c);
+                }
+
+                mongoCandles = new ArrayList<>(merged.values());
+                log.info("{} {} Merged to {} 30m candles (API + MongoDB)",
+                    LOG_PREFIX, scripCode, mongoCandles.size());
+            } else {
+                log.warn("{} {} API returned no data", LOG_PREFIX, scripCode);
             }
         }
 
-        if (historical.isEmpty() || historical.size() < 21) {
-            // Mark this scripCode as having insufficient data
-            insufficientDataScripCodes.add(scripCode);
-            log.warn("{} {} Insufficient historical data ({}), marked for skip",
-                LOG_PREFIX, scripCode, historical.size());
+        if (mongoCandles.isEmpty() || mongoCandles.size() < 21) {
+            // Mark this scripCode as having insufficient data (with timestamp for TTL)
+            insufficientDataScripCodes.put(scripCode, Instant.now());
+            log.warn("{} {} Insufficient historical data ({}), marked for skip (TTL: {})",
+                LOG_PREFIX, scripCode, mongoCandles.size(), INSUFFICIENT_DATA_TTL);
             return new ArrayList<>();
         }
 
-        // Sort by time and cache
-        historical.sort(Comparator.comparing(c -> c.windowStart));
-        historical30mCandles.put(scripCode, new ArrayList<>(historical));
+        // Sort by time and cache (with size limit)
+        mongoCandles.sort(Comparator.comparing(c -> c.windowStart));
+        if (mongoCandles.size() > MAX_CACHED_CANDLES) {
+            mongoCandles = new ArrayList<>(mongoCandles.subList(mongoCandles.size() - MAX_CACHED_CANDLES, mongoCandles.size()));
+        }
+        // FIX: Use CopyOnWriteArrayList for thread safety
+        historical30mCandles.put(scripCode, new java.util.concurrent.CopyOnWriteArrayList<>(mongoCandles));
 
-        log.info("{} {} Cached {} historical 30m candles", LOG_PREFIX, scripCode, historical.size());
-        return historical;
+        // Warn if we still don't have enough for accurate calculation
+        if (mongoCandles.size() < minCandlesForAccurateCalc) {
+            log.warn("{} {} Only {} 30m candles available (recommended: {}). " +
+                "SuperTrend values may differ from broker due to insufficient ATR warmup.",
+                LOG_PREFIX, scripCode, mongoCandles.size(), minCandlesForAccurateCalc);
+        }
+
+        log.info("{} {} Cached {} historical 30m candles (max: {})", LOG_PREFIX, scripCode, mongoCandles.size(), MAX_CACHED_CANDLES);
+        return mongoCandles;
     }
 
     /**
      * Build historical 30m candles from 1m candles in MongoDB.
      */
-    private List<Candle30m> buildHistorical30mFromMongoDB(String scripCode, List<TickCandle> all1mCandles, Instant beforeTime) {
+    private List<Candle30m> buildHistorical30mFromMongoDB(String scripCode, String exchange,
+                                                           List<TickCandle> all1mCandles, Instant beforeTime) {
         // Group 1m candles into 30m windows
         Map<Instant, List<TickCandle>> grouped = new TreeMap<>();
 
@@ -505,13 +632,13 @@ public class FudkiiSignalTrigger {
             Instant candleTime = candle.getWindowStart();
             ZonedDateTime istTime = candleTime.atZone(IST);
 
-            // Skip if outside market hours
-            if (!isMarketHours(istTime)) {
+            // Skip if outside market hours for this exchange
+            if (!isMarketHours(istTime, exchange)) {
                 continue;
             }
 
             // Calculate which 30m window this belongs to
-            Instant windowStart = get30mWindowStartForCandle(istTime);
+            Instant windowStart = get30mWindowStartForCandle(istTime, exchange);
 
             // Only include windows before the current time
             if (windowStart.isBefore(beforeTime)) {
@@ -521,11 +648,13 @@ public class FudkiiSignalTrigger {
 
         // Aggregate each 30m window
         List<Candle30m> historical = new ArrayList<>();
+        int minCandlesFor30m = "M".equalsIgnoreCase(exchange) ? 20 : 20; // Need at least 20 1m candles
+
         for (Map.Entry<Instant, List<TickCandle>> entry : grouped.entrySet()) {
             Instant windowStart = entry.getKey();
             List<TickCandle> windowCandles = entry.getValue();
 
-            if (windowCandles.size() >= 20) { // Need at least 20 1m candles for a valid 30m candle
+            if (windowCandles.size() >= minCandlesFor30m) {
                 Instant windowEnd = windowStart.plus(Duration.ofMinutes(30));
                 Candle30m candle30m = aggregate1mTo30m(scripCode, windowCandles, windowStart, windowEnd);
                 historical.add(candle30m);
@@ -539,21 +668,25 @@ public class FudkiiSignalTrigger {
     /**
      * Fetch historical 30m candles directly from 5paisa API.
      */
-    private List<Candle30m> fetchHistorical30mFromAPI(String scripCode, Instant beforeTime) {
+    private List<Candle30m> fetchHistorical30mFromAPI(String scripCode, String exchange, Instant beforeTime) {
         try {
-            // Calculate date range (40 days back)
+            // Calculate date range
             ZonedDateTime endDate = beforeTime.atZone(IST);
-            ZonedDateTime startDate = endDate.minusDays(40);
+            ZonedDateTime startDate = endDate.minusDays(bootstrapDaysBack);
 
             String startDateStr = startDate.toLocalDate().toString();
             String endDateStr = endDate.toLocalDate().toString();
 
-            log.info("{} {} Fetching 30m candles from API: {} to {}",
-                LOG_PREFIX, scripCode, startDateStr, endDateStr);
+            // Determine exchange parameters
+            String exch = "M".equalsIgnoreCase(exchange) ? "M" : "N";
+            String exchType = "M".equalsIgnoreCase(exchange) ? "D" : "C"; // MCX uses D for derivatives
+
+            log.info("{} {} Fetching 30m candles from API: {} to {} (exch={})",
+                LOG_PREFIX, scripCode, startDateStr, endDateStr, exch);
 
             // Fetch 30m candles directly from API
             List<HistoricalCandle> apiCandles = fastAnalyticsClient.getHistoricalData(
-                "N", "C", scripCode, startDateStr, endDateStr, "30m");
+                exch, exchType, scripCode, startDateStr, endDateStr, "30m");
 
             if (apiCandles == null || apiCandles.isEmpty()) {
                 log.warn("{} {} No 30m candles from API", LOG_PREFIX, scripCode);
@@ -568,8 +701,10 @@ public class FudkiiSignalTrigger {
                 Instant ts = hc.getTimestampAsInstant();
                 ZonedDateTime istTime = ts.atZone(IST);
 
-                // Skip if outside market hours or after beforeTime
-                if (!isMarketHours(istTime) || ts.isAfter(beforeTime)) {
+                // Skip if outside market hours or at/after beforeTime
+                // FIX: Changed from isAfter to !isBefore to exclude candles at beforeTime
+                // This prevents the current window's candle from being included in historical data
+                if (!isMarketHours(istTime, exchange) || !ts.isBefore(beforeTime)) {
                     continue;
                 }
 
@@ -596,19 +731,29 @@ public class FudkiiSignalTrigger {
     }
 
     /**
-     * Get the 30m window start for a given candle time.
+     * Get the 30m window start for a given candle time (for grouping 1m candles).
      */
-    private Instant get30mWindowStartForCandle(ZonedDateTime istTime) {
+    private Instant get30mWindowStartForCandle(ZonedDateTime istTime, String exchange) {
         int minute = istTime.getMinute();
         ZonedDateTime windowStart;
 
-        if (minute >= 45) {
-            windowStart = istTime.withMinute(45).withSecond(0).withNano(0);
-        } else if (minute >= 15) {
-            windowStart = istTime.withMinute(15).withSecond(0).withNano(0);
+        if ("M".equalsIgnoreCase(exchange)) {
+            // MCX: windows at :00 and :30
+            if (minute >= 30) {
+                windowStart = istTime.withMinute(30).withSecond(0).withNano(0);
+            } else {
+                windowStart = istTime.withMinute(0).withSecond(0).withNano(0);
+            }
         } else {
-            // Belongs to previous hour's 45 minute window
-            windowStart = istTime.minusHours(1).withMinute(45).withSecond(0).withNano(0);
+            // NSE: windows at :15 and :45
+            if (minute >= 45) {
+                windowStart = istTime.withMinute(45).withSecond(0).withNano(0);
+            } else if (minute >= 15) {
+                windowStart = istTime.withMinute(15).withSecond(0).withNano(0);
+            } else {
+                // Belongs to previous hour's 45 minute window
+                windowStart = istTime.minusHours(1).withMinute(45).withSecond(0).withNano(0);
+            }
         }
 
         return windowStart.toInstant();
@@ -623,13 +768,28 @@ public class FudkiiSignalTrigger {
         // Get previous state for flip detection
         BBSuperTrend prevBbst = lastBbstState.get(scripCode);
 
-        // Detect SuperTrend flip
-        boolean superTrendFlipped = bbst.isTrendChanged();
-        if (!superTrendFlipped && prevBbst != null) {
-            superTrendFlipped = prevBbst.getTrend() != bbst.getTrend();
+        // Detect SuperTrend flip - multiple methods in order of reliability
+        boolean superTrendFlipped = false;
+        String flipDetectionMethod = "none";
+
+        // Method 1: Calculator's built-in flip detection (most reliable when state is persisted)
+        if (bbst.isTrendChanged()) {
+            superTrendFlipped = true;
+            flipDetectionMethod = "calculator_trendChanged";
+            log.info("{} {} Flip detected via calculator.isTrendChanged()", LOG_PREFIX, scripCode);
         }
 
-        // Check debounced flip from Redis
+        // Method 2: Compare with in-memory previous state (catches flips across calculations)
+        if (!superTrendFlipped && prevBbst != null) {
+            if (prevBbst.getTrend() != bbst.getTrend()) {
+                superTrendFlipped = true;
+                flipDetectionMethod = "prevBbst_comparison";
+                log.info("{} {} Flip detected via prevBbst comparison: {} -> {}",
+                    LOG_PREFIX, scripCode, prevBbst.getTrend(), bbst.getTrend());
+            }
+        }
+
+        // Method 3: Check debounced flip from Redis (catches flips within debounce window)
         boolean usingDebouncedFlip = false;
         if (!superTrendFlipped) {
             String[] recentFlip = redisCacheService.getRecentSTFlip(scripCode, triggerTimeframe);
@@ -639,15 +799,42 @@ public class FudkiiSignalTrigger {
                     ("DOWN".equals(flipDirection) && bbst.getTrend() == TrendDirection.DOWN)) {
                     superTrendFlipped = true;
                     usingDebouncedFlip = true;
-                    log.info("{} {} Using debounced ST flip: {}", LOG_PREFIX, scripCode, flipDirection);
+                    flipDetectionMethod = "redis_debounce";
+                    log.info("{} {} Flip detected via Redis debounce: {}", LOG_PREFIX, scripCode, flipDirection);
                 }
             }
         }
 
-        // Record new flip for debouncing
+        // Method 4: FIX - Fallback detection using barsInTrend
+        // If barsInTrend is 1 and we have no previous state, this MIGHT be a flip
+        // This is a heuristic - if trend just started (1 bar), it could be a flip
+        if (!superTrendFlipped && prevBbst == null && bbst.getBarsInTrend() == 1) {
+            // Only trigger if price action strongly confirms the direction
+            // (above upper BB for bullish flip, below lower BB for bearish flip)
+            PricePosition pos = bbst.getPricePosition();
+            if ((bbst.getTrend() == TrendDirection.UP && pos == PricePosition.ABOVE_UPPER) ||
+                (bbst.getTrend() == TrendDirection.DOWN && pos == PricePosition.BELOW_LOWER)) {
+                superTrendFlipped = true;
+                flipDetectionMethod = "barsInTrend_heuristic";
+                log.info("{} {} Flip detected via barsInTrend heuristic: trend={}, barsInTrend=1, pricePos={}",
+                    LOG_PREFIX, scripCode, bbst.getTrend(), pos);
+            }
+        }
+
+        // Log why flip detection failed if it did
+        if (!superTrendFlipped) {
+            log.info("{} {} No flip detected. Reasons: calculator.trendChanged={}, prevBbst={}, " +
+                "barsInTrend={}, trend={}, pricePosition={}",
+                LOG_PREFIX, scripCode, bbst.isTrendChanged(),
+                prevBbst != null ? prevBbst.getTrend() : "null",
+                bbst.getBarsInTrend(), bbst.getTrend(), bbst.getPricePosition());
+        }
+
+        // Record new flip for debouncing (if not already using debounced flip)
         if (superTrendFlipped && !usingDebouncedFlip) {
             String flipDir = bbst.getTrend() == TrendDirection.UP ? "UP" : "DOWN";
             redisCacheService.recordSTFlip(scripCode, triggerTimeframe, flipDir, flipDebounceMinutes);
+            log.debug("{} {} Recorded ST flip to Redis: {}", LOG_PREFIX, scripCode, flipDir);
         }
 
         // Price position relative to BB
@@ -674,8 +861,9 @@ public class FudkiiSignalTrigger {
 
         // Log evaluation
         log.info("{} {} ========== TRIGGER EVALUATION ==========", LOG_PREFIX, scripCode);
-        log.info("{} {} ST_FLIPPED: {} (debounced: {})", LOG_PREFIX, scripCode, superTrendFlipped, usingDebouncedFlip);
-        log.info("{} {} TREND: {}", LOG_PREFIX, scripCode, bbst.getTrend());
+        log.info("{} {} ST_FLIPPED: {} (method: {}, debounced: {})",
+            LOG_PREFIX, scripCode, superTrendFlipped, flipDetectionMethod, usingDebouncedFlip);
+        log.info("{} {} TREND: {} (barsInTrend: {})", LOG_PREFIX, scripCode, bbst.getTrend(), bbst.getBarsInTrend());
         log.info("{} {} PRICE_POSITION: {}", LOG_PREFIX, scripCode, pricePos);
         log.info("{} {} ABOVE_BB_UPPER: {} (close {} > BB_upper {})",
             LOG_PREFIX, scripCode, aboveUpperBB,
@@ -798,13 +986,17 @@ public class FudkiiSignalTrigger {
 
         TickCandle latestCandle = recentCandles.get(0);
 
+        // Determine exchange
+        String exchange = latestCandle.getExchange();
+        if (exchange == null) exchange = "N";
+
         // Use candle's timestamp (event time) instead of wall-clock time for 30m boundary check
         Instant candleTime = latestCandle.getWindowStart() != null ? latestCandle.getWindowStart() : latestCandle.getTimestamp();
         ZonedDateTime candleZdt = candleTime.atZone(IST);
         int minute = candleZdt.getMinute();
 
-        if (minute != 15 && minute != 45) {
-            return FudkiiTriggerResult.noTrigger("Not at 30m boundary (minute=" + minute + ")");
+        if (!is30mBoundary(minute, exchange)) {
+            return FudkiiTriggerResult.noTrigger("Not at 30m boundary (minute=" + minute + ", exchange=" + exchange + ")");
         }
 
         return onCandleClose(scripCode, latestCandle);
@@ -816,7 +1008,10 @@ public class FudkiiSignalTrigger {
     public boolean isValidTriggerTime() {
         ZonedDateTime now = ZonedDateTime.now(IST);
         int minute = now.getMinute();
-        return (minute == 15 || minute == 45) && isMarketHours(now);
+        // Check both NSE and MCX boundaries
+        boolean nseValid = (minute == 15 || minute == 45) && isMarketHours(now, "N");
+        boolean mcxValid = mcxEnabled && (minute == 0 || minute == 30) && isMarketHours(now, "M");
+        return nseValid || mcxValid;
     }
 
     /**

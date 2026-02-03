@@ -45,12 +45,21 @@ public class PatternAnalyzer {
     private double dojiBodyRatio;
 
     /**
-     * Analyze candles for patterns.
+     * Analyze candles for patterns (legacy method, uses 5m timeframe).
      */
     public PatternResult analyze(UnifiedCandle current, List<UnifiedCandle> history) {
+        return analyze(current, history, "5m");
+    }
+
+    /**
+     * Analyze candles for patterns on a specific timeframe.
+     * Supports multi-timeframe pattern detection.
+     */
+    public PatternResult analyze(UnifiedCandle current, List<UnifiedCandle> history, String timeframe) {
         if (!enabled || current == null) {
             return PatternResult.builder()
                 .patterns(new ArrayList<>())
+                .timeframe(timeframe != null ? timeframe : "5m")
                 .timestamp(Instant.now())
                 .build();
         }
@@ -79,14 +88,16 @@ public class PatternAnalyzer {
         // Determine overall bias
         String overallBias = determineOverallBias(patterns);
 
-        log.debug("{} {} detected {} patterns, score={}, bias={}",
-            LOG_PREFIX, current.getSymbol(), patterns.size(),
+        String effectiveTimeframe = timeframe != null ? timeframe : "5m";
+
+        log.debug("{} {} [{}] detected {} patterns, score={}, bias={}",
+            LOG_PREFIX, current.getSymbol(), effectiveTimeframe, patterns.size(),
             String.format("%.2f", patternScore), overallBias);
 
         return PatternResult.builder()
             .scripCode(current.getScripCode())
             .symbol(current.getSymbol())
-            .timeframe("5m")
+            .timeframe(effectiveTimeframe)
             .patterns(patterns)
             .patternScore(patternScore)
             .overallBias(overallBias)

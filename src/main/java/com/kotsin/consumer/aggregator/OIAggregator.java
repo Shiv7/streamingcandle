@@ -29,6 +29,7 @@ import java.util.concurrent.*;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicReference;
 import java.util.concurrent.atomic.AtomicLong;
+import java.util.concurrent.locks.ReentrantLock;
 
 /**
  * OIAggregator - Independent Kafka consumer for Open Interest data.
@@ -102,6 +103,8 @@ public class OIAggregator {
     private final AtomicBoolean running = new AtomicBoolean(false);
 
     // Current window end (global tracker for emission progress)
+    // Bug #6 FIX: Use lock for atomic compound updates
+    private final ReentrantLock windowLock = new ReentrantLock();
     private volatile Instant currentWindowStart;
     private volatile Instant currentWindowEnd;
 
@@ -239,55 +242,76 @@ public class OIAggregator {
     /**
      * Check if current window should be emitted.
      * STRICT EVENT TIME MODE: Reference is always maxEventTime
+     * Bug #4 FIX: Improved idle flush and fast-forward logic
      */
     private void checkWindowEmission() {
-        // STRICT EVENT TIME: Reference is typically maxEventTime
-        Instant referenceTime = maxEventTime.get();
+        windowLock.lock();
+        try {
+            Instant referenceTime = maxEventTime.get();
 
-        // IDLE FLUSH LOGIC (Critique Fix #3)
-        long timeSinceLastData = System.currentTimeMillis() - lastDataArrivalMillis.get();
-        if (timeSinceLastData > 60000) { // 1 minute idle
-            Instant now = Instant.now();
-            if (now.isAfter(referenceTime)) {
-                referenceTime = now;
-                if (timeSinceLastData > 61000 && timeSinceLastData < 62000) { 
-                    log.info("{} [IDLE-FLUSH] System idle for {}ms, forcing time to {}", 
-                        LOG_PREFIX, timeSinceLastData, formatTime(referenceTime));
+            // Bug #4 FIX: Improved idle flush - advance by ONE window only
+            long timeSinceLastData = System.currentTimeMillis() - lastDataArrivalMillis.get();
+            if (timeSinceLastData > 60000) {
+                Instant maxIdleAdvance = currentWindowEnd.plusSeconds(60);
+                if (maxIdleAdvance.isAfter(referenceTime)) {
+                    referenceTime = maxIdleAdvance;
+                    if (timeSinceLastData > 61000 && timeSinceLastData < 62000) {
+                        log.info("{} [IDLE-FLUSH] System idle for {}ms, advancing by 1 window to {}",
+                            LOG_PREFIX, timeSinceLastData, formatTime(referenceTime));
+                    }
                 }
             }
-        }
 
-        // Skip if no data yet (and not idle)
-        if (referenceTime.equals(Instant.EPOCH)) {
-            return;
-        }
-
-        // Use WHILE loop to emit ALL closed windows up to referenceTime
-        int windowsEmitted = 0;
-        while (referenceTime.isAfter(currentWindowEnd.plusSeconds(2))) {
-            if (windowsEmitted == 0) {
-                log.info("{} [STRICT-EVENT-TIME] Catching up: current window {} -> reference time {}",
-                    LOG_PREFIX, formatTime(currentWindowEnd), formatTime(referenceTime));
+            if (referenceTime.equals(Instant.EPOCH)) {
+                return;
             }
 
-            emitCurrentWindow();
-            windowsEmitted++;
-
-            // Move to next window
-            currentWindowStart = currentWindowEnd;
-            currentWindowEnd = Timeframe.M1.getWindowEnd(currentWindowStart);
-
-            // Safety: limit iterations to prevent infinite loop
-            if (windowsEmitted > 500) {
-                log.warn("{} [STRICT-EVENT-TIME] Too many windows to emit ({}), breaking. Current: {}, Reference: {}",
-                    LOG_PREFIX, windowsEmitted, formatTime(currentWindowEnd), formatTime(referenceTime));
-                break;
+            // Bug #4 FIX: Fast-forward if too far behind (>2 hours)
+            long windowsBehind = Duration.between(currentWindowEnd, referenceTime).toMinutes();
+            if (windowsBehind > 120) {
+                log.warn("{} [STRICT-EVENT-TIME] Window {} hours behind, fast-forwarding",
+                    LOG_PREFIX, windowsBehind / 60);
+                currentWindowStart = Timeframe.M1.alignToWindowStart(referenceTime.minusSeconds(120));
+                currentWindowEnd = Timeframe.M1.getWindowEnd(currentWindowStart);
+                Instant cutoff = currentWindowStart.minusSeconds(300);
+                List<String> staleKeys = new ArrayList<>();
+                for (Map.Entry<String, OIAggregateState> e : aggregationState.entrySet()) {
+                    if (e.getValue().getWindowEnd() != null && e.getValue().getWindowEnd().isBefore(cutoff)) {
+                        staleKeys.add(e.getKey());
+                    }
+                }
+                staleKeys.forEach(aggregationState::remove);
+                log.info("{} [STRICT-EVENT-TIME] Fast-forwarded to: {} - {}, cleared {} stale states",
+                    LOG_PREFIX, formatTime(currentWindowStart), formatTime(currentWindowEnd), staleKeys.size());
+                return;
             }
-        }
 
-        if (windowsEmitted > 0) {
-            log.debug("{} [STRICT-EVENT-TIME] Emitted {} windows, now at: {} - {}",
-                LOG_PREFIX, windowsEmitted, formatTime(currentWindowStart), formatTime(currentWindowEnd));
+            int windowsEmitted = 0;
+            while (referenceTime.isAfter(currentWindowEnd.plusSeconds(2))) {
+                if (windowsEmitted == 0) {
+                    log.info("{} [STRICT-EVENT-TIME] Catching up: current window {} -> reference time {}",
+                        LOG_PREFIX, formatTime(currentWindowEnd), formatTime(referenceTime));
+                }
+
+                emitCurrentWindow();
+                windowsEmitted++;
+
+                currentWindowStart = currentWindowEnd;
+                currentWindowEnd = Timeframe.M1.getWindowEnd(currentWindowStart);
+
+                if (windowsEmitted > 500) {
+                    log.warn("{} [STRICT-EVENT-TIME] Too many windows ({}), breaking. Current: {}, Reference: {}",
+                        LOG_PREFIX, windowsEmitted, formatTime(currentWindowEnd), formatTime(referenceTime));
+                    break;
+                }
+            }
+
+            if (windowsEmitted > 0) {
+                log.debug("{} [STRICT-EVENT-TIME] Emitted {} windows, now at: {} - {}",
+                    LOG_PREFIX, windowsEmitted, formatTime(currentWindowStart), formatTime(currentWindowEnd));
+            }
+        } finally {
+            windowLock.unlock();
         }
     }
 
@@ -360,9 +384,17 @@ public class OIAggregator {
             aggregationState.remove(key);
         }
 
-        // Cleanup stale states (significantly behind emission progress)
+        // Bug #17 FIX: Cleanup stale states safely by collecting keys first
         Instant cutoff = currentWindowEnd.minus(Duration.ofMinutes(5));
-        aggregationState.entrySet().removeIf(e -> e.getValue().getLastUpdate().isBefore(cutoff));
+        List<String> staleKeys = new ArrayList<>();
+        for (Map.Entry<String, OIAggregateState> entry : aggregationState.entrySet()) {
+            if (entry.getValue().getLastUpdate().isBefore(cutoff)) {
+                staleKeys.add(entry.getKey());
+            }
+        }
+        for (String key : staleKeys) {
+            aggregationState.remove(key);
+        }
     }
 
     private KafkaConsumer<String, OpenInterest> createConsumer() {
@@ -572,6 +604,7 @@ public class OIAggregator {
          * Calculate OI interpretation using cached price from Redis (v2.1).
          * Falls back to NEUTRAL if price not available.
          * Uses scripCode for price lookup (unique instrument identifier).
+         * Bug #13 FIX: Added logging for cache misses
          */
         private OIMetrics.OIInterpretation calculateInterpretation(
                 long oiChange, String scripCode, RedisCacheService redisCacheService) {
@@ -582,19 +615,28 @@ public class OIAggregator {
 
             Double lastPrice = redisCacheService.getLastPrice(scripCode);
             Double prevPrice = redisCacheService.getPreviousPrice(scripCode);
-            
+
+            // Bug #13 FIX: Log cache misses for debugging
             if (lastPrice == null || prevPrice == null || prevPrice <= 0) {
+                // Log at debug level to avoid spam, but make it traceable
+                if (lastPrice == null && prevPrice == null) {
+                    log.debug("[OI-INTERP] Cache miss for scripCode={}: no price data available", scripCode);
+                } else if (lastPrice == null) {
+                    log.debug("[OI-INTERP] Cache miss for scripCode={}: lastPrice=null, prevPrice={}", scripCode, prevPrice);
+                } else {
+                    log.debug("[OI-INTERP] Cache miss for scripCode={}: lastPrice={}, prevPrice={}", scripCode, lastPrice, prevPrice);
+                }
                 return OIMetrics.OIInterpretation.NEUTRAL;
             }
-            
+
             double priceChange = lastPrice - prevPrice;
-            
+
             // Standard OI interpretation matrix:
             // OI ↑ + Price ↑ = LONG_BUILDUP (bullish)
             // OI ↓ + Price ↑ = SHORT_COVERING (bullish)
             // OI ↑ + Price ↓ = SHORT_BUILDUP (bearish)
             // OI ↓ + Price ↓ = LONG_UNWINDING (bearish)
-            
+
             if (oiChange > 0 && priceChange > 0) {
                 return OIMetrics.OIInterpretation.LONG_BUILDUP;
             } else if (oiChange < 0 && priceChange > 0) {
@@ -604,7 +646,7 @@ public class OIAggregator {
             } else if (oiChange < 0 && priceChange < 0) {
                 return OIMetrics.OIInterpretation.LONG_UNWINDING;
             }
-            
+
             return OIMetrics.OIInterpretation.NEUTRAL;
         }
 

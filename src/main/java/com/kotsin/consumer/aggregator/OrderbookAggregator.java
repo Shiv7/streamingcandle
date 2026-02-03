@@ -29,6 +29,7 @@ import java.util.concurrent.*;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicReference;
 import java.util.concurrent.atomic.AtomicLong;
+import java.util.concurrent.locks.ReentrantLock;
 
 /**
  * OrderbookAggregator - Independent Kafka consumer for orderbook data.
@@ -100,6 +101,8 @@ public class OrderbookAggregator {
     private final AtomicBoolean running = new AtomicBoolean(false);
 
     // Current window end (global tracker for emission progress)
+    // Bug #6 FIX: Use lock for atomic compound updates
+    private final ReentrantLock windowLock = new ReentrantLock();
     private volatile Instant currentWindowStart;
     private volatile Instant currentWindowEnd;
 
@@ -238,55 +241,76 @@ public class OrderbookAggregator {
     /**
      * Check if current window should be emitted.
      * STRICT EVENT TIME MODE: Reference is always maxEventTime
+     * Bug #4 FIX: Improved idle flush and fast-forward logic
      */
     private void checkWindowEmission() {
-        // STRICT EVENT TIME: Reference is typically maxEventTime
-        Instant referenceTime = maxEventTime.get();
+        windowLock.lock();
+        try {
+            Instant referenceTime = maxEventTime.get();
 
-        // IDLE FLUSH LOGIC (Critique Fix #3)
-        long timeSinceLastData = System.currentTimeMillis() - lastDataArrivalMillis.get();
-        if (timeSinceLastData > 60000) { // 1 minute idle
-            Instant now = Instant.now();
-            if (now.isAfter(referenceTime)) {
-                referenceTime = now;
-                if (timeSinceLastData > 61000 && timeSinceLastData < 62000) { 
-                    log.info("{} [IDLE-FLUSH] System idle for {}ms, forcing time to {}", 
-                        LOG_PREFIX, timeSinceLastData, formatTime(referenceTime));
+            // Bug #4 FIX: Improved idle flush - advance by ONE window only
+            long timeSinceLastData = System.currentTimeMillis() - lastDataArrivalMillis.get();
+            if (timeSinceLastData > 60000) {
+                Instant maxIdleAdvance = currentWindowEnd.plusSeconds(60);
+                if (maxIdleAdvance.isAfter(referenceTime)) {
+                    referenceTime = maxIdleAdvance;
+                    if (timeSinceLastData > 61000 && timeSinceLastData < 62000) {
+                        log.info("{} [IDLE-FLUSH] System idle for {}ms, advancing by 1 window to {}",
+                            LOG_PREFIX, timeSinceLastData, formatTime(referenceTime));
+                    }
                 }
             }
-        }
 
-        // Skip if no data yet (and not idle)
-        if (referenceTime.equals(Instant.EPOCH)) {
-            return;
-        }
-
-        // Use WHILE loop to emit ALL closed windows up to referenceTime
-        int windowsEmitted = 0;
-        while (referenceTime.isAfter(currentWindowEnd.plusSeconds(2))) {
-            if (windowsEmitted == 0) {
-                log.info("{} [STRICT-EVENT-TIME] Catching up: current window {} -> reference time {}",
-                    LOG_PREFIX, formatTime(currentWindowEnd), formatTime(referenceTime));
+            if (referenceTime.equals(Instant.EPOCH)) {
+                return;
             }
 
-            emitCurrentWindow();
-            windowsEmitted++;
-
-            // Move to next window
-            currentWindowStart = currentWindowEnd;
-            currentWindowEnd = Timeframe.M1.getWindowEnd(currentWindowStart);
-
-            // Safety: limit iterations to prevent infinite loop
-            if (windowsEmitted > 500) {
-                log.warn("{} [STRICT-EVENT-TIME] Too many windows to emit ({}), breaking. Current: {}, Reference: {}",
-                    LOG_PREFIX, windowsEmitted, formatTime(currentWindowEnd), formatTime(referenceTime));
-                break;
+            // Bug #4 FIX: Fast-forward if too far behind (>2 hours)
+            long windowsBehind = Duration.between(currentWindowEnd, referenceTime).toMinutes();
+            if (windowsBehind > 120) {
+                log.warn("{} [STRICT-EVENT-TIME] Window {} hours behind, fast-forwarding",
+                    LOG_PREFIX, windowsBehind / 60);
+                currentWindowStart = Timeframe.M1.alignToWindowStart(referenceTime.minusSeconds(120));
+                currentWindowEnd = Timeframe.M1.getWindowEnd(currentWindowStart);
+                Instant cutoff = currentWindowStart.minusSeconds(300);
+                List<String> staleKeys = new ArrayList<>();
+                for (Map.Entry<String, OrderbookAggregateState> e : aggregationState.entrySet()) {
+                    if (e.getValue().getWindowEnd() != null && e.getValue().getWindowEnd().isBefore(cutoff)) {
+                        staleKeys.add(e.getKey());
+                    }
+                }
+                staleKeys.forEach(aggregationState::remove);
+                log.info("{} [STRICT-EVENT-TIME] Fast-forwarded to: {} - {}, cleared {} stale states",
+                    LOG_PREFIX, formatTime(currentWindowStart), formatTime(currentWindowEnd), staleKeys.size());
+                return;
             }
-        }
 
-        if (windowsEmitted > 0) {
-            log.debug("{} [STRICT-EVENT-TIME] Emitted {} windows, now at: {} - {}",
-                LOG_PREFIX, windowsEmitted, formatTime(currentWindowStart), formatTime(currentWindowEnd));
+            int windowsEmitted = 0;
+            while (referenceTime.isAfter(currentWindowEnd.plusSeconds(2))) {
+                if (windowsEmitted == 0) {
+                    log.info("{} [STRICT-EVENT-TIME] Catching up: current window {} -> reference time {}",
+                        LOG_PREFIX, formatTime(currentWindowEnd), formatTime(referenceTime));
+                }
+
+                emitCurrentWindow();
+                windowsEmitted++;
+
+                currentWindowStart = currentWindowEnd;
+                currentWindowEnd = Timeframe.M1.getWindowEnd(currentWindowStart);
+
+                if (windowsEmitted > 500) {
+                    log.warn("{} [STRICT-EVENT-TIME] Too many windows ({}), breaking. Current: {}, Reference: {}",
+                        LOG_PREFIX, windowsEmitted, formatTime(currentWindowEnd), formatTime(referenceTime));
+                    break;
+                }
+            }
+
+            if (windowsEmitted > 0) {
+                log.debug("{} [STRICT-EVENT-TIME] Emitted {} windows, now at: {} - {}",
+                    LOG_PREFIX, windowsEmitted, formatTime(currentWindowStart), formatTime(currentWindowEnd));
+            }
+        } finally {
+            windowLock.unlock();
         }
     }
 
@@ -358,9 +382,17 @@ public class OrderbookAggregator {
             aggregationState.remove(key);
         }
 
-        // Cleanup stale states
+        // Bug #17 FIX: Cleanup stale states safely by collecting keys first
         Instant cutoff = currentWindowEnd.minus(Duration.ofMinutes(5));
-        aggregationState.entrySet().removeIf(e -> e.getValue().getLastUpdate().isBefore(cutoff));
+        List<String> staleKeys = new ArrayList<>();
+        for (Map.Entry<String, OrderbookAggregateState> entry : aggregationState.entrySet()) {
+            if (entry.getValue().getLastUpdate().isBefore(cutoff)) {
+                staleKeys.add(entry.getKey());
+            }
+        }
+        for (String key : staleKeys) {
+            aggregationState.remove(key);
+        }
     }
 
     private KafkaConsumer<String, OrderBookSnapshot> createConsumer() {
@@ -424,10 +456,12 @@ public class OrderbookAggregator {
         private double previousBid;
         private double previousAsk;
 
-        // Kyle's Lambda - rolling window (v2.1: persists across resets)
-        private static final int KYLE_LAMBDA_WINDOW = 50;  // Rolling window size
-        private final List<Double> priceChanges = new ArrayList<>();
-        private final List<Double> signedVolumes = new ArrayList<>();
+        // Kyle's Lambda - rolling window
+        // Bug #2 & #9 FIX: Use LinkedList for O(1) removal and track window-specific observations
+        private static final int KYLE_LAMBDA_WINDOW = 50;
+        private final java.util.LinkedList<Double> priceChanges = new java.util.LinkedList<>();
+        private final java.util.LinkedList<Double> signedVolumes = new java.util.LinkedList<>();
+        private int windowObservationCount = 0;  // Track observations in current window
         private double lastMidPrice;
 
         // Spread metrics
@@ -486,19 +520,20 @@ public class OrderbookAggregator {
             ofiSum += bidDelta - askDelta;
 
             // Kyle's Lambda - track price change vs signed volume
-            // v2.1: Keep ROLLING window of observations
+            // Bug #9 FIX: Use LinkedList removeFirst() for O(1) removal
             double midPrice = (bid + ask) / 2;
             if (lastMidPrice > 0 && midPrice > 0) {
                 double priceChange = midPrice - lastMidPrice;
                 double signedVol = bidDelta - askDelta;
                 if (Math.abs(signedVol) > 0) {
-                    priceChanges.add(priceChange);
-                    signedVolumes.add(signedVol);
-                    
-                    // Keep rolling window capped (v2.1)
+                    priceChanges.addLast(priceChange);
+                    signedVolumes.addLast(signedVol);
+                    windowObservationCount++;
+
+                    // Keep rolling window capped
                     while (priceChanges.size() > KYLE_LAMBDA_WINDOW) {
-                        priceChanges.remove(0);
-                        signedVolumes.remove(0);
+                        priceChanges.removeFirst();
+                        signedVolumes.removeFirst();
                     }
                 }
             }
@@ -600,7 +635,8 @@ public class OrderbookAggregator {
                 .updateCount(updateCount)
                 .lastUpdateTimestamp(lastUpdate)
                 .quality("VALID")
-                .staleness(System.currentTimeMillis() - lastUpdate.toEpochMilli())
+                // Bug #15 FIX: staleness measures time since last data update (epoch millis comparison is timezone-safe)
+                .staleness(lastUpdate != null ? System.currentTimeMillis() - lastUpdate.toEpochMilli() : 0)
                 .createdAt(Instant.now())
                 .build();
         }
@@ -624,9 +660,12 @@ public class OrderbookAggregator {
             this.windowStart = newWindowStart;
             this.windowEnd = newWindowEnd;
             this.ofiSum = 0;
-            // v2.1: DON'T clear priceChanges/signedVolumes - keep rolling window
-            // this.priceChanges.clear();
-            // this.signedVolumes.clear();
+            // Bug #2 FIX: Clear Kyle's Lambda window on reset
+            // The rolling window should only contain observations from current window
+            // for accurate per-window elasticity calculation
+            this.priceChanges.clear();
+            this.signedVolumes.clear();
+            this.windowObservationCount = 0;
             this.spreadSum = 0;
             this.spreadSqSum = 0;
             this.tightSpreadCount = 0;

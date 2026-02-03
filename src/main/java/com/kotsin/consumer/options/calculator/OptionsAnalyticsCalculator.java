@@ -3,6 +3,9 @@ package com.kotsin.consumer.options.calculator;
 import com.kotsin.consumer.options.model.OptionGreeks;
 import com.kotsin.consumer.options.model.OptionGreeks.OptionType;
 import com.kotsin.consumer.options.model.OptionsAnalytics;
+import com.kotsin.consumer.options.service.OptionChainService;
+import com.kotsin.consumer.options.service.OptionChainService.OptionChain;
+import com.kotsin.consumer.options.service.OptionChainService.StrikeEntry;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.stereotype.Component;
@@ -25,11 +28,238 @@ import java.util.stream.Collectors;
 @Slf4j
 public class OptionsAnalyticsCalculator {
 
+    private static final String LOG_PREFIX = "[OPTIONS-ANALYTICS]";
+
     @Autowired
     private BlackScholesCalculator blackScholesCalculator;
 
+    @Autowired
+    private OptionChainService optionChainService;
+
+    /**
+     * Calculate complete options analytics using real OI data from OptionChainService.
+     *
+     * @param underlyingSymbol  The underlying symbol (e.g., "NIFTY", "BANKNIFTY")
+     * @param options           List of OptionGreeks for the chain
+     * @param spotPrice         Current underlying price
+     * @return OptionsAnalytics with all metrics including real OI-based calculations
+     */
+    public OptionsAnalytics calculateWithRealOI(String underlyingSymbol, List<OptionGreeks> options, double spotPrice) {
+        // Fetch real OI data from OptionChainService
+        OptionChain chain = optionChainService.buildChain(underlyingSymbol);
+
+        if (chain.isEmpty()) {
+            log.warn("{} No option chain data for {}, falling back to price-based proxies",
+                LOG_PREFIX, underlyingSymbol);
+            return calculate(options, spotPrice);
+        }
+
+        log.debug("{} Using real OI data for {}: {} strikes, PCR={}",
+            LOG_PREFIX, underlyingSymbol, chain.getStrikeCount(),
+            String.format("%.2f", chain.getPcrByOI()));
+
+        return calculateWithChain(options, spotPrice, chain);
+    }
+
+    /**
+     * Calculate analytics with pre-built option chain.
+     */
+    public OptionsAnalytics calculateWithChain(List<OptionGreeks> options, double spotPrice, OptionChain chain) {
+        if (options == null || options.isEmpty()) {
+            return OptionsAnalytics.builder()
+                .timestamp(Instant.now())
+                .build();
+        }
+
+        // Separate calls and puts
+        List<OptionGreeks> calls = options.stream()
+            .filter(o -> o.getOptionType() == OptionType.CALL)
+            .collect(Collectors.toList());
+        List<OptionGreeks> puts = options.stream()
+            .filter(o -> o.getOptionType() == OptionType.PUT)
+            .collect(Collectors.toList());
+
+        OptionsAnalytics.OptionsAnalyticsBuilder builder = OptionsAnalytics.builder()
+            .underlyingSymbol(options.get(0).getUnderlyingSymbol())
+            .spotPrice(spotPrice)
+            .timestamp(Instant.now());
+
+        // Max Pain from real OI data
+        builder.maxPain(chain.getMaxPain())
+               .maxPainDistance(spotPrice > 0 ? (chain.getMaxPain() - spotPrice) / spotPrice : 0)
+               .totalPainAtMaxPain(0);  // Already calculated in chain
+
+        // PCR from real OI data
+        builder.pcrByOI(chain.getPcrByOI())
+               .pcrByVolume(chain.getPcrByOI())  // Use same as OI for now
+               .pcrByPremium(calculatePCRByPremium(calls, puts))
+               .pcrSignal(chain.getPCRSignal());
+
+        // GEX with real OI
+        GEXResult gex = calculateGEXWithOI(options, spotPrice, chain);
+        builder.totalGEX(gex.totalGEX)
+               .gexFlipPoint(gex.flipPoint)
+               .gexProfile(gex.profile)
+               .isPositiveGamma(gex.isPositive);
+
+        // IV Analysis (unchanged - uses greeks)
+        IVAnalysisResult ivAnalysis = analyzeIV(options, spotPrice);
+        builder.atmIV(ivAnalysis.atmIV)
+               .ivSkew(ivAnalysis.skew)
+               .ivSmile(ivAnalysis.smile)
+               .ivPercentile(ivAnalysis.percentile)
+               .ivTerm(ivAnalysis.term);
+
+        // OI Analysis from real data
+        builder.maxCallOIStrike(chain.getMaxCallOIStrike())
+               .maxPutOIStrike(chain.getMaxPutOIStrike())
+               .callOIWall(chain.getMaxCallOIStrike())
+               .putOIWall(chain.getMaxPutOIStrike())
+               .oiBasedRange(chain.getOiBasedRange());
+
+        // Derived signals using real PCR
+        double pcr = chain.getPcrByOI();
+        builder.bullishSignal(pcr > 1.2 && gex.isPositive)
+               .bearishSignal(pcr < 0.8 && !gex.isPositive)
+               .rangebound(Math.abs(chain.getMaxPain() - spotPrice) / spotPrice < 0.02);
+
+        log.info("{} Analytics for {}: PCR={}, MaxPain={}, GEX={}, Range=[{}, {}]",
+            LOG_PREFIX, chain.getUnderlyingSymbol(),
+            String.format("%.2f", pcr), chain.getMaxPain(),
+            String.format("%.0f", gex.totalGEX),
+            chain.getMaxPutOIStrike(), chain.getMaxCallOIStrike());
+
+        return builder.build();
+    }
+
+    /**
+     * Calculate PCR by premium only.
+     */
+    private double calculatePCRByPremium(List<OptionGreeks> calls, List<OptionGreeks> puts) {
+        double callPremium = calls.stream().mapToDouble(c -> c.getOptionPrice() * 100).sum();
+        double putPremium = puts.stream().mapToDouble(p -> p.getOptionPrice() * 100).sum();
+        return callPremium > 0 ? putPremium / callPremium : 1.0;
+    }
+
+    /**
+     * Calculate GEX with real OI data.
+     * GEX = Gamma * OI * Spot^2 * 0.01 * contractMultiplier
+     */
+    private GEXResult calculateGEXWithOI(List<OptionGreeks> options, double spotPrice, OptionChain chain) {
+        GEXResult result = new GEXResult();
+        Map<Double, Double> profile = new TreeMap<>();
+
+        // Build OI lookup from chain
+        Map<Double, StrikeEntry> oiLookup = chain.getStrikes().stream()
+            .collect(Collectors.toMap(StrikeEntry::getStrike, s -> s, (a, b) -> a));
+
+        double totalGEX = 0;
+        int contractMultiplier = getContractMultiplier(chain.getUnderlyingSymbol());
+
+        for (OptionGreeks opt : options) {
+            double gamma = opt.getGamma();
+            double strike = opt.getStrikePrice();
+
+            // Get real OI from chain
+            StrikeEntry strikeData = oiLookup.get(strike);
+            long oi = 0;
+            if (strikeData != null) {
+                oi = opt.getOptionType() == OptionType.CALL ?
+                    strikeData.getCallOI() : strikeData.getPutOI();
+            }
+
+            // GEX = Gamma * OI * Spot^2 * 0.01 * contractMultiplier
+            double gex = gamma * oi * spotPrice * spotPrice * 0.01 * contractMultiplier;
+
+            // Calls have positive GEX, puts have negative (dealers are short gamma on puts)
+            if (opt.getOptionType() == OptionType.PUT) {
+                gex = -gex;
+            }
+
+            totalGEX += gex;
+            profile.merge(strike, gex, Double::sum);
+        }
+
+        result.totalGEX = totalGEX;
+        result.isPositive = totalGEX > 0;
+        result.profile = profile;
+
+        // Find GEX flip point
+        double cumGEX = 0;
+        result.flipPoint = spotPrice;
+        for (Map.Entry<Double, Double> entry : profile.entrySet()) {
+            double prevCum = cumGEX;
+            cumGEX += entry.getValue();
+            if (prevCum * cumGEX < 0) {
+                result.flipPoint = entry.getKey();
+                break;
+            }
+        }
+
+        return result;
+    }
+
+    /**
+     * Get contract multiplier for underlying.
+     */
+    private int getContractMultiplier(String underlying) {
+        if (underlying == null) return 50;
+        switch (underlying.toUpperCase()) {
+            case "NIFTY": return 50;
+            case "BANKNIFTY": return 25;
+            case "FINNIFTY": return 40;
+            default: return 1;  // Stock options
+        }
+    }
+
+    /**
+     * Calculate analytics using only real OI data (no greeks required).
+     * Useful when only chain-level metrics are needed.
+     *
+     * @param underlyingSymbol The underlying symbol
+     * @return OptionsAnalytics with OI-based metrics
+     */
+    public OptionsAnalytics calculateFromChainOnly(String underlyingSymbol) {
+        OptionChain chain = optionChainService.buildChain(underlyingSymbol);
+
+        if (chain.isEmpty()) {
+            log.warn("{} No option chain data for {}", LOG_PREFIX, underlyingSymbol);
+            return OptionsAnalytics.builder()
+                .underlyingSymbol(underlyingSymbol)
+                .timestamp(Instant.now())
+                .build();
+        }
+
+        double spotPrice = chain.getSpotPrice();
+        double pcr = chain.getPcrByOI();
+
+        return OptionsAnalytics.builder()
+            .underlyingSymbol(underlyingSymbol)
+            .spotPrice(spotPrice)
+            .timestamp(Instant.now())
+            // PCR from real OI
+            .pcrByOI(pcr)
+            .pcrByVolume(pcr)
+            .pcrSignal(chain.getPCRSignal())
+            // Max Pain
+            .maxPain(chain.getMaxPain())
+            .maxPainDistance((chain.getMaxPain() - spotPrice) / spotPrice)
+            // OI Walls
+            .maxCallOIStrike(chain.getMaxCallOIStrike())
+            .maxPutOIStrike(chain.getMaxPutOIStrike())
+            .callOIWall(chain.getMaxCallOIStrike())
+            .putOIWall(chain.getMaxPutOIStrike())
+            .oiBasedRange(chain.getOiBasedRange())
+            // Signals
+            .bullishSignal(pcr > 1.2)
+            .bearishSignal(pcr < 0.8)
+            .rangebound(Math.abs(chain.getMaxPain() - spotPrice) / spotPrice < 0.02)
+            .build();
+    }
+
     /**
      * Calculate complete options analytics from a list of options.
+     * Falls back to price-based proxies when OI data is not available.
      *
      * @param options    List of OptionGreeks for the chain
      * @param spotPrice  Current underlying price

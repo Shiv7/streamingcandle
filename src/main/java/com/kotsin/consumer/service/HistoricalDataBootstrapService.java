@@ -7,10 +7,14 @@ import com.kotsin.consumer.repository.TickCandleRepository;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.beans.factory.annotation.Value;
+import org.springframework.data.mongodb.core.BulkOperations;
+import org.springframework.data.mongodb.core.MongoTemplate;
 import org.springframework.stereotype.Service;
 
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.mongodb.bulk.BulkWriteResult;
+import com.mongodb.MongoBulkWriteException;
 import jakarta.annotation.PostConstruct;
 import jakarta.annotation.PreDestroy;
 import org.springframework.web.client.RestTemplate;
@@ -41,6 +45,9 @@ public class HistoricalDataBootstrapService {
 
     @Autowired
     private TickCandleRepository tickCandleRepository;
+
+    @Autowired
+    private MongoTemplate mongoTemplate;
 
     @Autowired
     private RedisCacheService redisCacheService;
@@ -202,8 +209,20 @@ public class HistoricalDataBootstrapService {
         String endDate = LocalDate.now().format(DateTimeFormatter.ISO_DATE);
         String startDate = LocalDate.now().minusDays(historicalDays).format(DateTimeFormatter.ISO_DATE);
 
-        log.info("{} Starting bootstrap for {} ({}) from {} to {}",
-            LOG_PREFIX, symbol, scripCode, startDate, endDate);
+        // CHECK IF DATA ALREADY EXISTS IN MONGODB
+        long existingCount = tickCandleRepository.countByScripCode(scripCode);
+        int minRequiredCandles = historicalDays * 375; // ~375 1m candles per trading day (6.25 hours)
+        int acceptableThreshold = (int) (minRequiredCandles * 0.7); // 70% is acceptable
+
+        if (existingCount >= acceptableThreshold) {
+            log.info("{} Skipping API fetch for {} ({}) - MongoDB already has {} candles (threshold: {})",
+                LOG_PREFIX, symbol, scripCode, existingCount, acceptableThreshold);
+            bootstrapStatus.put(scripCode, BootstrapStatus.SUCCESS);
+            return true;
+        }
+
+        log.info("{} Starting bootstrap for {} ({}) from {} to {} - MongoDB has {} candles, need {}",
+            LOG_PREFIX, symbol, scripCode, startDate, endDate, existingCount, acceptableThreshold);
 
         // Fetch historical data from FastAnalytics API
         List<HistoricalCandle> candles = fastAnalyticsClient.getHistoricalData(
@@ -222,32 +241,37 @@ public class HistoricalDataBootstrapService {
             .map(c -> c.toTickCandle(symbol, scripCode, exch, exchType))
             .collect(Collectors.toList());
 
-        // Batch save to MongoDB
-        try {
-            int batchSize = 1000;
-            int saved = 0;
+        // Batch save to MongoDB with bulk unordered insert (skips duplicates automatically)
+        int saved = 0;
+        int skipped = 0;
+        int batchSize = 1000;
 
-            for (int i = 0; i < tickCandles.size(); i += batchSize) {
-                int end = Math.min(i + batchSize, tickCandles.size());
-                List<TickCandle> batch = tickCandles.subList(i, end);
-                tickCandleRepository.saveAll(batch);
-                saved += batch.size();
+        for (int i = 0; i < tickCandles.size(); i += batchSize) {
+            int end = Math.min(i + batchSize, tickCandles.size());
+            List<TickCandle> batch = tickCandles.subList(i, end);
 
-                if (saved % 5000 == 0) {
-                    log.debug("{} Saved {}/{} candles for {}",
-                        LOG_PREFIX, saved, tickCandles.size(), symbol);
-                }
+            try {
+                // Unordered bulk insert - continues past duplicate key errors
+                BulkOperations bulkOps = mongoTemplate.bulkOps(BulkOperations.BulkMode.UNORDERED, TickCandle.class);
+                bulkOps.insert(batch);
+                BulkWriteResult result = bulkOps.execute();
+                saved += result.getInsertedCount();
+            } catch (MongoBulkWriteException e) {
+                // Some inserts succeeded, some were duplicates
+                saved += e.getWriteResult().getInsertedCount();
+                skipped += e.getWriteErrors().size();
+            } catch (Exception e) {
+                log.warn("{} Bulk insert error for {}: {}", LOG_PREFIX, scripCode, e.getMessage());
             }
 
-            log.info("{} Saved {} candles to MongoDB for {} ({})",
-                LOG_PREFIX, saved, symbol, scripCode);
-
-        } catch (Exception e) {
-            log.error("{} Failed to save to MongoDB for {}: {}",
-                LOG_PREFIX, scripCode, e.getMessage());
-            bootstrapStatus.put(scripCode, BootstrapStatus.FAILED);
-            return false;
+            if ((i + batchSize) % 5000 == 0) {
+                log.debug("{} Progress for {}: saved={}, skipped={} of {}",
+                    LOG_PREFIX, symbol, saved, skipped, tickCandles.size());
+            }
         }
+
+        log.info("{} Saved {} new candles to MongoDB for {} ({}) - {} skipped (duplicates)",
+            LOG_PREFIX, saved, symbol, scripCode, skipped);
 
         // Cache recent 100 candles in Redis for quick access
         try {

@@ -2,12 +2,16 @@ package com.kotsin.consumer.signal.trigger;
 
 import com.kotsin.consumer.model.UnifiedCandle;
 import com.kotsin.consumer.model.Timeframe;
+import com.kotsin.consumer.model.TimeframeBoundary;
 import com.kotsin.consumer.model.MultiTimeframePivotState;
 import com.kotsin.consumer.model.ConfluenceResult;
+import com.kotsin.consumer.event.CandleBoundaryEvent;
 import com.kotsin.consumer.mtf.analyzer.MultiTimeframeAnalyzer;
 import com.kotsin.consumer.mtf.model.MultiTimeframeData;
 import com.kotsin.consumer.mtf.model.MultiTimeframeData.*;
+import com.kotsin.consumer.service.ATRService;
 import com.kotsin.consumer.service.CandleService;
+import com.kotsin.consumer.service.CompletedCandleService;
 import com.kotsin.consumer.service.PivotLevelService;
 import com.kotsin.consumer.smc.analyzer.SMCAnalyzer;
 import com.kotsin.consumer.smc.analyzer.SMCAnalyzer.SMCResult;
@@ -20,8 +24,11 @@ import lombok.Data;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.beans.factory.annotation.Value;
+import org.springframework.context.event.EventListener;
+import org.springframework.kafka.core.KafkaTemplate;
 import org.springframework.stereotype.Component;
 
+import java.time.Duration;
 import java.time.Instant;
 import java.util.*;
 import java.util.concurrent.ConcurrentHashMap;
@@ -58,8 +65,20 @@ public class PivotConfluenceTrigger {
     @Autowired
     private SMCAnalyzer smcAnalyzer;
 
+    @Autowired
+    private KafkaTemplate<String, Object> kafkaTemplate;
+
+    @Autowired
+    private ATRService atrService;
+
+    @Autowired
+    private CompletedCandleService completedCandleService;
+
     @Value("${pivot.confluence.enabled:true}")
     private boolean enabled;
+
+    @Value("${pivot.confluence.kafka.topic:pivot-confluence-signals}")
+    private String pivotKafkaTopic;
 
     @Value("${pivot.confluence.min.levels:2}")
     private int minConfluenceLevels;
@@ -73,8 +92,80 @@ public class PivotConfluenceTrigger {
     @Value("${pivot.confluence.ltf.weight:0.4}")
     private double ltfWeight;
 
-    // Cache for HTF bias
-    private final Map<String, DirectionBias> htfBiasCache = new ConcurrentHashMap<>();
+    @Value("${pivot.confluence.tolerance.percent:0.5}")
+    private double confluenceTolerancePercent;  // Default 0.5% (was 0.3% which was too tight)
+
+    // Cache for HTF bias with TTL
+    private final Map<String, CachedBias> htfBiasCache = new ConcurrentHashMap<>();
+
+    // Cache for LTF confirmation with TTL
+    private final Map<String, CachedLTFConfirmation> ltfConfirmCache = new ConcurrentHashMap<>();
+
+    // Cache TTLs
+    private static final Duration HTF_BIAS_TTL = Duration.ofHours(4);     // Recalculate every 4H
+    private static final Duration LTF_CONFIRM_TTL = Duration.ofMinutes(15); // Recalculate every 15m
+
+    /**
+     * Event listener for 15m boundary - update LTF confirmation.
+     */
+    @EventListener
+    public void on15mBoundary(CandleBoundaryEvent event) {
+        if (!enabled || event.getTimeframe() != Timeframe.M15) {
+            return;
+        }
+        String scripCode = event.getScripCode();
+        log.debug("{} {} 15m boundary crossed - updating LTF confirmation", LOG_PREFIX, scripCode);
+        // Invalidate LTF cache to trigger recalculation on next check
+        ltfConfirmCache.remove(scripCode);
+    }
+
+    /**
+     * Event listener for 4H boundary - update HTF bias.
+     */
+    @EventListener
+    public void on4hBoundary(CandleBoundaryEvent event) {
+        if (!enabled || event.getTimeframe() != Timeframe.H4) {
+            return;
+        }
+        String scripCode = event.getScripCode();
+        log.info("{} {} 4H boundary crossed - recalculating HTF bias", LOG_PREFIX, scripCode);
+        // Invalidate HTF cache to trigger recalculation on next check
+        htfBiasCache.remove(scripCode);
+    }
+
+    /**
+     * Event listener for Daily boundary - recalculate everything.
+     */
+    @EventListener
+    public void onDailyBoundary(CandleBoundaryEvent event) {
+        if (!enabled || event.getTimeframe() != Timeframe.D1) {
+            return;
+        }
+        String scripCode = event.getScripCode();
+        log.info("{} {} Daily boundary crossed - clearing all caches", LOG_PREFIX, scripCode);
+        htfBiasCache.remove(scripCode);
+        ltfConfirmCache.remove(scripCode);
+    }
+
+    /**
+     * Cached bias wrapper with timestamp.
+     */
+    @Data
+    @Builder
+    private static class CachedBias {
+        private DirectionBias bias;
+        private Instant calculatedAt;
+    }
+
+    /**
+     * Cached LTF confirmation wrapper.
+     */
+    @Data
+    @Builder
+    private static class CachedLTFConfirmation {
+        private LTFConfirmation confirmation;
+        private Instant calculatedAt;
+    }
 
     /**
      * Check if Pivot Confluence signal should trigger.
@@ -87,8 +178,8 @@ public class PivotConfluenceTrigger {
         try {
             log.info("{} {} Starting pivot confluence analysis", LOG_PREFIX, scripCode);
 
-            // Step 1: Determine HTF Bias (Daily, 4H)
-            DirectionBias htfBias = analyzeHTFBias(scripCode);
+            // Step 1: Determine HTF Bias (Daily, 4H) - USE CACHED IF VALID
+            DirectionBias htfBias = getCachedOrComputeHTFBias(scripCode);
             log.info("{} {} HTF Bias: direction={}, strength={}, reason={}",
                 LOG_PREFIX, scripCode, htfBias.direction,
                 String.format("%.2f", htfBias.strength), htfBias.reason);
@@ -97,8 +188,8 @@ public class PivotConfluenceTrigger {
                 return PivotTriggerResult.noTrigger("HTF bias is NEUTRAL - no clear direction");
             }
 
-            // Step 2: Analyze LTF for confirmation (15m, 5m)
-            LTFConfirmation ltfConfirm = analyzeLTFConfirmation(scripCode, htfBias.direction);
+            // Step 2: Analyze LTF for confirmation (15m, 5m) - USE CACHED IF VALID
+            LTFConfirmation ltfConfirm = getCachedOrComputeLTFConfirmation(scripCode, htfBias.direction);
             log.info("{} {} LTF Confirmation: confirmed={}, direction={}, alignment={}",
                 LOG_PREFIX, scripCode, ltfConfirm.confirmed, ltfConfirm.direction,
                 String.format("%.2f", ltfConfirm.alignmentScore));
@@ -150,7 +241,8 @@ public class PivotConfluenceTrigger {
                 String.format("%.2f", triggerScore),
                 String.format("%.2f", rrCalc.riskReward));
 
-            return PivotTriggerResult.builder()
+            // Build result
+            PivotTriggerResult result = PivotTriggerResult.builder()
                 .triggered(true)
                 .direction(htfBias.direction == BiasDirection.BULLISH ?
                     TriggerDirection.BULLISH : TriggerDirection.BEARISH)
@@ -163,6 +255,11 @@ public class PivotConfluenceTrigger {
                 .rrCalc(rrCalc)
                 .triggerTime(Instant.now())
                 .build();
+
+            // Publish to Kafka
+            publishToKafka(scripCode, result);
+
+            return result;
 
         } catch (Exception e) {
             log.error("{} {} Error in pivot confluence check: {}", LOG_PREFIX, scripCode, e.getMessage(), e);
@@ -273,8 +370,47 @@ public class PivotConfluenceTrigger {
             .reason(String.join("; ", reasons))
             .build();
 
-        htfBiasCache.put(scripCode, bias);
+        // Cache with timestamp
+        htfBiasCache.put(scripCode, CachedBias.builder()
+            .bias(bias)
+            .calculatedAt(Instant.now())
+            .build());
         return bias;
+    }
+
+    /**
+     * Get cached HTF bias or compute fresh if expired.
+     */
+    private DirectionBias getCachedOrComputeHTFBias(String scripCode) {
+        CachedBias cached = htfBiasCache.get(scripCode);
+        if (cached != null) {
+            Duration age = Duration.between(cached.getCalculatedAt(), Instant.now());
+            if (age.compareTo(HTF_BIAS_TTL) < 0) {
+                log.debug("{} {} Using cached HTF bias (age: {}m)", LOG_PREFIX, scripCode, age.toMinutes());
+                return cached.getBias();
+            }
+        }
+        return analyzeHTFBias(scripCode);
+    }
+
+    /**
+     * Get cached LTF confirmation or compute fresh if expired.
+     */
+    private LTFConfirmation getCachedOrComputeLTFConfirmation(String scripCode, BiasDirection htfDirection) {
+        CachedLTFConfirmation cached = ltfConfirmCache.get(scripCode);
+        if (cached != null && cached.getConfirmation().getDirection() == htfDirection) {
+            Duration age = Duration.between(cached.getCalculatedAt(), Instant.now());
+            if (age.compareTo(LTF_CONFIRM_TTL) < 0) {
+                log.debug("{} {} Using cached LTF confirmation (age: {}m)", LOG_PREFIX, scripCode, age.toMinutes());
+                return cached.getConfirmation();
+            }
+        }
+        LTFConfirmation confirmation = analyzeLTFConfirmation(scripCode, htfDirection);
+        ltfConfirmCache.put(scripCode, CachedLTFConfirmation.builder()
+            .confirmation(confirmation)
+            .calculatedAt(Instant.now())
+            .build());
+        return confirmation;
     }
 
     /**
@@ -365,7 +501,7 @@ public class PivotConfluenceTrigger {
 
         List<String> confluenceLevels = new ArrayList<>();
         int nearbyLevels = 0;
-        double tolerance = currentPrice * 0.003; // 0.3% tolerance
+        double tolerance = currentPrice * (confluenceTolerancePercent / 100.0); // Configurable tolerance (default 0.5%)
 
         if (pivotState != null) {
             // Check daily pivot
@@ -512,58 +648,90 @@ public class PivotConfluenceTrigger {
     }
 
     /**
-     * Calculate Risk:Reward.
+     * Calculate Risk:Reward using proper pivot-to-pivot distances.
+     *
+     * IMPROVED: Uses actual pivot levels for stop/target with ATR validation.
+     * Stop is placed below nearest support (LONG) or above nearest resistance (SHORT).
+     * Target is the next pivot level that provides at least 1.5R.
      */
     private RiskRewardCalculation calculateRiskReward(String scripCode, BiasDirection direction,
                                                        PivotConfluenceAnalysis pivotAnalysis,
                                                        SMCZoneAnalysis smcAnalysis) {
 
         double entryPrice = pivotAnalysis.currentPrice;
-        double stopLoss, target;
-
+        boolean isBullish = direction == BiasDirection.BULLISH;
         MultiTimeframePivotState pivots = pivotAnalysis.pivotState;
 
-        if (direction == BiasDirection.BULLISH) {
-            // Stop below nearest support
-            stopLoss = entryPrice * 0.99; // Default 1% stop
-            if (pivots != null && pivots.getDailyPivot() != null) {
-                double s1 = pivots.getDailyPivot().getS1();
-                if (s1 < entryPrice) {
-                    stopLoss = s1 * 0.998; // Just below S1
-                }
-            }
+        // Get ATR for minimum stop distance validation
+        ATRService.RiskRewardResult atrResult = atrService.calculateRiskReward(
+            scripCode, Timeframe.M15, entryPrice, isBullish, 1.5, 2.0);
+        double atr = atrResult != null ? atrResult.getAtr() : entryPrice * 0.015; // Fallback 1.5%
+        double minStopDistance = atr * 1.5; // Minimum 1.5x ATR to avoid whipsaw
 
-            // Target at nearest resistance
-            target = entryPrice * 1.02; // Default 2% target
-            if (pivots != null && pivots.getDailyPivot() != null) {
-                double r1 = pivots.getDailyPivot().getR1();
-                if (r1 > entryPrice) {
-                    target = r1;
-                }
-            }
-        } else {
-            // Stop above nearest resistance
-            stopLoss = entryPrice * 1.01;
-            if (pivots != null && pivots.getDailyPivot() != null) {
-                double r1 = pivots.getDailyPivot().getR1();
-                if (r1 > entryPrice) {
-                    stopLoss = r1 * 1.002;
-                }
-            }
+        double stopLoss = 0;
+        double target = 0;
+        String stopSource = "DEFAULT";
+        String targetSource = "DEFAULT";
 
-            // Target at nearest support
-            target = entryPrice * 0.98;
-            if (pivots != null && pivots.getDailyPivot() != null) {
-                double s1 = pivots.getDailyPivot().getS1();
-                if (s1 < entryPrice) {
-                    target = s1;
+        // ==================== STOP LOSS: Use pivot levels ====================
+        if (pivots != null) {
+            if (isBullish) {
+                // LONG: Stop below nearest support pivot
+                double bestSupport = findBestPivotSupport(entryPrice, pivots, minStopDistance);
+                if (bestSupport > 0) {
+                    stopLoss = bestSupport * 0.998; // Slightly below
+                    stopSource = "PIVOT_SUPPORT";
+                }
+            } else {
+                // SHORT: Stop above nearest resistance pivot
+                double bestResistance = findBestPivotResistance(entryPrice, pivots, minStopDistance);
+                if (bestResistance > 0) {
+                    stopLoss = bestResistance * 1.002; // Slightly above
+                    stopSource = "PIVOT_RESISTANCE";
                 }
             }
+        }
+
+        // Fallback to ATR-based if no pivot found
+        if (stopLoss == 0) {
+            stopLoss = isBullish ? entryPrice - (atr * 2.0) : entryPrice + (atr * 2.0);
+            stopSource = "ATR_BASED";
+        }
+
+        // Validate stop is not too tight
+        double actualStopDistance = Math.abs(entryPrice - stopLoss);
+        if (actualStopDistance < atr) {
+            stopLoss = isBullish ? entryPrice - (atr * 1.5) : entryPrice + (atr * 1.5);
+            stopSource = "ATR_ADJUSTED";
+            actualStopDistance = atr * 1.5;
+        }
+
+        // ==================== TARGET: Use pivot levels ====================
+        if (pivots != null) {
+            if (isBullish) {
+                target = findBestPivotTarget(entryPrice, pivots, actualStopDistance, true);
+                if (target > 0) targetSource = "PIVOT_RESISTANCE";
+            } else {
+                target = findBestPivotTarget(entryPrice, pivots, actualStopDistance, false);
+                if (target > 0) targetSource = "PIVOT_SUPPORT";
+            }
+        }
+
+        // Fallback to R-multiple if no valid pivot target
+        if (target == 0) {
+            target = isBullish ? entryPrice + (actualStopDistance * 2) : entryPrice - (actualStopDistance * 2);
+            targetSource = "R_MULTIPLE";
         }
 
         double risk = Math.abs(entryPrice - stopLoss);
         double reward = Math.abs(target - entryPrice);
         double riskReward = risk > 0 ? reward / risk : 0;
+
+        log.info("{} {} Pivot-based R:R: stop={} ({}), target={} ({}), R:R={:.2f}, ATR={:.2f}, Risk%={:.2f}%",
+            LOG_PREFIX, scripCode,
+            String.format("%.2f", stopLoss), stopSource,
+            String.format("%.2f", target), targetSource,
+            riskReward, atr, (risk / entryPrice) * 100);
 
         return RiskRewardCalculation.builder()
             .entryPrice(entryPrice)
@@ -573,6 +741,153 @@ public class PivotConfluenceTrigger {
             .reward(reward)
             .riskReward(riskReward)
             .build();
+    }
+
+    /**
+     * Find the best support pivot for stop placement.
+     */
+    private double findBestPivotSupport(double price, MultiTimeframePivotState pivots, double minDistance) {
+        List<Double> supports = new ArrayList<>();
+
+        // Daily pivots
+        if (pivots.getDailyPivot() != null) {
+            addIfValid(supports, pivots.getDailyPivot().getS1(), price);
+            addIfValid(supports, pivots.getDailyPivot().getS2(), price);
+            addIfValid(supports, pivots.getDailyPivot().getS3(), price);
+            addIfValid(supports, pivots.getDailyPivot().getBc(), price);
+            addIfValid(supports, pivots.getDailyPivot().getCamS3(), price);
+        }
+
+        // Weekly pivots (stronger levels)
+        if (pivots.getWeeklyPivot() != null) {
+            addIfValid(supports, pivots.getWeeklyPivot().getS1(), price);
+            addIfValid(supports, pivots.getWeeklyPivot().getPivot(), price);
+        }
+
+        // Monthly pivots (strongest levels)
+        if (pivots.getMonthlyPivot() != null) {
+            addIfValid(supports, pivots.getMonthlyPivot().getS1(), price);
+        }
+
+        // Sort descending (nearest first)
+        supports.sort((a, b) -> Double.compare(b, a));
+
+        // Find support with appropriate distance
+        for (double s : supports) {
+            double distance = price - s;
+            if (distance >= minDistance && distance <= price * 0.05) { // Max 5%
+                return s;
+            }
+        }
+
+        // If none found, return nearest if reasonable
+        if (!supports.isEmpty() && (price - supports.get(0)) >= minDistance * 0.5) {
+            return supports.get(0);
+        }
+
+        return 0;
+    }
+
+    /**
+     * Find the best resistance pivot for stop placement (SHORT trades).
+     */
+    private double findBestPivotResistance(double price, MultiTimeframePivotState pivots, double minDistance) {
+        List<Double> resistances = new ArrayList<>();
+
+        if (pivots.getDailyPivot() != null) {
+            addIfValidResistance(resistances, pivots.getDailyPivot().getR1(), price);
+            addIfValidResistance(resistances, pivots.getDailyPivot().getR2(), price);
+            addIfValidResistance(resistances, pivots.getDailyPivot().getR3(), price);
+            addIfValidResistance(resistances, pivots.getDailyPivot().getTc(), price);
+            addIfValidResistance(resistances, pivots.getDailyPivot().getCamR3(), price);
+        }
+
+        if (pivots.getWeeklyPivot() != null) {
+            addIfValidResistance(resistances, pivots.getWeeklyPivot().getR1(), price);
+            addIfValidResistance(resistances, pivots.getWeeklyPivot().getPivot(), price);
+        }
+
+        if (pivots.getMonthlyPivot() != null) {
+            addIfValidResistance(resistances, pivots.getMonthlyPivot().getR1(), price);
+        }
+
+        // Sort ascending (nearest first)
+        resistances.sort(Double::compare);
+
+        for (double r : resistances) {
+            double distance = r - price;
+            if (distance >= minDistance && distance <= price * 0.05) {
+                return r;
+            }
+        }
+
+        if (!resistances.isEmpty() && (resistances.get(0) - price) >= minDistance * 0.5) {
+            return resistances.get(0);
+        }
+
+        return 0;
+    }
+
+    /**
+     * Find the best pivot target that provides at least 1.5R.
+     */
+    private double findBestPivotTarget(double price, MultiTimeframePivotState pivots, double risk, boolean isBullish) {
+        List<Double> levels = new ArrayList<>();
+        double minReward = risk * 1.5;
+
+        if (isBullish) {
+            // LONG: Target at resistance
+            if (pivots.getDailyPivot() != null) {
+                addIfValidResistance(levels, pivots.getDailyPivot().getR1(), price);
+                addIfValidResistance(levels, pivots.getDailyPivot().getR2(), price);
+                addIfValidResistance(levels, pivots.getDailyPivot().getR3(), price);
+                addIfValidResistance(levels, pivots.getDailyPivot().getTc(), price);
+            }
+            if (pivots.getWeeklyPivot() != null) {
+                addIfValidResistance(levels, pivots.getWeeklyPivot().getR1(), price);
+                addIfValidResistance(levels, pivots.getWeeklyPivot().getR2(), price);
+            }
+            levels.sort(Double::compare);
+
+            for (double r : levels) {
+                if ((r - price) >= minReward) {
+                    return r;
+                }
+            }
+        } else {
+            // SHORT: Target at support
+            if (pivots.getDailyPivot() != null) {
+                addIfValid(levels, pivots.getDailyPivot().getS1(), price);
+                addIfValid(levels, pivots.getDailyPivot().getS2(), price);
+                addIfValid(levels, pivots.getDailyPivot().getS3(), price);
+                addIfValid(levels, pivots.getDailyPivot().getBc(), price);
+            }
+            if (pivots.getWeeklyPivot() != null) {
+                addIfValid(levels, pivots.getWeeklyPivot().getS1(), price);
+                addIfValid(levels, pivots.getWeeklyPivot().getS2(), price);
+            }
+            levels.sort((a, b) -> Double.compare(b, a));
+
+            for (double s : levels) {
+                if ((price - s) >= minReward) {
+                    return s;
+                }
+            }
+        }
+
+        return 0;
+    }
+
+    private void addIfValid(List<Double> list, double level, double price) {
+        if (level > 0 && level < price) {
+            list.add(level);
+        }
+    }
+
+    private void addIfValidResistance(List<Double> list, double level, double price) {
+        if (level > 0 && level > price) {
+            list.add(level);
+        }
     }
 
     /**
@@ -614,6 +929,76 @@ public class PivotConfluenceTrigger {
             rrCalc.riskReward);
     }
 
+    /**
+     * Publish Pivot Confluence trigger result to Kafka.
+     */
+    private void publishToKafka(String scripCode, PivotTriggerResult result) {
+        try {
+            Map<String, Object> payload = new LinkedHashMap<>();
+            payload.put("scripCode", scripCode);
+            payload.put("triggered", result.isTriggered());
+            payload.put("direction", result.getDirection() != null ? result.getDirection().name() : null);
+            payload.put("reason", result.getReason());
+            payload.put("score", result.getScore());
+            payload.put("triggerTime", result.getTriggerTime() != null ? result.getTriggerTime().toString() : null);
+
+            // HTF Bias details
+            if (result.getHtfBias() != null) {
+                DirectionBias htf = result.getHtfBias();
+                payload.put("htfDirection", htf.getDirection() != null ? htf.getDirection().name() : null);
+                payload.put("htfStrength", htf.getStrength());
+                payload.put("htfBullishScore", htf.getBullishScore());
+                payload.put("htfBearishScore", htf.getBearishScore());
+                payload.put("htfReason", htf.getReason());
+            }
+
+            // LTF Confirmation
+            if (result.getLtfConfirmation() != null) {
+                LTFConfirmation ltf = result.getLtfConfirmation();
+                payload.put("ltfConfirmed", ltf.isConfirmed());
+                payload.put("ltfAlignmentScore", ltf.getAlignmentScore());
+                payload.put("ltfReason", ltf.getReason());
+            }
+
+            // Pivot Analysis
+            if (result.getPivotAnalysis() != null) {
+                PivotConfluenceAnalysis pivot = result.getPivotAnalysis();
+                payload.put("pivotCurrentPrice", pivot.getCurrentPrice());
+                payload.put("pivotConfluenceLevels", pivot.getConfluenceLevels());
+                payload.put("pivotNearbyLevels", pivot.getNearbyLevels());
+                payload.put("cprPosition", pivot.getCprPosition());
+            }
+
+            // SMC Analysis
+            if (result.getSmcAnalysis() != null) {
+                SMCZoneAnalysis smc = result.getSmcAnalysis();
+                payload.put("smcInOrderBlock", smc.isInOrderBlock());
+                payload.put("smcNearFVG", smc.isNearFVG());
+                payload.put("smcAtLiquidityZone", smc.isAtLiquidityZone());
+                payload.put("smcBias", smc.getSmcBias() != null ? smc.getSmcBias().name() : null);
+            }
+
+            // Risk:Reward
+            if (result.getRrCalc() != null) {
+                RiskRewardCalculation rr = result.getRrCalc();
+                payload.put("entryPrice", rr.getEntryPrice());
+                payload.put("stopLoss", rr.getStopLoss());
+                payload.put("target", rr.getTarget());
+                payload.put("risk", rr.getRisk());
+                payload.put("reward", rr.getReward());
+                payload.put("riskReward", rr.getRiskReward());
+            }
+
+            payload.put("timestamp", System.currentTimeMillis());
+
+            kafkaTemplate.send(pivotKafkaTopic, scripCode, payload);
+            log.info("{} {} Published Pivot Confluence trigger to Kafka topic: {}", LOG_PREFIX, scripCode, pivotKafkaTopic);
+
+        } catch (Exception e) {
+            log.error("{} {} Failed to publish to Kafka: {}", LOG_PREFIX, scripCode, e.getMessage());
+        }
+    }
+
     private double calculateEMA(List<UnifiedCandle> candles, int period) {
         if (candles == null || candles.size() < period) {
             return candles != null && !candles.isEmpty() ? candles.get(0).getClose() : 0;
@@ -629,7 +1014,8 @@ public class PivotConfluenceTrigger {
      * Get cached HTF bias for symbol.
      */
     public Optional<DirectionBias> getHTFBias(String scripCode) {
-        return Optional.ofNullable(htfBiasCache.get(scripCode));
+        CachedBias cached = htfBiasCache.get(scripCode);
+        return cached != null ? Optional.of(cached.getBias()) : Optional.empty();
     }
 
     // ==================== RESULT CLASSES ====================

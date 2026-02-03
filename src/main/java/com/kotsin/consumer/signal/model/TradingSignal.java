@@ -218,6 +218,13 @@ public class TradingSignal {
     @Builder.Default
     private List<GateCheck> gateChecks = new ArrayList<>();
 
+    // ==================== PAPER TRADE LINK ====================
+    /**
+     * Paper trade ID (link to paper_trades collection).
+     */
+    @Indexed
+    private String paperTradeId;
+
     // ==================== METADATA ====================
     /**
      * Tags for categorization.
@@ -305,14 +312,25 @@ public class TradingSignal {
         this.stopLoss = stop;
         this.target1 = target1;
         this.target2 = target2;
-        this.riskReward = Math.abs(target1 - entry) / Math.abs(entry - stop);
+        // Guard against division by zero when entry == stop
+        double risk = Math.abs(entry - stop);
+        this.riskReward = risk > 0.001 ? Math.abs(target1 - entry) / risk : 0;
 
         if (watchedAt != null) {
             this.watchDurationSec = java.time.Duration.between(watchedAt, triggeredAt).getSeconds();
         }
 
-        // Active expiry: EOD or 4 hours
-        this.activeExpiry = Instant.now().plusSeconds(4 * 60 * 60L);
+        // Active expiry: min(now + 4 hours, EOD at 15:30 IST)
+        Instant fourHoursLater = Instant.now().plusSeconds(4 * 60 * 60L);
+        java.time.ZoneId ist = java.time.ZoneId.of("Asia/Kolkata");
+        java.time.ZonedDateTime now = java.time.ZonedDateTime.now(ist);
+        java.time.ZonedDateTime eod = now.withHour(15).withMinute(30).withSecond(0).withNano(0);
+        // If already past EOD today, use tomorrow's EOD
+        if (now.isAfter(eod)) {
+            eod = eod.plusDays(1);
+        }
+        Instant eodInstant = eod.toInstant();
+        this.activeExpiry = fourHoursLater.isBefore(eodInstant) ? fourHoursLater : eodInstant;
         addScoreToHistory(score);
     }
 
@@ -352,14 +370,18 @@ public class TradingSignal {
      */
     public void updatePrice(double price, FudkiiScore score) {
         this.currentPrice = price;
-        this.currentScore = score;
+        if (score != null) {
+            this.currentScore = score;
+        }
 
         if (state == SignalState.ACTIVE) {
             this.highSinceTrigger = Math.max(highSinceTrigger, price);
             this.lowSinceTrigger = Math.min(lowSinceTrigger, price);
         }
 
-        addScoreToHistory(score);
+        if (score != null) {
+            addScoreToHistory(score);
+        }
     }
 
     private void addScoreToHistory(FudkiiScore score) {

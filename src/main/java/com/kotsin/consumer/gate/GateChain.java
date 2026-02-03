@@ -235,6 +235,11 @@ public class GateChain {
             return this;
         }
 
+        public ContextBuilder exchange(String exchange) {
+            context.put("exchange", exchange);
+            return this;
+        }
+
         public ContextBuilder custom(String key, Object value) {
             context.put(key, value);
             return this;

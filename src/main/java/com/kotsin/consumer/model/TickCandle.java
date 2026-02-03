@@ -43,7 +43,11 @@ import java.util.Map;
 @Document(collection = "tick_candles_1m")
 @CompoundIndexes({
     @CompoundIndex(name = "symbol_timestamp_idx", def = "{'symbol': 1, 'timestamp': -1}"),
-    @CompoundIndex(name = "scripCode_timestamp_idx", def = "{'scripCode': 1, 'timestamp': -1}")
+    @CompoundIndex(name = "scripCode_timestamp_idx", def = "{'scripCode': 1, 'timestamp': -1}"),
+    // Unique index for deduplication - prevents duplicate candles for same scripCode+windowStart
+    @CompoundIndex(name = "scripCode_windowStart_unique_idx",
+                   def = "{'scripCode': 1, 'windowStart': 1}",
+                   unique = true)
 })
 public class TickCandle {
 
