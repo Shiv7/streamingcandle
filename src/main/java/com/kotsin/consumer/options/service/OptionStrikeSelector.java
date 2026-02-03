@@ -4,6 +4,7 @@ import com.kotsin.consumer.model.OIMetrics;
 import com.kotsin.consumer.options.model.OptionGreeks.MoneynessType;
 import com.kotsin.consumer.options.service.OptionChainService.OptionChain;
 import com.kotsin.consumer.options.service.OptionChainService.StrikeEntry;
+import com.kotsin.consumer.service.ScripMetadataService;
 import com.kotsin.consumer.signal.model.TradingSignal;
 import com.kotsin.consumer.signal.model.FudkiiScore;
 import lombok.AllArgsConstructor;
@@ -45,6 +46,9 @@ public class OptionStrikeSelector {
 
     @Autowired
     private OptionChainService optionChainService;
+
+    @Autowired
+    private ScripMetadataService scripMetadataService;
 
     @Value("${option.selector.max.otm.strikes:3}")
     private int maxOTMStrikes;
@@ -314,17 +318,12 @@ public class OptionStrikeSelector {
     }
 
     /**
-     * Extract underlying symbol from signal.
+     * Extract underlying symbol from signal using ScripMetadataService.
+     * Falls back to symbol parsing if scripCode not available.
      */
     private String extractUnderlying(String symbol, String companyName) {
-        if (symbol != null) {
-            String upper = symbol.toUpperCase();
-            if (upper.contains("BANKNIFTY") || upper.startsWith("BANK NIFTY")) return "BANKNIFTY";
-            if (upper.contains("FINNIFTY") || upper.startsWith("FIN NIFTY")) return "FINNIFTY";
-            if (upper.contains("NIFTY")) return "NIFTY";
-            return upper.split("\\s+")[0];
-        }
-        return symbol;
+        // Use ScripMetadataService for authoritative symbol resolution
+        return scripMetadataService.getSymbolRoot(symbol, companyName);
     }
 
     /**

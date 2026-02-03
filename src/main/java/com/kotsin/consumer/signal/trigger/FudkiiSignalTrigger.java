@@ -11,6 +11,7 @@ import com.kotsin.consumer.model.TickCandle;
 import com.kotsin.consumer.repository.TickCandleRepository;
 import com.kotsin.consumer.service.CandleService;
 import com.kotsin.consumer.service.RedisCacheService;
+import com.kotsin.consumer.service.ScripMetadataService;
 import lombok.Builder;
 import lombok.Data;
 import lombok.extern.slf4j.Slf4j;
@@ -90,6 +91,9 @@ public class FudkiiSignalTrigger {
 
     @Autowired
     private KafkaTemplate<String, Object> kafkaTemplate;
+
+    @Autowired
+    private ScripMetadataService scripMetadataService;
 
     @Value("${fudkii.trigger.enabled:true}")
     private boolean enabled;
@@ -501,8 +505,21 @@ public class FudkiiSignalTrigger {
         double close = candles1m.get(candles1m.size() - 1).getClose();
         long volume = candles1m.stream().mapToLong(TickCandle::getVolume).sum();
 
+        // Get exchange from first candle
+        String exchange = candles1m.get(0).getExchange();
+
+        // Get symbol and company name from ScripMetadataService
+        String symbol = scripMetadataService.getSymbolRoot(scripCode, candles1m.get(0).getCompanyName());
+        String companyName = scripMetadataService.getCompanyName(scripCode);
+        if (companyName == null) {
+            companyName = candles1m.get(0).getCompanyName();
+        }
+
         return Candle30m.builder()
             .scripCode(scripCode)
+            .symbol(symbol)
+            .companyName(companyName)
+            .exchange(exchange)
             .windowStart(windowStart)
             .windowEnd(windowEnd)
             .open(open)
@@ -695,6 +712,10 @@ public class FudkiiSignalTrigger {
 
             log.info("{} {} Fetched {} 30m candles from API", LOG_PREFIX, scripCode, apiCandles.size());
 
+            // Get symbol and company name from ScripMetadataService
+            String symbol = scripMetadataService.getSymbolRoot(scripCode, null);
+            String companyName = scripMetadataService.getCompanyName(scripCode);
+
             // Convert to Candle30m
             List<Candle30m> historical = new ArrayList<>();
             for (HistoricalCandle hc : apiCandles) {
@@ -710,6 +731,9 @@ public class FudkiiSignalTrigger {
 
                 Candle30m candle = Candle30m.builder()
                     .scripCode(scripCode)
+                    .symbol(symbol)
+                    .companyName(companyName)
+                    .exchange(exchange)
                     .windowStart(ts)
                     .windowEnd(ts.plus(Duration.ofMinutes(30)))
                     .open(hc.getOpen())
@@ -1062,6 +1086,9 @@ public class FudkiiSignalTrigger {
     @Builder
     public static class Candle30m {
         private String scripCode;
+        private String symbol;        // Clean symbol from ScripMetadataService
+        private String companyName;   // Full company name from ScripMetadataService
+        private String exchange;      // Exchange code (N, M, B)
         private Instant windowStart;
         private Instant windowEnd;
         private double open;
@@ -1076,6 +1103,10 @@ public class FudkiiSignalTrigger {
     public static class FudkiiTriggerResult {
         private boolean triggered;
         private TriggerDirection direction;
+        private String scripCode;
+        private String symbol;        // Clean symbol from ScripMetadataService
+        private String companyName;   // Full company name from ScripMetadataService
+        private String exchange;      // Exchange code (N, M, B)
         private String reason;
         private BBSuperTrend bbst;
         private double triggerPrice;

@@ -1,116 +1,302 @@
 package com.kotsin.consumer.aggregator;
 
-import com.kotsin.consumer.model.OpenInterest;
-import com.kotsin.consumer.model.OIMetrics;
-import com.kotsin.consumer.model.Timeframe;
-import com.kotsin.consumer.repository.OIMetricsRepository;
-import com.kotsin.consumer.service.RedisCacheService;
+// ==================== JAVA STANDARD LIBRARY ====================
+import java.time.Duration;
+import java.time.Instant;
+import java.time.ZoneId;
+import java.time.ZonedDateTime;
+import java.time.format.DateTimeFormatter;
+import java.util.ArrayList;
+import java.util.Collections;
+import java.util.HashMap;
+import java.util.HashSet;
+import java.util.List;
+import java.util.Map;
+import java.util.Properties;
+import java.util.Set;
+import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.ScheduledExecutorService;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicLong;
+import java.util.concurrent.atomic.AtomicReference;
+import java.util.concurrent.locks.ReentrantLock;
+
+// ==================== JAKARTA EE ====================
 import jakarta.annotation.PostConstruct;
 import jakarta.annotation.PreDestroy;
+
+// ==================== LOMBOK ====================
 import lombok.extern.slf4j.Slf4j;
+
+// ==================== APACHE KAFKA ====================
 import org.apache.kafka.clients.consumer.ConsumerConfig;
 import org.apache.kafka.clients.consumer.ConsumerRecord;
 import org.apache.kafka.clients.consumer.ConsumerRecords;
 import org.apache.kafka.clients.consumer.KafkaConsumer;
 import org.apache.kafka.common.serialization.StringDeserializer;
+
+// ==================== SPRING FRAMEWORK ====================
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.kafka.core.KafkaTemplate;
 import org.springframework.kafka.support.serializer.JsonDeserializer;
 import org.springframework.stereotype.Component;
 
-import java.time.Duration;
-import java.time.Instant;
-import java.time.ZoneId;
-import java.time.ZonedDateTime;
-import java.time.format.DateTimeFormatter;
-import java.util.*;
-import java.util.concurrent.*;
-import java.util.concurrent.atomic.AtomicBoolean;
-import java.util.concurrent.atomic.AtomicReference;
-import java.util.concurrent.atomic.AtomicLong;
-import java.util.concurrent.locks.ReentrantLock;
+// ==================== PROJECT IMPORTS ====================
+import com.kotsin.consumer.aggregator.state.OIAggregateState;
+import com.kotsin.consumer.aggregator.state.OptionMetadata;
+import com.kotsin.consumer.model.OIMetrics;
+import com.kotsin.consumer.model.OpenInterest;
+import com.kotsin.consumer.model.Timeframe;
+import com.kotsin.consumer.repository.OIMetricsRepository;
+import com.kotsin.consumer.service.RedisCacheService;
+import com.kotsin.consumer.service.ScripMetadataService;
 
 /**
- * OIAggregator - Independent Kafka consumer for Open Interest data.
+ * OIAggregator - Independent Kafka consumer for Open Interest data aggregation.
  *
- * Responsibilities:
- * 1. Consume from OpenInterest topic
- * 2. Aggregate OI snapshots into 1-minute metrics
- * 3. Calculate OI interpretation (LONG_BUILDUP, SHORT_COVERING, etc.)
- * 4. Track OI velocity and acceleration
- * 5. Write to MongoDB (oi_metrics_1m)
- * 6. Write to Redis (hot cache)
+ * <h2>Responsibilities</h2>
+ * <ol>
+ *   <li>Consume OI snapshots from OpenInterest Kafka topic</li>
+ *   <li>Aggregate OI data into 1-minute metrics using event-time windowing</li>
+ *   <li>Calculate OI interpretation (LONG_BUILDUP, SHORT_COVERING, etc.)</li>
+ *   <li>Track OI velocity and acceleration</li>
+ *   <li>Persist aggregated metrics to MongoDB (oi_metrics_1m collection)</li>
+ *   <li>Cache hot data in Redis for downstream consumers</li>
+ *   <li>Publish completed metrics to Kafka for downstream processing</li>
+ * </ol>
  *
- * Key Design:
- * - INDEPENDENT: No joins with tick or orderbook data
- * - SIMPLE: Only OI-derived metrics
- * - WALL-CLOCK: Emits based on wall clock time
+ * <h2>Key Design Principles</h2>
+ * <ul>
+ *   <li><b>SIMPLE</b>: Single responsibility - only OI aggregation</li>
+ *   <li><b>NO JOINS</b>: Does not join with tick or orderbook data (handled by UnifiedCandle builder)</li>
+ *   <li><b>INDEPENDENT</b>: Runs in its own thread pool, no Kafka Streams state stores</li>
+ *   <li><b>EVENT-TIME</b>: Uses kafkaTimestamp for window assignment (not wall clock)</li>
+ *   <li><b>THREAD-SAFE</b>: ConcurrentHashMap for state, ReentrantLock for window boundaries</li>
+ * </ul>
  *
- * v2.1 Quant Fixes:
- * - Immediate OI interpretation using cached price from Redis
- * - No longer defers interpretation to query time
+ * <h2>Architecture</h2>
+ * <pre>
+ * Kafka (OpenInterest)
+ *         │
+ *         ▼
+ * ┌───────────────────┐
+ * │   OIAggregator    │  ◄── Multiple consumer threads
+ * │   (Event-Time)    │
+ * └───────────────────┘
+ *         │
+ *         ▼
+ * ┌───────────────────┐
+ * │ OIAggregateState  │  ◄── Per-instrument, per-window state
+ * │ (Interpretation)  │
+ * └───────────────────┘
+ *         │
+ *         ├──► MongoDB (oi_metrics_1m)
+ *         ├──► Redis (hot cache)
+ *         └──► Kafka (oi-metrics-1m)
+ * </pre>
+ *
+ * <h2>OI Interpretation Matrix</h2>
+ * <pre>
+ * OI ↑ + Price ↑ = LONG_BUILDUP   (Bullish)
+ * OI ↓ + Price ↑ = SHORT_COVERING (Bullish)
+ * OI ↑ + Price ↓ = SHORT_BUILDUP  (Bearish)
+ * OI ↓ + Price ↓ = LONG_UNWINDING (Bearish)
+ * </pre>
+ *
+ * <h2>v2.1 Quant Fixes</h2>
+ * <ul>
+ *   <li>Immediate OI interpretation using cached price from Redis</li>
+ *   <li>No longer defers interpretation to query time</li>
+ * </ul>
+ *
+ * <h2>Bug Fixes</h2>
+ * <ul>
+ *   <li><b>Bug #4</b>: Idle flush advances by one window at a time</li>
+ *   <li><b>Bug #6</b>: ReentrantLock for atomic compound window updates</li>
+ *   <li><b>Bug #13</b>: Logging for price cache misses during interpretation</li>
+ *   <li><b>Bug #17</b>: Safe state cleanup using pre-collected key lists</li>
+ * </ul>
+ *
+ * @see OIAggregateState
+ * @see OIMetrics
+ * @see RedisCacheService
  */
 @Component
 @Slf4j
 public class OIAggregator {
 
+    // ==================== CONSTANTS ====================
+
+    /**
+     * Log prefix for all log messages from this aggregator.
+     */
     private static final String LOG_PREFIX = "[OI-AGG]";
 
+    /**
+     * Indian Standard Time zone for timestamp formatting.
+     */
+    private static final ZoneId IST = ZoneId.of("Asia/Kolkata");
+
+    /**
+     * Time formatter for log messages (HH:mm:ss).
+     */
+    private static final DateTimeFormatter TIME_FMT = DateTimeFormatter.ofPattern("HH:mm:ss");
+
+    // ==================== CONFIGURATION PROPERTIES ====================
+
+    /**
+     * Feature flag to enable/disable OI aggregator.
+     * <p>Default: true</p>
+     */
     @Value("${v2.oi.aggregator.enabled:true}")
     private boolean enabled;
 
+    /**
+     * Kafka bootstrap servers for consumer connection.
+     * <p>Default: localhost:9092</p>
+     */
     @Value("${spring.kafka.bootstrap-servers:localhost:9092}")
     private String bootstrapServers;
 
+    /**
+     * Input Kafka topic containing OI data.
+     * <p>Default: OpenInterest</p>
+     */
     @Value("${v2.oi.input.topic:OpenInterest}")
     private String inputTopic;
 
+    /**
+     * Kafka consumer group ID for this aggregator.
+     * <p>Default: oi-aggregator-v2</p>
+     */
     @Value("${v2.oi.consumer.group:oi-aggregator-v2}")
     private String consumerGroup;
 
+    /**
+     * Number of parallel consumer threads.
+     * <p>Default: 2</p>
+     */
     @Value("${v2.oi.aggregator.threads:2}")
     private int numThreads;
 
+    /**
+     * Output Kafka topic for aggregated OI metrics.
+     * <p>Default: oi-metrics-1m</p>
+     */
     @Value("${v2.oi.output.topic:oi-metrics-1m}")
     private String outputTopic;
 
+    /**
+     * Comma-separated list of symbols for trace logging.
+     * <p>Empty = trace all symbols (FULL MODE)</p>
+     */
+    @Value("${logging.trace.symbols:}")
+    private String traceSymbolsStr;
+
+    /**
+     * Parsed set of symbols for trace logging.
+     */
+    private Set<String> traceSymbols;
+
+    // ==================== INJECTED DEPENDENCIES ====================
+
+    /**
+     * Repository for persisting OIMetrics to MongoDB.
+     */
     @Autowired
     private OIMetricsRepository oiRepository;
 
+    /**
+     * Service for caching metrics and prices in Redis.
+     */
     @Autowired
     private RedisCacheService redisCacheService;
 
+    /**
+     * Kafka template for publishing aggregated metrics.
+     */
     @Autowired
     private KafkaTemplate<String, Object> kafkaTemplate;
 
-// Aggregation state: key = "exchange:token"
+    /**
+     * Service for scrip metadata lookups (symbol, company name, etc.).
+     * <p>Used to get authoritative symbol from scripCode via database lookup.</p>
+     */
+    @Autowired
+    private ScripMetadataService scripMetadataService;
+
+    // ==================== STATE MANAGEMENT ====================
+
+    /**
+     * Aggregation state per instrument-window pair.
+     * <p>Key format: {@code "exchange:token:windowStartMillis"}</p>
+     * <p>Example: {@code "N:12345:1706789400000"}</p>
+     */
     private final ConcurrentHashMap<String, OIAggregateState> aggregationState = new ConcurrentHashMap<>();
 
-    // Max event time seen (Atomic for thread safety)
-    private final AtomicReference<Instant> maxEventTime = new AtomicReference<>(Instant.EPOCH);
-    
-    // Track wall-clock time of last data arrival (for idle flushing)
-    private final AtomicLong lastDataArrivalMillis = new AtomicLong(System.currentTimeMillis());
-
-    @Value("${logging.trace.symbols:}")
-    private String traceSymbolsStr;
-    private Set<String> traceSymbols;
-    private final java.util.concurrent.atomic.AtomicLong traceCounter = new java.util.concurrent.atomic.AtomicLong(0);
-
+    /**
+     * Executor service for Kafka consumer threads.
+     */
     private ExecutorService consumerExecutor;
+
+    /**
+     * Scheduler for periodic window emission checks.
+     */
     private ScheduledExecutorService emissionScheduler;
+
+    /**
+     * Flag indicating whether aggregator is running.
+     */
     private final AtomicBoolean running = new AtomicBoolean(false);
 
-    // Current window end (global tracker for emission progress)
-    // Bug #6 FIX: Use lock for atomic compound updates
+    // ==================== EVENT TIME TRACKING ====================
+
+    /**
+     * Max event time observed across all OI snapshots.
+     * <p>Used as reference for strict event-time window emission.</p>
+     */
+    private final AtomicReference<Instant> maxEventTime = new AtomicReference<>(Instant.EPOCH);
+
+    /**
+     * Wall-clock time of last data arrival.
+     * <p>Used for idle detection when no new data arrives.</p>
+     */
+    private final AtomicLong lastDataArrivalMillis = new AtomicLong(System.currentTimeMillis());
+
+    /**
+     * Lock for atomic compound updates to window boundaries.
+     * <p>Bug #6 FIX: Prevents race conditions between emission threads.</p>
+     */
     private final ReentrantLock windowLock = new ReentrantLock();
+
+    /**
+     * Current window start being tracked for emission.
+     */
     private volatile Instant currentWindowStart;
+
+    /**
+     * Current window end being tracked for emission.
+     */
     private volatile Instant currentWindowEnd;
 
-    private static final ZoneId IST = ZoneId.of("Asia/Kolkata");
-    private static final DateTimeFormatter TIME_FMT = DateTimeFormatter.ofPattern("HH:mm:ss");
+    // ==================== LIFECYCLE METHODS ====================
 
+    /**
+     * Start the OI aggregator.
+     *
+     * <p>Initialization steps:</p>
+     * <ol>
+     *   <li>Check if enabled by configuration</li>
+     *   <li>Initialize window tracking to EPOCH</li>
+     *   <li>Start consumer thread pool</li>
+     *   <li>Start emission scheduler (runs every second)</li>
+     *   <li>Parse trace symbols for debug logging</li>
+     * </ol>
+     */
     @PostConstruct
     public void start() {
         if (!enabled) {
@@ -127,14 +313,16 @@ public class OIAggregator {
         currentWindowEnd = Instant.EPOCH;
         maxEventTime.set(Instant.EPOCH);
         lastDataArrivalMillis.set(System.currentTimeMillis());
-        
+
         log.info("{} [STRICT-EVENT-TIME] Window will be initialized from first OI event time", LOG_PREFIX);
 
+        // Start consumer threads
         consumerExecutor = Executors.newFixedThreadPool(numThreads);
         for (int i = 0; i < numThreads; i++) {
             consumerExecutor.submit(this::consumeLoop);
         }
 
+        // Start window emission scheduler
         emissionScheduler = Executors.newSingleThreadScheduledExecutor();
         emissionScheduler.scheduleAtFixedRate(this::checkWindowEmission, 1, 1, TimeUnit.SECONDS);
 
@@ -153,12 +341,25 @@ public class OIAggregator {
         }
     }
 
+    /**
+     * Stop the OI aggregator gracefully.
+     *
+     * <p>Shutdown steps:</p>
+     * <ol>
+     *   <li>Set running flag to false</li>
+     *   <li>Shutdown emission scheduler</li>
+     *   <li>Shutdown consumer executor with 30s timeout</li>
+     *   <li>Emit any remaining window data</li>
+     * </ol>
+     */
     @PreDestroy
     public void stop() {
         log.info("{} Stopping...", LOG_PREFIX);
         running.set(false);
 
-        if (emissionScheduler != null) emissionScheduler.shutdown();
+        if (emissionScheduler != null) {
+            emissionScheduler.shutdown();
+        }
         if (consumerExecutor != null) {
             consumerExecutor.shutdown();
             try {
@@ -168,10 +369,25 @@ public class OIAggregator {
             }
         }
 
+        // Emit any remaining data
         emitCurrentWindow();
+
         log.info("{} Stopped", LOG_PREFIX);
     }
 
+    // ==================== KAFKA CONSUMER ====================
+
+    /**
+     * Main consumer loop - runs in thread pool.
+     *
+     * <p>Each thread independently:</p>
+     * <ol>
+     *   <li>Creates Kafka consumer</li>
+     *   <li>Subscribes to input topic</li>
+     *   <li>Polls for records (100ms timeout)</li>
+     *   <li>Processes each OI snapshot via processOI()</li>
+     * </ol>
+     */
     private void consumeLoop() {
         KafkaConsumer<String, OpenInterest> consumer = createConsumer();
         consumer.subscribe(Collections.singletonList(inputTopic));
@@ -193,18 +409,59 @@ public class OIAggregator {
         }
     }
 
+    /**
+     * Create Kafka consumer with appropriate configuration.
+     *
+     * @return configured KafkaConsumer instance
+     */
+    private KafkaConsumer<String, OpenInterest> createConsumer() {
+        Properties props = new Properties();
+        props.put(ConsumerConfig.BOOTSTRAP_SERVERS_CONFIG, bootstrapServers);
+        props.put(ConsumerConfig.GROUP_ID_CONFIG, consumerGroup);
+        props.put(ConsumerConfig.KEY_DESERIALIZER_CLASS_CONFIG, StringDeserializer.class);
+        props.put(ConsumerConfig.VALUE_DESERIALIZER_CLASS_CONFIG, JsonDeserializer.class);
+        props.put(JsonDeserializer.TRUSTED_PACKAGES, "com.kotsin.consumer.model,com.kotsin.optionDataProducer.model");
+        props.put(JsonDeserializer.VALUE_DEFAULT_TYPE, OpenInterest.class.getName());
+        props.put(JsonDeserializer.USE_TYPE_INFO_HEADERS, "false");
+        props.put(ConsumerConfig.AUTO_OFFSET_RESET_CONFIG, "earliest");
+        props.put(ConsumerConfig.ENABLE_AUTO_COMMIT_CONFIG, "true");
+        props.put(ConsumerConfig.MAX_POLL_RECORDS_CONFIG, 2000);
+
+        return new KafkaConsumer<>(props);
+    }
+
+    // ==================== OI PROCESSING ====================
+
+    /**
+     * Process a single OI snapshot.
+     *
+     * <p>Processing steps:</p>
+     * <ol>
+     *   <li>Null check and validation</li>
+     *   <li>Update max event time atomically</li>
+     *   <li>Initialize window tracker if needed</li>
+     *   <li>Determine window assignment using strict event time</li>
+     *   <li>Resolve symbol using ScripMetadataService</li>
+     *   <li>Create or retrieve aggregation state</li>
+     *   <li>Update aggregation state with OI data</li>
+     * </ol>
+     *
+     * @param oi             incoming OI snapshot from Kafka
+     * @param kafkaTimestamp Kafka record timestamp (event time)
+     */
     private void processOI(OpenInterest oi, long kafkaTimestamp) {
         if (oi == null || oi.getToken() == 0) return;
 
         String key = oi.getExchange() + ":" + oi.getToken();
         Instant oiTime = Instant.ofEpochMilli(kafkaTimestamp);
-        
-        // [OI-TRACE] Log everything if list is empty, or specific symbol
-        boolean isSpecific = (traceSymbols != null && !traceSymbols.isEmpty() && traceSymbols.contains(String.valueOf(oi.getToken())));
+
+        // Trace logging
+        boolean isSpecific = (traceSymbols != null && !traceSymbols.isEmpty() &&
+                             traceSymbols.contains(String.valueOf(oi.getToken())));
         boolean shouldLog = isSpecific || (traceSymbols == null || traceSymbols.isEmpty());
-                           
+
         if (shouldLog) {
-            log.info("[OI-TRACE] Received OI for {}: OI={}, Time={}", 
+            log.info("[OI-TRACE] Received OI for {}: OI={}, Time={}",
                 oi.getToken(), oi.getOpenInterest(), oiTime);
         }
 
@@ -212,8 +469,7 @@ public class OIAggregator {
         lastDataArrivalMillis.set(System.currentTimeMillis());
 
         // Track max event time ATOMICALLY
-        // accumulateAndGet: update only if new time is after current
-        Instant currentMax = maxEventTime.accumulateAndGet(oiTime, 
+        maxEventTime.accumulateAndGet(oiTime,
             (current, newTime) -> newTime.isAfter(current) ? newTime : current);
 
         // Initialize current window tracker if needed
@@ -230,19 +486,37 @@ public class OIAggregator {
         final Instant tickWindowEnd = Timeframe.M1.getWindowEnd(tickWindowStart);
 
         // Composite key: exchange:token:windowStartMillis
-        // This ensures each window states are unique and independent
         String stateKey = key + ":" + tickWindowStart.toEpochMilli();
 
+        // Resolve symbol using ScripMetadataService (authoritative source from database)
+        final String scripCode = String.valueOf(oi.getToken());
+        final String resolvedSymbol = scripMetadataService.getSymbolRoot(scripCode, oi.getCompanyName());
+
+        // Get OptionMetadata from Scrip if this is an option (PREFERRED over companyName parsing)
+        final OptionMetadata optionMeta = scripMetadataService.isOption(scripCode)
+            ? OptionMetadata.fromScrip(scripMetadataService.getScripByCode(scripCode))
+            : null;
+
         OIAggregateState state = aggregationState.computeIfAbsent(stateKey,
-            k -> new OIAggregateState(oi, tickWindowStart, tickWindowEnd));
+            k -> new OIAggregateState(oi, tickWindowStart, tickWindowEnd, resolvedSymbol, optionMeta));
 
         state.update(oi, oiTime);
     }
 
+    // ==================== WINDOW EMISSION ====================
+
     /**
      * Check if current window should be emitted.
-     * STRICT EVENT TIME MODE: Reference is always maxEventTime
-     * Bug #4 FIX: Improved idle flush and fast-forward logic
+     *
+     * <p>STRICT EVENT TIME MODE:</p>
+     * <ul>
+     *   <li>Reference time is always maxEventTime</li>
+     *   <li>Emits windows that have closed relative to maxEventTime</li>
+     *   <li>Uses while loop to emit ALL closed windows (catch-up support)</li>
+     * </ul>
+     *
+     * <p>Bug #4 FIX: Improved idle flush logic</p>
+     * <p>Bug #6 FIX: Uses ReentrantLock for thread-safe boundary updates</p>
      */
     private void checkWindowEmission() {
         windowLock.lock();
@@ -315,6 +589,19 @@ public class OIAggregator {
         }
     }
 
+    /**
+     * Emit all OI metrics for closed windows.
+     *
+     * <p>Emission steps:</p>
+     * <ol>
+     *   <li>Scan aggregation states for windows that should emit</li>
+     *   <li>Convert states to OIMetrics objects (with interpretation)</li>
+     *   <li>Batch save to MongoDB</li>
+     *   <li>Cache to Redis</li>
+     *   <li>Publish to Kafka topic</li>
+     *   <li>Clean up stale states</li>
+     * </ol>
+     */
     private void emitCurrentWindow() {
         if (aggregationState.isEmpty()) return;
 
@@ -326,14 +613,13 @@ public class OIAggregator {
             String stateKey = entry.getKey();
             OIAggregateState state = entry.getValue();
 
-            // STRICT EVENT TIME CHECK:
-            // Emit if state's window has fully passed relative to our current tracking window
+            // STRICT EVENT TIME CHECK
             boolean shouldEmit = state.getUpdateCount() > 0 &&
                                  state.getWindowEnd() != null &&
                                  !state.getWindowEnd().isAfter(windowEnd);
 
             if (shouldEmit) {
-                // v2.1: Calculate interpretation NOW using cached price
+                // Calculate interpretation NOW using cached price
                 OIMetrics metrics = state.toOIMetrics(redisCacheService);
                 metricsToSave.add(metrics);
                 keysToRemove.add(stateKey);
@@ -341,42 +627,12 @@ public class OIAggregator {
         }
 
         if (!metricsToSave.isEmpty()) {
-            log.info("{} Emitting {} OI metrics for window end {}", 
+            log.info("{} Emitting {} OI metrics for window end {}",
                 LOG_PREFIX, metricsToSave.size(), formatTime(windowEnd));
 
-            try {
-                oiRepository.saveAll(metricsToSave);
-                
-                // Trace individual saves if enabled
-                if (traceSymbols != null && !traceSymbols.isEmpty()) {
-                    for (OIMetrics m : metricsToSave) {
-                        if (traceSymbols.contains(m.getSymbol()) || traceSymbols.contains(m.getScripCode())) {
-                            log.info("[MONGO-WRITE] OIMetrics saved for {} @ {} | OI: {} | Interp: {}", 
-                                m.getSymbol(), formatTime(m.getWindowEnd()), m.getOpenInterest(), m.getInterpretation());
-                        }
-                    }
-                }
-            } catch (Exception e) {
-                log.error("{} Failed to save to MongoDB: {}", LOG_PREFIX, e.getMessage());
-            }
-
-            try {
-                for (OIMetrics m : metricsToSave) {
-                    redisCacheService.cacheOIMetrics(m);
-                }
-            } catch (Exception e) {
-                log.error("{} Failed to cache in Redis: {}", LOG_PREFIX, e.getMessage());
-            }
-
-            // Publish to Kafka topic
-            try {
-                for (OIMetrics m : metricsToSave) {
-                    kafkaTemplate.send(outputTopic, m.getScripCode(), m);
-                }
-                log.info("{} Published {} OI metrics", LOG_PREFIX, metricsToSave.size());
-            } catch (Exception e) {
-                log.error("{} Failed to publish to Kafka: {}", LOG_PREFIX, e.getMessage());
-            }
+            persistToMongoDB(metricsToSave);
+            cacheToRedis(metricsToSave);
+            publishToKafka(metricsToSave);
         }
 
         // Remove emitted states
@@ -384,49 +640,113 @@ public class OIAggregator {
             aggregationState.remove(key);
         }
 
-        // Bug #17 FIX: Cleanup stale states safely by collecting keys first
+        // Bug #17 FIX: Cleanup stale states safely
+        cleanupStaleStates();
+    }
+
+    // ==================== PERSISTENCE ====================
+
+    /**
+     * Batch save metrics to MongoDB.
+     *
+     * @param metrics list of metrics to save
+     */
+    private void persistToMongoDB(List<OIMetrics> metrics) {
+        try {
+            oiRepository.saveAll(metrics);
+
+            // Trace individual saves if enabled
+            if (traceSymbols != null && !traceSymbols.isEmpty()) {
+                for (OIMetrics m : metrics) {
+                    if (traceSymbols.contains(m.getSymbol()) || traceSymbols.contains(m.getScripCode())) {
+                        log.info("[MONGO-WRITE] OIMetrics saved for {} @ {} | OI: {} | Interp: {}",
+                            m.getSymbol(), formatTime(m.getWindowEnd()), m.getOpenInterest(), m.getInterpretation());
+                    }
+                }
+            }
+        } catch (Exception e) {
+            log.error("{} Failed to save to MongoDB: {}", LOG_PREFIX, e.getMessage());
+        }
+    }
+
+    /**
+     * Cache metrics to Redis.
+     *
+     * @param metrics list of metrics to cache
+     */
+    private void cacheToRedis(List<OIMetrics> metrics) {
+        try {
+            for (OIMetrics m : metrics) {
+                redisCacheService.cacheOIMetrics(m);
+            }
+        } catch (Exception e) {
+            log.error("{} Failed to cache in Redis: {}", LOG_PREFIX, e.getMessage());
+        }
+    }
+
+    /**
+     * Publish metrics to output Kafka topic.
+     *
+     * @param metrics list of metrics to publish
+     */
+    private void publishToKafka(List<OIMetrics> metrics) {
+        try {
+            for (OIMetrics m : metrics) {
+                kafkaTemplate.send(outputTopic, m.getScripCode(), m);
+            }
+            log.info("{} Published {} OI metrics", LOG_PREFIX, metrics.size());
+        } catch (Exception e) {
+            log.error("{} Failed to publish to Kafka: {}", LOG_PREFIX, e.getMessage());
+        }
+    }
+
+    /**
+     * Clean up stale aggregation states.
+     *
+     * <p>Bug #17 FIX: Collects keys first to avoid ConcurrentModificationException.</p>
+     */
+    private void cleanupStaleStates() {
         Instant cutoff = currentWindowEnd.minus(Duration.ofMinutes(5));
         List<String> staleKeys = new ArrayList<>();
+
         for (Map.Entry<String, OIAggregateState> entry : aggregationState.entrySet()) {
             if (entry.getValue().getLastUpdate().isBefore(cutoff)) {
                 staleKeys.add(entry.getKey());
             }
         }
+
         for (String key : staleKeys) {
             aggregationState.remove(key);
         }
     }
 
-    private KafkaConsumer<String, OpenInterest> createConsumer() {
-        Properties props = new Properties();
-        props.put(ConsumerConfig.BOOTSTRAP_SERVERS_CONFIG, bootstrapServers);
-        props.put(ConsumerConfig.GROUP_ID_CONFIG, consumerGroup);
-        props.put(ConsumerConfig.KEY_DESERIALIZER_CLASS_CONFIG, StringDeserializer.class);
-        props.put(ConsumerConfig.VALUE_DESERIALIZER_CLASS_CONFIG, JsonDeserializer.class);
-        props.put(JsonDeserializer.TRUSTED_PACKAGES, "com.kotsin.consumer.model,com.kotsin.optionDataProducer.model");
-        // FIX: Specify the target type explicitly since producer doesn't send type headers
-        props.put(JsonDeserializer.VALUE_DEFAULT_TYPE, OpenInterest.class.getName());
-        props.put(JsonDeserializer.USE_TYPE_INFO_HEADERS, "false");
-        props.put(ConsumerConfig.AUTO_OFFSET_RESET_CONFIG, "earliest");
-        props.put(ConsumerConfig.ENABLE_AUTO_COMMIT_CONFIG, "true");
-        props.put(ConsumerConfig.MAX_POLL_RECORDS_CONFIG, 2000);
+    // ==================== UTILITY METHODS ====================
 
-        return new KafkaConsumer<>(props);
-    }
-
+    /**
+     * Format instant as IST time string (HH:mm:ss).
+     *
+     * @param instant instant to format
+     * @return formatted time string
+     */
     private String formatTime(Instant instant) {
         return ZonedDateTime.ofInstant(instant, IST).format(TIME_FMT);
     }
 
+    // ==================== PUBLIC API ====================
+
     /**
-     * Check if the aggregator is running.
+     * Check if the aggregator is currently running.
+     *
+     * @return true if running, false otherwise
      */
     public boolean isRunning() {
         return running.get();
     }
 
     /**
-     * Get aggregator stats.
+     * Get aggregator statistics.
+     *
+     * @return map containing aggregator stats
      */
     public Map<String, Object> getStats() {
         Map<String, Object> stats = new HashMap<>();
@@ -436,286 +756,5 @@ public class OIAggregator {
         stats.put("currentWindowStart", currentWindowStart != null ? currentWindowStart.toString() : null);
         stats.put("currentWindowEnd", currentWindowEnd != null ? currentWindowEnd.toString() : null);
         return stats;
-    }
-
-    /**
-     * Internal state for OI aggregation.
-     */
-    private static class OIAggregateState {
-        private final String symbol;
-        private final String scripCode;
-        private final String exchange;
-        private final String exchangeType;
-        private final String companyName;
-
-        private Instant windowStart;
-        private Instant windowEnd;
-        private Instant lastUpdate;
-
-        // OI tracking
-        private long oiOpen;
-        private long oiClose;
-        private long oiHigh;
-        private long oiLow;
-        private boolean firstUpdate;
-
-        // For option parsing
-        private String underlyingSymbol;
-        private Double strikePrice;
-        private String optionType;
-        private String expiry;
-
-        // Previous window for velocity calculation
-        private long previousWindowOI;
-        private double previousVelocity;
-
-        // Daily reference
-        private long previousDayOI;
-
-        private int updateCount;
-
-        public OIAggregateState(OpenInterest oi, Instant windowStart, Instant windowEnd) {
-            this.scripCode = String.valueOf(oi.getToken());
-            this.exchange = oi.getExchange();
-            this.exchangeType = oi.getExchangeType();
-            this.companyName = oi.getCompanyName();
-            this.windowStart = windowStart;
-            this.windowEnd = windowEnd;
-            this.lastUpdate = Instant.now();
-            this.firstUpdate = true;
-
-            // Parse symbol and option details from companyName
-            parseInstrumentDetails(oi.getCompanyName());
-            this.symbol = underlyingSymbol != null ? underlyingSymbol : scripCode;
-
-            // Initialize OI values
-            long currentOI = oi.getOpenInterest() != null ? oi.getOpenInterest() : 0;
-            this.oiOpen = currentOI;
-            this.oiClose = currentOI;
-            this.oiHigh = currentOI;
-            this.oiLow = currentOI;
-
-            // Calculate previous day OI from oiChange if available from producer
-            // oiChange from producer = currentOI - previousDayOI, so previousDayOI = currentOI - oiChange
-            if (oi.getOiChange() != null && oi.getOiChange() != 0) {
-                this.previousDayOI = currentOI - oi.getOiChange();
-            } else {
-                // Fallback: use current OI (daily change will be 0)
-                // Note: Without historical data source, accurate daily OI change is not possible
-                this.previousDayOI = currentOI;
-            }
-            this.previousWindowOI = currentOI;
-        }
-
-        public synchronized void update(OpenInterest oi, Instant oiTime) {
-            long currentOI = oi.getOpenInterest() != null ? oi.getOpenInterest() : 0;
-
-            if (firstUpdate) {
-                oiOpen = currentOI;
-                oiHigh = currentOI;
-                oiLow = currentOI;
-                firstUpdate = false;
-            } else {
-                oiHigh = Math.max(oiHigh, currentOI);
-                oiLow = Math.min(oiLow, currentOI);
-            }
-            oiClose = currentOI;
-
-            updateCount++;
-            lastUpdate = oiTime;
-        }
-
-        public OIMetrics toOIMetrics(RedisCacheService redisCacheService) {
-            long oiChange = oiClose - oiOpen;
-            double oiChangePercent = oiOpen > 0 ? (double) oiChange / oiOpen * 100 : 0;
-
-            long dailyOIChange = oiClose - previousDayOI;
-            double dailyOIChangePercent = previousDayOI > 0 ?
-                (double) dailyOIChange / previousDayOI * 100 : 0;
-
-            // OI velocity = change per minute
-            double oiVelocity = oiChange;  // 1-minute window, so change = velocity
-
-            // OI acceleration = change in velocity
-            double oiAcceleration = oiVelocity - previousVelocity;
-
-            // v2.1: Calculate interpretation IMMEDIATELY using cached price (keyed by scripCode)
-            OIMetrics.OIInterpretation interpretation = calculateInterpretation(
-                oiChange, scripCode, redisCacheService);
-
-            // Calculate interpretation confidence based on OI change magnitude
-            double interpretationConfidence = Math.min(1.0, Math.abs(oiChangePercent) / 5.0);
-            
-            // v2.1: suggestsReversal based on short covering or long unwinding
-            boolean suggestsReversal = (interpretation == OIMetrics.OIInterpretation.SHORT_COVERING ||
-                                        interpretation == OIMetrics.OIInterpretation.LONG_UNWINDING);
-
-            return OIMetrics.builder()
-                .id(scripCode + "_" + windowEnd.toEpochMilli()) // IDEMPOTENCY FIX
-                .symbol(symbol)
-                .scripCode(scripCode)
-                .exchange(exchange)
-                .exchangeType(exchangeType)
-                .underlyingSymbol(underlyingSymbol)
-                .strikePrice(strikePrice)
-                .optionType(optionType)
-                .expiry(expiry)
-                .timestamp(windowEnd)
-                .windowStart(windowStart)
-                .windowEnd(windowEnd)
-                .openInterest(oiClose)
-                .oiOpen(oiOpen)
-                .oiClose(oiClose)
-                .oiChange(oiChange)
-                .oiChangePercent(oiChangePercent)
-                .previousDayOI(previousDayOI)
-                .dailyOIChange(dailyOIChange)
-                .dailyOIChangePercent(dailyOIChangePercent)
-                .interpretation(interpretation)
-                .interpretationConfidence(interpretationConfidence)
-                .suggestsReversal(suggestsReversal)
-                .oiVelocity(oiVelocity)
-                .oiAcceleration(oiAcceleration)
-                .updateCount(updateCount)
-                .lastUpdateTimestamp(lastUpdate)
-                .quality("VALID")
-                .staleness(System.currentTimeMillis() - lastUpdate.toEpochMilli())
-                .createdAt(Instant.now())
-                .build();
-        }
-
-        public void reset(Instant newWindowStart, Instant newWindowEnd) {
-            // Store previous values for velocity calculation
-            this.previousWindowOI = this.oiClose;
-            this.previousVelocity = this.oiClose - this.oiOpen;
-
-            this.windowStart = newWindowStart;
-            this.windowEnd = newWindowEnd;
-
-            // Open = previous close for continuity
-            this.oiOpen = this.oiClose;
-            this.oiHigh = this.oiClose;
-            this.oiLow = this.oiClose;
-            this.firstUpdate = true;
-            this.updateCount = 0;
-        }
-
-        /**
-         * Calculate OI interpretation using cached price from Redis (v2.1).
-         * Falls back to NEUTRAL if price not available.
-         * Uses scripCode for price lookup (unique instrument identifier).
-         * Bug #13 FIX: Added logging for cache misses
-         */
-        private OIMetrics.OIInterpretation calculateInterpretation(
-                long oiChange, String scripCode, RedisCacheService redisCacheService) {
-
-            if (redisCacheService == null) {
-                return OIMetrics.OIInterpretation.NEUTRAL;
-            }
-
-            Double lastPrice = redisCacheService.getLastPrice(scripCode);
-            Double prevPrice = redisCacheService.getPreviousPrice(scripCode);
-
-            // Bug #13 FIX: Log cache misses for debugging
-            if (lastPrice == null || prevPrice == null || prevPrice <= 0) {
-                // Log at debug level to avoid spam, but make it traceable
-                if (lastPrice == null && prevPrice == null) {
-                    log.debug("[OI-INTERP] Cache miss for scripCode={}: no price data available", scripCode);
-                } else if (lastPrice == null) {
-                    log.debug("[OI-INTERP] Cache miss for scripCode={}: lastPrice=null, prevPrice={}", scripCode, prevPrice);
-                } else {
-                    log.debug("[OI-INTERP] Cache miss for scripCode={}: lastPrice={}, prevPrice={}", scripCode, lastPrice, prevPrice);
-                }
-                return OIMetrics.OIInterpretation.NEUTRAL;
-            }
-
-            double priceChange = lastPrice - prevPrice;
-
-            // Standard OI interpretation matrix:
-            // OI ↑ + Price ↑ = LONG_BUILDUP (bullish)
-            // OI ↓ + Price ↑ = SHORT_COVERING (bullish)
-            // OI ↑ + Price ↓ = SHORT_BUILDUP (bearish)
-            // OI ↓ + Price ↓ = LONG_UNWINDING (bearish)
-
-            if (oiChange > 0 && priceChange > 0) {
-                return OIMetrics.OIInterpretation.LONG_BUILDUP;
-            } else if (oiChange < 0 && priceChange > 0) {
-                return OIMetrics.OIInterpretation.SHORT_COVERING;
-            } else if (oiChange > 0 && priceChange < 0) {
-                return OIMetrics.OIInterpretation.SHORT_BUILDUP;
-            } else if (oiChange < 0 && priceChange < 0) {
-                return OIMetrics.OIInterpretation.LONG_UNWINDING;
-            }
-
-            return OIMetrics.OIInterpretation.NEUTRAL;
-        }
-
-        /**
-         * Parse instrument details from companyName.
-         *
-         * Examples:
-         * - "NIFTY 23JAN 21000 CE" -> underlying=NIFTY, strike=21000, type=CE
-         * - "BANKNIFTY 25JAN 48000 PE" -> underlying=BANKNIFTY, strike=48000, type=PE
-         * - "RELIANCE" -> underlying=RELIANCE (equity/futures)
-         */
-        private void parseInstrumentDetails(String companyName) {
-            if (companyName == null || companyName.isEmpty()) {
-                this.underlyingSymbol = null;
-                return;
-            }
-
-            String upper = companyName.toUpperCase().trim();
-            String[] parts = upper.split("\\s+");
-
-            if (parts.length == 0) {
-                this.underlyingSymbol = null;
-                return;
-            }
-
-            // First part is always the underlying
-            if (upper.startsWith("BANK NIFTY") || upper.startsWith("BANKNIFTY")) {
-                this.underlyingSymbol = "BANKNIFTY";
-            } else if (upper.startsWith("FIN NIFTY") || upper.startsWith("FINNIFTY")) {
-                this.underlyingSymbol = "FINNIFTY";
-            } else if (upper.startsWith("NIFTY")) {
-                this.underlyingSymbol = "NIFTY";
-            } else {
-                this.underlyingSymbol = parts[0];
-            }
-
-            // Check if option (has CE or PE at end)
-            if (parts.length >= 2) {
-                String lastPart = parts[parts.length - 1];
-                if ("CE".equals(lastPart) || "PE".equals(lastPart)) {
-                    this.optionType = lastPart;
-
-                    // Strike is second to last (if numeric)
-                    if (parts.length >= 3) {
-                        String strikePart = parts[parts.length - 2];
-                        try {
-                            this.strikePrice = Double.parseDouble(strikePart);
-                        } catch (NumberFormatException e) {
-                            // Not a valid strike
-                        }
-                    }
-
-                    // Expiry is typically after underlying, before strike
-                    if (parts.length >= 4) {
-                        // Find expiry pattern (like 23JAN, 25JAN2025, etc.)
-                        for (int i = 1; i < parts.length - 2; i++) {
-                            if (parts[i].matches("\\d{1,2}[A-Z]{3}.*")) {
-                                this.expiry = parts[i];
-                                break;
-                            }
-                        }
-                    }
-                }
-            }
-        }
-
-        public Instant getWindowStart() { return windowStart; }
-        public Instant getWindowEnd() { return windowEnd; }
-        public Instant getLastUpdate() { return lastUpdate; }
-        public int getUpdateCount() { return updateCount; }
     }
 }

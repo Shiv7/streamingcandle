@@ -4,6 +4,7 @@ import com.kotsin.consumer.model.TickCandle;
 import com.kotsin.consumer.model.TickData;
 import com.kotsin.consumer.repository.TickCandleRepository;
 import com.kotsin.consumer.service.RedisCacheService;
+import com.kotsin.consumer.service.ScripMetadataService;
 import com.kotsin.consumer.signal.trigger.FudkiiSignalTrigger;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -19,6 +20,7 @@ import java.util.concurrent.atomic.AtomicBoolean;
 
 import static org.junit.jupiter.api.Assertions.*;
 import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.*;
 
@@ -37,6 +39,9 @@ class TickAggregatorTest {
     @Mock
     private FudkiiSignalTrigger fudkiiSignalTrigger;
 
+    @Mock
+    private ScripMetadataService scripMetadataService;
+
     @InjectMocks
     private TickAggregator tickAggregator;
 
@@ -46,7 +51,11 @@ class TickAggregatorTest {
         ReflectionTestUtils.setField(tickAggregator, "enabled", true);
         ReflectionTestUtils.setField(tickAggregator, "outputTopic", "tick-candles-1m");
         ReflectionTestUtils.setField(tickAggregator, "numThreads", 2); // Set threads!
-        
+
+        // Configure ScripMetadataService mock to return the companyName as symbol
+        when(scripMetadataService.getSymbolRoot(anyString(), anyString()))
+            .thenAnswer(invocation -> invocation.getArgument(1)); // Return companyName (2nd arg)
+
         // Initialize aggregator (start method)
         tickAggregator.start();
     }
