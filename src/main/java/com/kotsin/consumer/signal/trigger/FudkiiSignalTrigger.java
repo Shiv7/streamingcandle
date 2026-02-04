@@ -252,7 +252,15 @@ public class FudkiiSignalTrigger {
                 newCandle30m.volume);
 
             // Step 3: Get historical 30m candles (from cache or build from DB + API)
-            List<Candle30m> historicalCandles = getOrBuildHistorical30mCandles(scripCode, exchange, windowStart);
+            // FIX: Pass exchangeType to ensure correct API segment (C=Cash, D=Derivative)
+            String exchangeType = candle1m.getExchangeType();
+            if (exchangeType == null || exchangeType.isEmpty()) {
+                // Default based on instrument type detection
+                exchangeType = candle1m.isDerivative() ? "D" : "C";
+                log.debug("{} {} exchangeType was null, derived from instrumentType: {}",
+                    LOG_PREFIX, scripCode, exchangeType);
+            }
+            List<Candle30m> historicalCandles = getOrBuildHistorical30mCandles(scripCode, exchange, exchangeType, windowStart);
 
             log.info("{} {} Historical 30m candles: {} candles", LOG_PREFIX, scripCode, historicalCandles.size());
 
@@ -480,6 +488,31 @@ public class FudkiiSignalTrigger {
     }
 
     /**
+     * Check if this is the first 30m candle of the trading day.
+     * NSE: First candle starts at 09:15 (windowStart)
+     * MCX: First candle starts at 09:00 (windowStart)
+     *
+     * FIX: Used to skip heuristic flip detection on first candle where
+     * there's no intraday context to validate the flip.
+     */
+    private boolean isFirstCandleOfDay(Instant windowStart, String exchange) {
+        if (windowStart == null || exchange == null) {
+            return false;
+        }
+        ZonedDateTime zdt = windowStart.atZone(IST);
+        int hour = zdt.getHour();
+        int minute = zdt.getMinute();
+
+        if ("M".equalsIgnoreCase(exchange)) {
+            // MCX: First candle is 09:00-09:30, windowStart = 09:00
+            return hour == MCX_MARKET_OPEN_HOUR && minute == MCX_MARKET_OPEN_MINUTE;
+        } else {
+            // NSE: First candle is 09:15-09:45, windowStart = 09:15
+            return hour == NSE_MARKET_OPEN_HOUR && minute == NSE_MARKET_OPEN_MINUTE;
+        }
+    }
+
+    /**
      * Fetch 1m candles from MongoDB for a specific 30m window.
      */
     private List<TickCandle> fetch1mCandlesForWindow(String scripCode, Instant windowStart, Instant windowEnd) {
@@ -536,7 +569,7 @@ public class FudkiiSignalTrigger {
      *
      * FIX: Now merges MongoDB and API data to ensure complete history.
      */
-    private List<Candle30m> getOrBuildHistorical30mCandles(String scripCode, String exchange, Instant beforeTime) {
+    private List<Candle30m> getOrBuildHistorical30mCandles(String scripCode, String exchange, String exchangeType, Instant beforeTime) {
         // Check if this scripCode is already marked as having insufficient data (with TTL check)
         Instant markedAt = insufficientDataScripCodes.get(scripCode);
         if (markedAt != null) {
@@ -586,7 +619,7 @@ public class FudkiiSignalTrigger {
 
             apiAttemptedScripCodes.add(scripCode);
 
-            List<Candle30m> apiCandles = fetchHistorical30mFromAPI(scripCode, exchange, beforeTime);
+            List<Candle30m> apiCandles = fetchHistorical30mFromAPI(scripCode, exchange, exchangeType, beforeTime);
 
             if (!apiCandles.isEmpty()) {
                 // Merge: use TreeMap to deduplicate by windowStart, prefer MongoDB for overlaps
@@ -685,7 +718,7 @@ public class FudkiiSignalTrigger {
     /**
      * Fetch historical 30m candles directly from 5paisa API.
      */
-    private List<Candle30m> fetchHistorical30mFromAPI(String scripCode, String exchange, Instant beforeTime) {
+    private List<Candle30m> fetchHistorical30mFromAPI(String scripCode, String exchange, String exchangeType, Instant beforeTime) {
         try {
             // Calculate date range
             ZonedDateTime endDate = beforeTime.atZone(IST);
@@ -696,10 +729,13 @@ public class FudkiiSignalTrigger {
 
             // Determine exchange parameters
             String exch = "M".equalsIgnoreCase(exchange) ? "M" : "N";
-            String exchType = "M".equalsIgnoreCase(exchange) ? "D" : "C"; // MCX uses D for derivatives
+            // FIX: Use passed exchangeType instead of hardcoding based on exchange
+            // This ensures F&O instruments (exchangeType="D") fetch derivative data, not cash
+            String exchType = exchangeType != null ? exchangeType :
+                ("M".equalsIgnoreCase(exchange) ? "D" : "C"); // Fallback to old logic if null
 
-            log.info("{} {} Fetching 30m candles from API: {} to {} (exch={})",
-                LOG_PREFIX, scripCode, startDateStr, endDateStr, exch);
+            log.info("{} {} Fetching 30m candles from API: {} to {} (exch={}, exchType={})",
+                LOG_PREFIX, scripCode, startDateStr, endDateStr, exch, exchType);
 
             // Fetch 30m candles directly from API
             List<HistoricalCandle> apiCandles = fastAnalyticsClient.getHistoricalData(
@@ -832,16 +868,26 @@ public class FudkiiSignalTrigger {
         // Method 4: FIX - Fallback detection using barsInTrend
         // If barsInTrend is 1 and we have no previous state, this MIGHT be a flip
         // This is a heuristic - if trend just started (1 bar), it could be a flip
+        // FIX: Skip this heuristic on first candle of day (09:15 NSE, 09:00 MCX)
+        // because we have no intraday context to validate the flip
         if (!superTrendFlipped && prevBbst == null && bbst.getBarsInTrend() == 1) {
-            // Only trigger if price action strongly confirms the direction
-            // (above upper BB for bullish flip, below lower BB for bearish flip)
-            PricePosition pos = bbst.getPricePosition();
-            if ((bbst.getTrend() == TrendDirection.UP && pos == PricePosition.ABOVE_UPPER) ||
-                (bbst.getTrend() == TrendDirection.DOWN && pos == PricePosition.BELOW_LOWER)) {
-                superTrendFlipped = true;
-                flipDetectionMethod = "barsInTrend_heuristic";
-                log.info("{} {} Flip detected via barsInTrend heuristic: trend={}, barsInTrend=1, pricePos={}",
-                    LOG_PREFIX, scripCode, bbst.getTrend(), pos);
+            // Check if this is the first candle of the day
+            boolean isFirstCandleOfDay = isFirstCandleOfDay(currentCandle.windowStart, currentCandle.exchange);
+
+            if (isFirstCandleOfDay) {
+                log.info("{} {} Skipping barsInTrend heuristic - first candle of day (no intraday context)",
+                    LOG_PREFIX, scripCode);
+            } else {
+                // Only trigger if price action strongly confirms the direction
+                // (above upper BB for bullish flip, below lower BB for bearish flip)
+                PricePosition pos = bbst.getPricePosition();
+                if ((bbst.getTrend() == TrendDirection.UP && pos == PricePosition.ABOVE_UPPER) ||
+                    (bbst.getTrend() == TrendDirection.DOWN && pos == PricePosition.BELOW_LOWER)) {
+                    superTrendFlipped = true;
+                    flipDetectionMethod = "barsInTrend_heuristic";
+                    log.info("{} {} Flip detected via barsInTrend heuristic: trend={}, barsInTrend=1, pricePos={}",
+                        LOG_PREFIX, scripCode, bbst.getTrend(), pos);
+                }
             }
         }
 
