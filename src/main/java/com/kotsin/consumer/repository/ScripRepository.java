@@ -1,26 +1,23 @@
 package com.kotsin.consumer.repository;
 
-import com.kotsin.consumer.entity.Scrip;
+
+import com.kotsin.consumer.metadata.model.Scrip;
 import org.springframework.data.mongodb.repository.MongoRepository;
+import org.springframework.data.mongodb.repository.Query;
 import org.springframework.stereotype.Repository;
 
-import java.util.Optional;
+import java.util.List;
 
 @Repository
 public interface ScripRepository extends MongoRepository<Scrip, String> {
-    Optional<Scrip> findFirstByExchAndExchTypeAndScripCode(String exch, String exchType, String scripCode);
-    Optional<Scrip> findFirstByExchAndExchTypeAndName(String exch, String exchType, String name);
+    List<Scrip> findByScriptTypeKotsin(String scriptTypeKotsin);
 
-    /**
-     * Find equity by symbolRoot - critical for options-to-equity mapping
-     * ExchType "C" = Cash segment = Equity
-     */
-    Optional<Scrip> findFirstBySymbolRootAndExchType(String symbolRoot, String exchType);
+    @Query("{ 'ScripCode': ?0, 'Exch': ?1, 'ExchType': ?2 }")
+    List<Scrip> findByScripCodeAndExchAndExchType(String scripCode, String exch, String exchType);
 
-    /**
-     * FIX: Find any Scrip by scripCode directly (without requiring exch/exchType)
-     * Used as fallback when ScripGroup lookup fails for options not in ScripGroup.options[]
-     * ScripCode is unique across all exchanges, so this is safe
-     */
-    Optional<Scrip> findByScripCode(String scripCode);
+
+    @Query("{ 'ScripCode': ?0 }")
+    List<Scrip> findByScripCode(String scripCode);
+
+
 }

@@ -1,12 +1,10 @@
 package com.kotsin.consumer.controller;
 
 import com.kotsin.consumer.monitoring.SystemMonitor;
-import com.kotsin.consumer.infrastructure.kafka.UnifiedInstrumentCandleProcessor;
-import com.kotsin.consumer.infrastructure.kafka.FamilyCandleProcessor;
-import com.kotsin.consumer.processor.IPUProcessor;
-import com.kotsin.consumer.processor.VCPProcessor;
+import com.kotsin.consumer.aggregator.TickAggregator;
+import com.kotsin.consumer.aggregator.OrderbookAggregator;
+import com.kotsin.consumer.aggregator.OIAggregator;
 import lombok.extern.slf4j.Slf4j;
-import org.apache.kafka.streams.KafkaStreams;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.GetMapping;
@@ -19,10 +17,8 @@ import java.util.Map;
 /**
  * Health check and metrics endpoint
  *
- * OBSERVABILITY: Expose health and metrics for monitoring
- * KUBERNETES READY: Provides liveness and readiness probes
- *
- * Updated: Now monitors NEW family-candle architecture processors
+ * Provides health and metrics for monitoring.
+ * Monitors the new v2 architecture aggregators.
  */
 @RestController
 @RequestMapping("/api/v1/health")
@@ -32,16 +28,13 @@ public class HealthController {
     private final SystemMonitor systemMonitor;
 
     @Autowired(required = false)
-    private UnifiedInstrumentCandleProcessor instrumentProcessor;
+    private TickAggregator tickAggregator;
 
     @Autowired(required = false)
-    private FamilyCandleProcessor familyProcessor;
+    private OrderbookAggregator orderbookAggregator;
 
     @Autowired(required = false)
-    private IPUProcessor ipuProcessor;
-
-    @Autowired(required = false)
-    private VCPProcessor vcpProcessor;
+    private OIAggregator oiAggregator;
 
     public HealthController(SystemMonitor systemMonitor) {
         this.systemMonitor = systemMonitor;
@@ -64,52 +57,37 @@ public class HealthController {
     @GetMapping("/ready")
     public ResponseEntity<Map<String, Object>> readiness() {
         Map<String, Object> response = new HashMap<>();
-        
-        boolean isReady = systemMonitor.isSystemHealthy() && 
-                         areAllProcessorsHealthy();
-        
+
+        boolean isReady = systemMonitor.isSystemHealthy() && areAggregatorsRunning();
+
         response.put("status", isReady ? "UP" : "DOWN");
         response.put("timestamp", System.currentTimeMillis());
         response.put("healthy", isReady);
-        
+
         if (!isReady) {
             return ResponseEntity.status(503).body(response);
         }
-        
+
         return ResponseEntity.ok(response);
     }
-    
+
     /**
-     * Check if all processors are healthy
+     * Check if all aggregators are running
      */
-    private boolean areAllProcessorsHealthy() {
-        boolean allHealthy = true;
+    private boolean areAggregatorsRunning() {
+        boolean allRunning = true;
 
-        // Check IPU processor
-        if (ipuProcessor != null) {
-            try {
-                Map<String, KafkaStreams.State> states = ipuProcessor.getStreamStates();
-                allHealthy = allHealthy && states.values().stream()
-                    .allMatch(state -> state == KafkaStreams.State.RUNNING);
-            } catch (Exception e) {
-                log.warn("Error checking IPU processor health", e);
-                allHealthy = false;
-            }
+        if (tickAggregator != null) {
+            allRunning = allRunning && tickAggregator.isRunning();
+        }
+        if (orderbookAggregator != null) {
+            allRunning = allRunning && orderbookAggregator.isRunning();
+        }
+        if (oiAggregator != null) {
+            allRunning = allRunning && oiAggregator.isRunning();
         }
 
-        // Check VCP processor
-        if (vcpProcessor != null) {
-            try {
-                Map<String, KafkaStreams.State> states = vcpProcessor.getStreamStates();
-                allHealthy = allHealthy && states.values().stream()
-                    .allMatch(state -> state == KafkaStreams.State.RUNNING);
-            } catch (Exception e) {
-                log.warn("Error checking VCP processor health", e);
-                allHealthy = false;
-            }
-        }
-
-        return allHealthy;
+        return allRunning;
     }
 
     /**
@@ -119,29 +97,33 @@ public class HealthController {
     public ResponseEntity<Map<String, Object>> health() {
         Map<String, Object> response = new HashMap<>();
 
-        boolean isHealthy = systemMonitor.isSystemHealthy() && areAllProcessorsHealthy();
+        boolean isHealthy = systemMonitor.isSystemHealthy() && areAggregatorsRunning();
 
         response.put("status", isHealthy ? "HEALTHY" : "UNHEALTHY");
         response.put("timestamp", System.currentTimeMillis());
         response.put("systemMetrics", systemMonitor.getSystemMetrics());
 
-        // Stream states from NEW architecture processors
-        Map<String, Object> allStreamStates = new HashMap<>();
-        if (ipuProcessor != null) {
-            try {
-                allStreamStates.put("ipu", ipuProcessor.getStreamStates());
-            } catch (Exception e) {
-                allStreamStates.put("ipu", "ERROR: " + e.getMessage());
-            }
+        // Aggregator status
+        Map<String, Object> aggregatorStatus = new HashMap<>();
+        if (tickAggregator != null) {
+            aggregatorStatus.put("tick", Map.of(
+                "running", tickAggregator.isRunning(),
+                "stats", tickAggregator.getStats()
+            ));
         }
-        if (vcpProcessor != null) {
-            try {
-                allStreamStates.put("vcp", vcpProcessor.getStreamStates());
-            } catch (Exception e) {
-                allStreamStates.put("vcp", "ERROR: " + e.getMessage());
-            }
+        if (orderbookAggregator != null) {
+            aggregatorStatus.put("orderbook", Map.of(
+                "running", orderbookAggregator.isRunning(),
+                "stats", orderbookAggregator.getStats()
+            ));
         }
-        response.put("streamStates", allStreamStates);
+        if (oiAggregator != null) {
+            aggregatorStatus.put("oi", Map.of(
+                "running", oiAggregator.isRunning(),
+                "stats", oiAggregator.getStats()
+            ));
+        }
+        response.put("aggregators", aggregatorStatus);
 
         if (!isHealthy) {
             return ResponseEntity.status(503).body(response);

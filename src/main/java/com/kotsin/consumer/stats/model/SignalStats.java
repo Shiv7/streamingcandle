@@ -4,235 +4,231 @@ import lombok.AllArgsConstructor;
 import lombok.Builder;
 import lombok.Data;
 import lombok.NoArgsConstructor;
-import org.springframework.data.annotation.Id;
-import org.springframework.data.mongodb.core.mapping.Document;
 
+import java.time.Instant;
 import java.time.LocalDate;
-import java.util.ArrayList;
-import java.util.List;
+import java.util.HashMap;
+import java.util.Map;
 
 /**
- * SignalStats - Per (scripCode, signalType) performance statistics
- * 
+ * SignalStats - Performance statistics for trading signals.
+ *
  * Tracks:
- * - All-time win rate, expectancy, R-multiples
- * - Rolling window of recent trades (last 20)
- * - Daily stats (reset at market open)
- * 
- * Used by SignalStatsGate to filter out underperforming signals.
+ * - Win rate and profit factor
+ * - Signal type performance
+ * - Time-based performance
+ * - Drawdown and recovery
  */
 @Data
 @Builder
 @NoArgsConstructor
 @AllArgsConstructor
-@Document(collection = "signal_stats")
 public class SignalStats {
 
-    @Id
-    private String id;  // Format: "SCRIPCODE_SIGNALTYPE" e.g., "RELIANCE_OI_BULLISH"
+    private String symbol;
+    private String signalType;
+    private Instant lastUpdated;
 
-    private String scripCode;
-    private String signalType;  // e.g., "BREAKOUT_RETEST", "MTF_CONFLUENCE", "OI_BULLISH"
+    // ==================== OVERALL STATS ====================
+    private int totalSignals;
+    private int winningSignals;
+    private int losingSignals;
+    private int breakEvenSignals;
+    private double winRate;              // Winning / Total * 100
 
-    // ========== All-time Stats ==========
-    @Builder.Default
-    private int totalSignals = 0;     // Total signals generated
-    @Builder.Default
-    private int totalTrades = 0;      // Signals that became trades
-    @Builder.Default
-    private int wins = 0;
-    @Builder.Default
-    private int losses = 0;
-    @Builder.Default
-    private double totalRMultiple = 0.0;
-    @Builder.Default
-    private double maxWin = 0.0;      // Best R-multiple
-    @Builder.Default
-    private double maxLoss = 0.0;     // Worst R-multiple
-    @Builder.Default
-    private double peakEquity = 0.0;  // For drawdown calculation
-    @Builder.Default
-    private double maxDrawdown = 0.0;
+    // ==================== PROFIT/LOSS ====================
+    private double totalProfit;
+    private double totalLoss;
+    private double netProfit;
+    private double profitFactor;         // Total Profit / Total Loss
+    private double avgWin;
+    private double avgLoss;
+    private double avgRR;                // Average Risk-Reward ratio
+    private double expectancy;           // (WinRate * AvgWin) - (LossRate * AvgLoss)
 
-    // ========== Rolling Window (last 20 trades) ==========
-    @Builder.Default
-    private List<SimpleOutcome> recentTrades = new ArrayList<>();
+    // ==================== STREAKS ====================
+    private int currentStreak;           // Positive = wins, Negative = losses
+    private int maxWinStreak;
+    private int maxLossStreak;
+    private int currentWinStreak;
+    private int currentLossStreak;
 
-    // ========== Daily Stats (reset at 9 AM IST) ==========
-    @Builder.Default
-    private int todaySignals = 0;
-    @Builder.Default
-    private int todayTrades = 0;
-    @Builder.Default
-    private int todayWins = 0;
-    @Builder.Default
-    private int todayLosses = 0;
-    @Builder.Default
-    private double todayPnL = 0.0;
-    private LocalDate statsDate;
+    // ==================== DRAWDOWN ====================
+    private double maxDrawdown;
+    private double maxDrawdownPercent;
+    private double currentDrawdown;
+    private Instant maxDrawdownDate;
+    private int drawdownDuration;        // Bars in drawdown
 
-    // ========== Computed Metrics ==========
+    // ==================== TIME-BASED STATS ====================
+    @Builder.Default
+    private Map<String, DayStats> statsByDay = new HashMap<>();
+    @Builder.Default
+    private Map<String, SessionStats> statsBySession = new HashMap<>();
+    private double morningWinRate;       // 9:15 - 12:00
+    private double afternoonWinRate;     // 12:00 - 15:30
 
-    /**
-     * Calculate all-time win rate
-     */
-    public double getWinRate() {
-        return totalTrades > 0 ? (double) wins / totalTrades : 0.0;
+    // ==================== SIGNAL TYPE STATS ====================
+    @Builder.Default
+    private Map<String, TypeStats> statsBySignalType = new HashMap<>();
+
+    // ==================== RECENT PERFORMANCE ====================
+    private double last10WinRate;
+    private double last20WinRate;
+    private double last50WinRate;
+    private double todayNetProfit;
+    private int todaySignals;
+    private int todayWins;
+
+    // ==================== ENUMS ====================
+
+    public enum PerformanceGrade {
+        EXCELLENT,   // Win rate > 65%, PF > 2
+        GOOD,        // Win rate > 55%, PF > 1.5
+        AVERAGE,     // Win rate > 45%, PF > 1
+        POOR,        // Win rate < 45%, PF < 1
+        TERRIBLE     // Win rate < 35%, PF < 0.8
     }
 
-    /**
-     * Calculate average R-multiple per trade
-     */
-    public double getAvgR() {
-        return totalTrades > 0 ? totalRMultiple / totalTrades : 0.0;
-    }
+    // ==================== HELPER METHODS ====================
 
-    /**
-     * Calculate expectancy (expected R per trade)
-     * Formula: (WinRate × AvgWin) - (LossRate × AvgLoss)
-     * Simplified: AvgR already captures this
-     */
-    public double getExpectancy() {
-        if (totalTrades == 0) return 0.0;
-        double wr = getWinRate();
-        double avgR = getAvgR();
-        // Positive avgR means net winning system
-        return avgR;
-    }
-
-    /**
-     * Calculate rolling window win rate (last 20 trades)
-     */
-    public double getRecentWinRate() {
-        if (recentTrades == null || recentTrades.isEmpty()) return 0.0;
-        long recentWins = recentTrades.stream().filter(SimpleOutcome::isWin).count();
-        return (double) recentWins / recentTrades.size();
-    }
-
-    /**
-     * Calculate rolling window expectancy
-     */
-    public double getRecentExpectancy() {
-        if (recentTrades == null || recentTrades.isEmpty()) return 0.0;
-        double sumR = recentTrades.stream().mapToDouble(SimpleOutcome::getRMultiple).sum();
-        return sumR / recentTrades.size();
-    }
-
-    /**
-     * Calculate profit factor (gross profit / gross loss)
-     */
-    public double getProfitFactor() {
-        if (recentTrades == null || recentTrades.isEmpty()) return 0.0;
-        double grossProfit = recentTrades.stream()
-                .mapToDouble(SimpleOutcome::getRMultiple)
-                .filter(r -> r > 0)
-                .sum();
-        double grossLoss = Math.abs(recentTrades.stream()
-                .mapToDouble(SimpleOutcome::getRMultiple)
-                .filter(r -> r < 0)
-                .sum());
-        return grossLoss > 0 ? grossProfit / grossLoss : grossProfit > 0 ? 999.0 : 0.0;
-    }
-
-    // ========== Update Methods ==========
-
-    /**
-     * Record a new trade outcome
-     */
-    public void recordOutcome(boolean isWin, double rMultiple) {
-        // Update all-time stats
-        totalTrades++;
-        totalRMultiple += rMultiple;
-
-        if (isWin) {
-            wins++;
-            maxWin = Math.max(maxWin, rMultiple);
-        } else {
-            losses++;
-            maxLoss = Math.min(maxLoss, rMultiple);
-        }
-
-        // Update rolling window
-        if (recentTrades == null) {
-            recentTrades = new ArrayList<>();
-        }
-        recentTrades.add(new SimpleOutcome(isWin, rMultiple));
-        if (recentTrades.size() > 20) {
-            recentTrades.remove(0);
-        }
-
-        // Update daily stats
-        LocalDate today = LocalDate.now();
-        if (statsDate == null || !statsDate.equals(today)) {
-            resetDailyStats();
-            statsDate = today;
-        }
-        todayTrades++;
-        if (isWin) {
-            todayWins++;
-        } else {
-            todayLosses++;
-        }
-    }
-
-    /**
-     * Record a signal (even if not traded)
-     */
-    public void recordSignal() {
+    public void recordSignal(boolean won, double profit, String signalType, String session) {
         totalSignals++;
-        LocalDate today = LocalDate.now();
-        if (statsDate == null || !statsDate.equals(today)) {
-            resetDailyStats();
-            statsDate = today;
+
+        if (profit > 0) {
+            winningSignals++;
+            totalProfit += profit;
+            currentWinStreak++;
+            currentLossStreak = 0;
+            currentStreak = Math.max(0, currentStreak) + 1;
+            maxWinStreak = Math.max(maxWinStreak, currentWinStreak);
+        } else if (profit < 0) {
+            losingSignals++;
+            totalLoss += Math.abs(profit);
+            currentLossStreak++;
+            currentWinStreak = 0;
+            currentStreak = Math.min(0, currentStreak) - 1;
+            maxLossStreak = Math.max(maxLossStreak, currentLossStreak);
+        } else {
+            breakEvenSignals++;
         }
-        todaySignals++;
+
+        netProfit = totalProfit - totalLoss;
+        updateMetrics();
+
+        // Update session stats
+        SessionStats sStats = statsBySession.computeIfAbsent(session, s -> new SessionStats());
+        sStats.record(won, profit);
+
+        // Update type stats
+        TypeStats tStats = statsBySignalType.computeIfAbsent(signalType, s -> new TypeStats());
+        tStats.record(won, profit);
+
+        lastUpdated = Instant.now();
     }
 
-    /**
-     * Reset daily stats
-     */
-    public void resetDailyStats() {
-        todaySignals = 0;
-        todayTrades = 0;
-        todayWins = 0;
-        todayLosses = 0;
-        todayPnL = 0.0;
+    private void updateMetrics() {
+        winRate = totalSignals > 0 ? (double) winningSignals / totalSignals * 100 : 0;
+        profitFactor = totalLoss > 0 ? totalProfit / totalLoss : totalProfit > 0 ? Double.MAX_VALUE : 0;
+        avgWin = winningSignals > 0 ? totalProfit / winningSignals : 0;
+        avgLoss = losingSignals > 0 ? totalLoss / losingSignals : 0;
+        expectancy = (winRate / 100 * avgWin) - ((100 - winRate) / 100 * avgLoss);
+        avgRR = avgLoss > 0 ? avgWin / avgLoss : 0;
     }
 
-    /**
-     * Check if this is a new/untested signal type
-     */
-    public boolean isNew(int minTrades) {
-        return totalTrades < minTrades;
+    public void updateDrawdown(double equity, double peak) {
+        if (equity < peak) {
+            currentDrawdown = peak - equity;
+            double ddPercent = peak > 0 ? currentDrawdown / peak * 100 : 0;
+
+            if (currentDrawdown > maxDrawdown) {
+                maxDrawdown = currentDrawdown;
+                maxDrawdownPercent = ddPercent;
+                maxDrawdownDate = Instant.now();
+            }
+            drawdownDuration++;
+        } else {
+            currentDrawdown = 0;
+            drawdownDuration = 0;
+        }
     }
 
-    // ========== Inner Classes ==========
+    public PerformanceGrade getGrade() {
+        if (winRate > 65 && profitFactor > 2) return PerformanceGrade.EXCELLENT;
+        if (winRate > 55 && profitFactor > 1.5) return PerformanceGrade.GOOD;
+        if (winRate > 45 && profitFactor > 1) return PerformanceGrade.AVERAGE;
+        if (winRate > 35 && profitFactor > 0.8) return PerformanceGrade.POOR;
+        return PerformanceGrade.TERRIBLE;
+    }
 
-    /**
-     * Simple outcome for rolling window
-     */
+    public boolean isPerforming() {
+        return winRate > 50 && profitFactor > 1.2 && currentLossStreak < 5;
+    }
+
+    public boolean isInDrawdown() {
+        return currentDrawdown > 0;
+    }
+
+    public double getSharpeRatio(double riskFreeRate) {
+        // Simplified Sharpe calculation
+        if (totalSignals < 10) return 0;
+        double avgReturn = netProfit / totalSignals;
+        double stdDev = calculateStdDev();
+        return stdDev > 0 ? (avgReturn - riskFreeRate) / stdDev : 0;
+    }
+
+    private double calculateStdDev() {
+        // Would need individual trade returns - simplified version
+        return Math.abs(avgWin - avgLoss) / 2;
+    }
+
+    // ==================== INNER CLASSES ====================
+
     @Data
-    @NoArgsConstructor
-    @AllArgsConstructor
-    public static class SimpleOutcome {
-        private boolean win;
-        private double rMultiple;
+    public static class DayStats {
+        private LocalDate date;
+        private int signals;
+        private int wins;
+        private double profit;
+        private double winRate;
+
+        public void record(boolean won, double pnl) {
+            signals++;
+            if (won) wins++;
+            profit += pnl;
+            winRate = signals > 0 ? (double) wins / signals * 100 : 0;
+        }
     }
 
-    // ========== Factory Methods ==========
+    @Data
+    public static class SessionStats {
+        private int signals;
+        private int wins;
+        private double profit;
+        private double winRate;
 
-    /**
-     * Create new stats for a signal type
-     */
-    public static SignalStats create(String scripCode, String signalType) {
-        String id = scripCode + "_" + signalType;
-        return SignalStats.builder()
-                .id(id)
-                .scripCode(scripCode)
-                .signalType(signalType)
-                .recentTrades(new ArrayList<>())
-                .statsDate(LocalDate.now())
-                .build();
+        public void record(boolean won, double pnl) {
+            signals++;
+            if (won) wins++;
+            profit += pnl;
+            winRate = signals > 0 ? (double) wins / signals * 100 : 0;
+        }
+    }
+
+    @Data
+    public static class TypeStats {
+        private int signals;
+        private int wins;
+        private double profit;
+        private double winRate;
+        private double avgProfit;
+
+        public void record(boolean won, double pnl) {
+            signals++;
+            if (won) wins++;
+            profit += pnl;
+            winRate = signals > 0 ? (double) wins / signals * 100 : 0;
+            avgProfit = signals > 0 ? profit / signals : 0;
+        }
     }
 }
-
