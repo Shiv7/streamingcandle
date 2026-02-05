@@ -467,4 +467,86 @@ public class RedisCacheService {
                 scripCode, timeframe, e.getMessage());
         }
     }
+
+    // ==================== FUKAA WATCHING SIGNALS (Volume Filter) ====================
+
+    private static final String FUKAA_WATCHING_PREFIX = "fukaa:watching:";
+    private static final String FUKAA_WATCHING_SET = "fukaa:watching:all";
+
+    /**
+     * Store a FUDKII signal in watching mode for T+1 volume re-evaluation.
+     * Signal will be checked on next 30m candle close.
+     *
+     * @param scripCode The script code
+     * @param signalData Map containing signal data (result, avgVolume, signalTime, etc.)
+     * @param ttlMinutes TTL for watching signal (should be > 30 min for T+1)
+     */
+    public void storeFukaaWatchingSignal(String scripCode, java.util.Map<String, Object> signalData, int ttlMinutes) {
+        if (scripCode == null || signalData == null) return;
+
+        try {
+            String key = FUKAA_WATCHING_PREFIX + scripCode;
+            redisTemplate.opsForValue().set(key, signalData, Duration.ofMinutes(ttlMinutes));
+            // Also add to set of all watching scripCodes for efficient lookup
+            redisTemplate.opsForSet().add(FUKAA_WATCHING_SET, scripCode);
+            redisTemplate.expire(FUKAA_WATCHING_SET, Duration.ofHours(24));
+            log.info("[REDIS-CACHE] Stored FUKAA watching signal for {} (TTL={}min)", scripCode, ttlMinutes);
+        } catch (Exception e) {
+            log.error("[REDIS-CACHE] Failed to store FUKAA watching signal for {}: {}", scripCode, e.getMessage());
+        }
+    }
+
+    /**
+     * Get a watching signal for T+1 evaluation.
+     */
+    @SuppressWarnings("unchecked")
+    public java.util.Map<String, Object> getFukaaWatchingSignal(String scripCode) {
+        if (scripCode == null) return null;
+
+        try {
+            String key = FUKAA_WATCHING_PREFIX + scripCode;
+            Object value = redisTemplate.opsForValue().get(key);
+            if (value instanceof java.util.Map) {
+                return (java.util.Map<String, Object>) value;
+            }
+        } catch (Exception e) {
+            log.debug("[REDIS-CACHE] Failed to get FUKAA watching signal for {}: {}", scripCode, e.getMessage());
+        }
+        return null;
+    }
+
+    /**
+     * Get all scripCodes with watching signals (for T+1 batch check).
+     */
+    public Set<String> getAllFukaaWatchingScripCodes() {
+        try {
+            Set<Object> members = redisTemplate.opsForSet().members(FUKAA_WATCHING_SET);
+            if (members != null) {
+                Set<String> result = new java.util.HashSet<>();
+                for (Object m : members) {
+                    if (m != null) result.add(m.toString());
+                }
+                return result;
+            }
+        } catch (Exception e) {
+            log.debug("[REDIS-CACHE] Failed to get FUKAA watching scripCodes: {}", e.getMessage());
+        }
+        return java.util.Collections.emptySet();
+    }
+
+    /**
+     * Remove a watching signal (after T+1 evaluation or expiry).
+     */
+    public void removeFukaaWatchingSignal(String scripCode) {
+        if (scripCode == null) return;
+
+        try {
+            String key = FUKAA_WATCHING_PREFIX + scripCode;
+            redisTemplate.delete(key);
+            redisTemplate.opsForSet().remove(FUKAA_WATCHING_SET, scripCode);
+            log.debug("[REDIS-CACHE] Removed FUKAA watching signal for {}", scripCode);
+        } catch (Exception e) {
+            log.debug("[REDIS-CACHE] Failed to remove FUKAA watching signal for {}: {}", scripCode, e.getMessage());
+        }
+    }
 }
