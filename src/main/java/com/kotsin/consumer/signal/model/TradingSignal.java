@@ -218,6 +218,12 @@ public class TradingSignal {
     @Builder.Default
     private List<GateCheck> gateChecks = new ArrayList<>();
 
+    // ==================== CROSS-STRATEGY CONFLUENCE ====================
+    private boolean crossStrategyConfluence;
+    private int confluentStrategies;
+    @Builder.Default
+    private List<String> alignedStrategyNames = new ArrayList<>();
+
     // ==================== PAPER TRADE LINK ====================
     /**
      * Paper trade ID (link to paper_trades collection).

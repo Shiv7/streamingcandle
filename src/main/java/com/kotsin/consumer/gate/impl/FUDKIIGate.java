@@ -2,6 +2,7 @@ package com.kotsin.consumer.gate.impl;
 
 import com.kotsin.consumer.gate.SignalGate;
 import com.kotsin.consumer.gate.model.GateResult;
+import com.kotsin.consumer.signal.model.FudkiiScore;
 import org.springframework.stereotype.Component;
 
 import java.util.Map;
@@ -41,26 +42,57 @@ public class FUDKIIGate implements SignalGate {
     @Override
     public GateResult evaluate(Map<String, Object> context) {
         String direction = (String) context.get("signalDirection");
-        Double fudkiiScore = (Double) context.get("fudkiiScore");
 
-        // Also check individual components if available
-        Double flowScore = (Double) context.get("flowScore");
-        Double urgencyScore = (Double) context.get("urgencyScore");
-        Double directionScore = (Double) context.get("directionScore");
-        Double kyleScore = (Double) context.get("kyleScore");
-        Double imbalanceScore = (Double) context.get("imbalanceScore");
-        Double intensityScore = (Double) context.get("intensityScore");
+        // "fudkiiScore" key contains the full FudkiiScore object from SignalEngine
+        Object fudkiiObj = context.get("fudkiiScore");
+        Double fudkiiScoreValue = null;
+        Double flowScore = null;
+        Double urgencyScore = null;
+        Double directionScore = null;
+        Double kyleScore = null;
+        Double imbalanceScore = null;
+        Double intensityScore = null;
 
-        if (fudkiiScore == null) {
+        if (fudkiiObj instanceof FudkiiScore fs) {
+            fudkiiScoreValue = fs.getCompositeScore();
+            flowScore = fs.getFlowScore();
+            urgencyScore = fs.getUrgencyScore();
+            directionScore = fs.getDirectionScore();
+            kyleScore = fs.getKyleScore();
+            imbalanceScore = fs.getImbalanceScore();
+            intensityScore = fs.getIntensityScore();
+        } else if (fudkiiObj instanceof Double d) {
+            fudkiiScoreValue = d;
+        }
+
+        // Fallback: try the standard "fudkii" key (composite double)
+        if (fudkiiScoreValue == null) {
+            Object fudkiiStandard = context.get("fudkii");
+            if (fudkiiStandard instanceof Double d) {
+                fudkiiScoreValue = d;
+            }
+        }
+
+        // Also check individual component keys if not extracted from object
+        if (flowScore == null) flowScore = (Double) context.get("flowScore");
+        if (urgencyScore == null) urgencyScore = (Double) context.get("urgencyScore");
+        if (directionScore == null) directionScore = (Double) context.get("directionScore");
+        if (kyleScore == null) kyleScore = (Double) context.get("kyleScore");
+        if (imbalanceScore == null) imbalanceScore = (Double) context.get("imbalanceScore");
+        if (intensityScore == null) intensityScore = (Double) context.get("intensityScore");
+
+        if (fudkiiScoreValue == null) {
             // Try to construct from components
             if (flowScore != null || urgencyScore != null || directionScore != null) {
-                fudkiiScore = calculateFromComponents(
+                fudkiiScoreValue = calculateFromComponents(
                     flowScore, urgencyScore, directionScore,
                     kyleScore, imbalanceScore, intensityScore);
             } else {
                 return GateResult.fail(getName(), getWeight(), "FUDKII score not available");
             }
         }
+
+        Double fudkiiScore = fudkiiScoreValue;
 
         if (direction == null) {
             return GateResult.fail(getName(), getWeight(), "Signal direction not specified");

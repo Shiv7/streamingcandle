@@ -34,6 +34,8 @@ public class BreakoutDetector {
     private static final double RETEST_THRESHOLD = 0.003;    // 0.3% tolerance for retest
     private static final double VOLUME_CONFIRM_RATIO = 1.5;  // 1.5x average volume
     private static final int MAX_ACTIVE_BREAKOUTS = 20;
+    private static final double LEVEL_MATCH_TOLERANCE = 0.0005; // 0.05% tolerance for matching levels
+    private static final int STALE_EXPIRY_CANDLES = 12;      // Remove stale levels after 12 candles (~1 hour on 5m)
 
     /**
      * Check for breakouts against registered levels.
@@ -102,11 +104,123 @@ public class BreakoutDetector {
     }
 
     /**
-     * Clear all levels for a symbol.
+     * Clear all levels for a symbol. Only use on day boundary (session reset).
      */
     public void clearLevels(String symbol) {
         keyLevels.remove(symbol);
         activeBreakouts.remove(symbol);
+    }
+
+    /**
+     * Update levels for a symbol by merging new levels into existing state.
+     * Preserves touchCount, isBroken, and registeredAt for matched levels.
+     * New levels are added; absent levels are marked stale and expired after STALE_EXPIRY_CANDLES.
+     */
+    public void updateLevels(String symbol, List<LevelInfo> newLevels) {
+        List<KeyLevel> existing = keyLevels.get(symbol);
+
+        if (existing == null || existing.isEmpty()) {
+            // No existing levels — just register fresh
+            registerLevels(symbol, newLevels);
+            return;
+        }
+
+        List<KeyLevel> merged = new ArrayList<>();
+        Set<Integer> matchedExistingIndices = new HashSet<>();
+        Set<Integer> matchedNewIndices = new HashSet<>();
+
+        // Match new levels to existing by price (within tolerance) + source
+        for (int n = 0; n < newLevels.size(); n++) {
+            LevelInfo newLevel = newLevels.get(n);
+            boolean found = false;
+
+            for (int e = 0; e < existing.size(); e++) {
+                if (matchedExistingIndices.contains(e)) continue;
+
+                KeyLevel existingLevel = existing.get(e);
+                if (levelsMatch(existingLevel, newLevel)) {
+                    // Preserve existing state, update description if changed
+                    existingLevel.staleSince = null; // Clear staleness — level is still active
+                    existingLevel.staleCandles = 0;
+                    existingLevel.description = newLevel.description;
+                    merged.add(existingLevel);
+                    matchedExistingIndices.add(e);
+                    matchedNewIndices.add(n);
+                    found = true;
+                    break;
+                }
+            }
+
+            if (!found) {
+                // Genuinely new level
+                KeyLevel kl = new KeyLevel();
+                kl.price = newLevel.price;
+                kl.source = newLevel.source;
+                kl.description = newLevel.description;
+                kl.registeredAt = Instant.now();
+                kl.touchCount = 0;
+                kl.isBroken = false;
+                kl.staleSince = null;
+                kl.staleCandles = 0;
+                merged.add(kl);
+                matchedNewIndices.add(n);
+            }
+        }
+
+        // Handle unmatched existing levels — mark as stale or expire
+        for (int e = 0; e < existing.size(); e++) {
+            if (matchedExistingIndices.contains(e)) continue;
+
+            KeyLevel staleLevel = existing.get(e);
+            if (staleLevel.staleSince == null) {
+                staleLevel.staleSince = Instant.now();
+                staleLevel.staleCandles = 1;
+            } else {
+                staleLevel.staleCandles++;
+            }
+
+            // Keep stale levels until they exceed expiry threshold
+            if (staleLevel.staleCandles <= STALE_EXPIRY_CANDLES) {
+                merged.add(staleLevel);
+            } else {
+                log.debug("[BREAKOUT] {} Expiring stale level: {} {} (stale for {} candles)",
+                    symbol, staleLevel.source, staleLevel.description, staleLevel.staleCandles);
+            }
+        }
+
+        keyLevels.put(symbol, merged);
+
+        log.debug("[BREAKOUT] {} Updated levels: {} total ({} preserved, {} new, {} stale)",
+            symbol, merged.size(), matchedExistingIndices.size(),
+            newLevels.size() - matchedExistingIndices.size(),
+            merged.size() - newLevels.size());
+    }
+
+    /**
+     * Check if an existing KeyLevel matches a new LevelInfo by price proximity and source.
+     */
+    private boolean levelsMatch(KeyLevel existing, LevelInfo newLevel) {
+        if (existing.source != newLevel.source) return false;
+        double priceDiff = Math.abs(existing.price - newLevel.price);
+        double tolerance = existing.price * LEVEL_MATCH_TOLERANCE;
+        return priceDiff <= tolerance;
+    }
+
+    /**
+     * Expire old breakouts that predate the session start.
+     * Call this on day boundary / session reset.
+     */
+    public void expireOldBreakouts(String symbol, Instant sessionStart) {
+        List<BreakoutEvent> actives = activeBreakouts.get(symbol);
+        if (actives == null || actives.isEmpty()) return;
+
+        int before = actives.size();
+        actives.removeIf(b -> b.getTimestamp() != null && b.getTimestamp().isBefore(sessionStart));
+        int removed = before - actives.size();
+
+        if (removed > 0) {
+            log.debug("[BREAKOUT] {} Expired {} old breakouts from previous session", symbol, removed);
+        }
     }
 
     /**
@@ -382,6 +496,8 @@ public class BreakoutDetector {
         Instant registeredAt;
         int touchCount;
         boolean isBroken;
+        Instant staleSince;   // When this level was first absent from new data
+        int staleCandles;     // Number of candles since level became stale
     }
 
     @Data

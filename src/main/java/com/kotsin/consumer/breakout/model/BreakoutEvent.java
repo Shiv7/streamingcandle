@@ -90,6 +90,7 @@ public class BreakoutEvent {
         EMA,
         OPENING_RANGE,
         PREVIOUS_DAY,
+        PREVIOUS_WEEK,
         ORDER_BLOCK,
         FVG,
         ROUND_NUMBER
