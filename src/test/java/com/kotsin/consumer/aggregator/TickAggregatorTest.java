@@ -52,9 +52,9 @@ class TickAggregatorTest {
         ReflectionTestUtils.setField(tickAggregator, "outputTopic", "tick-candles-1m");
         ReflectionTestUtils.setField(tickAggregator, "numThreads", 2); // Set threads!
 
-        // Configure ScripMetadataService mock to return the companyName as symbol
-        when(scripMetadataService.getSymbolRoot(anyString(), anyString()))
-            .thenAnswer(invocation -> invocation.getArgument(1)); // Return companyName (2nd arg)
+        // Configure ScripMetadataService mock to return the scripCode as symbol
+        when(scripMetadataService.getSymbolRoot(anyString()))
+            .thenAnswer(invocation -> invocation.getArgument(0));
 
         // Initialize aggregator (start method)
         tickAggregator.start();
@@ -68,7 +68,7 @@ class TickAggregatorTest {
         // 2. Process First Tick (T1 = 10:00:05)
         // Window should be 10:00:00 - 10:01:00
         TickData t1 = createTick("RELIANCE", 100.0, "2024-01-01T10:00:05Z");
-        tickAggregator.processTick(t1, Instant.parse("2024-01-01T10:00:05Z").toEpochMilli());
+        tickAggregator.processRecord(t1, Instant.parse("2024-01-01T10:00:05Z").toEpochMilli());
 
         // Verify State Created
         assertEquals(1, tickAggregator.aggregationState.size());
@@ -79,7 +79,7 @@ class TickAggregatorTest {
 
         // 3. Process Second Tick (T2 = 10:00:55)
         TickData t2 = createTick("RELIANCE", 101.0, "2024-01-01T10:00:55Z");
-        tickAggregator.processTick(t2, Instant.parse("2024-01-01T10:00:55Z").toEpochMilli());
+        tickAggregator.processRecord(t2, Instant.parse("2024-01-01T10:00:55Z").toEpochMilli());
         
         // Still same window, no emission
         tickAggregator.checkWindowEmission();
@@ -90,7 +90,7 @@ class TickAggregatorTest {
         // Buffer is 2 seconds in code? "currentWindowEnd.plusSeconds(2)"
         // Window End is 10:01:00. Ref Time is 10:01:05. 10:01:05 > 10:01:02. YES.
         TickData t3 = createTick("RELIANCE", 102.0, "2024-01-01T10:01:05Z");
-        tickAggregator.processTick(t3, Instant.parse("2024-01-01T10:01:05Z").toEpochMilli());
+        tickAggregator.processRecord(t3, Instant.parse("2024-01-01T10:01:05Z").toEpochMilli());
 
         // Now check emission
         tickAggregator.checkWindowEmission();

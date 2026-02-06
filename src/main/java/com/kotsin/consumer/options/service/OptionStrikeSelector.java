@@ -127,6 +127,13 @@ public class OptionStrikeSelector {
         // Calculate estimated delta (simplified)
         double estimatedDelta = estimateDelta(selected.getStrike(), spotPrice, true);
 
+        // Estimate premium translation from equity move using delta
+        double absDelta = Math.abs(estimatedDelta);
+        double equityMoveToTarget = Math.abs(signal.getTarget1() - signal.getEntryPrice());
+        double equityMoveToStop = Math.abs(signal.getEntryPrice() - signal.getStopLoss());
+        double premiumTarget = absDelta * equityMoveToTarget;
+        double premiumStop = absDelta * equityMoveToStop;
+
         // Build recommendation
         return OptionRecommendation.builder()
             .hasRecommendation(true)
@@ -142,6 +149,8 @@ public class OptionStrikeSelector {
             .oiChange(selected.getCallOIChange())
             .oiInterpretation(selected.getCallInterpretation())
             .estimatedDelta(estimatedDelta)
+            .estimatedPremiumTarget(premiumTarget)
+            .estimatedPremiumStopLoss(premiumStop)
             .expiry(selected.getExpiry())
             .signalEntry(signal.getEntryPrice())
             .signalStop(signal.getStopLoss())
@@ -188,6 +197,13 @@ public class OptionStrikeSelector {
         // Calculate estimated delta (simplified)
         double estimatedDelta = estimateDelta(selected.getStrike(), spotPrice, false);
 
+        // Estimate premium translation from equity move using delta
+        double absDelta = Math.abs(estimatedDelta);
+        double equityMoveToTarget = Math.abs(signal.getTarget1() - signal.getEntryPrice());
+        double equityMoveToStop = Math.abs(signal.getEntryPrice() - signal.getStopLoss());
+        double premiumTarget = absDelta * equityMoveToTarget;
+        double premiumStop = absDelta * equityMoveToStop;
+
         // Build recommendation
         return OptionRecommendation.builder()
             .hasRecommendation(true)
@@ -203,6 +219,8 @@ public class OptionStrikeSelector {
             .oiChange(selected.getPutOIChange())
             .oiInterpretation(selected.getPutInterpretation())
             .estimatedDelta(estimatedDelta)
+            .estimatedPremiumTarget(premiumTarget)
+            .estimatedPremiumStopLoss(premiumStop)
             .expiry(selected.getExpiry())
             .signalEntry(signal.getEntryPrice())
             .signalStop(signal.getStopLoss())
@@ -409,6 +427,8 @@ public class OptionStrikeSelector {
         private double confidence;
         private Instant timestamp;
         private String noRecommendationReason;
+        private double estimatedPremiumTarget;    // Estimated premium move to target
+        private double estimatedPremiumStopLoss;  // Estimated premium move to stop
 
         public static OptionRecommendation noRecommendation(String reason) {
             return OptionRecommendation.builder()

@@ -10,6 +10,7 @@ import org.springframework.beans.factory.annotation.Value;
 import org.springframework.kafka.annotation.KafkaListener;
 import org.springframework.kafka.core.KafkaTemplate;
 import org.springframework.scheduling.annotation.Scheduled;
+import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
 import org.springframework.stereotype.Component;
 
 import jakarta.annotation.PostConstruct;
@@ -38,6 +39,7 @@ import java.util.concurrent.ConcurrentHashMap;
  *   the signal is flagged as CONFLICTED and NOT promoted to ACTIVE.
  */
 @Component
+@ConditionalOnProperty(name = "orchestrator.enabled", havingValue = "true", matchIfMissing = true)
 @Slf4j
 public class StrategyStateOrchestrator {
 
@@ -70,6 +72,9 @@ public class StrategyStateOrchestrator {
     @Value("${orchestrator.gate.min.score:50}")
     private double gateMinScore;
 
+    @Value("${orchestrator.state.management.enabled:false}")
+    private boolean stateManagementEnabled;
+
     // Per-instrument state tracking
     private final Map<String, InstrumentState> instrumentStates = new ConcurrentHashMap<>();
 
@@ -84,8 +89,12 @@ public class StrategyStateOrchestrator {
 
     @PostConstruct
     public void init() {
-        log.info("StrategyStateOrchestrator initialized | TTL={}min, cooldown={}min, maxPerDay={}, gateMinScore={}",
-                signalTtlMinutes, cooldownMinutes, maxSignalsPerDay, gateMinScore);
+        if (stateManagementEnabled) {
+            log.info("StrategyStateOrchestrator initialized | TTL={}min, cooldown={}min, maxPerDay={}, gateMinScore={}",
+                    signalTtlMinutes, cooldownMinutes, maxSignalsPerDay, gateMinScore);
+        } else {
+            log.info("StrategyStateOrchestrator in MONITORING MODE — state management disabled, signal consumption only");
+        }
     }
 
     // ==================== KAFKA CONSUMERS ====================
@@ -191,6 +200,14 @@ public class StrategyStateOrchestrator {
 
     private void processSignalTrigger(String scripCode, String strategy, String direction,
                                        double score, double price, JsonNode rawSignal) {
+
+        // When state management is disabled, only monitor (track directions + publish opportunities)
+        if (!stateManagementEnabled) {
+            log.debug("[ORCHESTRATOR] Monitoring: {} {} {} score={} price={}",
+                scripCode, strategy, direction, String.format("%.1f", score), String.format("%.2f", price));
+            publishOpportunity(scripCode, strategy, direction, score, price, "Monitoring mode", null);
+            return;
+        }
 
         // --- MARKET HOURS CHECK ---
         LocalTime now = LocalTime.now(IST);

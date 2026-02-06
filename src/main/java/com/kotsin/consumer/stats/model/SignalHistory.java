@@ -128,7 +128,7 @@ public class SignalHistory {
         this.exitPrice = price;
         this.exitTime = time;
         this.exitReason = reason;
-        this.durationMs = time.toEpochMilli() - entryTime.toEpochMilli();
+        this.durationMs = entryTime != null ? time.toEpochMilli() - entryTime.toEpochMilli() : 0;
 
         // Calculate P&L
         if (direction == SignalDirection.LONG) {

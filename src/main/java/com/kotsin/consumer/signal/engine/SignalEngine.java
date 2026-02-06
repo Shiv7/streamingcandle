@@ -52,6 +52,8 @@ import org.springframework.stereotype.Service;
 
 import java.time.Duration;
 import java.time.Instant;
+import java.time.LocalDate;
+import java.time.ZoneId;
 import java.util.*;
 import java.util.concurrent.*;
 import java.util.concurrent.atomic.AtomicBoolean;
@@ -145,6 +147,10 @@ public class SignalEngine {
     // Per-symbol breakout events cache (updated each processSymbol cycle)
     private final ConcurrentHashMap<String, List<BreakoutEvent>> symbolBreakoutEvents = new ConcurrentHashMap<>();
 
+    // Track last processing date per symbol for day-boundary detection
+    private final ConcurrentHashMap<String, LocalDate> lastLevelRegistrationDate = new ConcurrentHashMap<>();
+    private static final ZoneId IST = ZoneId.of("Asia/Kolkata");
+
     // ==================== STRATEGY TRIGGERS ====================
 
     @Autowired
@@ -155,6 +161,9 @@ public class SignalEngine {
 
     @Autowired
     private com.kotsin.consumer.signal.trigger.MicroAlphaTrigger microAlphaTrigger;
+
+    @Autowired
+    private com.kotsin.consumer.signal.tracker.SetupTracker setupTracker;
 
     @Autowired
     private com.kotsin.consumer.indicator.calculator.BBSuperTrendCalculator bbstCalculator;
@@ -587,12 +596,38 @@ public class SignalEngine {
 
             // ==================== BREAKOUT DETECTION ====================
             TraceContext.addStage("BREAKOUT_DETECTION");
-            List<BreakoutEvent> breakoutEvents = detectBreakouts(symbol, current, candles, indicators);
+            List<BreakoutEvent> breakoutEvents = detectBreakouts(symbol, current, candles, indicators, pivotState);
             // Cache for gate chain and other components
             if (breakoutEvents != null && !breakoutEvents.isEmpty()) {
                 symbolBreakoutEvents.put(symbol, breakoutEvents);
+                // Feed breakout events to SetupTracker for lifecycle tracking
+                for (BreakoutEvent be : breakoutEvents) {
+                    if (be.getType() == BreakoutEvent.BreakoutType.BREAKOUT) {
+                        setupTracker.onBreakoutDetected(symbol, be);
+                    }
+                }
             } else {
                 symbolBreakoutEvents.remove(symbol);
+            }
+            // Update setup state machines on every price tick
+            setupTracker.onPriceUpdate(symbol, current.getClose());
+
+            // ==================== OI ENRICHMENT (shared across strategies) ====================
+            TraceContext.addStage("OI_ENRICH");
+            try {
+                com.kotsin.consumer.metadata.model.ScripGroup group = getScripGroup(symbol);
+                enrichWithFuturesOI(current, group, symbol);
+                // Feed OI context to PivotConfluenceTrigger
+                if (current.getOiInterpretation() != null) {
+                    String underlyingSymbol = group != null ? group.getCompanyName() : symbol;
+                    com.kotsin.consumer.options.model.OptionsAnalytics opts = fetchOptionsAnalytics(underlyingSymbol, current.getClose());
+                    Double pcr = opts != null && opts.getPcrByOI() > 0 ? opts.getPcrByOI() : null;
+                    pivotConfluenceTrigger.setOIContext(symbol, current.getOiInterpretation(),
+                        current.getOiChangePercent(), pcr);
+                }
+            } catch (Exception e) {
+                log.debug("{} {} OI enrichment before triggers failed: {}",
+                    LOG_PREFIX, TraceContext.getShortPrefix(), e.getMessage());
             }
 
             // ==================== STRATEGY 1: FUDKII TRIGGER (ST + BB on 30m) ====================
@@ -602,6 +637,14 @@ public class SignalEngine {
             // ==================== STRATEGY 2: PIVOT CONFLUENCE TRIGGER ====================
             TraceContext.addStage("PIVOT_TRIGGER");
             pivotConfluenceTrigger.setBreakoutContext(symbol, breakoutEvents);
+            // Feed IPU context to PivotConfluenceTrigger
+            if (ipuState != null) {
+                pivotConfluenceTrigger.setIPUContext(symbol,
+                    ipuState.getCurrentExhaustion(),
+                    ipuState.getCurrentMomentumState(),
+                    ipuState.isIpuRising(),
+                    ipuState.isExhaustionBuilding());
+            }
             var pivotResult = checkPivotConfluenceTrigger(symbol, current);
 
             // ==================== STRATEGY 3: MICROALPHA TRIGGER (Microstructure Alpha) ====================
@@ -1065,14 +1108,14 @@ public class SignalEngine {
      * 4. Return events for downstream consumption by triggers
      */
     private List<BreakoutEvent> detectBreakouts(String symbol, UnifiedCandle current,
-            List<UnifiedCandle> candles, TechnicalIndicators indicators) {
+            List<UnifiedCandle> candles, TechnicalIndicators indicators, PivotState pivotState) {
         try {
             String exch = current.getExchange() != null ? current.getExchange() : "N";
             String exchType = current.getExchangeType() != null ? current.getExchangeType() : "C";
             String scripCode = current.getScripCode() != null ? current.getScripCode() : symbol;
 
-            // Register levels from pivots, SMC, and session structure
-            registerLevelsForBreakoutDetection(scripCode, exch, exchType);
+            // Register levels from pivots, SMC, session structure, and swing S/R
+            registerLevelsForBreakoutDetection(scripCode, exch, exchType, pivotState);
 
             // Calculate average volume for confirmation
             double avgVolume = 0;
@@ -1121,9 +1164,18 @@ public class SignalEngine {
      * Register key price levels into BreakoutDetector for a symbol.
      * Sources: Daily/Weekly pivots, CPR, SMC order blocks, session levels (VWAP, OR).
      */
-    private void registerLevelsForBreakoutDetection(String scripCode, String exch, String exchType) {
-        // Clear old levels to re-register fresh
-        breakoutDetector.clearLevels(scripCode);
+    private void registerLevelsForBreakoutDetection(String scripCode, String exch, String exchType,
+                                                       PivotState pivotState) {
+        // Day-boundary detection: full clear + expire old breakouts on new session day
+        LocalDate today = LocalDate.now(IST);
+        LocalDate lastDate = lastLevelRegistrationDate.get(scripCode);
+        if (lastDate != null && !lastDate.equals(today)) {
+            breakoutDetector.clearLevels(scripCode);
+            breakoutDetector.expireOldBreakouts(scripCode, today.atStartOfDay(IST).toInstant());
+            log.info("{} {} Day boundary detected ({}→{}), cleared levels and expired old breakouts",
+                LOG_PREFIX, scripCode, lastDate, today);
+        }
+        lastLevelRegistrationDate.put(scripCode, today);
 
         List<BreakoutDetector.LevelInfo> levels = new ArrayList<>();
 
@@ -1189,10 +1241,70 @@ public class SignalEngine {
                 LOG_PREFIX, scripCode, e.getMessage());
         }
 
-        // Register all collected levels
+        // 4. Register swing-derived S/R levels from PivotProcessor
+        try {
+            if (pivotState != null) {
+                if (pivotState.getSupportLevels() != null) {
+                    int count = 0;
+                    for (PriceLevel sl : pivotState.getSupportLevels()) {
+                        if (count >= 5) break;
+                        addLevel(levels, sl.getPrice(), LevelSource.SWING_LOW,
+                            "Swing_S_" + String.format("%.0f", sl.getPrice()));
+                        count++;
+                    }
+                }
+                if (pivotState.getResistanceLevels() != null) {
+                    int count = 0;
+                    for (PriceLevel rl : pivotState.getResistanceLevels()) {
+                        if (count >= 5) break;
+                        addLevel(levels, rl.getPrice(), LevelSource.SWING_HIGH,
+                            "Swing_R_" + String.format("%.0f", rl.getPrice()));
+                        count++;
+                    }
+                }
+            }
+        } catch (Exception e) {
+            log.debug("{} {} Failed to register swing levels: {}",
+                LOG_PREFIX, scripCode, e.getMessage());
+        }
+
+        // 5. Register previous day levels (PDH/PDL)
+        try {
+            SessionStructure session = sessionTracker.getSession(scripCode);
+            if (session != null) {
+                if (session.getPrevDayHigh() > 0) {
+                    addLevel(levels, session.getPrevDayHigh(), LevelSource.PREVIOUS_DAY, "PDH");
+                }
+                if (session.getPrevDayLow() > 0) {
+                    addLevel(levels, session.getPrevDayLow(), LevelSource.PREVIOUS_DAY, "PDL");
+                }
+            }
+        } catch (Exception e) {
+            log.debug("{} {} Failed to register previous day levels: {}",
+                LOG_PREFIX, scripCode, e.getMessage());
+        }
+
+        // 6. Register previous week levels (PWH/PWL) — derived from pivot formula: H = 2P - S1, L = 2P - R1
+        try {
+            Optional<MultiTimeframePivotState> pivotOpt = pivotLevelService.getOrLoadPivotLevels(scripCode, exch, exchType);
+            if (pivotOpt.isPresent()) {
+                PivotLevels prevWeekly = pivotOpt.get().getPrevWeeklyPivot();
+                if (prevWeekly != null && prevWeekly.getPivot() > 0) {
+                    double pwh = 2 * prevWeekly.getPivot() - prevWeekly.getS1();
+                    double pwl = 2 * prevWeekly.getPivot() - prevWeekly.getR1();
+                    if (pwh > 0) addLevel(levels, pwh, LevelSource.PREVIOUS_WEEK, "PWH");
+                    if (pwl > 0) addLevel(levels, pwl, LevelSource.PREVIOUS_WEEK, "PWL");
+                }
+            }
+        } catch (Exception e) {
+            log.debug("{} {} Failed to register previous week levels: {}",
+                LOG_PREFIX, scripCode, e.getMessage());
+        }
+
+        // Merge levels into existing state (preserves touchCount, isBroken, activeBreakouts)
         if (!levels.isEmpty()) {
-            breakoutDetector.registerLevels(scripCode, levels);
-            log.debug("{} {} Registered {} levels for breakout detection",
+            breakoutDetector.updateLevels(scripCode, levels);
+            log.debug("{} {} Updated {} levels for breakout detection",
                 LOG_PREFIX, scripCode, levels.size());
         }
     }
@@ -1773,6 +1885,47 @@ public class SignalEngine {
             return;
         }
 
+        // Cross-strategy confluence detection
+        Map<String, String> triggeredDirections = new LinkedHashMap<>();
+        if (fudkiiResult != null && fudkiiResult.isTriggered()) {
+            triggeredDirections.put("FUDKII", fudkiiResult.getDirection().name());
+        }
+        if (pivotResult != null && pivotResult.isTriggered()) {
+            triggeredDirections.put("PIVOT_CONFLUENCE", pivotResult.getDirection().name());
+        }
+        if (microAlphaResult != null && microAlphaResult.isTriggered()) {
+            triggeredDirections.put("MICROALPHA", microAlphaResult.getDirection().name());
+        }
+
+        // Find aligned strategies (same direction)
+        Map<String, List<String>> directionGroups = new HashMap<>();
+        for (Map.Entry<String, String> entry : triggeredDirections.entrySet()) {
+            directionGroups.computeIfAbsent(entry.getValue(), k -> new ArrayList<>()).add(entry.getKey());
+        }
+
+        // Determine confluence for each direction
+        Map<String, Boolean> isConfluent = new HashMap<>();
+        Map<String, List<String>> alignedNames = new HashMap<>();
+        for (Map.Entry<String, List<String>> group : directionGroups.entrySet()) {
+            boolean confluent = group.getValue().size() >= 2;
+            for (String strategy : group.getValue()) {
+                isConfluent.put(strategy, confluent);
+                alignedNames.put(strategy, group.getValue());
+            }
+            if (confluent) {
+                log.info("{} {} CROSS-STRATEGY CONFLUENCE: {} strategies aligned {} — {}",
+                    LOG_PREFIX, TraceContext.getShortPrefix(), group.getValue().size(),
+                    group.getKey(), String.join("+", group.getValue()));
+            }
+        }
+
+        // Check for conflicting directions (opposing strategies)
+        boolean hasConflict = directionGroups.size() > 1 && triggeredDirections.size() > 1;
+        if (hasConflict) {
+            log.info("{} {} DIRECTION CONFLICT: strategies firing in opposing directions — {}",
+                LOG_PREFIX, TraceContext.getShortPrefix(), triggeredDirections);
+        }
+
         // Get or create per-symbol strategy map
         ConcurrentHashMap<String, TradingSignal> symbolSignals =
             activeSignals.computeIfAbsent(symbol, k -> new ConcurrentHashMap<>());
@@ -1790,6 +1943,7 @@ public class SignalEngine {
                 fudkiiResult.getBbst() != null ? fudkiiResult.getBbst().getSuperTrend() : price * 0.99
             );
             if (signal != null && signal.getState().isActive()) {
+                applyConfluenceMetadata(signal, "FUDKII", isConfluent, alignedNames);
                 symbolSignals.put("FUDKII", signal);
             }
         }
@@ -1810,6 +1964,7 @@ public class SignalEngine {
                 pivotResult.getReason(), stopLoss
             );
             if (signal != null && signal.getState().isActive()) {
+                applyConfluenceMetadata(signal, "PIVOT_CONFLUENCE", isConfluent, alignedNames);
                 symbolSignals.put("PIVOT_CONFLUENCE", signal);
             }
         }
@@ -1831,6 +1986,7 @@ public class SignalEngine {
                 microAlphaResult.getReason(), stopLoss
             );
             if (signal != null && signal.getState().isActive()) {
+                applyConfluenceMetadata(signal, "MICROALPHA", isConfluent, alignedNames);
                 symbolSignals.put("MICROALPHA", signal);
             }
         }
@@ -1847,6 +2003,22 @@ public class SignalEngine {
         // Clean up empty symbol entries
         if (symbolSignals.isEmpty()) {
             activeSignals.remove(symbol);
+        }
+    }
+
+    /**
+     * Apply cross-strategy confluence metadata to a created signal.
+     */
+    private void applyConfluenceMetadata(TradingSignal signal, String strategyName,
+                                          Map<String, Boolean> isConfluent,
+                                          Map<String, List<String>> alignedNames) {
+        Boolean confluent = isConfluent.get(strategyName);
+        if (confluent != null && confluent) {
+            List<String> aligned = alignedNames.get(strategyName);
+            signal.setCrossStrategyConfluence(true);
+            signal.setConfluentStrategies(aligned.size());
+            signal.setAlignedStrategyNames(new ArrayList<>(aligned));
+            signal.getTags().add("CONFLUENCE_" + aligned.size() + "x");
         }
     }
 

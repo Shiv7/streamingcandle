@@ -91,6 +91,14 @@ public class SMCAnalyzer {
     private List<OrderBlock> detectOrderBlocks(String symbol, String timeframe, List<CandleData> candles) {
         List<OrderBlock> detected = new ArrayList<>();
 
+        // Compute average volume for strength calculation
+        double avgVolume = candles.stream().mapToDouble(c -> c.volume).average().orElse(0);
+
+        // Get market structure for trend context
+        MarketStructure ms = marketStructures.get(symbol);
+        boolean structureBullish = ms != null && ms.isBullish();
+        boolean structureBearish = ms != null && ms.isBearish();
+
         for (int i = 2; i < candles.size() - 2; i++) {
             CandleData prev = candles.get(i - 1);
             CandleData curr = candles.get(i);
@@ -122,8 +130,8 @@ public class SMCAnalyzer {
                         .candlesToBreak(2)
                         .volume(curr.volume)
                         .structureBreakLevel(prev.high)
-                        .strength(calculateOBStrength(movePercent, curr.volume))
-                        .trendContext(TrendContext.WITH_TREND)
+                        .strength(calculateOBStrength(movePercent, curr.volume, avgVolume))
+                        .trendContext(structureBullish ? TrendContext.WITH_TREND : (structureBearish ? TrendContext.COUNTER_TREND : TrendContext.WITH_TREND))
                         .build();
                     detected.add(ob);
                 }
@@ -154,8 +162,8 @@ public class SMCAnalyzer {
                         .candlesToBreak(2)
                         .volume(curr.volume)
                         .structureBreakLevel(prev.low)
-                        .strength(calculateOBStrength(movePercent, curr.volume))
-                        .trendContext(TrendContext.WITH_TREND)
+                        .strength(calculateOBStrength(movePercent, curr.volume, avgVolume))
+                        .trendContext(structureBearish ? TrendContext.WITH_TREND : (structureBullish ? TrendContext.COUNTER_TREND : TrendContext.WITH_TREND))
                         .build();
                     detected.add(ob);
                 }
@@ -541,8 +549,10 @@ public class SMCAnalyzer {
         return next1.close < ob.low || next2.close < ob.low;
     }
 
-    private OrderBlockStrength calculateOBStrength(double movePercent, double volume) {
-        if (movePercent > 1.0) return OrderBlockStrength.STRONG;
+    private OrderBlockStrength calculateOBStrength(double movePercent, double volume, double avgVolume) {
+        double volumeRatio = avgVolume > 0 ? volume / avgVolume : 1.0;
+        if (movePercent > 1.0 && volumeRatio > 1.5) return OrderBlockStrength.STRONG;
+        if (movePercent > 1.0 || (movePercent > 0.5 && volumeRatio > 1.3)) return OrderBlockStrength.MODERATE;
         if (movePercent > 0.5) return OrderBlockStrength.MODERATE;
         return OrderBlockStrength.WEAK;
     }
@@ -639,6 +649,9 @@ public class SMCAnalyzer {
         boolean isLowerHigh;
         boolean isLowerLow;
         Instant lastUpdate;
+
+        public boolean isBullish() { return trend == Trend.BULLISH; }
+        public boolean isBearish() { return trend == Trend.BEARISH; }
 
         public enum Trend {
             BULLISH, BEARISH, RANGING

@@ -21,6 +21,7 @@ import com.kotsin.consumer.smc.analyzer.SMCAnalyzer.CandleData;
 import com.kotsin.consumer.smc.model.OrderBlock;
 import com.kotsin.consumer.smc.model.FairValueGap;
 import com.kotsin.consumer.smc.model.LiquidityZone;
+import com.kotsin.consumer.model.OIMetrics;
 import lombok.Builder;
 import lombok.Data;
 import lombok.extern.slf4j.Slf4j;
@@ -110,6 +111,12 @@ public class PivotConfluenceTrigger {
     // Cache for LTF confirmation with TTL
     private final Map<String, CachedLTFConfirmation> ltfConfirmCache = new ConcurrentHashMap<>();
 
+    // OI context per symbol (set by SignalEngine before checkTrigger)
+    private final ConcurrentHashMap<String, OIContext> oiContext = new ConcurrentHashMap<>();
+
+    // IPU context per symbol (set by SignalEngine before checkTrigger)
+    private final ConcurrentHashMap<String, IPUContext> ipuContext = new ConcurrentHashMap<>();
+
     // Cache TTLs
     private static final Duration HTF_BIAS_TTL = Duration.ofHours(4);     // Recalculate every 4H
     private static final Duration LTF_CONFIRM_TTL = Duration.ofMinutes(15); // Recalculate every 15m
@@ -177,11 +184,57 @@ public class PivotConfluenceTrigger {
         private Instant calculatedAt;
     }
 
+    private static class OIContext {
+        final OIMetrics.OIInterpretation interpretation;
+        final double oiChangePct;
+        final Double pcr;
+
+        OIContext(OIMetrics.OIInterpretation interpretation, double oiChangePct, Double pcr) {
+            this.interpretation = interpretation;
+            this.oiChangePct = oiChangePct;
+            this.pcr = pcr;
+        }
+    }
+
+    private static class IPUContext {
+        final double exhaustion;
+        final String momentumState;
+        final boolean ipuRising;
+        final boolean exhaustionBuilding;
+
+        IPUContext(double exhaustion, String momentumState, boolean ipuRising, boolean exhaustionBuilding) {
+            this.exhaustion = exhaustion;
+            this.momentumState = momentumState;
+            this.ipuRising = ipuRising;
+            this.exhaustionBuilding = exhaustionBuilding;
+        }
+    }
+
+    /**
+     * Set IPU context for a symbol. Called by SignalEngine before checkTrigger.
+     */
+    public void setIPUContext(String symbol, double exhaustion, String momentumState,
+                               boolean ipuRising, boolean exhaustionBuilding) {
+        ipuContext.put(symbol, new IPUContext(exhaustion, momentumState, ipuRising, exhaustionBuilding));
+    }
+
     /**
      * Set breakout context from BreakoutDetector.
      * Called by SignalEngine before checkTrigger() to provide break/retest state.
      * Also updates persistent level states from the events.
      */
+    /**
+     * Set OI context for a symbol. Called by SignalEngine before checkTrigger.
+     */
+    public void setOIContext(String symbol, OIMetrics.OIInterpretation interp,
+                              double oiChangePct, Double pcr) {
+        if (interp != null) {
+            oiContext.put(symbol, new OIContext(interp, oiChangePct, pcr));
+        } else {
+            oiContext.remove(symbol);
+        }
+    }
+
     public void setBreakoutContext(String symbol, List<BreakoutEvent> events) {
         if (events != null && !events.isEmpty()) {
             breakoutContext.put(symbol, events);
@@ -309,7 +362,7 @@ public class PivotConfluenceTrigger {
             }
 
             // Step 6: Calculate overall score
-            double triggerScore = calculateTriggerScore(htfBias, ltfConfirm, pivotAnalysis, smcAnalysis, rrCalc);
+            double triggerScore = calculateTriggerScore(scripCode, htfBias, ltfConfirm, pivotAnalysis, smcAnalysis, rrCalc);
             log.info("{} {} Trigger Score: {}", LOG_PREFIX, scripCode, String.format("%.2f", triggerScore));
 
             // All conditions met - TRIGGER!
@@ -812,6 +865,7 @@ public class PivotConfluenceTrigger {
         boolean nearFVG = false;
         boolean atLiquidity = false;
         BiasDirection smcBias = BiasDirection.NEUTRAL;
+        OrderBlock.OrderBlockStrength obStrength = null;
 
         if (smcResult != null) {
             // Check order blocks
@@ -819,8 +873,9 @@ public class PivotConfluenceTrigger {
                 if (ob.isPriceInZone(currentPrice)) {
                     inOrderBlock = true;
                     smcBias = ob.isBullish() ? BiasDirection.BULLISH : BiasDirection.BEARISH;
-                    log.debug("{} {} In {} order block at {}",
-                        LOG_PREFIX, scripCode, ob.getType(), String.format("%.2f", currentPrice));
+                    obStrength = ob.getStrength();
+                    log.debug("{} {} In {} order block at {} (strength={})",
+                        LOG_PREFIX, scripCode, ob.getType(), String.format("%.2f", currentPrice), obStrength);
                     break;
                 }
             }
@@ -850,6 +905,7 @@ public class PivotConfluenceTrigger {
             .atLiquidityZone(atLiquidity)
             .smcBias(smcBias)
             .smcResult(smcResult)
+            .obStrength(obStrength)
             .build();
     }
 
@@ -1100,7 +1156,7 @@ public class PivotConfluenceTrigger {
     /**
      * Calculate overall trigger score.
      */
-    private double calculateTriggerScore(DirectionBias htfBias, LTFConfirmation ltfConfirm,
+    private double calculateTriggerScore(String symbol, DirectionBias htfBias, LTFConfirmation ltfConfirm,
                                           PivotConfluenceAnalysis pivotAnalysis,
                                           SMCZoneAnalysis smcAnalysis,
                                           RiskRewardCalculation rrCalc) {
@@ -1116,8 +1172,15 @@ public class PivotConfluenceTrigger {
         // Pivot confluence (max 20)
         score += Math.min(pivotAnalysis.nearbyLevels * 5, 20);
 
-        // SMC zones (max 15)
-        if (smcAnalysis.inOrderBlock) score += 8;
+        // SMC zones (max 18) — quality-scaled by OB strength
+        if (smcAnalysis.inOrderBlock) {
+            int obPoints = smcAnalysis.obStrength != null ? switch (smcAnalysis.obStrength) {
+                case STRONG -> 12;
+                case MODERATE -> 8;
+                case WEAK -> 4;
+            } : 8;
+            score += obPoints;
+        }
         if (smcAnalysis.nearFVG) score += 4;
         if (smcAnalysis.atLiquidityZone) score += 3;
 
@@ -1141,6 +1204,64 @@ public class PivotConfluenceTrigger {
         } else if (pivotAnalysis.isHasActiveBreakout()) {
             score += 15; // Active breakout at a pivot level
             log.info("{} Breakout bonus applied: +15", LOG_PREFIX);
+        }
+
+        // OI enrichment (max ±15) — family OI alignment with bias direction
+        OIContext oi = oiContext.get(symbol);
+        if (oi != null && oi.interpretation != null) {
+            boolean bullish = "BULLISH".equals(htfBias.direction);
+            int oiAdj = 0;
+            switch (oi.interpretation) {
+                case LONG_BUILDUP:
+                    oiAdj = bullish ? 10 : -10;
+                    break;
+                case LONG_UNWINDING:
+                    oiAdj = bullish ? -10 : 5;
+                    break;
+                case SHORT_BUILDUP:
+                    oiAdj = bullish ? -10 : 10;
+                    break;
+                case SHORT_COVERING:
+                    oiAdj = bullish ? 5 : -10;
+                    break;
+            }
+            // PCR alignment bonus
+            if (oi.pcr != null) {
+                if (bullish && oi.pcr > 1.5) oiAdj += 5;   // High PCR = put writers supporting
+                if (!bullish && oi.pcr < 0.5) oiAdj += 5;  // Low PCR = call writers pressuring
+            }
+            if (oiAdj != 0) {
+                score += oiAdj;
+                log.info("{} {} OI adjustment: {} (interp={}, PCR={})",
+                    LOG_PREFIX, symbol, oiAdj > 0 ? "+" + oiAdj : oiAdj,
+                    oi.interpretation, oi.pcr != null ? String.format("%.2f", oi.pcr) : "N/A");
+            }
+        }
+
+        // IPU context (max ±15) — momentum state alignment
+        IPUContext ipu = ipuContext.get(symbol);
+        if (ipu != null) {
+            int ipuAdj = 0;
+            boolean bullish2 = "BULLISH".equals(htfBias.direction);
+            String ms = ipu.momentumState;
+
+            if ("ACCELERATING".equals(ms)) {
+                ipuAdj += 10; // Strong momentum in direction
+            } else if ("EXHAUSTED".equals(ms) || ipu.exhaustion > 0.7) {
+                ipuAdj -= 15; // Exhausted momentum — high risk
+            } else if ("DECELERATING".equals(ms)) {
+                ipuAdj -= 5; // Momentum weakening
+            }
+
+            if (ipu.ipuRising) ipuAdj += 5;
+            if (ipu.exhaustionBuilding) ipuAdj -= 8;
+
+            if (ipuAdj != 0) {
+                score += ipuAdj;
+                log.info("{} {} IPU adjustment: {} (state={}, exhaustion={}, rising={}, exhaBuilding={})",
+                    LOG_PREFIX, symbol, ipuAdj > 0 ? "+" + ipuAdj : ipuAdj,
+                    ms, String.format("%.2f", ipu.exhaustion), ipu.ipuRising, ipu.exhaustionBuilding);
+            }
         }
 
         return Math.min(score, 100);
@@ -1340,6 +1461,7 @@ public class PivotConfluenceTrigger {
         private boolean atLiquidityZone;
         private BiasDirection smcBias;
         private SMCResult smcResult;
+        private OrderBlock.OrderBlockStrength obStrength; // Strength of nearest OB
     }
 
     @Data
