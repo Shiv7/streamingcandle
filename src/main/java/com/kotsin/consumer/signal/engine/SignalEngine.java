@@ -570,7 +570,7 @@ public class SignalEngine {
             TraceContext.addStage("QUANT_PUBLISH");
             quantScoreProducer.publish(
                 current, score, vcpState, ipuState, pivotState, detectedPatterns,
-                symbolBreakoutEvents.get(symbol));
+                patternResult.getPatternScore(), symbolBreakoutEvents.get(symbol));
 
             // ==================== PIVOT CONFLUENCE ANALYSIS ====================
             TraceContext.addStage("PIVOT_MTF");

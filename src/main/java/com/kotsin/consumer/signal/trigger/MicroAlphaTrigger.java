@@ -125,6 +125,8 @@ public class MicroAlphaTrigger {
     public void setLevelContext(String symbol, List<BreakoutEvent> events) {
         if (events != null && !events.isEmpty()) {
             levelContext.put(symbol, events);
+            log.debug("{} {} Level context set: {} events (types: {})", LOG_PREFIX, symbol, events.size(),
+                events.stream().map(e -> e.getType().name()).distinct().toList());
         } else {
             levelContext.remove(symbol);
         }
@@ -428,10 +430,14 @@ public class MicroAlphaTrigger {
             String symbol = String.valueOf(candle.getScripCode());
             List<BreakoutEvent> events = levelContext.get(symbol);
             if (events != null) {
+                log.debug("{} {} MR validation: checking {} BreakoutDetector events for extremity",
+                    LOG_PREFIX, symbol, events.size());
                 for (BreakoutEvent event : events) {
                     if (event.getType() == BreakoutType.RETEST && event.isRetestHeld()) {
                         atExtremity = true;
                         passes.add("At confirmed retest level: " + event.getLevelDescription());
+                        log.debug("{} {} MR validation: confirmed retest at {} counts as extremity",
+                            LOG_PREFIX, symbol, event.getLevelDescription());
                         break;
                     }
                 }
@@ -504,14 +510,20 @@ public class MicroAlphaTrigger {
             String symbol = String.valueOf(candle.getScripCode());
             List<BreakoutEvent> events = levelContext.get(symbol);
             if (events != null) {
+                log.debug("{} {} BKO validation: checking {} BreakoutDetector events for structural break",
+                    LOG_PREFIX, symbol, events.size());
                 for (BreakoutEvent event : events) {
                     if (event.getType() == BreakoutType.BREAKOUT) {
                         structuralBreak = true;
                         passes.add("Breakout at " + event.getLevelDescription() + " (registered level)");
+                        log.debug("{} {} BKO validation: structural break confirmed via BREAKOUT at {}",
+                            LOG_PREFIX, symbol, event.getLevelDescription());
                         break;
                     } else if (event.getType() == BreakoutType.RETEST && event.isRetestHeld()) {
                         structuralBreak = true;
                         passes.add("Retest held at " + event.getLevelDescription() + " (confirmed)");
+                        log.debug("{} {} BKO validation: structural break confirmed via RETEST at {}",
+                            LOG_PREFIX, symbol, event.getLevelDescription());
                         break;
                     }
                 }
@@ -552,19 +564,29 @@ public class MicroAlphaTrigger {
         if (events == null || events.isEmpty()) return 0;
 
         double bonus = 0;
+        String bestLevel = null;
+        String bestType = null;
         for (BreakoutEvent event : events) {
             if (event.getType() == BreakoutType.RETEST && event.isRetestHeld()) {
                 RetestQuality quality = event.getRetestQuality();
                 if (quality == RetestQuality.PERFECT) {
+                    if (bonus < 10) { bestLevel = event.getLevelDescription(); bestType = "PERFECT_RETEST"; }
                     bonus = Math.max(bonus, 10);
                 } else if (quality == RetestQuality.GOOD) {
+                    if (bonus < 7) { bestLevel = event.getLevelDescription(); bestType = "GOOD_RETEST"; }
                     bonus = Math.max(bonus, 7);
                 } else {
+                    if (bonus < 3) { bestLevel = event.getLevelDescription(); bestType = "RETEST"; }
                     bonus = Math.max(bonus, 3);
                 }
             } else if (event.getType() == BreakoutType.BREAKOUT) {
+                if (bonus < 5) { bestLevel = event.getLevelDescription(); bestType = "BREAKOUT"; }
                 bonus = Math.max(bonus, 5);
             }
+        }
+        if (bonus > 0) {
+            log.debug("{} {} Structural bonus: +{} from {} at {}",
+                LOG_PREFIX, symbol, String.format("%.0f", bonus), bestType, bestLevel);
         }
         return bonus;
     }

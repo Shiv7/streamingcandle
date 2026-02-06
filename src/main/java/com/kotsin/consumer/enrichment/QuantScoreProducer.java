@@ -74,11 +74,11 @@ public class QuantScoreProducer {
             IpuState ipuState,
             PivotState pivotState,
             List<String> detectedPatterns) {
-        publish(candle, fudkiiScore, vcpState, ipuState, pivotState, detectedPatterns, null);
+        publish(candle, fudkiiScore, vcpState, ipuState, pivotState, detectedPatterns, 0.0, null);
     }
 
     /**
-     * Publish a QuantScore with structural level context.
+     * Publish a QuantScore with structural level context and pattern confidence.
      */
     public void publish(
             UnifiedCandle candle,
@@ -87,6 +87,7 @@ public class QuantScoreProducer {
             IpuState ipuState,
             PivotState pivotState,
             List<String> detectedPatterns,
+            double patternScore,
             List<BreakoutEvent> breakoutEvents) {
 
         if (!enabled || fudkiiScore == null || candle == null) {
@@ -94,7 +95,7 @@ public class QuantScoreProducer {
         }
 
         try {
-            QuantScoreDTO dto = buildQuantScore(candle, fudkiiScore, vcpState, ipuState, pivotState, detectedPatterns, breakoutEvents);
+            QuantScoreDTO dto = buildQuantScore(candle, fudkiiScore, vcpState, ipuState, pivotState, detectedPatterns, patternScore, breakoutEvents);
 
             // Publish to Redis
             publishToRedis(dto);
@@ -122,7 +123,14 @@ public class QuantScoreProducer {
             IpuState ipuState,
             PivotState pivotState,
             List<String> detectedPatterns,
+            double patternScore,
             List<BreakoutEvent> breakoutEvents) {
+
+        // Calculate pattern score: use actual confidence from PatternAnalyzer (0-1 range → 0-100)
+        double normalizedPatternScore = 0.0;
+        if (detectedPatterns != null && !detectedPatterns.isEmpty()) {
+            normalizedPatternScore = patternScore > 0 ? Math.min(patternScore * 100, 100) : 50.0;
+        }
 
         // Build score breakdown
         QuantScoreDTO.ScoreBreakdown breakdown = QuantScoreDTO.ScoreBreakdown.builder()
@@ -132,7 +140,7 @@ public class QuantScoreProducer {
             .kyleScore(normalize(fudkiiScore.getKyleScore()))
             .imbalanceScore(normalize(fudkiiScore.getImbalanceScore()))
             .intensityScore(normalize(fudkiiScore.getIntensityScore()))
-            .patternScore(detectedPatterns != null && !detectedPatterns.isEmpty() ? 70.0 : 0.0)
+            .patternScore(normalizedPatternScore)
             .trendScore(calculateTrendScore(pivotState))
             .volumeProfileScore(calculateVolumeProfileScore(vcpState))
             .microstructureScore(calculateMicrostructureScore(candle))
@@ -201,7 +209,7 @@ public class QuantScoreProducer {
             .momentumState(momentumState)
             .exhaustionScore(exhaustionScore)
             .detectedPatterns(detectedPatterns != null ? detectedPatterns : new ArrayList<>())
-            .patternConfidence(detectedPatterns != null && !detectedPatterns.isEmpty() ? 0.7 : 0.0)
+            .patternConfidence(patternScore)
             .nearestSupport(nearestSupport)
             .nearestResistance(nearestResistance)
             .currentPrice(candle.getClose())

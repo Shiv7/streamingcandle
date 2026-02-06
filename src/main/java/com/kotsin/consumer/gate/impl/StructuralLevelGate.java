@@ -72,6 +72,10 @@ public class StructuralLevelGate implements SignalGate {
         RetestQuality bestRetestQuality = null;
 
         for (BreakoutEvent event : events) {
+            log.debug("[STRUCTURAL-GATE] Evaluating event: type={} level={} retestHeld={} quality={}",
+                event.getType(), event.getLevelDescription(),
+                event.isRetestHeld(), event.getRetestQuality());
+
             if (event.getType() == BreakoutType.RETEST && event.isRetestHeld()) {
                 hasRetest = true;
                 RetestQuality quality = event.getRetestQuality();
