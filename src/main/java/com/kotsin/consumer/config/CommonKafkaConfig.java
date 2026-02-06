@@ -85,7 +85,7 @@ public class CommonKafkaConfig {
         ConcurrentKafkaListenerContainerFactory<String, String> factory =
                 new ConcurrentKafkaListenerContainerFactory<>();
         factory.setConsumerFactory(commonConsumerFactory());
-        factory.setConcurrency(10); // Increased from 3 for better parallelism (MasterArchProcessor uses this)
+        factory.setConcurrency(16); // Bug #18: Match Kafka partition count (16 partitions)
 
         StringJsonMessageConverter converter = new StringJsonMessageConverter(commonObjectMapper());
         factory.setRecordMessageConverter(converter);

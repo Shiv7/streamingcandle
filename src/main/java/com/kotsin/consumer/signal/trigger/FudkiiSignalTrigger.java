@@ -586,7 +586,7 @@ public class FudkiiSignalTrigger {
         String exchange = candles1m.get(0).getExchange();
 
         // Get symbol and company name from ScripMetadataService
-        String symbol = scripMetadataService.getSymbolRoot(scripCode, candles1m.get(0).getCompanyName());
+        String symbol = scripMetadataService.getSymbolRoot(scripCode);
         String companyName = scripMetadataService.getCompanyName(scripCode);
         if (companyName == null) {
             companyName = candles1m.get(0).getCompanyName();
@@ -793,7 +793,7 @@ public class FudkiiSignalTrigger {
             log.info("{} {} Fetched {} 30m candles from API", LOG_PREFIX, scripCode, apiCandles.size());
 
             // Get symbol and company name from ScripMetadataService
-            String symbol = scripMetadataService.getSymbolRoot(scripCode, null);
+            String symbol = scripMetadataService.getSymbolRoot(scripCode);
             String companyName = scripMetadataService.getCompanyName(scripCode);
 
             // Convert to Candle30m

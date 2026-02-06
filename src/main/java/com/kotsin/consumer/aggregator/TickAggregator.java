@@ -525,8 +525,8 @@ public class TickAggregator {
                 symbol, tick.getLastRate(), tick.getLastQuantity(), tick.getTickDt());
         }
 
-        // Start trace context
-        TraceContext.start(symbol, "1m");
+        // Bug #19: Start trace context with scripcode for consistency
+        TraceContext.start(tick.getScripCode(), "1m");
         try {
             // Use Kafka timestamp for consistency with OI and Orderbook aggregators
             Instant tickTime = Instant.ofEpochMilli(kafkaTimestamp);
