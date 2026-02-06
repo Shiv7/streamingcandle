@@ -575,7 +575,7 @@ public class TickAggregateState {
             : OptionMetadata.parse(companyName);
 
         TickCandle.TickCandleBuilder builder = TickCandle.builder()
-            .id(scripCode + "_" + windowEnd.toEpochMilli()) // IDEMPOTENCY FIX
+            .id(exchange + ":" + scripCode + "_" + windowEnd.toEpochMilli()) // IDEMPOTENCY FIX + Bug #6: exchange in ID
             .symbol(symbol)
             .scripCode(scripCode)
             .exchange(exchange)

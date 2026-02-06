@@ -303,62 +303,90 @@ public class RedisCacheService {
 
     /**
      * Cache current price for a scripCode (for OI interpretation).
-     * Also stores previous price before updating.
+     * Bug #25 FIX: Backward-compatible overload defaulting exchange to "N".
      */
     public void cachePrice(String scripCode, double price) {
+        cachePrice("N", scripCode, price);
+    }
+
+    /**
+     * Cache current price for a scripCode with exchange (for OI interpretation).
+     * Bug #25 FIX: Include exchange in key to avoid MCX/NSE price collisions.
+     * Also stores previous price before updating.
+     */
+    public void cachePrice(String exchange, String scripCode, double price) {
         if (scripCode == null || price <= 0) return;
+        String exch = (exchange != null && !exchange.isEmpty()) ? exchange : "N";
 
         try {
-            String priceKey = PRICE_KEY_PREFIX + scripCode;
-            String prevPriceKey = PREV_PRICE_KEY_PREFIX + scripCode;
-            
+            String priceKey = PRICE_KEY_PREFIX + exch + ":" + scripCode;
+            String prevPriceKey = PREV_PRICE_KEY_PREFIX + exch + ":" + scripCode;
+
             // Get current price to store as previous
             Object current = redisTemplate.opsForValue().get(priceKey);
             if (current != null) {
-                redisTemplate.opsForValue().set(prevPriceKey, current, 
+                redisTemplate.opsForValue().set(prevPriceKey, current,
                     Duration.ofMinutes(tickLatestTtlMinutes));
             }
-            
+
             // Store new price
             redisTemplate.opsForValue().set(priceKey, price,
                 Duration.ofMinutes(tickLatestTtlMinutes));
         } catch (Exception e) {
-            log.debug("[REDIS-CACHE] Failed to cache price for scripCode={}: {}", scripCode, e.getMessage());
+            log.debug("[REDIS-CACHE] Failed to cache price for {}:{}: {}", exch, scripCode, e.getMessage());
         }
     }
 
     /**
-     * Get last known price for a scripCode.
+     * Get last known price for a scripCode (backward-compatible, defaults to NSE).
      */
     public Double getLastPrice(String scripCode) {
+        return getLastPrice("N", scripCode);
+    }
+
+    /**
+     * Get last known price for a scripCode with exchange.
+     * Bug #25 FIX: Include exchange in key lookup.
+     */
+    public Double getLastPrice(String exchange, String scripCode) {
         if (scripCode == null) return null;
+        String exch = (exchange != null && !exchange.isEmpty()) ? exchange : "N";
 
         try {
-            String key = PRICE_KEY_PREFIX + scripCode;
+            String key = PRICE_KEY_PREFIX + exch + ":" + scripCode;
             Object value = redisTemplate.opsForValue().get(key);
             if (value instanceof Number) {
                 return ((Number) value).doubleValue();
             }
         } catch (Exception e) {
-            log.debug("[REDIS-CACHE] Failed to get price for scripCode={}: {}", scripCode, e.getMessage());
+            log.debug("[REDIS-CACHE] Failed to get price for {}:{}: {}", exch, scripCode, e.getMessage());
         }
         return null;
     }
 
     /**
-     * Get previous price for a scripCode.
+     * Get previous price for a scripCode (backward-compatible, defaults to NSE).
      */
     public Double getPreviousPrice(String scripCode) {
+        return getPreviousPrice("N", scripCode);
+    }
+
+    /**
+     * Get previous price for a scripCode with exchange.
+     * Bug #25 FIX: Include exchange in key lookup.
+     */
+    public Double getPreviousPrice(String exchange, String scripCode) {
         if (scripCode == null) return null;
+        String exch = (exchange != null && !exchange.isEmpty()) ? exchange : "N";
 
         try {
-            String key = PREV_PRICE_KEY_PREFIX + scripCode;
+            String key = PREV_PRICE_KEY_PREFIX + exch + ":" + scripCode;
             Object value = redisTemplate.opsForValue().get(key);
             if (value instanceof Number) {
                 return ((Number) value).doubleValue();
             }
         } catch (Exception e) {
-            log.debug("[REDIS-CACHE] Failed to get previous price for scripCode={}: {}", scripCode, e.getMessage());
+            log.debug("[REDIS-CACHE] Failed to get previous price for {}:{}: {}", exch, scripCode, e.getMessage());
         }
         return null;
     }

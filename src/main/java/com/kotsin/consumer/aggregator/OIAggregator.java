@@ -180,7 +180,7 @@ public class OIAggregator {
      * Number of parallel consumer threads.
      * <p>Default: 2</p>
      */
-    @Value("${v2.oi.aggregator.threads:2}")
+    @Value("${v2.oi.aggregator.threads:16}")
     private int numThreads;
 
     /**
@@ -490,7 +490,7 @@ public class OIAggregator {
 
         // Resolve symbol using ScripMetadataService (authoritative source from database)
         final String scripCode = String.valueOf(oi.getToken());
-        final String resolvedSymbol = scripMetadataService.getSymbolRoot(scripCode, oi.getCompanyName());
+        final String resolvedSymbol = scripMetadataService.getSymbolRoot(scripCode);
 
         // Get OptionMetadata from Scrip if this is an option (PREFERRED over companyName parsing)
         final OptionMetadata optionMeta = scripMetadataService.isOption(scripCode)

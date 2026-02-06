@@ -322,9 +322,9 @@ public class OIAggregateState {
         // OI acceleration = change in velocity
         double oiAcceleration = oiVelocity - previousVelocity;
 
-        // Calculate interpretation using cached price (keyed by scripCode)
+        // Calculate interpretation using cached price (keyed by exchange:scripCode)
         OIMetrics.OIInterpretation interpretation = calculateInterpretation(
-            oiChange, scripCode, redisCacheService);
+            oiChange, exchange, scripCode, redisCacheService);
 
         // Calculate interpretation confidence based on OI change magnitude
         double interpretationConfidence = Math.min(1.0, Math.abs(oiChangePercent) / 5.0);
@@ -334,7 +334,7 @@ public class OIAggregateState {
                                     interpretation == OIMetrics.OIInterpretation.LONG_UNWINDING);
 
         return OIMetrics.builder()
-            .id(scripCode + "_" + windowEnd.toEpochMilli()) // IDEMPOTENCY FIX
+            .id(exchange + ":" + scripCode + "_" + windowEnd.toEpochMilli()) // IDEMPOTENCY FIX + Bug #6: exchange in ID
             .symbol(symbol)
             .scripCode(scripCode)
             .exchange(exchange)
@@ -410,14 +410,14 @@ public class OIAggregateState {
      * @return OI interpretation enum
      */
     private OIMetrics.OIInterpretation calculateInterpretation(
-            long oiChange, String scripCode, RedisCacheService redisCacheService) {
+            long oiChange, String exchange, String scripCode, RedisCacheService redisCacheService) {
 
         if (redisCacheService == null) {
             return OIMetrics.OIInterpretation.NEUTRAL;
         }
 
-        Double lastPrice = redisCacheService.getLastPrice(scripCode);
-        Double prevPrice = redisCacheService.getPreviousPrice(scripCode);
+        Double lastPrice = redisCacheService.getLastPrice(exchange, scripCode);
+        Double prevPrice = redisCacheService.getPreviousPrice(exchange, scripCode);
 
         // Log cache misses for debugging
         if (lastPrice == null || prevPrice == null || prevPrice <= 0) {

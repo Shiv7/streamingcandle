@@ -177,7 +177,7 @@ public class TickAggregator {
      * Number of parallel consumer threads.
      * <p>Default: 4</p>
      */
-    @Value("${v2.tick.aggregator.threads:4}")
+    @Value("${v2.tick.aggregator.threads:16}")
     private int numThreads;
 
     /**
@@ -509,7 +509,7 @@ public class TickAggregator {
         //good key building as nse or mcx might have same scripcode so use of exchange is good idea
         String key = buildKey(tick);
         // Extract symbol from ScripMetadataService (authoritative source from database)
-        String symbol = scripMetadataService.getSymbolRoot(tick.getScripCode(), tick.getCompanyName());
+        String symbol = scripMetadataService.getSymbolRoot(tick.getScripCode());
 
         // [TICK-TRACE] Log everything if list is empty, or specific symbol
         boolean specificSymbol = traceSymbols.contains(symbol);
@@ -584,6 +584,18 @@ public class TickAggregator {
         // Check price > 0
         if (tick.getLastRate() <= 0) {
             return "Price <= 0";
+        }
+
+        // Check quantity > 0 (Bug #26), but allow qty=0 for INDEX instruments
+        if (tick.getLastQuantity() < 0) {
+            return "Quantity < 0";
+        }
+        if (tick.getLastQuantity() == 0) {
+            TickCandle.InstrumentType type = TickCandle.InstrumentType.detect(
+                tick.getExchange(), tick.getExchangeType(), tick.getCompanyName());
+            if (type != TickCandle.InstrumentType.INDEX) {
+                return "Quantity = 0 (non-INDEX)";
+            }
         }
 
         return null; // Valid
@@ -785,8 +797,8 @@ public class TickAggregator {
         try {
             for (TickCandle candle : candles) {
                 redisCacheService.cacheTickCandle(candle);
-                // v2.1: Cache price for OI interpretation (keyed by scripCode)
-                redisCacheService.cachePrice(candle.getScripCode(), candle.getClose());
+                // v2.1: Cache price for OI interpretation (Bug #25 FIX: keyed by exchange:scripCode)
+                redisCacheService.cachePrice(candle.getExchange(), candle.getScripCode(), candle.getClose());
             }
             log.debug("{} Cached {} candles in Redis", LOG_PREFIX, candles.size());
         } catch (Exception e) {

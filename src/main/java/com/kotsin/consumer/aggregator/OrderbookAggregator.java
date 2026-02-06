@@ -181,7 +181,7 @@ public class OrderbookAggregator {
      * Number of parallel consumer threads.
      * <p>Default: 2</p>
      */
-    @Value("${v2.orderbook.aggregator.threads:2}")
+    @Value("${v2.orderbook.aggregator.threads:16}")
     private int numThreads;
 
     /**
@@ -492,8 +492,7 @@ public class OrderbookAggregator {
         String stateKey = key + ":" + tickWindowStart.toEpochMilli();
 
         // Resolve symbol using ScripMetadataService (authoritative source from database)
-        final String resolvedSymbol = scripMetadataService.getSymbolRoot(
-            String.valueOf(ob.getToken()), ob.getCompanyName());
+        final String resolvedSymbol = scripMetadataService.getSymbolRoot(String.valueOf(ob.getToken()));
 
         OrderbookAggregateState state = aggregationState.computeIfAbsent(stateKey,
             k -> new OrderbookAggregateState(ob, tickWindowStart, tickWindowEnd, resolvedSymbol));
