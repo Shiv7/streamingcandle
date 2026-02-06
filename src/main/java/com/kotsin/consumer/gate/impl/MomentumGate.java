@@ -43,9 +43,17 @@ public class MomentumGate implements SignalGate {
         Double rsi = (Double) context.get("rsi");
         Double macdHistogram = (Double) context.get("macdHistogram");
         Double momentumScore = (Double) context.get("momentumScore");
+        Double ipuExhaustion = (Double) context.get("ipuExhaustion");
+        Boolean exhaustionBuilding = (Boolean) context.get("exhaustionBuilding");
 
         if (direction == null) {
             return GateResult.fail(getName(), getWeight(), "Signal direction not specified");
+        }
+
+        // IPU exhaustion check: high exhaustion (>0.7) blocks new signals
+        if (ipuExhaustion != null && ipuExhaustion > 0.7) {
+            return GateResult.fail(getName(), getWeight(),
+                String.format("IPU exhaustion high (%.2f) - avoid new entries", ipuExhaustion));
         }
 
         boolean isLong = "LONG".equalsIgnoreCase(direction);
@@ -124,10 +132,17 @@ public class MomentumGate implements SignalGate {
             reason = "Partial momentum alignment: " + reasons.toString().trim();
         }
 
+        // Penalize score if exhaustion is building (trending toward exhaustion)
+        if (exhaustionBuilding != null && exhaustionBuilding) {
+            score = Math.max(score - 15, 40);
+            reason += " [exhaustion building: -15]";
+        }
+
         GateResult result = GateResult.pass(getName(), score, getWeight(), reason);
         result.getDetails().put("alignmentPercent", alignmentPercent);
         if (rsi != null) result.getDetails().put("rsi", rsi);
         if (macdHistogram != null) result.getDetails().put("macdHistogram", macdHistogram);
+        if (ipuExhaustion != null) result.getDetails().put("ipuExhaustion", ipuExhaustion);
         return result;
     }
 }

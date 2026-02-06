@@ -45,7 +45,7 @@ import java.util.LinkedList;
  * @see com.kotsin.consumer.aggregator.OrderbookAggregator
  * @see OrderbookMetrics
  */
-public class OrderbookAggregateState {
+public class OrderbookAggregateState implements com.kotsin.consumer.aggregator.WindowedState {
 
     // ==================== CONSTANTS ====================
 
@@ -514,5 +514,10 @@ public class OrderbookAggregateState {
      */
     public int getUpdateCount() {
         return updateCount;
+    }
+
+    @Override
+    public boolean hasData() {
+        return updateCount > 0;
     }
 }

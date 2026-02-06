@@ -1,5 +1,8 @@
 package com.kotsin.consumer.signal.engine;
 
+import com.kotsin.consumer.breakout.detector.BreakoutDetector;
+import com.kotsin.consumer.breakout.model.BreakoutEvent;
+import com.kotsin.consumer.breakout.model.BreakoutEvent.*;
 import com.kotsin.consumer.event.CandleBoundaryEvent;
 import com.kotsin.consumer.gate.GateChain;
 import com.kotsin.consumer.gate.model.GateResult.ChainResult;
@@ -14,6 +17,7 @@ import com.kotsin.consumer.model.PivotLevels;
 import com.kotsin.consumer.model.CprAnalysis;
 import com.kotsin.consumer.model.ConfluenceResult;
 import com.kotsin.consumer.model.BounceSignal;
+import com.kotsin.consumer.model.OIMetrics;
 import com.kotsin.consumer.papertrade.executor.PaperTradeExecutor;
 import com.kotsin.consumer.papertrade.model.PaperTrade.TradeDirection;
 import com.kotsin.consumer.regime.detector.RegimeDetector;
@@ -133,6 +137,14 @@ public class SignalEngine {
     @Autowired
     private com.kotsin.consumer.service.ATRService atrService;
 
+    // ==================== BREAKOUT DETECTION ====================
+
+    @Autowired
+    private BreakoutDetector breakoutDetector;
+
+    // Per-symbol breakout events cache (updated each processSymbol cycle)
+    private final ConcurrentHashMap<String, List<BreakoutEvent>> symbolBreakoutEvents = new ConcurrentHashMap<>();
+
     // ==================== STRATEGY TRIGGERS ====================
 
     @Autowired
@@ -220,8 +232,8 @@ public class SignalEngine {
     @Value("${signal.active.expiry.hours:4}")
     private int activeExpiryHours;
 
-    // Active signals by symbol
-    private final ConcurrentHashMap<String, TradingSignal> activeSignals = new ConcurrentHashMap<>();
+    // Active signals: symbol → strategyName → signal (allows concurrent strategies per symbol)
+    private final ConcurrentHashMap<String, ConcurrentHashMap<String, TradingSignal>> activeSignals = new ConcurrentHashMap<>();
 
     // Processing state
     private final AtomicBoolean running = new AtomicBoolean(false);
@@ -558,7 +570,8 @@ public class SignalEngine {
             // ==================== PUBLISH QUANT SCORE ====================
             TraceContext.addStage("QUANT_PUBLISH");
             quantScoreProducer.publish(
-                current, score, vcpState, ipuState, pivotState, detectedPatterns);
+                current, score, vcpState, ipuState, pivotState, detectedPatterns,
+                patternResult.getPatternScore(), symbolBreakoutEvents.get(symbol));
 
             // ==================== PIVOT CONFLUENCE ANALYSIS ====================
             TraceContext.addStage("PIVOT_MTF");
@@ -572,32 +585,34 @@ public class SignalEngine {
             TraceContext.addStage("MTF");
             analyzeMTF(symbol, candles, score);
 
+            // ==================== BREAKOUT DETECTION ====================
+            TraceContext.addStage("BREAKOUT_DETECTION");
+            List<BreakoutEvent> breakoutEvents = detectBreakouts(symbol, current, candles, indicators);
+            // Cache for gate chain and other components
+            if (breakoutEvents != null && !breakoutEvents.isEmpty()) {
+                symbolBreakoutEvents.put(symbol, breakoutEvents);
+            } else {
+                symbolBreakoutEvents.remove(symbol);
+            }
+
             // ==================== STRATEGY 1: FUDKII TRIGGER (ST + BB on 30m) ====================
             TraceContext.addStage("FUDKII_TRIGGER");
             var fudkiiResult = checkFudkiiTrigger(symbol, current);
 
             // ==================== STRATEGY 2: PIVOT CONFLUENCE TRIGGER ====================
             TraceContext.addStage("PIVOT_TRIGGER");
+            pivotConfluenceTrigger.setBreakoutContext(symbol, breakoutEvents);
             var pivotResult = checkPivotConfluenceTrigger(symbol, current);
 
             // ==================== STRATEGY 3: MICROALPHA TRIGGER (Microstructure Alpha) ====================
             TraceContext.addStage("MICROALPHA_TRIGGER");
+            microAlphaTrigger.setLevelContext(symbol, breakoutEvents);
             var microAlphaResult = checkMicroAlphaTrigger(symbol, current, indicators);
 
-            // Get current signal for this symbol
-            TradingSignal signal = activeSignals.get(symbol);
-
-            // Process state machine with strategy triggers
+            // Process all strategy triggers independently (concurrent signal tracking)
             TraceContext.addStage("STATE_MACHINE");
-            signal = processStateMachineWithTriggers(symbol, current, score, signal, pivotState,
+            processAllStrategyTriggers(symbol, current, score, pivotState,
                 indicators, patternResult, fudkiiResult, pivotResult, microAlphaResult);
-
-            // Update active signals map
-            if (signal != null && signal.getState().isActive()) {
-                activeSignals.put(symbol, signal);
-            } else if (signal != null && signal.getState().isTerminal()) {
-                activeSignals.remove(symbol);
-            }
 
             // Update paper trade positions
             if (paperTradeEnabled) {
@@ -1038,6 +1053,160 @@ public class SignalEngine {
         }
     }
 
+    // ==================== BREAKOUT DETECTION ====================
+
+    /**
+     * Register key levels and detect breakouts/retests for a symbol.
+     *
+     * Flow:
+     * 1. Load pivot levels (daily, weekly) and session levels (VWAP, OR)
+     * 2. Register all levels into BreakoutDetector
+     * 3. Call detect() to check for breakouts, retests, and failed breakouts
+     * 4. Return events for downstream consumption by triggers
+     */
+    private List<BreakoutEvent> detectBreakouts(String symbol, UnifiedCandle current,
+            List<UnifiedCandle> candles, TechnicalIndicators indicators) {
+        try {
+            String exch = current.getExchange() != null ? current.getExchange() : "N";
+            String exchType = current.getExchangeType() != null ? current.getExchangeType() : "C";
+            String scripCode = current.getScripCode() != null ? current.getScripCode() : symbol;
+
+            // Register levels from pivots, SMC, and session structure
+            registerLevelsForBreakoutDetection(scripCode, exch, exchType);
+
+            // Calculate average volume for confirmation
+            double avgVolume = 0;
+            if (candles != null && candles.size() >= 20) {
+                avgVolume = candles.stream().limit(20).mapToDouble(UnifiedCandle::getVolume).average().orElse(0);
+            } else if (indicators != null && indicators.getAvgVolume20() > 0) {
+                avgVolume = indicators.getAvgVolume20();
+            }
+
+            // Extract RSI and MACD for momentum confirmation
+            Double rsi = indicators != null ? indicators.getRsi() : null;
+            Double macdHist = indicators != null ? indicators.getMacdHistogram() : null;
+
+            // Detect breakouts against registered levels
+            List<BreakoutEvent> events = breakoutDetector.detect(
+                scripCode, "5m",
+                current.getHigh(), current.getLow(), current.getClose(),
+                current.getVolume(), avgVolume,
+                rsi, macdHist);
+
+            if (events != null && !events.isEmpty()) {
+                for (BreakoutEvent event : events) {
+                    if (event.getType() == BreakoutType.RETEST && event.isRetestHeld()) {
+                        log.info("{} {} RETEST DETECTED: {} at {} (quality={}, level={})",
+                            LOG_PREFIX, TraceContext.getShortPrefix(),
+                            event.getDirection(), String.format("%.2f", event.getBreakoutLevel()),
+                            event.getRetestQuality(), event.getLevelDescription());
+                    } else if (event.getType() == BreakoutType.BREAKOUT) {
+                        log.info("{} {} BREAKOUT DETECTED: {} through {} (strength={}, vol={}x)",
+                            LOG_PREFIX, TraceContext.getShortPrefix(),
+                            event.getDirection(), String.format("%.2f", event.getBreakoutLevel()),
+                            event.getStrength(), String.format("%.1f", event.getVolumeRatio()));
+                    }
+                }
+            }
+
+            return events != null ? events : List.of();
+        } catch (Exception e) {
+            log.debug("{} {} Breakout detection failed: {}",
+                LOG_PREFIX, TraceContext.getShortPrefix(), e.getMessage());
+            return List.of();
+        }
+    }
+
+    /**
+     * Register key price levels into BreakoutDetector for a symbol.
+     * Sources: Daily/Weekly pivots, CPR, SMC order blocks, session levels (VWAP, OR).
+     */
+    private void registerLevelsForBreakoutDetection(String scripCode, String exch, String exchType) {
+        // Clear old levels to re-register fresh
+        breakoutDetector.clearLevels(scripCode);
+
+        List<BreakoutDetector.LevelInfo> levels = new ArrayList<>();
+
+        // 1. Register pivot levels
+        try {
+            Optional<MultiTimeframePivotState> pivotOpt = pivotLevelService.getOrLoadPivotLevels(scripCode, exch, exchType);
+            if (pivotOpt.isPresent()) {
+                MultiTimeframePivotState mtfPivots = pivotOpt.get();
+
+                // Daily pivots
+                if (mtfPivots.getDailyPivot() != null) {
+                    com.kotsin.consumer.model.PivotLevels daily = mtfPivots.getDailyPivot();
+                    addLevel(levels, daily.getS1(), LevelSource.SUPPORT, "Daily_S1");
+                    addLevel(levels, daily.getS2(), LevelSource.SUPPORT, "Daily_S2");
+                    addLevel(levels, daily.getR1(), LevelSource.RESISTANCE, "Daily_R1");
+                    addLevel(levels, daily.getR2(), LevelSource.RESISTANCE, "Daily_R2");
+                    addLevel(levels, daily.getPivot(), LevelSource.SUPPORT, "Daily_Pivot");
+                    addLevel(levels, daily.getTc(), LevelSource.RESISTANCE, "Daily_TC");
+                    addLevel(levels, daily.getBc(), LevelSource.SUPPORT, "Daily_BC");
+                }
+
+                // Weekly pivots
+                if (mtfPivots.getWeeklyPivot() != null) {
+                    com.kotsin.consumer.model.PivotLevels weekly = mtfPivots.getWeeklyPivot();
+                    addLevel(levels, weekly.getS1(), LevelSource.SUPPORT, "Weekly_S1");
+                    addLevel(levels, weekly.getR1(), LevelSource.RESISTANCE, "Weekly_R1");
+                    addLevel(levels, weekly.getPivot(), LevelSource.SUPPORT, "Weekly_Pivot");
+                }
+            }
+        } catch (Exception e) {
+            log.debug("{} {} Failed to register pivot levels: {}",
+                LOG_PREFIX, scripCode, e.getMessage());
+        }
+
+        // 2. Register SMC order blocks
+        try {
+            List<com.kotsin.consumer.smc.model.OrderBlock> orderBlocks = smcAnalyzer.getValidOrderBlocks(scripCode);
+            for (com.kotsin.consumer.smc.model.OrderBlock ob : orderBlocks) {
+                double midPrice = (ob.getHigh() + ob.getLow()) / 2;
+                LevelSource source = LevelSource.ORDER_BLOCK;
+                String desc = (ob.isBullish() ? "Bull_OB_" : "Bear_OB_") + String.format("%.0f", midPrice);
+                addLevel(levels, midPrice, source, desc);
+            }
+        } catch (Exception e) {
+            log.debug("{} {} Failed to register SMC levels: {}",
+                LOG_PREFIX, scripCode, e.getMessage());
+        }
+
+        // 3. Register session levels (VWAP, Opening Range)
+        try {
+            SessionStructure session = sessionTracker.getSession(scripCode);
+            if (session != null) {
+                if (session.getVwap() > 0) {
+                    addLevel(levels, session.getVwap(), LevelSource.VWAP, "VWAP");
+                }
+                if (session.isOpeningRangeComplete()) {
+                    addLevel(levels, session.getOpeningRangeHigh30(), LevelSource.OPENING_RANGE, "OR_High_30m");
+                    addLevel(levels, session.getOpeningRangeLow30(), LevelSource.OPENING_RANGE, "OR_Low_30m");
+                }
+            }
+        } catch (Exception e) {
+            log.debug("{} {} Failed to register session levels: {}",
+                LOG_PREFIX, scripCode, e.getMessage());
+        }
+
+        // Register all collected levels
+        if (!levels.isEmpty()) {
+            breakoutDetector.registerLevels(scripCode, levels);
+            log.debug("{} {} Registered {} levels for breakout detection",
+                LOG_PREFIX, scripCode, levels.size());
+        }
+    }
+
+    /**
+     * Helper to add a level if valid (positive price).
+     */
+    private void addLevel(List<BreakoutDetector.LevelInfo> levels, double price,
+                           LevelSource source, String description) {
+        if (price > 0) {
+            levels.add(new BreakoutDetector.LevelInfo(price, source, description));
+        }
+    }
+
     /**
      * Validate signal through gate chain (exchange-aware for MCX/NSE).
      */
@@ -1069,6 +1238,13 @@ public class SignalEngine {
                 .custom("macdHistogram", indicators.getMacdHistogram())
                 .custom("fudkiiScore", score)               // For QuantScoreGate
                 .custom("patternResult", patternResult)     // For PatternGate
+                .custom("breakoutEvents", symbolBreakoutEvents.get(symbol))  // For StructuralLevelGate
+                .custom("momentumScore", score.getUrgencyScore())  // IPU urgency for MomentumGate
+                .custom("oiInterpretation", score.getOiInterpretation())  // OI interpretation
+                .custom("exhaustionScore", score.isSuggestsReversal() ? 0.8 : 0.0)  // OI exhaustion signal
+                .custom("ipuExhaustion", getIpuExhaustion(symbol))        // IPU exhaustion (0-1)
+                .custom("ipuRising", getIpuRising(symbol))                // IPU momentum rising
+                .custom("exhaustionBuilding", getExhaustionBuilding(symbol))  // Exhaustion trend
                 .build();
 
             return gateChain.evaluate(symbol, "FUDKII", context);
@@ -1077,6 +1253,32 @@ public class SignalEngine {
                 LOG_PREFIX, TraceContext.getShortPrefix(), e.getMessage());
             return null;
         }
+    }
+
+    // ==================== IPU STATE HELPERS FOR GATE CONTEXT ====================
+
+    private double getIpuExhaustion(String symbol) {
+        try {
+            return strategyStateService.getIpuState(symbol, primaryTimeframe)
+                .map(IpuState::getCurrentExhaustion)
+                .orElse(0.0);
+        } catch (Exception e) { return 0.0; }
+    }
+
+    private boolean getIpuRising(String symbol) {
+        try {
+            return strategyStateService.getIpuState(symbol, primaryTimeframe)
+                .map(IpuState::isIpuRising)
+                .orElse(false);
+        } catch (Exception e) { return false; }
+    }
+
+    private boolean getExhaustionBuilding(String symbol) {
+        try {
+            return strategyStateService.getIpuState(symbol, primaryTimeframe)
+                .map(IpuState::isExhaustionBuilding)
+                .orElse(false);
+        } catch (Exception e) { return false; }
     }
 
     /**
@@ -1547,14 +1749,13 @@ public class SignalEngine {
     }
 
     /**
-     * Process signal state machine with strategy triggers.
-     * This combines FUDKII, Pivot Confluence, and MicroAlpha strategies.
+     * Process ALL strategy triggers independently (no priority chain).
+     * Each strategy gets its own slot — FUDKII, PIVOT, and MICROALPHA can all be active simultaneously.
      */
-    private TradingSignal processStateMachineWithTriggers(
+    private void processAllStrategyTriggers(
             String symbol,
             UnifiedCandle candle,
             FudkiiScore score,
-            TradingSignal currentSignal,
             PivotState pivotState,
             TechnicalIndicators indicators,
             PatternResult patternResult,
@@ -1569,28 +1770,32 @@ public class SignalEngine {
         if (regime != null && regime.getRecommendedMode() == TradingMode.AVOID) {
             log.debug("{} {} Skipping - market regime suggests AVOID",
                 LOG_PREFIX, TraceContext.getShortPrefix());
-            return currentSignal;
+            return;
         }
 
-        // ==================== STRATEGY TRIGGERS OVERRIDE ====================
-        // If either strategy triggers, we go directly to ACTIVE (skip WATCH)
+        // Get or create per-symbol strategy map
+        ConcurrentHashMap<String, TradingSignal> symbolSignals =
+            activeSignals.computeIfAbsent(symbol, k -> new ConcurrentHashMap<>());
 
-        // Strategy 1: FUDKII (ST flip + BB outside on 30m)
-        if (fudkiiResult != null && fudkiiResult.isTriggered()) {
+        // Strategy 1: FUDKII (ST flip + BB outside on 30m) — independent
+        if (fudkiiResult != null && fudkiiResult.isTriggered() && !symbolSignals.containsKey("FUDKII")) {
             log.info("{} {} STRATEGY 1 (FUDKII) ACTIVATED: {} at {}",
                 LOG_PREFIX, TraceContext.getShortPrefix(),
                 fudkiiResult.getDirection(), String.format("%.2f", price));
 
-            return createAndActivateSignal(
+            TradingSignal signal = createAndActivateSignal(
                 symbol, candle, score, pivotState, indicators, patternResult,
                 "FUDKII", fudkiiResult.getDirection().name(),
                 fudkiiResult.getReason(),
                 fudkiiResult.getBbst() != null ? fudkiiResult.getBbst().getSuperTrend() : price * 0.99
             );
+            if (signal != null && signal.getState().isActive()) {
+                symbolSignals.put("FUDKII", signal);
+            }
         }
 
-        // Strategy 2: Pivot Confluence (HTF/LTF + Pivot + SMC + R:R)
-        if (pivotResult != null && pivotResult.isTriggered()) {
+        // Strategy 2: Pivot Confluence (HTF/LTF + Pivot + SMC + R:R) — independent
+        if (pivotResult != null && pivotResult.isTriggered() && !symbolSignals.containsKey("PIVOT_CONFLUENCE")) {
             log.info("{} {} STRATEGY 2 (PIVOT CONFLUENCE) ACTIVATED: {} at {}, score={}",
                 LOG_PREFIX, TraceContext.getShortPrefix(),
                 pivotResult.getDirection(), String.format("%.2f", price),
@@ -1599,15 +1804,18 @@ public class SignalEngine {
             double stopLoss = pivotResult.getRrCalc() != null ?
                 pivotResult.getRrCalc().getStopLoss() : price * 0.99;
 
-            return createAndActivateSignal(
+            TradingSignal signal = createAndActivateSignal(
                 symbol, candle, score, pivotState, indicators, patternResult,
                 "PIVOT_CONFLUENCE", pivotResult.getDirection().name(),
                 pivotResult.getReason(), stopLoss
             );
+            if (signal != null && signal.getState().isActive()) {
+                symbolSignals.put("PIVOT_CONFLUENCE", signal);
+            }
         }
 
-        // Strategy 3: MicroAlpha (Microstructure Alpha - regime-adaptive)
-        if (microAlphaResult != null && microAlphaResult.isTriggered()) {
+        // Strategy 3: MicroAlpha (Microstructure Alpha - regime-adaptive) — independent
+        if (microAlphaResult != null && microAlphaResult.isTriggered() && !symbolSignals.containsKey("MICROALPHA")) {
             log.info("{} {} STRATEGY 3 (MICROALPHA) ACTIVATED: {} at {}, conviction={}, mode={}",
                 LOG_PREFIX, TraceContext.getShortPrefix(),
                 microAlphaResult.getDirection(), String.format("%.2f", price),
@@ -1617,16 +1825,29 @@ public class SignalEngine {
             double stopLoss = microAlphaResult.getStopLoss() > 0 ?
                 microAlphaResult.getStopLoss() : price * 0.99;
 
-            return createAndActivateSignal(
+            TradingSignal signal = createAndActivateSignal(
                 symbol, candle, score, pivotState, indicators, patternResult,
                 "MICROALPHA", microAlphaResult.getDirection().name(),
                 microAlphaResult.getReason(), stopLoss
             );
+            if (signal != null && signal.getState().isActive()) {
+                symbolSignals.put("MICROALPHA", signal);
+            }
         }
 
-        // ==================== FALLBACK: Original State Machine ====================
-        // If no strategy triggered, use the original FUDKII score-based flow
-        return processStateMachine(symbol, candle, score, currentSignal, pivotState, indicators, patternResult);
+        // Fallback: if no strategy triggered and no active signals, use original state machine
+        if (symbolSignals.isEmpty()) {
+            TradingSignal fallbackSignal = processStateMachine(
+                symbol, candle, score, null, pivotState, indicators, patternResult);
+            if (fallbackSignal != null && fallbackSignal.getState().isActive()) {
+                symbolSignals.put("FUDKII_SCORE", fallbackSignal);
+            }
+        }
+
+        // Clean up empty symbol entries
+        if (symbolSignals.isEmpty()) {
+            activeSignals.remove(symbol);
+        }
     }
 
     /**
@@ -1735,6 +1956,21 @@ public class SignalEngine {
             String.format("%.2f", levels.target2),
             String.format("%.2f", Math.abs(levels.target1 - levels.entry) / risk),
             String.format("%.2f", (risk / levels.entry) * 100));
+
+        // Gate chain validation (applies to all strategies)
+        ChainResult gateResult = validateThroughGates(symbol, adjustedScore, indicators,
+            price, levels.target1, levels.stop, patternResult,
+            candle.getExchange());
+        if (gateResult != null && !gateResult.isPassed()) {
+            log.info("{} {} {} Signal blocked by gates: {}",
+                LOG_PREFIX, TraceContext.getShortPrefix(), strategyName, gateResult.getFailureReason());
+            return null; // Signal rejected by gates
+        }
+        if (gateResult != null) {
+            log.info("{} {} {} Gate score: {} ({})", LOG_PREFIX, TraceContext.getShortPrefix(),
+                strategyName, String.format("%.1f", gateResult.getTotalScore()),
+                gateResult.isHighQuality() ? "HIGH_QUALITY" : "STANDARD");
+        }
 
         // Immediately activate
         signal.enterActive(adjustedScore, price, levels.entry, levels.stop, levels.target1, levels.target2);
@@ -2101,6 +2337,48 @@ public class SignalEngine {
     }
 
     /**
+     * Check if OI interpretation contradicts the signal direction with high confidence.
+     * For LONG signals: exit if OI shows LONG_UNWINDING (longs exiting) or SHORT_BUILDUP (new shorts)
+     * For SHORT signals: exit if OI shows SHORT_COVERING (shorts exiting) or LONG_BUILDUP (new longs)
+     * Only triggers with high confidence (>0.7) and when signal is in loss territory.
+     */
+    private boolean isOiExhaustionExit(UnifiedCandle candle, TradingSignal signal) {
+        if (candle == null || !candle.isHasOI() || candle.getOiInterpretation() == null) {
+            return false;
+        }
+
+        Double confidence = candle.getOiInterpretationConfidence();
+        if (confidence == null || confidence < 0.7) {
+            return false;
+        }
+
+        OIMetrics.OIInterpretation interp = candle.getOiInterpretation();
+        boolean isLong = signal.getDirection() == FudkiiScore.Direction.BULLISH;
+        double price = candle.getClose();
+
+        // Check if signal is at a loss (don't exit winners on OI alone)
+        boolean isAtLoss = isLong ?
+            price < signal.getEntryPrice() :
+            price > signal.getEntryPrice();
+
+        if (!isAtLoss) {
+            return false;
+        }
+
+        // LONG_UNWINDING = longs exiting (bearish for long signals)
+        // SHORT_BUILDUP = new shorts entering (bearish for long signals)
+        // SHORT_COVERING = shorts exiting (bullish, bad for short signals)
+        // LONG_BUILDUP = new longs entering (bullish, bad for short signals)
+        if (isLong) {
+            return interp == OIMetrics.OIInterpretation.LONG_UNWINDING
+                || interp == OIMetrics.OIInterpretation.SHORT_BUILDUP;
+        } else {
+            return interp == OIMetrics.OIInterpretation.SHORT_COVERING
+                || interp == OIMetrics.OIInterpretation.LONG_BUILDUP;
+        }
+    }
+
+    /**
      * Check if reversal signal triggered.
      */
     private boolean isReversalTriggered(FudkiiScore score, TradingSignal signal) {
@@ -2116,42 +2394,63 @@ public class SignalEngine {
      * Check active signals for exit conditions.
      */
     private void checkActiveSignals() {
-        // Collect symbols to remove after iteration to avoid ConcurrentModificationException
-        List<String> symbolsToRemove = new ArrayList<>();
+        for (Map.Entry<String, ConcurrentHashMap<String, TradingSignal>> symbolEntry : activeSignals.entrySet()) {
+            String symbol = symbolEntry.getKey();
+            ConcurrentHashMap<String, TradingSignal> strategySignals = symbolEntry.getValue();
 
-        for (Map.Entry<String, TradingSignal> entry : activeSignals.entrySet()) {
             try {
-                String symbol = entry.getKey();
-                TradingSignal signal = entry.getValue();
-
-                if (signal.getState() != SignalState.ACTIVE) continue;
-
-                // Get current price
+                // Get current price once per symbol
                 UnifiedCandle current = candleService.getLatestCandle(
                     symbol, Timeframe.fromLabel(primaryTimeframe));
                 if (current == null) continue;
 
                 double price = current.getClose();
 
-                // Quick exit checks
-                if (signal.isStopHit(price)) {
-                    signal.enterComplete(TradingSignal.ExitReason.STOP_HIT, price);
-                    saveAndNotify(signal, SignalEvent.STOPPED_OUT);
-                    symbolsToRemove.add(symbol);
-                } else if (signal.isTargetHit(price)) {
-                    signal.enterComplete(TradingSignal.ExitReason.TARGET_HIT, price);
-                    saveAndNotify(signal, SignalEvent.TARGET_HIT);
-                    symbolsToRemove.add(symbol);
+                // Check each strategy signal independently
+                List<String> strategiesToRemove = new ArrayList<>();
+                for (Map.Entry<String, TradingSignal> stratEntry : strategySignals.entrySet()) {
+                    String strategyName = stratEntry.getKey();
+                    TradingSignal signal = stratEntry.getValue();
+
+                    if (signal.getState() != SignalState.ACTIVE) continue;
+
+                    if (signal.isStopHit(price)) {
+                        signal.enterComplete(TradingSignal.ExitReason.STOP_HIT, price);
+                        recordExitToStats(signal, price, "STOP_HIT");
+                        saveAndNotify(signal, SignalEvent.STOPPED_OUT);
+                        strategiesToRemove.add(strategyName);
+                    } else if (signal.isTargetHit(price)) {
+                        signal.enterComplete(TradingSignal.ExitReason.TARGET_HIT, price);
+                        recordExitToStats(signal, price, "TARGET_HIT");
+                        saveAndNotify(signal, SignalEvent.TARGET_HIT);
+                        strategiesToRemove.add(strategyName);
+                    } else if (isOiExhaustionExit(current, signal)) {
+                        // OI interpretation directly contradicts signal direction with high confidence
+                        signal.enterComplete(TradingSignal.ExitReason.OI_EXHAUSTION, price);
+                        recordExitToStats(signal, price, "OI_EXHAUSTION");
+                        saveAndNotify(signal, SignalEvent.REVERSED);
+                        strategiesToRemove.add(strategyName);
+                        log.info("{} {} {} OI exhaustion exit: interp={} conf={} price={}",
+                            LOG_PREFIX, symbol, strategyName,
+                            current.getOiInterpretation(),
+                            current.getOiInterpretationConfidence(),
+                            String.format("%.2f", price));
+                    }
+                }
+
+                // Remove completed strategy signals
+                for (String s : strategiesToRemove) {
+                    strategySignals.remove(s);
+                }
+
+                // Clean up empty symbol entries
+                if (strategySignals.isEmpty()) {
+                    activeSignals.remove(symbol);
                 }
             } catch (Exception e) {
-                log.error("{} Error checking signal for symbol={}: {}",
-                    LOG_PREFIX, entry.getKey(), e.getMessage());
+                log.error("{} Error checking signals for symbol={}: {}",
+                    LOG_PREFIX, symbol, e.getMessage());
             }
-        }
-
-        // Remove completed signals after iteration
-        for (String symbol : symbolsToRemove) {
-            activeSignals.remove(symbol);
         }
     }
 
@@ -2496,24 +2795,43 @@ public class SignalEngine {
     // ==================== PUBLIC API ====================
 
     /**
-     * Get active signal for symbol.
+     * Get active signal for symbol (returns first active strategy signal found).
      */
     public Optional<TradingSignal> getActiveSignal(String symbol) {
-        return Optional.ofNullable(activeSignals.get(symbol));
+        ConcurrentHashMap<String, TradingSignal> strategySignals = activeSignals.get(symbol);
+        if (strategySignals == null || strategySignals.isEmpty()) {
+            return Optional.empty();
+        }
+        return strategySignals.values().stream().findFirst();
     }
 
     /**
-     * Get all active signals.
+     * Get active signal for a specific strategy on a symbol.
+     */
+    public Optional<TradingSignal> getActiveSignal(String symbol, String strategyName) {
+        ConcurrentHashMap<String, TradingSignal> strategySignals = activeSignals.get(symbol);
+        if (strategySignals == null) {
+            return Optional.empty();
+        }
+        return Optional.ofNullable(strategySignals.get(strategyName));
+    }
+
+    /**
+     * Get all active signals across all symbols and strategies.
      */
     public List<TradingSignal> getAllActiveSignals() {
-        return new ArrayList<>(activeSignals.values());
+        List<TradingSignal> all = new ArrayList<>();
+        for (ConcurrentHashMap<String, TradingSignal> strategySignals : activeSignals.values()) {
+            all.addAll(strategySignals.values());
+        }
+        return all;
     }
 
     /**
      * Get signals by state.
      */
     public List<TradingSignal> getSignalsByState(SignalState state) {
-        return activeSignals.values().stream()
+        return getAllActiveSignals().stream()
             .filter(s -> s.getState() == state)
             .toList();
     }
@@ -2569,7 +2887,8 @@ public class SignalEngine {
         stats.put("enabled", enabled);
         stats.put("symbols", symbolsConfig);
         stats.put("timeframe", primaryTimeframe);
-        stats.put("activeSignals", activeSignals.size());
+        stats.put("activeSymbols", activeSignals.size());
+        stats.put("activeSignals", getAllActiveSignals().size());
         stats.put("watchSignals", getSignalsByState(SignalState.WATCH).size());
         stats.put("activeTriggeredSignals", getSignalsByState(SignalState.ACTIVE).size());
         return stats;

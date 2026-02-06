@@ -62,8 +62,15 @@ public class QuantScoreDTO {
     private Double atrPercent;
 
     // Volume Profile
+    private Double pocPrice;            // Point of Control (highest volume price)
+    private Double valueAreaHigh;       // Value Area High (70% volume)
+    private Double valueAreaLow;        // Value Area Low (70% volume)
     private double volumeRatio;         // Current vs average
     private boolean highVolume;
+
+    // OI Context
+    private String oiInterpretation;    // LONG_BUILDUP, SHORT_COVERING, etc.
+    private boolean oiSuggestsReversal; // True when OI suggests exhaustion
 
     // Additional Metadata
     private Map<String, Object> metadata;
@@ -94,6 +101,7 @@ public class QuantScoreDTO {
         private double ivSurfaceScore;      // IV analysis (if applicable)
         private double crossInstrumentScore; // Family correlation
         private double confluenceScore;     // Multi-timeframe confluence
+        private double structuralLevelScore; // Structural level proximity (breakout/retest)
     }
 
     /**

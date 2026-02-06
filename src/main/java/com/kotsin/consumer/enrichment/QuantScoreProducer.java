@@ -13,6 +13,9 @@ import org.springframework.data.redis.core.RedisTemplate;
 import org.springframework.kafka.core.KafkaTemplate;
 import org.springframework.stereotype.Component;
 
+import com.kotsin.consumer.breakout.model.BreakoutEvent;
+import com.kotsin.consumer.breakout.model.BreakoutEvent.*;
+
 import java.time.Duration;
 import java.time.Instant;
 import java.util.ArrayList;
@@ -71,13 +74,28 @@ public class QuantScoreProducer {
             IpuState ipuState,
             PivotState pivotState,
             List<String> detectedPatterns) {
+        publish(candle, fudkiiScore, vcpState, ipuState, pivotState, detectedPatterns, 0.0, null);
+    }
+
+    /**
+     * Publish a QuantScore with structural level context and pattern confidence.
+     */
+    public void publish(
+            UnifiedCandle candle,
+            FudkiiScore fudkiiScore,
+            VcpState vcpState,
+            IpuState ipuState,
+            PivotState pivotState,
+            List<String> detectedPatterns,
+            double patternScore,
+            List<BreakoutEvent> breakoutEvents) {
 
         if (!enabled || fudkiiScore == null || candle == null) {
             return;
         }
 
         try {
-            QuantScoreDTO dto = buildQuantScore(candle, fudkiiScore, vcpState, ipuState, pivotState, detectedPatterns);
+            QuantScoreDTO dto = buildQuantScore(candle, fudkiiScore, vcpState, ipuState, pivotState, detectedPatterns, patternScore, breakoutEvents);
 
             // Publish to Redis
             publishToRedis(dto);
@@ -104,7 +122,15 @@ public class QuantScoreProducer {
             VcpState vcpState,
             IpuState ipuState,
             PivotState pivotState,
-            List<String> detectedPatterns) {
+            List<String> detectedPatterns,
+            double patternScore,
+            List<BreakoutEvent> breakoutEvents) {
+
+        // Calculate pattern score: use actual confidence from PatternAnalyzer (0-1 range → 0-100)
+        double normalizedPatternScore = 0.0;
+        if (detectedPatterns != null && !detectedPatterns.isEmpty()) {
+            normalizedPatternScore = patternScore > 0 ? Math.min(patternScore * 100, 100) : 50.0;
+        }
 
         // Build score breakdown
         QuantScoreDTO.ScoreBreakdown breakdown = QuantScoreDTO.ScoreBreakdown.builder()
@@ -114,12 +140,13 @@ public class QuantScoreProducer {
             .kyleScore(normalize(fudkiiScore.getKyleScore()))
             .imbalanceScore(normalize(fudkiiScore.getImbalanceScore()))
             .intensityScore(normalize(fudkiiScore.getIntensityScore()))
-            .patternScore(detectedPatterns != null && !detectedPatterns.isEmpty() ? 70.0 : 0.0)
+            .patternScore(normalizedPatternScore)
             .trendScore(calculateTrendScore(pivotState))
             .volumeProfileScore(calculateVolumeProfileScore(vcpState))
             .microstructureScore(calculateMicrostructureScore(candle))
             .optionsFlowScore(calculateOptionsFlowScore(candle))
             .confluenceScore(calculateConfluenceScore(vcpState, ipuState, pivotState))
+            .structuralLevelScore(calculateStructuralLevelScore(breakoutEvents))
             .build();
 
         // Determine trend direction
@@ -141,9 +168,12 @@ public class QuantScoreProducer {
             exhaustionScore = ipuState.getCurrentExhaustion();
         }
 
-        // Get nearest support/resistance
+        // Get nearest support/resistance and VCP levels
         Double nearestSupport = null;
         Double nearestResistance = null;
+        Double pocPrice = null;
+        Double valueAreaHigh = null;
+        Double valueAreaLow = null;
         if (vcpState != null) {
             if (vcpState.getSupportClusters() != null && !vcpState.getSupportClusters().isEmpty()) {
                 nearestSupport = vcpState.getSupportClusters().get(0).getPrice();
@@ -151,6 +181,17 @@ public class QuantScoreProducer {
             if (vcpState.getResistanceClusters() != null && !vcpState.getResistanceClusters().isEmpty()) {
                 nearestResistance = vcpState.getResistanceClusters().get(0).getPrice();
             }
+            if (vcpState.getPocPrice() > 0) pocPrice = vcpState.getPocPrice();
+            if (vcpState.getValueAreaHigh() > 0) valueAreaHigh = vcpState.getValueAreaHigh();
+            if (vcpState.getValueAreaLow() > 0) valueAreaLow = vcpState.getValueAreaLow();
+        }
+
+        // Get OI context
+        String oiInterpretation = null;
+        boolean oiSuggestsReversal = false;
+        if (candle.isHasOI() && candle.getOiInterpretation() != null) {
+            oiInterpretation = candle.getOiInterpretation().name();
+            oiSuggestsReversal = candle.getOiSuggestsReversal() != null && candle.getOiSuggestsReversal();
         }
 
         // Calculate directional imbalance: |buyVolume - sellVolume| / totalVolume
@@ -182,13 +223,18 @@ public class QuantScoreProducer {
             .momentumState(momentumState)
             .exhaustionScore(exhaustionScore)
             .detectedPatterns(detectedPatterns != null ? detectedPatterns : new ArrayList<>())
-            .patternConfidence(detectedPatterns != null && !detectedPatterns.isEmpty() ? 0.7 : 0.0)
+            .patternConfidence(patternScore)
             .nearestSupport(nearestSupport)
             .nearestResistance(nearestResistance)
             .currentPrice(candle.getClose())
             .atrPercent(null)  // ATR not available on UnifiedCandle
+            .pocPrice(pocPrice)
+            .valueAreaHigh(valueAreaHigh)
+            .valueAreaLow(valueAreaLow)
             .volumeRatio(directionalImbalance)  // Renamed: actually represents directional imbalance
             .highVolume(highVolumeActivity)  // True when > 50% one-sided flow
+            .oiInterpretation(oiInterpretation)
+            .oiSuggestsReversal(oiSuggestsReversal)
             .build();
     }
 
@@ -261,24 +307,33 @@ public class QuantScoreProducer {
     }
 
     /**
-     * Calculate volume profile quality score.
+     * Calculate volume profile quality score using cluster strength and quality metrics.
      */
     private double calculateVolumeProfileScore(VcpState vcpState) {
         if (vcpState == null) return 0;
 
         double score = 0;
 
-        // Has clear clusters
+        // Support cluster quality (max 35)
         if (vcpState.getSupportClusters() != null && !vcpState.getSupportClusters().isEmpty()) {
-            score += 30;
-        }
-        if (vcpState.getResistanceClusters() != null && !vcpState.getResistanceClusters().isEmpty()) {
-            score += 30;
+            double avgStrength = vcpState.getSupportClusters().stream()
+                .mapToDouble(c -> c.getStrength())
+                .average().orElse(0);
+            // Strong clusters (strength > 0.5) score higher than weak clusters
+            score += 15 + avgStrength * 20; // 15 for presence + up to 20 for quality
         }
 
-        // Runway quality
+        // Resistance cluster quality (max 35)
+        if (vcpState.getResistanceClusters() != null && !vcpState.getResistanceClusters().isEmpty()) {
+            double avgStrength = vcpState.getResistanceClusters().stream()
+                .mapToDouble(c -> c.getStrength())
+                .average().orElse(0);
+            score += 15 + avgStrength * 20;
+        }
+
+        // Runway quality: directional conviction (max 30)
         double runway = Math.max(vcpState.getBullishRunway(), vcpState.getBearishRunway());
-        score += runway * 40;
+        score += runway * 30;
 
         return Math.min(100, score);
     }
@@ -310,44 +365,118 @@ public class QuantScoreProducer {
     }
 
     /**
-     * Calculate options flow score.
+     * Calculate options flow score using OI interpretation and change magnitude.
+     * Scores continuations (buildup) higher than exhaustion (unwinding/covering).
      */
     private double calculateOptionsFlowScore(UnifiedCandle candle) {
         if (!candle.isHasOI()) return 0;
 
-        double score = 50; // Base score for having OI
+        double score = 40; // Base score for having OI data
 
-        // OI change significance
-        if (candle.getOiChangePercent() != null && Math.abs(candle.getOiChangePercent()) > 2) {
-            score += 25;
+        // OI change magnitude: bigger moves = higher score
+        if (candle.getOiChangePercent() != null) {
+            double absChange = Math.abs(candle.getOiChangePercent());
+            if (absChange > 5) score += 25;       // Very strong OI move
+            else if (absChange > 2) score += 15;   // Strong OI move
+            else if (absChange > 0.5) score += 5;  // Moderate OI move
         }
 
-        // Clear interpretation
+        // OI interpretation quality: continuation > exhaustion > neutral
         if (candle.getOiInterpretation() != null) {
-            score += 25;
+            switch (candle.getOiInterpretation()) {
+                case LONG_BUILDUP:
+                case SHORT_BUILDUP:
+                    // Fresh position buildup = strong institutional commitment
+                    score += 30;
+                    break;
+                case SHORT_COVERING:
+                case LONG_UNWINDING:
+                    // Unwinding/covering = directional but exhaustive
+                    score += 15;
+                    break;
+                case NEUTRAL:
+                default:
+                    // No clear interpretation
+                    score += 5;
+                    break;
+            }
+        }
+
+        // OI confidence bonus
+        if (candle.getOiInterpretationConfidence() != null && candle.getOiInterpretationConfidence() > 0.7) {
+            score += 5;
         }
 
         return Math.min(100, score);
     }
 
     /**
+     * Calculate structural level score.
+     * - 100: Trading at confirmed retest of broken level
+     * - 75: Trading at key confluence level with active breakout
+     * - 50: Trading near a registered level
+     * - 25: No nearby structural level
+     */
+    private double calculateStructuralLevelScore(List<BreakoutEvent> breakoutEvents) {
+        if (breakoutEvents == null || breakoutEvents.isEmpty()) return 25;
+
+        double bestScore = 25;
+        for (BreakoutEvent event : breakoutEvents) {
+            if (event.getType() == BreakoutType.RETEST && event.isRetestHeld()) {
+                RetestQuality quality = event.getRetestQuality();
+                if (quality == RetestQuality.PERFECT) {
+                    bestScore = Math.max(bestScore, 100);
+                } else if (quality == RetestQuality.GOOD) {
+                    bestScore = Math.max(bestScore, 85);
+                } else {
+                    bestScore = Math.max(bestScore, 60);
+                }
+            } else if (event.getType() == BreakoutType.BREAKOUT) {
+                bestScore = Math.max(bestScore, 75);
+            }
+        }
+        return bestScore;
+    }
+
+    /**
      * Calculate multi-factor confluence score.
+     * Checks alignment across VCP runway, VCP cluster OFI bias, IPU direction,
+     * IPU momentum trend, and pivot structure.
      */
     private double calculateConfluenceScore(VcpState vcpState, IpuState ipuState, PivotState pivotState) {
         int factors = 0;
         int aligned = 0;
 
-        // Check VCP direction
+        // Check VCP runway direction
         if (vcpState != null) {
             factors++;
             double netRunway = vcpState.getBullishRunway() - vcpState.getBearishRunway();
             if (Math.abs(netRunway) > 0.1) aligned++;
         }
 
+        // Check VCP cluster OFI bias alignment (average of support cluster biases)
+        if (vcpState != null && vcpState.getSupportClusters() != null && !vcpState.getSupportClusters().isEmpty()) {
+            double avgOfiBias = vcpState.getSupportClusters().stream()
+                .mapToDouble(c -> c.getOfiBias())
+                .average().orElse(0);
+            if (Math.abs(avgOfiBias) > 0.2) {
+                factors++;
+                aligned++; // Clear OFI bias = aligned factor
+            }
+        }
+
         // Check IPU direction
         if (ipuState != null && ipuState.getCurrentDirection() != null) {
             factors++;
             if (!"NEUTRAL".equals(ipuState.getCurrentDirection())) aligned++;
+        }
+
+        // Check IPU momentum trend (ipuRising = bullish momentum, exhaustionBuilding = warning)
+        if (ipuState != null) {
+            factors++;
+            if (ipuState.isIpuRising() && !ipuState.isExhaustionBuilding()) {
+                aligned++; // Rising IPU without exhaustion = strong momentum alignment
+            }
         }
 
         // Check Pivot structure
