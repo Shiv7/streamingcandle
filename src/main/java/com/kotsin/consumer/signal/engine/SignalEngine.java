@@ -228,8 +228,8 @@ public class SignalEngine {
     @Value("${signal.active.expiry.hours:4}")
     private int activeExpiryHours;
 
-    // Active signals by symbol
-    private final ConcurrentHashMap<String, TradingSignal> activeSignals = new ConcurrentHashMap<>();
+    // Active signals: symbol → strategyName → signal (allows concurrent strategies per symbol)
+    private final ConcurrentHashMap<String, ConcurrentHashMap<String, TradingSignal>> activeSignals = new ConcurrentHashMap<>();
 
     // Processing state
     private final AtomicBoolean running = new AtomicBoolean(false);
@@ -597,20 +597,10 @@ public class SignalEngine {
             TraceContext.addStage("MICROALPHA_TRIGGER");
             var microAlphaResult = checkMicroAlphaTrigger(symbol, current, indicators);
 
-            // Get current signal for this symbol
-            TradingSignal signal = activeSignals.get(symbol);
-
-            // Process state machine with strategy triggers
+            // Process all strategy triggers independently (concurrent signal tracking)
             TraceContext.addStage("STATE_MACHINE");
-            signal = processStateMachineWithTriggers(symbol, current, score, signal, pivotState,
+            processAllStrategyTriggers(symbol, current, score, pivotState,
                 indicators, patternResult, fudkiiResult, pivotResult, microAlphaResult);
-
-            // Update active signals map
-            if (signal != null && signal.getState().isActive()) {
-                activeSignals.put(symbol, signal);
-            } else if (signal != null && signal.getState().isTerminal()) {
-                activeSignals.remove(symbol);
-            }
 
             // Update paper trade positions
             if (paperTradeEnabled) {
@@ -1714,14 +1704,13 @@ public class SignalEngine {
     }
 
     /**
-     * Process signal state machine with strategy triggers.
-     * This combines FUDKII, Pivot Confluence, and MicroAlpha strategies.
+     * Process ALL strategy triggers independently (no priority chain).
+     * Each strategy gets its own slot — FUDKII, PIVOT, and MICROALPHA can all be active simultaneously.
      */
-    private TradingSignal processStateMachineWithTriggers(
+    private void processAllStrategyTriggers(
             String symbol,
             UnifiedCandle candle,
             FudkiiScore score,
-            TradingSignal currentSignal,
             PivotState pivotState,
             TechnicalIndicators indicators,
             PatternResult patternResult,
@@ -1736,28 +1725,32 @@ public class SignalEngine {
         if (regime != null && regime.getRecommendedMode() == TradingMode.AVOID) {
             log.debug("{} {} Skipping - market regime suggests AVOID",
                 LOG_PREFIX, TraceContext.getShortPrefix());
-            return currentSignal;
+            return;
         }
 
-        // ==================== STRATEGY TRIGGERS OVERRIDE ====================
-        // If either strategy triggers, we go directly to ACTIVE (skip WATCH)
+        // Get or create per-symbol strategy map
+        ConcurrentHashMap<String, TradingSignal> symbolSignals =
+            activeSignals.computeIfAbsent(symbol, k -> new ConcurrentHashMap<>());
 
-        // Strategy 1: FUDKII (ST flip + BB outside on 30m)
-        if (fudkiiResult != null && fudkiiResult.isTriggered()) {
+        // Strategy 1: FUDKII (ST flip + BB outside on 30m) — independent
+        if (fudkiiResult != null && fudkiiResult.isTriggered() && !symbolSignals.containsKey("FUDKII")) {
             log.info("{} {} STRATEGY 1 (FUDKII) ACTIVATED: {} at {}",
                 LOG_PREFIX, TraceContext.getShortPrefix(),
                 fudkiiResult.getDirection(), String.format("%.2f", price));
 
-            return createAndActivateSignal(
+            TradingSignal signal = createAndActivateSignal(
                 symbol, candle, score, pivotState, indicators, patternResult,
                 "FUDKII", fudkiiResult.getDirection().name(),
                 fudkiiResult.getReason(),
                 fudkiiResult.getBbst() != null ? fudkiiResult.getBbst().getSuperTrend() : price * 0.99
             );
+            if (signal != null && signal.getState().isActive()) {
+                symbolSignals.put("FUDKII", signal);
+            }
         }
 
-        // Strategy 2: Pivot Confluence (HTF/LTF + Pivot + SMC + R:R)
-        if (pivotResult != null && pivotResult.isTriggered()) {
+        // Strategy 2: Pivot Confluence (HTF/LTF + Pivot + SMC + R:R) — independent
+        if (pivotResult != null && pivotResult.isTriggered() && !symbolSignals.containsKey("PIVOT_CONFLUENCE")) {
             log.info("{} {} STRATEGY 2 (PIVOT CONFLUENCE) ACTIVATED: {} at {}, score={}",
                 LOG_PREFIX, TraceContext.getShortPrefix(),
                 pivotResult.getDirection(), String.format("%.2f", price),
@@ -1766,15 +1759,18 @@ public class SignalEngine {
             double stopLoss = pivotResult.getRrCalc() != null ?
                 pivotResult.getRrCalc().getStopLoss() : price * 0.99;
 
-            return createAndActivateSignal(
+            TradingSignal signal = createAndActivateSignal(
                 symbol, candle, score, pivotState, indicators, patternResult,
                 "PIVOT_CONFLUENCE", pivotResult.getDirection().name(),
                 pivotResult.getReason(), stopLoss
             );
+            if (signal != null && signal.getState().isActive()) {
+                symbolSignals.put("PIVOT_CONFLUENCE", signal);
+            }
         }
 
-        // Strategy 3: MicroAlpha (Microstructure Alpha - regime-adaptive)
-        if (microAlphaResult != null && microAlphaResult.isTriggered()) {
+        // Strategy 3: MicroAlpha (Microstructure Alpha - regime-adaptive) — independent
+        if (microAlphaResult != null && microAlphaResult.isTriggered() && !symbolSignals.containsKey("MICROALPHA")) {
             log.info("{} {} STRATEGY 3 (MICROALPHA) ACTIVATED: {} at {}, conviction={}, mode={}",
                 LOG_PREFIX, TraceContext.getShortPrefix(),
                 microAlphaResult.getDirection(), String.format("%.2f", price),
@@ -1784,16 +1780,29 @@ public class SignalEngine {
             double stopLoss = microAlphaResult.getStopLoss() > 0 ?
                 microAlphaResult.getStopLoss() : price * 0.99;
 
-            return createAndActivateSignal(
+            TradingSignal signal = createAndActivateSignal(
                 symbol, candle, score, pivotState, indicators, patternResult,
                 "MICROALPHA", microAlphaResult.getDirection().name(),
                 microAlphaResult.getReason(), stopLoss
             );
+            if (signal != null && signal.getState().isActive()) {
+                symbolSignals.put("MICROALPHA", signal);
+            }
         }
 
-        // ==================== FALLBACK: Original State Machine ====================
-        // If no strategy triggered, use the original FUDKII score-based flow
-        return processStateMachine(symbol, candle, score, currentSignal, pivotState, indicators, patternResult);
+        // Fallback: if no strategy triggered and no active signals, use original state machine
+        if (symbolSignals.isEmpty()) {
+            TradingSignal fallbackSignal = processStateMachine(
+                symbol, candle, score, null, pivotState, indicators, patternResult);
+            if (fallbackSignal != null && fallbackSignal.getState().isActive()) {
+                symbolSignals.put("FUDKII_SCORE", fallbackSignal);
+            }
+        }
+
+        // Clean up empty symbol entries
+        if (symbolSignals.isEmpty()) {
+            activeSignals.remove(symbol);
+        }
     }
 
     /**
@@ -2283,42 +2292,52 @@ public class SignalEngine {
      * Check active signals for exit conditions.
      */
     private void checkActiveSignals() {
-        // Collect symbols to remove after iteration to avoid ConcurrentModificationException
-        List<String> symbolsToRemove = new ArrayList<>();
+        for (Map.Entry<String, ConcurrentHashMap<String, TradingSignal>> symbolEntry : activeSignals.entrySet()) {
+            String symbol = symbolEntry.getKey();
+            ConcurrentHashMap<String, TradingSignal> strategySignals = symbolEntry.getValue();
 
-        for (Map.Entry<String, TradingSignal> entry : activeSignals.entrySet()) {
             try {
-                String symbol = entry.getKey();
-                TradingSignal signal = entry.getValue();
-
-                if (signal.getState() != SignalState.ACTIVE) continue;
-
-                // Get current price
+                // Get current price once per symbol
                 UnifiedCandle current = candleService.getLatestCandle(
                     symbol, Timeframe.fromLabel(primaryTimeframe));
                 if (current == null) continue;
 
                 double price = current.getClose();
 
-                // Quick exit checks
-                if (signal.isStopHit(price)) {
-                    signal.enterComplete(TradingSignal.ExitReason.STOP_HIT, price);
-                    saveAndNotify(signal, SignalEvent.STOPPED_OUT);
-                    symbolsToRemove.add(symbol);
-                } else if (signal.isTargetHit(price)) {
-                    signal.enterComplete(TradingSignal.ExitReason.TARGET_HIT, price);
-                    saveAndNotify(signal, SignalEvent.TARGET_HIT);
-                    symbolsToRemove.add(symbol);
+                // Check each strategy signal independently
+                List<String> strategiesToRemove = new ArrayList<>();
+                for (Map.Entry<String, TradingSignal> stratEntry : strategySignals.entrySet()) {
+                    String strategyName = stratEntry.getKey();
+                    TradingSignal signal = stratEntry.getValue();
+
+                    if (signal.getState() != SignalState.ACTIVE) continue;
+
+                    if (signal.isStopHit(price)) {
+                        signal.enterComplete(TradingSignal.ExitReason.STOP_HIT, price);
+                        recordExitToStats(signal, price, "STOP_HIT");
+                        saveAndNotify(signal, SignalEvent.STOPPED_OUT);
+                        strategiesToRemove.add(strategyName);
+                    } else if (signal.isTargetHit(price)) {
+                        signal.enterComplete(TradingSignal.ExitReason.TARGET_HIT, price);
+                        recordExitToStats(signal, price, "TARGET_HIT");
+                        saveAndNotify(signal, SignalEvent.TARGET_HIT);
+                        strategiesToRemove.add(strategyName);
+                    }
+                }
+
+                // Remove completed strategy signals
+                for (String s : strategiesToRemove) {
+                    strategySignals.remove(s);
+                }
+
+                // Clean up empty symbol entries
+                if (strategySignals.isEmpty()) {
+                    activeSignals.remove(symbol);
                 }
             } catch (Exception e) {
-                log.error("{} Error checking signal for symbol={}: {}",
-                    LOG_PREFIX, entry.getKey(), e.getMessage());
+                log.error("{} Error checking signals for symbol={}: {}",
+                    LOG_PREFIX, symbol, e.getMessage());
             }
-        }
-
-        // Remove completed signals after iteration
-        for (String symbol : symbolsToRemove) {
-            activeSignals.remove(symbol);
         }
     }
 
@@ -2663,24 +2682,43 @@ public class SignalEngine {
     // ==================== PUBLIC API ====================
 
     /**
-     * Get active signal for symbol.
+     * Get active signal for symbol (returns first active strategy signal found).
      */
     public Optional<TradingSignal> getActiveSignal(String symbol) {
-        return Optional.ofNullable(activeSignals.get(symbol));
+        ConcurrentHashMap<String, TradingSignal> strategySignals = activeSignals.get(symbol);
+        if (strategySignals == null || strategySignals.isEmpty()) {
+            return Optional.empty();
+        }
+        return strategySignals.values().stream().findFirst();
     }
 
     /**
-     * Get all active signals.
+     * Get active signal for a specific strategy on a symbol.
+     */
+    public Optional<TradingSignal> getActiveSignal(String symbol, String strategyName) {
+        ConcurrentHashMap<String, TradingSignal> strategySignals = activeSignals.get(symbol);
+        if (strategySignals == null) {
+            return Optional.empty();
+        }
+        return Optional.ofNullable(strategySignals.get(strategyName));
+    }
+
+    /**
+     * Get all active signals across all symbols and strategies.
      */
     public List<TradingSignal> getAllActiveSignals() {
-        return new ArrayList<>(activeSignals.values());
+        List<TradingSignal> all = new ArrayList<>();
+        for (ConcurrentHashMap<String, TradingSignal> strategySignals : activeSignals.values()) {
+            all.addAll(strategySignals.values());
+        }
+        return all;
     }
 
     /**
      * Get signals by state.
      */
     public List<TradingSignal> getSignalsByState(SignalState state) {
-        return activeSignals.values().stream()
+        return getAllActiveSignals().stream()
             .filter(s -> s.getState() == state)
             .toList();
     }
@@ -2736,7 +2774,8 @@ public class SignalEngine {
         stats.put("enabled", enabled);
         stats.put("symbols", symbolsConfig);
         stats.put("timeframe", primaryTimeframe);
-        stats.put("activeSignals", activeSignals.size());
+        stats.put("activeSymbols", activeSignals.size());
+        stats.put("activeSignals", getAllActiveSignals().size());
         stats.put("watchSignals", getSignalsByState(SignalState.WATCH).size());
         stats.put("activeTriggeredSignals", getSignalsByState(SignalState.ACTIVE).size());
         return stats;
