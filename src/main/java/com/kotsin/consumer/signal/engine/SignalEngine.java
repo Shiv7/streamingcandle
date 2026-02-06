@@ -1238,6 +1238,9 @@ public class SignalEngine {
                 .custom("fudkiiScore", score)               // For QuantScoreGate
                 .custom("patternResult", patternResult)     // For PatternGate
                 .custom("breakoutEvents", symbolBreakoutEvents.get(symbol))  // For StructuralLevelGate
+                .custom("momentumScore", score.getUrgencyScore())  // IPU urgency for MomentumGate
+                .custom("oiInterpretation", score.getOiInterpretation())  // OI interpretation
+                .custom("exhaustionScore", score.isSuggestsReversal() ? 0.8 : 0.0)  // Exhaustion signal
                 .build();
 
             return gateChain.evaluate(symbol, "FUDKII", context);

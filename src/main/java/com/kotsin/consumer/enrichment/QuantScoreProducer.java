@@ -288,24 +288,33 @@ public class QuantScoreProducer {
     }
 
     /**
-     * Calculate volume profile quality score.
+     * Calculate volume profile quality score using cluster strength and quality metrics.
      */
     private double calculateVolumeProfileScore(VcpState vcpState) {
         if (vcpState == null) return 0;
 
         double score = 0;
 
-        // Has clear clusters
+        // Support cluster quality (max 35)
         if (vcpState.getSupportClusters() != null && !vcpState.getSupportClusters().isEmpty()) {
-            score += 30;
-        }
-        if (vcpState.getResistanceClusters() != null && !vcpState.getResistanceClusters().isEmpty()) {
-            score += 30;
+            double avgStrength = vcpState.getSupportClusters().stream()
+                .mapToDouble(c -> c.getStrength())
+                .average().orElse(0);
+            // Strong clusters (strength > 0.5) score higher than weak clusters
+            score += 15 + avgStrength * 20; // 15 for presence + up to 20 for quality
         }
 
-        // Runway quality
+        // Resistance cluster quality (max 35)
+        if (vcpState.getResistanceClusters() != null && !vcpState.getResistanceClusters().isEmpty()) {
+            double avgStrength = vcpState.getResistanceClusters().stream()
+                .mapToDouble(c -> c.getStrength())
+                .average().orElse(0);
+            score += 15 + avgStrength * 20;
+        }
+
+        // Runway quality: directional conviction (max 30)
         double runway = Math.max(vcpState.getBullishRunway(), vcpState.getBearishRunway());
-        score += runway * 40;
+        score += runway * 30;
 
         return Math.min(100, score);
     }
@@ -337,21 +346,46 @@ public class QuantScoreProducer {
     }
 
     /**
-     * Calculate options flow score.
+     * Calculate options flow score using OI interpretation and change magnitude.
+     * Scores continuations (buildup) higher than exhaustion (unwinding/covering).
      */
     private double calculateOptionsFlowScore(UnifiedCandle candle) {
         if (!candle.isHasOI()) return 0;
 
-        double score = 50; // Base score for having OI
+        double score = 40; // Base score for having OI data
 
-        // OI change significance
-        if (candle.getOiChangePercent() != null && Math.abs(candle.getOiChangePercent()) > 2) {
-            score += 25;
+        // OI change magnitude: bigger moves = higher score
+        if (candle.getOiChangePercent() != null) {
+            double absChange = Math.abs(candle.getOiChangePercent());
+            if (absChange > 5) score += 25;       // Very strong OI move
+            else if (absChange > 2) score += 15;   // Strong OI move
+            else if (absChange > 0.5) score += 5;  // Moderate OI move
         }
 
-        // Clear interpretation
+        // OI interpretation quality: continuation > exhaustion > neutral
         if (candle.getOiInterpretation() != null) {
-            score += 25;
+            switch (candle.getOiInterpretation()) {
+                case LONG_BUILDUP:
+                case SHORT_BUILDUP:
+                    // Fresh position buildup = strong institutional commitment
+                    score += 30;
+                    break;
+                case SHORT_COVERING:
+                case LONG_UNWINDING:
+                    // Unwinding/covering = directional but exhaustive
+                    score += 15;
+                    break;
+                case NEUTRAL:
+                default:
+                    // No clear interpretation
+                    score += 5;
+                    break;
+            }
+        }
+
+        // OI confidence bonus
+        if (candle.getOiInterpretationConfidence() != null && candle.getOiInterpretationConfidence() > 0.7) {
+            score += 5;
         }
 
         return Math.min(100, score);
