@@ -1,5 +1,7 @@
 package com.kotsin.consumer.signal.trigger;
 
+import com.kotsin.consumer.breakout.model.BreakoutEvent;
+import com.kotsin.consumer.breakout.model.BreakoutEvent.*;
 import com.kotsin.consumer.model.UnifiedCandle;
 import com.kotsin.consumer.model.Timeframe;
 import com.kotsin.consumer.model.TimeframeBoundary;
@@ -95,6 +97,9 @@ public class PivotConfluenceTrigger {
     @Value("${pivot.confluence.tolerance.percent:0.5}")
     private double confluenceTolerancePercent;  // Default 0.5% (was 0.3% which was too tight)
 
+    // Breakout context from BreakoutDetector (set by SignalEngine before checkTrigger)
+    private final ConcurrentHashMap<String, List<BreakoutEvent>> breakoutContext = new ConcurrentHashMap<>();
+
     // Cache for HTF bias with TTL
     private final Map<String, CachedBias> htfBiasCache = new ConcurrentHashMap<>();
 
@@ -168,6 +173,18 @@ public class PivotConfluenceTrigger {
     }
 
     /**
+     * Set breakout context from BreakoutDetector.
+     * Called by SignalEngine before checkTrigger() to provide break/retest state.
+     */
+    public void setBreakoutContext(String symbol, List<BreakoutEvent> events) {
+        if (events != null && !events.isEmpty()) {
+            breakoutContext.put(symbol, events);
+        } else {
+            breakoutContext.remove(symbol);
+        }
+    }
+
+    /**
      * Check if Pivot Confluence signal should trigger.
      */
     public PivotTriggerResult checkTrigger(String scripCode, String exch, String exchType) {
@@ -204,7 +221,8 @@ public class PivotConfluenceTrigger {
                 LOG_PREFIX, scripCode, pivotAnalysis.confluenceLevels.size(),
                 pivotAnalysis.nearbyLevels, pivotAnalysis.cprPosition);
 
-            if (pivotAnalysis.nearbyLevels < minConfluenceLevels) {
+            // Retest setups bypass confluence minimum — a retest at a single R1/S1 is valid
+            if (pivotAnalysis.nearbyLevels < minConfluenceLevels && !pivotAnalysis.isHasConfirmedRetest()) {
                 return PivotTriggerResult.noTrigger(String.format(
                     "Insufficient pivot confluence: %d levels (min %d required)",
                     pivotAnalysis.nearbyLevels, minConfluenceLevels));
@@ -550,8 +568,47 @@ public class PivotConfluenceTrigger {
                 }
             }
 
-            log.debug("{} {} Pivot analysis: price={}, nearbyLevels={}, cpr={}",
-                LOG_PREFIX, scripCode, String.format("%.2f", currentPrice), nearbyLevels, cprPosition);
+            // Check breakout context for retest/breakout events at pivot levels
+            boolean hasConfirmedRetest = false;
+            boolean hasActiveBreakout = false;
+            String retestLevelDesc = null;
+            RetestQuality retestQual = null;
+
+            List<BreakoutEvent> events = breakoutContext.get(scripCode);
+            if (events != null) {
+                for (BreakoutEvent event : events) {
+                    if (event.getType() == BreakoutType.RETEST && event.isRetestHeld()) {
+                        // Check if retest quality is good enough (PERFECT or GOOD)
+                        if (event.getRetestQuality() == RetestQuality.PERFECT ||
+                            event.getRetestQuality() == RetestQuality.GOOD) {
+                            hasConfirmedRetest = true;
+                            retestLevelDesc = event.getLevelDescription();
+                            retestQual = event.getRetestQuality();
+                            log.info("{} {} RETEST at pivot: {} (quality={})",
+                                LOG_PREFIX, scripCode, retestLevelDesc, retestQual);
+                        }
+                    } else if (event.getType() == BreakoutType.BREAKOUT) {
+                        hasActiveBreakout = true;
+                        log.info("{} {} Active BREAKOUT: {} through {} (strength={})",
+                            LOG_PREFIX, scripCode, event.getDirection(),
+                            event.getLevelDescription(), event.getStrength());
+                    }
+                }
+            }
+
+            // Retest at a key level counts as a confluence point
+            if (hasConfirmedRetest) {
+                nearbyLevels++;
+                confluenceLevels.add("Confirmed retest: " + retestLevelDesc);
+            }
+            if (hasActiveBreakout) {
+                nearbyLevels++;
+                confluenceLevels.add("Active breakout at pivot");
+            }
+
+            log.debug("{} {} Pivot analysis: price={}, nearbyLevels={}, cpr={}, retest={}, breakout={}",
+                LOG_PREFIX, scripCode, String.format("%.2f", currentPrice), nearbyLevels, cprPosition,
+                hasConfirmedRetest, hasActiveBreakout);
 
             return PivotConfluenceAnalysis.builder()
                 .currentPrice(currentPrice)
@@ -559,6 +616,10 @@ public class PivotConfluenceTrigger {
                 .nearbyLevels(nearbyLevels)
                 .cprPosition(cprPosition)
                 .pivotState(pivotState)
+                .hasConfirmedRetest(hasConfirmedRetest)
+                .hasActiveBreakout(hasActiveBreakout)
+                .retestLevelDescription(retestLevelDesc)
+                .retestQuality(retestQual)
                 .build();
         }
 
@@ -918,16 +979,39 @@ public class PivotConfluenceTrigger {
         // R:R bonus (max 10)
         score += Math.min(rrCalc.riskReward * 3, 10);
 
+        // Breakout/Retest bonus (max 25) - key structural events
+        if (pivotAnalysis.isHasConfirmedRetest()) {
+            score += 20; // Confirmed retest is a high-conviction setup
+            if (pivotAnalysis.getRetestQuality() == RetestQuality.PERFECT) {
+                score += 5; // Extra bonus for clean retest
+            }
+            log.info("{} Retest bonus applied: +{} (quality={})",
+                LOG_PREFIX, pivotAnalysis.getRetestQuality() == RetestQuality.PERFECT ? 25 : 20,
+                pivotAnalysis.getRetestQuality());
+        } else if (pivotAnalysis.isHasActiveBreakout()) {
+            score += 15; // Active breakout at a pivot level
+            log.info("{} Breakout bonus applied: +15", LOG_PREFIX);
+        }
+
         return Math.min(score, 100);
     }
 
     private String buildTriggerReason(DirectionBias htfBias, PivotConfluenceAnalysis pivotAnalysis,
                                        SMCZoneAnalysis smcAnalysis, RiskRewardCalculation rrCalc) {
-        return String.format("HTF %s (%.0f%%) + %d pivot levels + SMC[OB=%s,FVG=%s] + R:R=%.1f",
-            htfBias.direction, htfBias.strength * 100,
-            pivotAnalysis.nearbyLevels,
-            smcAnalysis.inOrderBlock, smcAnalysis.nearFVG,
-            rrCalc.riskReward);
+        StringBuilder reason = new StringBuilder();
+        reason.append(String.format("HTF %s (%.0f%%) + %d pivot levels",
+            htfBias.direction, htfBias.strength * 100, pivotAnalysis.nearbyLevels));
+
+        if (pivotAnalysis.isHasConfirmedRetest()) {
+            reason.append(String.format(" + RETEST[%s, quality=%s]",
+                pivotAnalysis.getRetestLevelDescription(), pivotAnalysis.getRetestQuality()));
+        } else if (pivotAnalysis.isHasActiveBreakout()) {
+            reason.append(" + BREAKOUT");
+        }
+
+        reason.append(String.format(" + SMC[OB=%s,FVG=%s] + R:R=%.1f",
+            smcAnalysis.inOrderBlock, smcAnalysis.nearFVG, rrCalc.riskReward));
+        return reason.toString();
     }
 
     /**
@@ -968,6 +1052,12 @@ public class PivotConfluenceTrigger {
                 payload.put("pivotConfluenceLevels", pivot.getConfluenceLevels());
                 payload.put("pivotNearbyLevels", pivot.getNearbyLevels());
                 payload.put("cprPosition", pivot.getCprPosition());
+                payload.put("hasConfirmedRetest", pivot.isHasConfirmedRetest());
+                payload.put("hasActiveBreakout", pivot.isHasActiveBreakout());
+                if (pivot.isHasConfirmedRetest()) {
+                    payload.put("retestLevel", pivot.getRetestLevelDescription());
+                    payload.put("retestQuality", pivot.getRetestQuality() != null ? pivot.getRetestQuality().name() : null);
+                }
             }
 
             // SMC Analysis
@@ -1082,6 +1172,11 @@ public class PivotConfluenceTrigger {
         private int nearbyLevels;
         private String cprPosition;
         private MultiTimeframePivotState pivotState;
+        // Breakout/retest context from BreakoutDetector
+        private boolean hasConfirmedRetest;
+        private boolean hasActiveBreakout;
+        private String retestLevelDescription;
+        private RetestQuality retestQuality;
     }
 
     @Data

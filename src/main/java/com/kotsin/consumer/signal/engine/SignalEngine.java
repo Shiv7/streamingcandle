@@ -1,5 +1,8 @@
 package com.kotsin.consumer.signal.engine;
 
+import com.kotsin.consumer.breakout.detector.BreakoutDetector;
+import com.kotsin.consumer.breakout.model.BreakoutEvent;
+import com.kotsin.consumer.breakout.model.BreakoutEvent.*;
 import com.kotsin.consumer.event.CandleBoundaryEvent;
 import com.kotsin.consumer.gate.GateChain;
 import com.kotsin.consumer.gate.model.GateResult.ChainResult;
@@ -132,6 +135,11 @@ public class SignalEngine {
 
     @Autowired
     private com.kotsin.consumer.service.ATRService atrService;
+
+    // ==================== BREAKOUT DETECTION ====================
+
+    @Autowired
+    private BreakoutDetector breakoutDetector;
 
     // ==================== STRATEGY TRIGGERS ====================
 
@@ -572,12 +580,17 @@ public class SignalEngine {
             TraceContext.addStage("MTF");
             analyzeMTF(symbol, candles, score);
 
+            // ==================== BREAKOUT DETECTION ====================
+            TraceContext.addStage("BREAKOUT_DETECTION");
+            List<BreakoutEvent> breakoutEvents = detectBreakouts(symbol, current, candles, indicators);
+
             // ==================== STRATEGY 1: FUDKII TRIGGER (ST + BB on 30m) ====================
             TraceContext.addStage("FUDKII_TRIGGER");
             var fudkiiResult = checkFudkiiTrigger(symbol, current);
 
             // ==================== STRATEGY 2: PIVOT CONFLUENCE TRIGGER ====================
             TraceContext.addStage("PIVOT_TRIGGER");
+            pivotConfluenceTrigger.setBreakoutContext(symbol, breakoutEvents);
             var pivotResult = checkPivotConfluenceTrigger(symbol, current);
 
             // ==================== STRATEGY 3: MICROALPHA TRIGGER (Microstructure Alpha) ====================
@@ -1035,6 +1048,160 @@ public class SignalEngine {
         } catch (Exception e) {
             log.debug("{} {} MTF analysis failed: {}",
                 LOG_PREFIX, TraceContext.getShortPrefix(), e.getMessage());
+        }
+    }
+
+    // ==================== BREAKOUT DETECTION ====================
+
+    /**
+     * Register key levels and detect breakouts/retests for a symbol.
+     *
+     * Flow:
+     * 1. Load pivot levels (daily, weekly) and session levels (VWAP, OR)
+     * 2. Register all levels into BreakoutDetector
+     * 3. Call detect() to check for breakouts, retests, and failed breakouts
+     * 4. Return events for downstream consumption by triggers
+     */
+    private List<BreakoutEvent> detectBreakouts(String symbol, UnifiedCandle current,
+            List<UnifiedCandle> candles, TechnicalIndicators indicators) {
+        try {
+            String exch = current.getExchange() != null ? current.getExchange() : "N";
+            String exchType = current.getExchangeType() != null ? current.getExchangeType() : "C";
+            String scripCode = current.getScripCode() != null ? current.getScripCode() : symbol;
+
+            // Register levels from pivots, SMC, and session structure
+            registerLevelsForBreakoutDetection(scripCode, exch, exchType);
+
+            // Calculate average volume for confirmation
+            double avgVolume = 0;
+            if (candles != null && candles.size() >= 20) {
+                avgVolume = candles.stream().limit(20).mapToDouble(UnifiedCandle::getVolume).average().orElse(0);
+            } else if (indicators != null && indicators.getAvgVolume20() > 0) {
+                avgVolume = indicators.getAvgVolume20();
+            }
+
+            // Extract RSI and MACD for momentum confirmation
+            Double rsi = indicators != null ? indicators.getRsi() : null;
+            Double macdHist = indicators != null ? indicators.getMacdHistogram() : null;
+
+            // Detect breakouts against registered levels
+            List<BreakoutEvent> events = breakoutDetector.detect(
+                scripCode, "5m",
+                current.getHigh(), current.getLow(), current.getClose(),
+                current.getVolume(), avgVolume,
+                rsi, macdHist);
+
+            if (events != null && !events.isEmpty()) {
+                for (BreakoutEvent event : events) {
+                    if (event.getType() == BreakoutType.RETEST && event.isRetestHeld()) {
+                        log.info("{} {} RETEST DETECTED: {} at {} (quality={}, level={})",
+                            LOG_PREFIX, TraceContext.getShortPrefix(),
+                            event.getDirection(), String.format("%.2f", event.getBreakoutLevel()),
+                            event.getRetestQuality(), event.getLevelDescription());
+                    } else if (event.getType() == BreakoutType.BREAKOUT) {
+                        log.info("{} {} BREAKOUT DETECTED: {} through {} (strength={}, vol={}x)",
+                            LOG_PREFIX, TraceContext.getShortPrefix(),
+                            event.getDirection(), String.format("%.2f", event.getBreakoutLevel()),
+                            event.getStrength(), String.format("%.1f", event.getVolumeRatio()));
+                    }
+                }
+            }
+
+            return events != null ? events : List.of();
+        } catch (Exception e) {
+            log.debug("{} {} Breakout detection failed: {}",
+                LOG_PREFIX, TraceContext.getShortPrefix(), e.getMessage());
+            return List.of();
+        }
+    }
+
+    /**
+     * Register key price levels into BreakoutDetector for a symbol.
+     * Sources: Daily/Weekly pivots, CPR, SMC order blocks, session levels (VWAP, OR).
+     */
+    private void registerLevelsForBreakoutDetection(String scripCode, String exch, String exchType) {
+        // Clear old levels to re-register fresh
+        breakoutDetector.clearLevels(scripCode);
+
+        List<BreakoutDetector.LevelInfo> levels = new ArrayList<>();
+
+        // 1. Register pivot levels
+        try {
+            Optional<MultiTimeframePivotState> pivotOpt = pivotLevelService.getOrLoadPivotLevels(scripCode, exch, exchType);
+            if (pivotOpt.isPresent()) {
+                MultiTimeframePivotState mtfPivots = pivotOpt.get();
+
+                // Daily pivots
+                if (mtfPivots.getDailyPivot() != null) {
+                    com.kotsin.consumer.model.PivotLevels daily = mtfPivots.getDailyPivot();
+                    addLevel(levels, daily.getS1(), LevelSource.SUPPORT, "Daily_S1");
+                    addLevel(levels, daily.getS2(), LevelSource.SUPPORT, "Daily_S2");
+                    addLevel(levels, daily.getR1(), LevelSource.RESISTANCE, "Daily_R1");
+                    addLevel(levels, daily.getR2(), LevelSource.RESISTANCE, "Daily_R2");
+                    addLevel(levels, daily.getPivot(), LevelSource.SUPPORT, "Daily_Pivot");
+                    addLevel(levels, daily.getTc(), LevelSource.RESISTANCE, "Daily_TC");
+                    addLevel(levels, daily.getBc(), LevelSource.SUPPORT, "Daily_BC");
+                }
+
+                // Weekly pivots
+                if (mtfPivots.getWeeklyPivot() != null) {
+                    com.kotsin.consumer.model.PivotLevels weekly = mtfPivots.getWeeklyPivot();
+                    addLevel(levels, weekly.getS1(), LevelSource.SUPPORT, "Weekly_S1");
+                    addLevel(levels, weekly.getR1(), LevelSource.RESISTANCE, "Weekly_R1");
+                    addLevel(levels, weekly.getPivot(), LevelSource.SUPPORT, "Weekly_Pivot");
+                }
+            }
+        } catch (Exception e) {
+            log.debug("{} {} Failed to register pivot levels: {}",
+                LOG_PREFIX, scripCode, e.getMessage());
+        }
+
+        // 2. Register SMC order blocks
+        try {
+            List<com.kotsin.consumer.smc.model.OrderBlock> orderBlocks = smcAnalyzer.getValidOrderBlocks(scripCode);
+            for (com.kotsin.consumer.smc.model.OrderBlock ob : orderBlocks) {
+                double midPrice = (ob.getHigh() + ob.getLow()) / 2;
+                LevelSource source = LevelSource.ORDER_BLOCK;
+                String desc = (ob.isBullish() ? "Bull_OB_" : "Bear_OB_") + String.format("%.0f", midPrice);
+                addLevel(levels, midPrice, source, desc);
+            }
+        } catch (Exception e) {
+            log.debug("{} {} Failed to register SMC levels: {}",
+                LOG_PREFIX, scripCode, e.getMessage());
+        }
+
+        // 3. Register session levels (VWAP, Opening Range)
+        try {
+            SessionStructure session = sessionTracker.getSession(scripCode);
+            if (session != null) {
+                if (session.getVwap() > 0) {
+                    addLevel(levels, session.getVwap(), LevelSource.VWAP, "VWAP");
+                }
+                if (session.isOpeningRangeComplete()) {
+                    addLevel(levels, session.getOpeningRangeHigh30(), LevelSource.OPENING_RANGE, "OR_High_30m");
+                    addLevel(levels, session.getOpeningRangeLow30(), LevelSource.OPENING_RANGE, "OR_Low_30m");
+                }
+            }
+        } catch (Exception e) {
+            log.debug("{} {} Failed to register session levels: {}",
+                LOG_PREFIX, scripCode, e.getMessage());
+        }
+
+        // Register all collected levels
+        if (!levels.isEmpty()) {
+            breakoutDetector.registerLevels(scripCode, levels);
+            log.debug("{} {} Registered {} levels for breakout detection",
+                LOG_PREFIX, scripCode, levels.size());
+        }
+    }
+
+    /**
+     * Helper to add a level if valid (positive price).
+     */
+    private void addLevel(List<BreakoutDetector.LevelInfo> levels, double price,
+                           LevelSource source, String description) {
+        if (price > 0) {
+            levels.add(new BreakoutDetector.LevelInfo(price, source, description));
         }
     }
 
