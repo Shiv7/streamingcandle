@@ -424,6 +424,52 @@ public class PivotConfluenceTrigger {
             log.debug("{} {} 4H analysis: bullish={}, bearish={}", LOG_PREFIX, scripCode, bullishScore, bearishScore);
         }
 
+        // Structural level context (40% weight on HTF bias)
+        List<BreakoutEvent> events = breakoutContext.get(scripCode);
+        if (events != null) {
+            for (BreakoutEvent event : events) {
+                if (event.getType() == BreakoutType.BREAKOUT) {
+                    // Price broke through a key level — direction of break strengthens bias
+                    if (event.getDirection() == BreakoutDirection.BULLISH) {
+                        bullishScore += 15;
+                        reasons.add("Structural: Breakout above " + event.getLevelDescription());
+                    } else if (event.getDirection() == BreakoutDirection.BEARISH) {
+                        bearishScore += 15;
+                        reasons.add("Structural: Breakdown below " + event.getLevelDescription());
+                    }
+                } else if (event.getType() == BreakoutType.RETEST && event.isRetestHeld()) {
+                    // Confirmed retest = strong directional conviction
+                    if (event.getDirection() == BreakoutDirection.BULLISH) {
+                        bullishScore += 20;
+                        reasons.add("Structural: Retest held above " + event.getLevelDescription());
+                    } else if (event.getDirection() == BreakoutDirection.BEARISH) {
+                        bearishScore += 20;
+                        reasons.add("Structural: Retest held below " + event.getLevelDescription());
+                    }
+                }
+            }
+        }
+
+        // CPR position adds structural context
+        MultiTimeframePivotState pivotState = pivotLevelService.getOrLoadPivotLevels(scripCode, "N", "C").orElse(null);
+        if (pivotState != null && pivotState.getDailyPivot() != null) {
+            List<UnifiedCandle> priceCandles = candleService.getCandleHistory(scripCode, Timeframe.M5, 1);
+            if (priceCandles != null && !priceCandles.isEmpty()) {
+                double price = priceCandles.get(0).getClose();
+                double tc = pivotState.getDailyPivot().getTc();
+                double bc = pivotState.getDailyPivot().getBc();
+                if (tc > 0 && price > tc) {
+                    bullishScore += 10;
+                    reasons.add("Structural: Price ABOVE CPR");
+                } else if (bc > 0 && price < bc) {
+                    bearishScore += 10;
+                    reasons.add("Structural: Price BELOW CPR");
+                }
+            }
+        }
+
+        log.debug("{} {} HTF structural context: bullish={}, bearish={}", LOG_PREFIX, scripCode, bullishScore, bearishScore);
+
         // Determine bias
         BiasDirection direction;
         double strength;
@@ -554,6 +600,36 @@ public class PivotConfluenceTrigger {
             if (momentum) {
                 alignmentScore += 20;
                 reasons.add("5m: Momentum in HTF direction");
+            }
+        }
+
+        // Structural level confirmation: bounce/retest at key level in HTF direction
+        List<BreakoutEvent> events = breakoutContext.get(scripCode);
+        if (events != null) {
+            for (BreakoutEvent event : events) {
+                boolean directionMatch =
+                    (htfDirection == BiasDirection.BULLISH && event.getDirection() == BreakoutDirection.BULLISH) ||
+                    (htfDirection == BiasDirection.BEARISH && event.getDirection() == BreakoutDirection.BEARISH);
+
+                if (directionMatch && event.getType() == BreakoutType.RETEST && event.isRetestHeld()) {
+                    alignmentScore += 20;
+                    confirms = true;
+                    reasons.add("LTF: Confirmed retest at " + event.getLevelDescription() + " in HTF direction");
+                    break;
+                } else if (directionMatch && event.getType() == BreakoutType.BREAKOUT) {
+                    alignmentScore += 10;
+                    reasons.add("LTF: Active breakout at " + event.getLevelDescription() + " aligns with HTF");
+                    break;
+                }
+            }
+        }
+
+        // Volume surge on latest 5m candle strengthens LTF confirmation
+        if (m5Candles != null && m5Candles.size() >= 10) {
+            double avgVol = m5Candles.stream().limit(10).mapToDouble(UnifiedCandle::getVolume).average().orElse(0);
+            if (avgVol > 0 && m5Candles.get(0).getVolume() > avgVol * 1.3) {
+                alignmentScore += 10;
+                reasons.add("5m: Volume surge (1.3x+ avg)");
             }
         }
 

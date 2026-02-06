@@ -13,6 +13,9 @@ import org.springframework.data.redis.core.RedisTemplate;
 import org.springframework.kafka.core.KafkaTemplate;
 import org.springframework.stereotype.Component;
 
+import com.kotsin.consumer.breakout.model.BreakoutEvent;
+import com.kotsin.consumer.breakout.model.BreakoutEvent.*;
+
 import java.time.Duration;
 import java.time.Instant;
 import java.util.ArrayList;
@@ -71,13 +74,27 @@ public class QuantScoreProducer {
             IpuState ipuState,
             PivotState pivotState,
             List<String> detectedPatterns) {
+        publish(candle, fudkiiScore, vcpState, ipuState, pivotState, detectedPatterns, null);
+    }
+
+    /**
+     * Publish a QuantScore with structural level context.
+     */
+    public void publish(
+            UnifiedCandle candle,
+            FudkiiScore fudkiiScore,
+            VcpState vcpState,
+            IpuState ipuState,
+            PivotState pivotState,
+            List<String> detectedPatterns,
+            List<BreakoutEvent> breakoutEvents) {
 
         if (!enabled || fudkiiScore == null || candle == null) {
             return;
         }
 
         try {
-            QuantScoreDTO dto = buildQuantScore(candle, fudkiiScore, vcpState, ipuState, pivotState, detectedPatterns);
+            QuantScoreDTO dto = buildQuantScore(candle, fudkiiScore, vcpState, ipuState, pivotState, detectedPatterns, breakoutEvents);
 
             // Publish to Redis
             publishToRedis(dto);
@@ -104,7 +121,8 @@ public class QuantScoreProducer {
             VcpState vcpState,
             IpuState ipuState,
             PivotState pivotState,
-            List<String> detectedPatterns) {
+            List<String> detectedPatterns,
+            List<BreakoutEvent> breakoutEvents) {
 
         // Build score breakdown
         QuantScoreDTO.ScoreBreakdown breakdown = QuantScoreDTO.ScoreBreakdown.builder()
@@ -120,6 +138,7 @@ public class QuantScoreProducer {
             .microstructureScore(calculateMicrostructureScore(candle))
             .optionsFlowScore(calculateOptionsFlowScore(candle))
             .confluenceScore(calculateConfluenceScore(vcpState, ipuState, pivotState))
+            .structuralLevelScore(calculateStructuralLevelScore(breakoutEvents))
             .build();
 
         // Determine trend direction
@@ -328,6 +347,34 @@ public class QuantScoreProducer {
         }
 
         return Math.min(100, score);
+    }
+
+    /**
+     * Calculate structural level score.
+     * - 100: Trading at confirmed retest of broken level
+     * - 75: Trading at key confluence level with active breakout
+     * - 50: Trading near a registered level
+     * - 25: No nearby structural level
+     */
+    private double calculateStructuralLevelScore(List<BreakoutEvent> breakoutEvents) {
+        if (breakoutEvents == null || breakoutEvents.isEmpty()) return 25;
+
+        double bestScore = 25;
+        for (BreakoutEvent event : breakoutEvents) {
+            if (event.getType() == BreakoutType.RETEST && event.isRetestHeld()) {
+                RetestQuality quality = event.getRetestQuality();
+                if (quality == RetestQuality.PERFECT) {
+                    bestScore = Math.max(bestScore, 100);
+                } else if (quality == RetestQuality.GOOD) {
+                    bestScore = Math.max(bestScore, 85);
+                } else {
+                    bestScore = Math.max(bestScore, 60);
+                }
+            } else if (event.getType() == BreakoutType.BREAKOUT) {
+                bestScore = Math.max(bestScore, 75);
+            }
+        }
+        return bestScore;
     }
 
     /**

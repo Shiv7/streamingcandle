@@ -94,6 +94,7 @@ public class QuantScoreDTO {
         private double ivSurfaceScore;      // IV analysis (if applicable)
         private double crossInstrumentScore; // Family correlation
         private double confluenceScore;     // Multi-timeframe confluence
+        private double structuralLevelScore; // Structural level proximity (breakout/retest)
     }
 
     /**
