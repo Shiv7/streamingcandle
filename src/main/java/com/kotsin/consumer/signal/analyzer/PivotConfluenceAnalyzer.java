@@ -190,6 +190,12 @@ public class PivotConfluenceAnalyzer {
 
     /**
      * Detect bounce signal at pivot levels.
+     *
+     * Enhanced logic:
+     * - Uses up to 10 candles (not just 3) to find the touch candle
+     * - Wick analysis: long lower/upper wick = rejection signal
+     * - Volume surge: bounce candle should have 1.3x average volume
+     * - Reduced confluence requirement: single level valid if wick rejection is strong
      */
     public BounceSignal detectBounce(MultiTimeframePivotState state,
             List<UnifiedCandle> recentCandles, double currentPrice) {
@@ -200,101 +206,165 @@ public class PivotConfluenceAnalyzer {
             return null;
         }
 
+        // Use up to 10 candles for richer bounce analysis
+        int lookback = Math.min(recentCandles.size(), 10);
         UnifiedCandle current = recentCandles.get(0);
-        UnifiedCandle prev1 = recentCandles.get(1);
-        UnifiedCandle prev2 = recentCandles.get(2);
 
-        log.debug("{} Checking bounce for {} at price {} | Recent: O={} H={} L={} C={}",
-            LOG_PREFIX, state.getSymbol(), String.format("%.2f", currentPrice),
-            String.format("%.2f", current.getOpen()), String.format("%.2f", current.getHigh()),
-            String.format("%.2f", current.getLow()), String.format("%.2f", current.getClose()));
+        log.debug("{} Checking bounce for {} at price {} | Lookback: {} candles",
+            LOG_PREFIX, state.getSymbol(), String.format("%.2f", currentPrice), lookback);
+
+        // Calculate average volume over available candles
+        double avgVolume = recentCandles.stream().limit(lookback)
+            .mapToDouble(UnifiedCandle::getVolume).average().orElse(0);
 
         // Find nearest support and resistance
         NearestLevel nearestSupport = findNearestSupport(state, currentPrice);
         NearestLevel nearestResistance = findNearestResistance(state, currentPrice);
 
-        if (nearestSupport != null) {
-            log.debug("{} Nearest support: {} at {} (distance: {}%)",
-                LOG_PREFIX, nearestSupport.name, String.format("%.2f", nearestSupport.price),
-                String.format("%.2f", nearestSupport.distance / currentPrice * 100));
-        }
-        if (nearestResistance != null) {
-            log.debug("{} Nearest resistance: {} at {} (distance: {}%)",
-                LOG_PREFIX, nearestResistance.name, String.format("%.2f", nearestResistance.price),
-                String.format("%.2f", nearestResistance.distance / currentPrice * 100));
-        }
-
         // Check for bullish bounce at support
-        if (nearestSupport != null && nearestSupport.distance < currentPrice * 0.01) { // Within 1%
-            boolean touchedSupport = prev1.getLow() <= nearestSupport.price * 1.002; // Within 0.2%
-            boolean bouncing = current.getClose() > prev1.getClose() &&
-                              current.getClose() > current.getOpen();  // Bullish candle
-            boolean volumeConfirm = current.getVolume() > prev1.getVolume() * 0.8; // Decent volume
+        if (nearestSupport != null && nearestSupport.distance < currentPrice * 0.015) { // Within 1.5%
+            // Scan recent candles to find the one that touched support
+            for (int i = 0; i < lookback - 1; i++) {
+                UnifiedCandle touchCandle = recentCandles.get(i);
+                double touchTolerance = nearestSupport.price * 0.003; // 0.3% tolerance
 
-            if (touchedSupport && bouncing && nearestSupport.confluence >= 2) {
-                double bouncePercent = ((current.getClose() - prev1.getLow()) / prev1.getLow()) * 100;
+                boolean touchedSupport = touchCandle.getLow() <= nearestSupport.price + touchTolerance;
+                if (!touchedSupport) continue;
 
-                log.info("{} *** BULLISH BOUNCE DETECTED *** | Symbol: {} | Level: {} @ {} | " +
-                    "Confluence: {} | Bounce: {}% | Touch: {} -> Current: {}",
-                    LOG_PREFIX, state.getSymbol(), nearestSupport.name,
-                    String.format("%.2f", nearestSupport.price), nearestSupport.confluence,
-                    String.format("%.2f", bouncePercent),
-                    String.format("%.2f", prev1.getLow()), String.format("%.2f", current.getClose()));
+                // Wick analysis: long lower wick = strong rejection
+                double range = touchCandle.getHigh() - touchCandle.getLow();
+                double lowerWick = Math.min(touchCandle.getOpen(), touchCandle.getClose()) - touchCandle.getLow();
+                double wickRatio = range > 0 ? lowerWick / range : 0;
+                boolean strongWickRejection = wickRatio > 0.5; // Lower wick > 50% of candle
 
-                return BounceSignal.builder()
-                    .symbol(state.getSymbol())
-                    .type(BounceSignal.BounceType.BULLISH_BOUNCE)
-                    .level(nearestSupport.price)
-                    .levelName(nearestSupport.name)
-                    .confluence(nearestSupport.confluence)
-                    .confidence(calculateConfidence(nearestSupport.confluence, bouncePercent))
-                    .message("Bullish bounce at " + nearestSupport.name +
-                            " (confluence: " + nearestSupport.confluence + ")")
-                    .touchPrice(prev1.getLow())
-                    .currentPrice(current.getClose())
-                    .bouncePercent(bouncePercent)
-                    .signalTime(Instant.now())
-                    .candlesSinceBounce(1)
-                    .build();
+                // Current candle must be bouncing (closing above touch low)
+                boolean bouncing = current.getClose() > touchCandle.getLow() &&
+                                  current.getClose() > current.getOpen();
+
+                // Volume check: bounce candle should show conviction
+                boolean volumeSurge = current.getVolume() > avgVolume * 1.3;
+
+                // Relaxed confluence: wick rejection can compensate for lower confluence
+                int minConfluence = strongWickRejection ? 1 : 2;
+
+                if (bouncing && nearestSupport.confluence >= minConfluence) {
+                    double bouncePercent = ((current.getClose() - touchCandle.getLow()) / touchCandle.getLow()) * 100;
+                    int candlesSince = i;
+
+                    double confidence = calculateEnhancedConfidence(
+                        nearestSupport.confluence, bouncePercent, wickRatio, volumeSurge, candlesSince);
+
+                    log.info("{} *** BULLISH BOUNCE *** | {} | Level: {} @ {} | " +
+                        "Confluence: {} | Bounce: {}% | Wick: {}% | VolSurge: {} | Candles: {}",
+                        LOG_PREFIX, state.getSymbol(), nearestSupport.name,
+                        String.format("%.2f", nearestSupport.price), nearestSupport.confluence,
+                        String.format("%.2f", bouncePercent),
+                        String.format("%.0f", wickRatio * 100), volumeSurge, candlesSince);
+
+                    return BounceSignal.builder()
+                        .symbol(state.getSymbol())
+                        .type(BounceSignal.BounceType.BULLISH_BOUNCE)
+                        .level(nearestSupport.price)
+                        .levelName(nearestSupport.name)
+                        .confluence(nearestSupport.confluence)
+                        .confidence(confidence)
+                        .message(String.format("Bullish bounce at %s (confluence: %d, wick: %.0f%%)",
+                            nearestSupport.name, nearestSupport.confluence, wickRatio * 100))
+                        .touchPrice(touchCandle.getLow())
+                        .currentPrice(current.getClose())
+                        .bouncePercent(bouncePercent)
+                        .signalTime(Instant.now())
+                        .candlesSinceBounce(candlesSince)
+                        .build();
+                }
+                break; // Only check the first touch candle found
             }
         }
 
         // Check for bearish bounce at resistance
-        if (nearestResistance != null && nearestResistance.distance < currentPrice * 0.01) { // Within 1%
-            boolean touchedResistance = prev1.getHigh() >= nearestResistance.price * 0.998; // Within 0.2%
-            boolean rejecting = current.getClose() < prev1.getClose() &&
-                               current.getClose() < current.getOpen();  // Bearish candle
-            boolean volumeConfirm = current.getVolume() > prev1.getVolume() * 0.8;
+        if (nearestResistance != null && nearestResistance.distance < currentPrice * 0.015) { // Within 1.5%
+            for (int i = 0; i < lookback - 1; i++) {
+                UnifiedCandle touchCandle = recentCandles.get(i);
+                double touchTolerance = nearestResistance.price * 0.003;
 
-            if (touchedResistance && rejecting && nearestResistance.confluence >= 2) {
-                double bouncePercent = ((prev1.getHigh() - current.getClose()) / prev1.getHigh()) * 100;
+                boolean touchedResistance = touchCandle.getHigh() >= nearestResistance.price - touchTolerance;
+                if (!touchedResistance) continue;
 
-                log.info("{} *** BEARISH BOUNCE DETECTED *** | Symbol: {} | Level: {} @ {} | " +
-                    "Confluence: {} | Rejection: {}% | Touch: {} -> Current: {}",
-                    LOG_PREFIX, state.getSymbol(), nearestResistance.name,
-                    String.format("%.2f", nearestResistance.price), nearestResistance.confluence,
-                    String.format("%.2f", bouncePercent),
-                    String.format("%.2f", prev1.getHigh()), String.format("%.2f", current.getClose()));
+                // Wick analysis: long upper wick = strong rejection
+                double range = touchCandle.getHigh() - touchCandle.getLow();
+                double upperWick = touchCandle.getHigh() - Math.max(touchCandle.getOpen(), touchCandle.getClose());
+                double wickRatio = range > 0 ? upperWick / range : 0;
+                boolean strongWickRejection = wickRatio > 0.5;
 
-                return BounceSignal.builder()
-                    .symbol(state.getSymbol())
-                    .type(BounceSignal.BounceType.BEARISH_BOUNCE)
-                    .level(nearestResistance.price)
-                    .levelName(nearestResistance.name)
-                    .confluence(nearestResistance.confluence)
-                    .confidence(calculateConfidence(nearestResistance.confluence, bouncePercent))
-                    .message("Bearish rejection at " + nearestResistance.name +
-                            " (confluence: " + nearestResistance.confluence + ")")
-                    .touchPrice(prev1.getHigh())
-                    .currentPrice(current.getClose())
-                    .bouncePercent(bouncePercent)
-                    .signalTime(Instant.now())
-                    .candlesSinceBounce(1)
-                    .build();
+                boolean rejecting = current.getClose() < touchCandle.getHigh() &&
+                                   current.getClose() < current.getOpen();
+
+                boolean volumeSurge = current.getVolume() > avgVolume * 1.3;
+
+                int minConfluence = strongWickRejection ? 1 : 2;
+
+                if (rejecting && nearestResistance.confluence >= minConfluence) {
+                    double bouncePercent = ((touchCandle.getHigh() - current.getClose()) / touchCandle.getHigh()) * 100;
+                    int candlesSince = i;
+
+                    double confidence = calculateEnhancedConfidence(
+                        nearestResistance.confluence, bouncePercent, wickRatio, volumeSurge, candlesSince);
+
+                    log.info("{} *** BEARISH BOUNCE *** | {} | Level: {} @ {} | " +
+                        "Confluence: {} | Rejection: {}% | Wick: {}% | VolSurge: {} | Candles: {}",
+                        LOG_PREFIX, state.getSymbol(), nearestResistance.name,
+                        String.format("%.2f", nearestResistance.price), nearestResistance.confluence,
+                        String.format("%.2f", bouncePercent),
+                        String.format("%.0f", wickRatio * 100), volumeSurge, candlesSince);
+
+                    return BounceSignal.builder()
+                        .symbol(state.getSymbol())
+                        .type(BounceSignal.BounceType.BEARISH_BOUNCE)
+                        .level(nearestResistance.price)
+                        .levelName(nearestResistance.name)
+                        .confluence(nearestResistance.confluence)
+                        .confidence(confidence)
+                        .message(String.format("Bearish rejection at %s (confluence: %d, wick: %.0f%%)",
+                            nearestResistance.name, nearestResistance.confluence, wickRatio * 100))
+                        .touchPrice(touchCandle.getHigh())
+                        .currentPrice(current.getClose())
+                        .bouncePercent(bouncePercent)
+                        .signalTime(Instant.now())
+                        .candlesSinceBounce(candlesSince)
+                        .build();
+                }
+                break;
             }
         }
 
         return null;
+    }
+
+    /**
+     * Enhanced confidence calculation with wick and volume factors.
+     */
+    private double calculateEnhancedConfidence(int confluence, double bouncePercent,
+            double wickRatio, boolean volumeSurge, int candlesSinceBounce) {
+        double confidence = 0.2; // Base
+
+        // Confluence contribution (max 0.3)
+        confidence += Math.min(confluence * 0.15, 0.3);
+
+        // Bounce magnitude (max 0.15)
+        confidence += Math.min(bouncePercent * 0.05, 0.15);
+
+        // Wick rejection quality (max 0.2) — strong wick = strong rejection
+        confidence += Math.min(wickRatio * 0.4, 0.2);
+
+        // Volume surge bonus (0.1)
+        if (volumeSurge) confidence += 0.1;
+
+        // Decay for older bounces (penalize if >3 candles ago)
+        if (candlesSinceBounce > 3) {
+            confidence *= 0.8;
+        }
+
+        return Math.min(confidence, 1.0);
     }
 
     /**

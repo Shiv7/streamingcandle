@@ -100,6 +100,10 @@ public class PivotConfluenceTrigger {
     // Breakout context from BreakoutDetector (set by SignalEngine before checkTrigger)
     private final ConcurrentHashMap<String, List<BreakoutEvent>> breakoutContext = new ConcurrentHashMap<>();
 
+    // Level state tracking: symbol -> (levelDesc -> LevelState)
+    // Tracks which levels have been broken, retested, and their current status
+    private final ConcurrentHashMap<String, Map<String, LevelState>> levelStates = new ConcurrentHashMap<>();
+
     // Cache for HTF bias with TTL
     private final Map<String, CachedBias> htfBiasCache = new ConcurrentHashMap<>();
 
@@ -147,9 +151,10 @@ public class PivotConfluenceTrigger {
             return;
         }
         String scripCode = event.getScripCode();
-        log.info("{} {} Daily boundary crossed - clearing all caches", LOG_PREFIX, scripCode);
+        log.info("{} {} Daily boundary crossed - clearing all caches and level states", LOG_PREFIX, scripCode);
         htfBiasCache.remove(scripCode);
         ltfConfirmCache.remove(scripCode);
+        levelStates.remove(scripCode); // Daily pivots change — reset level tracking
     }
 
     /**
@@ -175,13 +180,67 @@ public class PivotConfluenceTrigger {
     /**
      * Set breakout context from BreakoutDetector.
      * Called by SignalEngine before checkTrigger() to provide break/retest state.
+     * Also updates persistent level states from the events.
      */
     public void setBreakoutContext(String symbol, List<BreakoutEvent> events) {
         if (events != null && !events.isEmpty()) {
             breakoutContext.put(symbol, events);
+            updateLevelStates(symbol, events);
         } else {
             breakoutContext.remove(symbol);
         }
+    }
+
+    /**
+     * Update persistent level states from breakout events.
+     * Tracks which levels have been broken and retested across candle boundaries.
+     */
+    private void updateLevelStates(String symbol, List<BreakoutEvent> events) {
+        Map<String, LevelState> states = levelStates.computeIfAbsent(symbol, k -> new ConcurrentHashMap<>());
+        Instant now = Instant.now();
+
+        for (BreakoutEvent event : events) {
+            String levelDesc = event.getLevelDescription();
+            if (levelDesc == null) continue;
+
+            LevelState state = states.get(levelDesc);
+
+            if (event.getType() == BreakoutType.BREAKOUT) {
+                if (state == null) {
+                    state = LevelState.builder()
+                        .price(event.getBreakoutLevel())
+                        .description(levelDesc)
+                        .build();
+                    states.put(levelDesc, state);
+                }
+                state.recordBreak(now);
+                log.debug("{} {} Level BROKEN: {} @ {}", LOG_PREFIX, symbol, levelDesc,
+                    String.format("%.2f", event.getBreakoutLevel()));
+
+            } else if (event.getType() == BreakoutType.RETEST) {
+                if (state == null) {
+                    // Retest without prior tracked break — create state
+                    state = LevelState.builder()
+                        .price(event.getBreakoutLevel())
+                        .description(levelDesc)
+                        .broken(true)
+                        .brokenAt(now.minus(Duration.ofMinutes(30))) // Approximate
+                        .build();
+                    states.put(levelDesc, state);
+                }
+                state.recordRetest(now, event.isRetestHeld());
+                log.debug("{} {} Level RETESTED: {} (held={}, count={}, quality={})",
+                    LOG_PREFIX, symbol, levelDesc, event.isRetestHeld(),
+                    state.getRetestCount(), event.getRetestQuality());
+            }
+        }
+    }
+
+    /**
+     * Get level states for a symbol (for external access by other components).
+     */
+    public Map<String, LevelState> getLevelStates(String symbol) {
+        return levelStates.getOrDefault(symbol, Collections.emptyMap());
     }
 
     /**
@@ -573,6 +632,7 @@ public class PivotConfluenceTrigger {
             boolean hasActiveBreakout = false;
             String retestLevelDesc = null;
             RetestQuality retestQual = null;
+            boolean isFirstRetest = false;
 
             List<BreakoutEvent> events = breakoutContext.get(scripCode);
             if (events != null) {
@@ -584,8 +644,16 @@ public class PivotConfluenceTrigger {
                             hasConfirmedRetest = true;
                             retestLevelDesc = event.getLevelDescription();
                             retestQual = event.getRetestQuality();
-                            log.info("{} {} RETEST at pivot: {} (quality={})",
-                                LOG_PREFIX, scripCode, retestLevelDesc, retestQual);
+
+                            // Check level state for first-retest (most valuable setup)
+                            Map<String, LevelState> states = levelStates.getOrDefault(scripCode, Collections.emptyMap());
+                            LevelState ls = states.get(retestLevelDesc);
+                            if (ls != null && ls.isFirstRetest()) {
+                                isFirstRetest = true;
+                            }
+
+                            log.info("{} {} RETEST at pivot: {} (quality={}, firstRetest={})",
+                                LOG_PREFIX, scripCode, retestLevelDesc, retestQual, isFirstRetest);
                         }
                     } else if (event.getType() == BreakoutType.BREAKOUT) {
                         hasActiveBreakout = true;
@@ -620,6 +688,7 @@ public class PivotConfluenceTrigger {
                 .hasActiveBreakout(hasActiveBreakout)
                 .retestLevelDescription(retestLevelDesc)
                 .retestQuality(retestQual)
+                .firstRetest(isFirstRetest)
                 .build();
         }
 
@@ -979,15 +1048,20 @@ public class PivotConfluenceTrigger {
         // R:R bonus (max 10)
         score += Math.min(rrCalc.riskReward * 3, 10);
 
-        // Breakout/Retest bonus (max 25) - key structural events
+        // Breakout/Retest bonus (max 30) - key structural events
         if (pivotAnalysis.isHasConfirmedRetest()) {
             score += 20; // Confirmed retest is a high-conviction setup
             if (pivotAnalysis.getRetestQuality() == RetestQuality.PERFECT) {
                 score += 5; // Extra bonus for clean retest
             }
-            log.info("{} Retest bonus applied: +{} (quality={})",
-                LOG_PREFIX, pivotAnalysis.getRetestQuality() == RetestQuality.PERFECT ? 25 : 20,
-                pivotAnalysis.getRetestQuality());
+            if (pivotAnalysis.isFirstRetest()) {
+                score += 5; // First retest after break is the highest-probability trade
+            }
+            log.info("{} Retest bonus applied: +{} (quality={}, firstRetest={})",
+                LOG_PREFIX,
+                20 + (pivotAnalysis.getRetestQuality() == RetestQuality.PERFECT ? 5 : 0)
+                   + (pivotAnalysis.isFirstRetest() ? 5 : 0),
+                pivotAnalysis.getRetestQuality(), pivotAnalysis.isFirstRetest());
         } else if (pivotAnalysis.isHasActiveBreakout()) {
             score += 15; // Active breakout at a pivot level
             log.info("{} Breakout bonus applied: +15", LOG_PREFIX);
@@ -1003,8 +1077,9 @@ public class PivotConfluenceTrigger {
             htfBias.direction, htfBias.strength * 100, pivotAnalysis.nearbyLevels));
 
         if (pivotAnalysis.isHasConfirmedRetest()) {
-            reason.append(String.format(" + RETEST[%s, quality=%s]",
-                pivotAnalysis.getRetestLevelDescription(), pivotAnalysis.getRetestQuality()));
+            reason.append(String.format(" + RETEST[%s, quality=%s%s]",
+                pivotAnalysis.getRetestLevelDescription(), pivotAnalysis.getRetestQuality(),
+                pivotAnalysis.isFirstRetest() ? ", FIRST" : ""));
         } else if (pivotAnalysis.isHasActiveBreakout()) {
             reason.append(" + BREAKOUT");
         }
@@ -1057,6 +1132,7 @@ public class PivotConfluenceTrigger {
                 if (pivot.isHasConfirmedRetest()) {
                     payload.put("retestLevel", pivot.getRetestLevelDescription());
                     payload.put("retestQuality", pivot.getRetestQuality() != null ? pivot.getRetestQuality().name() : null);
+                    payload.put("firstRetest", pivot.isFirstRetest());
                 }
             }
 
@@ -1177,6 +1253,7 @@ public class PivotConfluenceTrigger {
         private boolean hasActiveBreakout;
         private String retestLevelDescription;
         private RetestQuality retestQuality;
+        private boolean firstRetest; // First retest after break — highest conviction
     }
 
     @Data
@@ -1206,5 +1283,56 @@ public class PivotConfluenceTrigger {
 
     public enum TriggerDirection {
         BULLISH, BEARISH, NONE
+    }
+
+    /**
+     * Tracks the state of a structural price level across candle boundaries.
+     * Allows the system to know which levels have been broken and are candidates for retest.
+     */
+    @Data
+    @Builder
+    public static class LevelState {
+        private double price;
+        private String description;      // e.g., "Daily_R1", "Weekly_S1"
+        private boolean broken;          // Has price broken through this level?
+        private Instant brokenAt;        // When was it broken?
+        private int retestCount;         // How many times has it been retested after break?
+        private Instant lastRetest;      // When was the last retest?
+        private boolean retestHeld;      // Did the most recent retest hold?
+
+        /**
+         * Record a break of this level.
+         */
+        public void recordBreak(Instant when) {
+            this.broken = true;
+            this.brokenAt = when;
+            this.retestCount = 0;
+            this.lastRetest = null;
+            this.retestHeld = false;
+        }
+
+        /**
+         * Record a retest of this broken level.
+         */
+        public void recordRetest(Instant when, boolean held) {
+            this.retestCount++;
+            this.lastRetest = when;
+            this.retestHeld = held;
+        }
+
+        /**
+         * Check if this level is a fresh break (broken within last N minutes).
+         */
+        public boolean isFreshBreak(int maxMinutes) {
+            if (!broken || brokenAt == null) return false;
+            return Duration.between(brokenAt, Instant.now()).toMinutes() <= maxMinutes;
+        }
+
+        /**
+         * Check if this is a first retest (most valuable).
+         */
+        public boolean isFirstRetest() {
+            return broken && retestCount == 1;
+        }
     }
 }
