@@ -188,16 +188,16 @@ public class TickAggregator {
     private String outputTopic;
 
     /**
-     * Comma-separated list of symbols for trace logging.
-     * <p>Empty = trace all symbols (FULL MODE)</p>
+     * Comma-separated list of scripcodes for trace logging.
+     * <p>Empty = trace all scripcodes (FULL MODE)</p>
      */
-    @Value("${logging.trace.symbols:}")
-    private String traceSymbolsStr;
+    @Value("${logging.trace.scripcodes:}")
+    private String traceScripCodesStr;
 
     /**
-     * Parsed set of symbols for trace logging.
+     * Parsed set of scripcodes for trace logging.
      */
-    private Set<String> traceSymbols;
+    private Set<String> traceScripCodes;
 
     // ==================== INJECTED DEPENDENCIES ====================
 
@@ -341,16 +341,16 @@ public class TickAggregator {
 
         log.info("{} Started successfully", LOG_PREFIX);
 
-        // Parse trace symbols
-        this.traceSymbols = new HashSet<>();
-        if (traceSymbolsStr != null && !traceSymbolsStr.isBlank()) {
-            String[] parts = traceSymbolsStr.split(",");
+        // Parse trace scripcodes (Bug #2: trace by scripcode, not symbol)
+        this.traceScripCodes = new HashSet<>();
+        if (traceScripCodesStr != null && !traceScripCodesStr.isBlank()) {
+            String[] parts = traceScripCodesStr.split(",");
             for (String part : parts) {
-                traceSymbols.add(part.trim().toUpperCase());
+                traceScripCodes.add(part.trim());
             }
-            log.info("{} Trace logging enabled for symbols: {}", LOG_PREFIX, traceSymbols);
+            log.info("{} Trace logging enabled for scripcodes: {}", LOG_PREFIX, traceScripCodes);
         } else {
-            log.info("{} Trace logging enabled for ALL symbols (FULL - NO SAMPLING)", LOG_PREFIX);
+            log.info("{} Trace logging enabled for ALL scripcodes (FULL - NO SAMPLING)", LOG_PREFIX);
         }
     }
 
@@ -511,9 +511,9 @@ public class TickAggregator {
         // Extract symbol from ScripMetadataService (authoritative source from database)
         String symbol = scripMetadataService.getSymbolRoot(tick.getScripCode());
 
-        // [TICK-TRACE] Log everything if list is empty, or specific symbol
-        boolean specificSymbol = traceSymbols.contains(symbol);
-        boolean shouldLog = specificSymbol || traceSymbols.isEmpty();
+        // [TICK-TRACE] Log everything if list is empty, or specific scripcode (Bug #2)
+        boolean specificScripCode = traceScripCodes.contains(tick.getScripCode());
+        boolean shouldLog = specificScripCode || traceScripCodes.isEmpty();
 
         if (shouldLog) {
             log.info("[TICK-TRACE] Received tick for {}: Price={}, Vol={}, Time={}",
@@ -775,9 +775,9 @@ public class TickAggregator {
             log.info("{} Saved {} candles to MongoDB", LOG_PREFIX, candles.size());
 
             // Trace individual saves if enabled
-            if (traceSymbols != null && !traceSymbols.isEmpty()) {
+            if (traceScripCodes != null && !traceScripCodes.isEmpty()) {
                 for (TickCandle c : candles) {
-                    if (traceSymbols.contains(c.getSymbol()) || traceSymbols.contains(c.getScripCode())) {
+                    if (traceScripCodes.contains(c.getScripCode())) {
                         log.info("[MONGO-WRITE] TickCandle saved for {} @ {} | Close: {} | Vol: {}",
                             c.getSymbol(), formatTime(c.getWindowEnd()), c.getClose(), c.getVolume());
                     }
@@ -815,6 +815,11 @@ public class TickAggregator {
         try {
             for (TickCandle candle : candles) {
                 if (candle.getScripCode() != null) {
+                    // Bug #17: FUDKII only for equity/index, not derivatives
+                    TickCandle.InstrumentType type = candle.getInstrumentType();
+                    if (type != null && type.isDerivative()) {
+                        continue;
+                    }
                     fudkiiSignalTrigger.onCandleClose(candle.getScripCode(), candle);
                 }
             }
