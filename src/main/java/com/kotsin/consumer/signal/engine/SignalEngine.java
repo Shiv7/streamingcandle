@@ -17,6 +17,7 @@ import com.kotsin.consumer.model.PivotLevels;
 import com.kotsin.consumer.model.CprAnalysis;
 import com.kotsin.consumer.model.ConfluenceResult;
 import com.kotsin.consumer.model.BounceSignal;
+import com.kotsin.consumer.model.OIMetrics;
 import com.kotsin.consumer.papertrade.executor.PaperTradeExecutor;
 import com.kotsin.consumer.papertrade.model.PaperTrade.TradeDirection;
 import com.kotsin.consumer.regime.detector.RegimeDetector;
@@ -1240,7 +1241,10 @@ public class SignalEngine {
                 .custom("breakoutEvents", symbolBreakoutEvents.get(symbol))  // For StructuralLevelGate
                 .custom("momentumScore", score.getUrgencyScore())  // IPU urgency for MomentumGate
                 .custom("oiInterpretation", score.getOiInterpretation())  // OI interpretation
-                .custom("exhaustionScore", score.isSuggestsReversal() ? 0.8 : 0.0)  // Exhaustion signal
+                .custom("exhaustionScore", score.isSuggestsReversal() ? 0.8 : 0.0)  // OI exhaustion signal
+                .custom("ipuExhaustion", getIpuExhaustion(symbol))        // IPU exhaustion (0-1)
+                .custom("ipuRising", getIpuRising(symbol))                // IPU momentum rising
+                .custom("exhaustionBuilding", getExhaustionBuilding(symbol))  // Exhaustion trend
                 .build();
 
             return gateChain.evaluate(symbol, "FUDKII", context);
@@ -1249,6 +1253,32 @@ public class SignalEngine {
                 LOG_PREFIX, TraceContext.getShortPrefix(), e.getMessage());
             return null;
         }
+    }
+
+    // ==================== IPU STATE HELPERS FOR GATE CONTEXT ====================
+
+    private double getIpuExhaustion(String symbol) {
+        try {
+            return strategyStateService.getIpuState(symbol, primaryTimeframe)
+                .map(IpuState::getCurrentExhaustion)
+                .orElse(0.0);
+        } catch (Exception e) { return 0.0; }
+    }
+
+    private boolean getIpuRising(String symbol) {
+        try {
+            return strategyStateService.getIpuState(symbol, primaryTimeframe)
+                .map(IpuState::isIpuRising)
+                .orElse(false);
+        } catch (Exception e) { return false; }
+    }
+
+    private boolean getExhaustionBuilding(String symbol) {
+        try {
+            return strategyStateService.getIpuState(symbol, primaryTimeframe)
+                .map(IpuState::isExhaustionBuilding)
+                .orElse(false);
+        } catch (Exception e) { return false; }
     }
 
     /**
@@ -2307,6 +2337,48 @@ public class SignalEngine {
     }
 
     /**
+     * Check if OI interpretation contradicts the signal direction with high confidence.
+     * For LONG signals: exit if OI shows LONG_UNWINDING (longs exiting) or SHORT_BUILDUP (new shorts)
+     * For SHORT signals: exit if OI shows SHORT_COVERING (shorts exiting) or LONG_BUILDUP (new longs)
+     * Only triggers with high confidence (>0.7) and when signal is in loss territory.
+     */
+    private boolean isOiExhaustionExit(UnifiedCandle candle, TradingSignal signal) {
+        if (candle == null || !candle.isHasOI() || candle.getOiInterpretation() == null) {
+            return false;
+        }
+
+        Double confidence = candle.getOiInterpretationConfidence();
+        if (confidence == null || confidence < 0.7) {
+            return false;
+        }
+
+        OIMetrics.OIInterpretation interp = candle.getOiInterpretation();
+        boolean isLong = signal.getDirection() == FudkiiScore.Direction.BULLISH;
+        double price = candle.getClose();
+
+        // Check if signal is at a loss (don't exit winners on OI alone)
+        boolean isAtLoss = isLong ?
+            price < signal.getEntryPrice() :
+            price > signal.getEntryPrice();
+
+        if (!isAtLoss) {
+            return false;
+        }
+
+        // LONG_UNWINDING = longs exiting (bearish for long signals)
+        // SHORT_BUILDUP = new shorts entering (bearish for long signals)
+        // SHORT_COVERING = shorts exiting (bullish, bad for short signals)
+        // LONG_BUILDUP = new longs entering (bullish, bad for short signals)
+        if (isLong) {
+            return interp == OIMetrics.OIInterpretation.LONG_UNWINDING
+                || interp == OIMetrics.OIInterpretation.SHORT_BUILDUP;
+        } else {
+            return interp == OIMetrics.OIInterpretation.SHORT_COVERING
+                || interp == OIMetrics.OIInterpretation.LONG_BUILDUP;
+        }
+    }
+
+    /**
      * Check if reversal signal triggered.
      */
     private boolean isReversalTriggered(FudkiiScore score, TradingSignal signal) {
@@ -2352,6 +2424,17 @@ public class SignalEngine {
                         recordExitToStats(signal, price, "TARGET_HIT");
                         saveAndNotify(signal, SignalEvent.TARGET_HIT);
                         strategiesToRemove.add(strategyName);
+                    } else if (isOiExhaustionExit(current, signal)) {
+                        // OI interpretation directly contradicts signal direction with high confidence
+                        signal.enterComplete(TradingSignal.ExitReason.OI_EXHAUSTION, price);
+                        recordExitToStats(signal, price, "OI_EXHAUSTION");
+                        saveAndNotify(signal, SignalEvent.REVERSED);
+                        strategiesToRemove.add(strategyName);
+                        log.info("{} {} {} OI exhaustion exit: interp={} conf={} price={}",
+                            LOG_PREFIX, symbol, strategyName,
+                            current.getOiInterpretation(),
+                            current.getOiInterpretationConfidence(),
+                            String.format("%.2f", price));
                     }
                 }
 

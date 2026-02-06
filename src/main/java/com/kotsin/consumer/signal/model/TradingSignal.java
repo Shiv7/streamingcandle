@@ -251,7 +251,8 @@ public class TradingSignal {
         TIME_EXPIRY,       // Signal expired
         MANUAL,            // Manual exit
         REVERSAL,          // Opposite signal triggered
-        INVALIDATION       // Setup invalidated
+        INVALIDATION,      // Setup invalidated
+        OI_EXHAUSTION      // OI interpretation contradicts signal direction
     }
 
     public enum Outcome {

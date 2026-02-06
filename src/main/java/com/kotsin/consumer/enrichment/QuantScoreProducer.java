@@ -168,9 +168,12 @@ public class QuantScoreProducer {
             exhaustionScore = ipuState.getCurrentExhaustion();
         }
 
-        // Get nearest support/resistance
+        // Get nearest support/resistance and VCP levels
         Double nearestSupport = null;
         Double nearestResistance = null;
+        Double pocPrice = null;
+        Double valueAreaHigh = null;
+        Double valueAreaLow = null;
         if (vcpState != null) {
             if (vcpState.getSupportClusters() != null && !vcpState.getSupportClusters().isEmpty()) {
                 nearestSupport = vcpState.getSupportClusters().get(0).getPrice();
@@ -178,6 +181,17 @@ public class QuantScoreProducer {
             if (vcpState.getResistanceClusters() != null && !vcpState.getResistanceClusters().isEmpty()) {
                 nearestResistance = vcpState.getResistanceClusters().get(0).getPrice();
             }
+            if (vcpState.getPocPrice() > 0) pocPrice = vcpState.getPocPrice();
+            if (vcpState.getValueAreaHigh() > 0) valueAreaHigh = vcpState.getValueAreaHigh();
+            if (vcpState.getValueAreaLow() > 0) valueAreaLow = vcpState.getValueAreaLow();
+        }
+
+        // Get OI context
+        String oiInterpretation = null;
+        boolean oiSuggestsReversal = false;
+        if (candle.isHasOI() && candle.getOiInterpretation() != null) {
+            oiInterpretation = candle.getOiInterpretation().name();
+            oiSuggestsReversal = candle.getOiSuggestsReversal() != null && candle.getOiSuggestsReversal();
         }
 
         // Calculate directional imbalance: |buyVolume - sellVolume| / totalVolume
@@ -214,8 +228,13 @@ public class QuantScoreProducer {
             .nearestResistance(nearestResistance)
             .currentPrice(candle.getClose())
             .atrPercent(null)  // ATR not available on UnifiedCandle
+            .pocPrice(pocPrice)
+            .valueAreaHigh(valueAreaHigh)
+            .valueAreaLow(valueAreaLow)
             .volumeRatio(directionalImbalance)  // Renamed: actually represents directional imbalance
             .highVolume(highVolumeActivity)  // True when > 50% one-sided flow
+            .oiInterpretation(oiInterpretation)
+            .oiSuggestsReversal(oiSuggestsReversal)
             .build();
     }
 
@@ -421,22 +440,43 @@ public class QuantScoreProducer {
 
     /**
      * Calculate multi-factor confluence score.
+     * Checks alignment across VCP runway, VCP cluster OFI bias, IPU direction,
+     * IPU momentum trend, and pivot structure.
      */
     private double calculateConfluenceScore(VcpState vcpState, IpuState ipuState, PivotState pivotState) {
         int factors = 0;
         int aligned = 0;
 
-        // Check VCP direction
+        // Check VCP runway direction
         if (vcpState != null) {
             factors++;
             double netRunway = vcpState.getBullishRunway() - vcpState.getBearishRunway();
             if (Math.abs(netRunway) > 0.1) aligned++;
         }
 
+        // Check VCP cluster OFI bias alignment (average of support cluster biases)
+        if (vcpState != null && vcpState.getSupportClusters() != null && !vcpState.getSupportClusters().isEmpty()) {
+            double avgOfiBias = vcpState.getSupportClusters().stream()
+                .mapToDouble(c -> c.getOfiBias())
+                .average().orElse(0);
+            if (Math.abs(avgOfiBias) > 0.2) {
+                factors++;
+                aligned++; // Clear OFI bias = aligned factor
+            }
+        }
+
         // Check IPU direction
         if (ipuState != null && ipuState.getCurrentDirection() != null) {
             factors++;
             if (!"NEUTRAL".equals(ipuState.getCurrentDirection())) aligned++;
+        }
+
+        // Check IPU momentum trend (ipuRising = bullish momentum, exhaustionBuilding = warning)
+        if (ipuState != null) {
+            factors++;
+            if (ipuState.isIpuRising() && !ipuState.isExhaustionBuilding()) {
+                aligned++; // Rising IPU without exhaustion = strong momentum alignment
+            }
         }
 
         // Check Pivot structure
