@@ -53,6 +53,17 @@ public class CandleService {
     private static final double PRICE_CHANGE_THRESHOLD = 0.1;  // 0.1%
     private static final double OI_CHANGE_THRESHOLD = 0.5;     // 0.5%
 
+    // Per-cycle ThreadLocal cache to avoid redundant calls within a single processSymbol() cycle
+    private static final ThreadLocal<Map<String, List<UnifiedCandle>>> cycleCache =
+        ThreadLocal.withInitial(HashMap::new);
+
+    /**
+     * Clear the per-cycle cache. Call at start and end of processSymbol().
+     */
+    public void clearCycleCache() {
+        cycleCache.get().clear();
+    }
+
     // ==================== LATEST CANDLE ====================
 
     /**
@@ -344,11 +355,28 @@ public class CandleService {
     }
 
     private List<UnifiedCandle> getAggregatedHistory(String scripCode, Timeframe timeframe, int count) {
-        // Calculate how many 1m candles we need
+        // 1. Check ThreadLocal cycle cache first (avoids redundant calls within same processSymbol cycle)
+        String cacheKey = scripCode + ":" + timeframe.getLabel() + ":" + count;
+        Map<String, List<UnifiedCandle>> cache = cycleCache.get();
+        if (cache.containsKey(cacheKey)) {
+            log.debug("[CANDLE-SVC] Cycle cache hit: scripCode={}, timeframe={}, count={}", scripCode, timeframe, count);
+            return cache.get(cacheKey);
+        }
+
+        // 2. Try Redis cache (populated by CompletedCandleService on boundary events)
+        List<UnifiedCandle> cached = redisCacheService.getAggregatedHistory(scripCode, timeframe, count);
+        if (cached != null && cached.size() >= count) {
+            log.debug("[CANDLE-SVC] Redis cache hit: scripCode={}, timeframe={}, count={}, got={}",
+                scripCode, timeframe, count, cached.size());
+            cache.put(cacheKey, cached);
+            return cached;
+        }
+
+        // 3. Fall through to MongoDB aggregation
         int candlesPerWindow = timeframe.getMinutes();
         int totalCandlesNeeded = count * candlesPerWindow;
 
-        log.debug("[CANDLE-SVC] getAggregatedHistory: scripCode={}, timeframe={}, count={}, totalCandlesNeeded={}",
+        log.debug("[CANDLE-SVC] MongoDB fallback: scripCode={}, timeframe={}, count={}, totalCandlesNeeded={}",
             scripCode, timeframe, count, totalCandlesNeeded);
 
         List<TickCandle> allTicks = tickCandleRepository.findByScripCodeOrderByTimestampDesc(
@@ -408,7 +436,12 @@ public class CandleService {
         // Sort by timestamp descending (most recent first)
         result.sort((a, b) -> b.getTimestamp().compareTo(a.getTimestamp()));
 
-        return result.stream().limit(count).collect(Collectors.toList());
+        List<UnifiedCandle> finalResult = result.stream().limit(count).collect(Collectors.toList());
+
+        // Cache in cycle cache for reuse within same processSymbol() cycle
+        cache.put(cacheKey, finalResult);
+
+        return finalResult;
     }
 
     // ==================== AGGREGATION LOGIC ====================
