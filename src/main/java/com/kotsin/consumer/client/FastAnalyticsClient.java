@@ -7,6 +7,7 @@ import com.kotsin.consumer.model.PivotLevels;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Service;
+import org.springframework.http.client.SimpleClientHttpRequestFactory;
 import org.springframework.web.client.RestClientException;
 import org.springframework.web.client.RestTemplate;
 import org.springframework.web.util.UriComponentsBuilder;
@@ -44,7 +45,10 @@ public class FastAnalyticsClient {
 
     @PostConstruct
     public void init() {
-        this.restTemplate = new RestTemplate();
+        SimpleClientHttpRequestFactory factory = new SimpleClientHttpRequestFactory();
+        factory.setConnectTimeout(connectTimeoutMs);
+        factory.setReadTimeout(readTimeoutMs);
+        this.restTemplate = new RestTemplate(factory);
         this.objectMapper = new ObjectMapper();
 
         log.info("{} Initialized with baseUrl={}, connectTimeout={}ms, readTimeout={}ms",

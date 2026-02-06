@@ -47,6 +47,9 @@ public class PaperTradeExecutor {
     @Value("${papertrade.commission.per.trade:20}")
     private double commissionPerTrade;
 
+    @Value("${papertrade.ml.mode:false}")
+    private boolean mlMode;
+
     // In-memory cache for fast access (backed by MongoDB)
     private final Map<String, PaperTrade> openTrades = new ConcurrentHashMap<>();
 
@@ -135,8 +138,12 @@ public class PaperTradeExecutor {
 
         double positionValue = currentPrice * quantity;
         if (positionValue > availableCapital) {
-            log.warn("{} Insufficient capital for {}: need {} have {}", LOG_PREFIX, symbol, positionValue, availableCapital);
-            return null;
+            if (!mlMode) {
+                log.warn("{} Insufficient capital for {}: need {} have {}", LOG_PREFIX, symbol, positionValue, availableCapital);
+                return null;
+            }
+            log.info("{} [ML-MODE] Virtual capital for {}: need {} have {} - proceeding for ML data",
+                LOG_PREFIX, symbol, positionValue, availableCapital);
         }
 
         // Create trade
@@ -377,7 +384,9 @@ public class PaperTradeExecutor {
     // ==================== POSITION SIZING ====================
 
     private int calculatePositionSize(double entryPrice, double stopLoss, TradeDirection direction) {
-        double riskAmount = availableCapital * riskPerTrade;
+        // In ML mode, use initial capital for sizing so trades aren't starved
+        double capitalForSizing = mlMode ? Math.max(availableCapital, initialCapital) : availableCapital;
+        double riskAmount = capitalForSizing * riskPerTrade;
         double riskPerShare = Math.abs(entryPrice - stopLoss);
 
         if (riskPerShare <= 0) {
@@ -385,16 +394,25 @@ public class PaperTradeExecutor {
         }
 
         int size = (int) (riskAmount / riskPerShare);
+
+        // Cap position value at 20% of initial capital to prevent absurd quantities
+        if (entryPrice > 0) {
+            int maxSize = (int) (initialCapital * 0.20 / entryPrice);
+            if (maxSize > 0) {
+                size = Math.min(size, maxSize);
+            }
+        }
+
         return Math.max(1, size);
     }
 
     private boolean canOpenPosition(String symbol) {
-        // Check max positions
-        if (openTrades.size() >= maxPositions) {
+        // Check max positions (skip in ML mode to collect all signal data)
+        if (!mlMode && openTrades.size() >= maxPositions) {
             return false;
         }
 
-        // Check if already have position in symbol (memory cache)
+        // Still prevent duplicate positions per symbol
         if (openTrades.values().stream().anyMatch(t -> t.getSymbol().equals(symbol))) {
             return false;
         }

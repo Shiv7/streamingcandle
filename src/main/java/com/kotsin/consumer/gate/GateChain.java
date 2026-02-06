@@ -80,8 +80,8 @@ public class GateChain {
             result.setTotalScore(result.getTotalScore() / maxPossibleScore * 100);
         }
 
-        log.debug("GateChain result for {} {}: passed={} score={:.1f} ({}/{} gates)",
-            symbol, signalType, result.isPassed(), result.getTotalScore(),
+        log.debug("GateChain result for {} {}: passed={} score={} ({}/{} gates)",
+            symbol, signalType, result.isPassed(), String.format("%.1f", result.getTotalScore()),
             result.getGatesPassed(), result.getTotalGates());
 
         return result;

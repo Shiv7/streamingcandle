@@ -132,9 +132,9 @@ public class ATRService {
             .calculatedAt(Instant.now())
             .build();
 
-        log.debug("{} {} {} ATR({})={} ({:.2f}%)",
+        log.debug("{} {} {} ATR({})={} ({}%)",
             LOG_PREFIX, scripCode, timeframe.getLabel(), period,
-            String.format("%.2f", atr), atrPercent);
+            String.format("%.2f", atr), String.format("%.2f", atrPercent));
 
         return result;
     }

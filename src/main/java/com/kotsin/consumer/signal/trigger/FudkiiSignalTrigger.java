@@ -1012,6 +1012,10 @@ public class FudkiiSignalTrigger {
             return FudkiiTriggerResult.builder()
                 .triggered(true)
                 .direction(TriggerDirection.BULLISH)
+                .scripCode(currentCandle.getScripCode())
+                .symbol(currentCandle.getSymbol())
+                .companyName(currentCandle.getCompanyName())
+                .exchange(currentCandle.getExchange())
                 .reason(reason)
                 .bbst(bbst)
                 .triggerPrice(close)
@@ -1029,6 +1033,10 @@ public class FudkiiSignalTrigger {
             return FudkiiTriggerResult.builder()
                 .triggered(true)
                 .direction(TriggerDirection.BEARISH)
+                .scripCode(currentCandle.getScripCode())
+                .symbol(currentCandle.getSymbol())
+                .companyName(currentCandle.getCompanyName())
+                .exchange(currentCandle.getExchange())
                 .reason(reason)
                 .bbst(bbst)
                 .triggerPrice(close)
@@ -1562,8 +1570,8 @@ public class FudkiiSignalTrigger {
         Map<String, Object> fukaaPayload = buildFukaaPayload(payload, audit);
         publishToFukaaKafka(result.getScripCode(), fukaaPayload);
 
-        log.info("{} {} *** FUKAA IMMEDIATE PASS *** rank={:.2f}, passedCandle={}, publishing to {}",
-            LOG_PREFIX, result.getScripCode(), eval.rank, eval.passedCandle, fukaaKafkaTopic);
+        log.info("{} {} *** FUKAA IMMEDIATE PASS *** rank={}, passedCandle={}, publishing to {}",
+            LOG_PREFIX, result.getScripCode(), String.format("%.2f", eval.rank), eval.passedCandle, fukaaKafkaTopic);
     }
 
     @Data
@@ -1588,6 +1596,9 @@ public class FudkiiSignalTrigger {
             // Build a serializable DTO for Kafka
             Map<String, Object> payload = new HashMap<>();
             payload.put("scripCode", scripCode);
+            payload.put("symbol", result.getSymbol());
+            payload.put("companyName", result.getCompanyName());
+            payload.put("exchange", result.getExchange());
             payload.put("triggered", result.isTriggered());
             payload.put("direction", result.getDirection() != null ? result.getDirection().name() : null);
             payload.put("reason", result.getReason());

@@ -118,6 +118,34 @@ public class TopicInitializer {
                 .build();
     }
 
+    // ==================== MICROALPHA TOPIC ====================
+
+    @Bean
+    public NewTopic microalphaSignalsTopic() {
+        return TopicBuilder.name("microalpha-signals")
+                .partitions(partitions)
+                .replicas(replicationFactor)
+                .build();
+    }
+
+    // ==================== ORCHESTRATOR TOPICS (State Machine Bridge) ====================
+
+    @Bean
+    public NewTopic instrumentStateSnapshotsTopic() {
+        return TopicBuilder.name("instrument-state-snapshots")
+                .partitions(partitions)
+                .replicas(replicationFactor)
+                .build();
+    }
+
+    @Bean
+    public NewTopic strategyOpportunitiesTopic() {
+        return TopicBuilder.name("strategy-opportunities")
+                .partitions(partitions)
+                .replicas(replicationFactor)
+                .build();
+    }
+
     /**
      * Log startup info about topic creation
      */
@@ -126,7 +154,8 @@ public class TopicInitializer {
         log.info("TopicInitializer: Ensuring all required topics exist");
         log.info("Input topics: tick-data, orderbook-snapshot, oi-data");
         log.info("Output topics: tick-candles-1m, orderbook-metrics-1m, oi-metrics-1m");
-        log.info("Strategy topics: strategy-state, vcp-signals, ipu-signals, pivot-signals");
+        log.info("Strategy topics: strategy-state, vcp-signals, ipu-signals, pivot-signals, microalpha-signals");
+        log.info("Orchestrator topics: instrument-state-snapshots, strategy-opportunities");
         log.info("Topic configuration: {} partitions, replication-factor={}", partitions, replicationFactor);
 
         return new KafkaAdmin.NewTopics(
@@ -139,7 +168,10 @@ public class TopicInitializer {
             strategyStateTopic(),
             vcpSignalsTopic(),
             ipuSignalsTopic(),
-            pivotSignalsTopic()
+            pivotSignalsTopic(),
+            microalphaSignalsTopic(),
+            instrumentStateSnapshotsTopic(),
+            strategyOpportunitiesTopic()
         );
     }
 }
