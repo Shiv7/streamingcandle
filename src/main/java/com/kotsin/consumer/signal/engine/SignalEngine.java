@@ -6,7 +6,6 @@ import com.kotsin.consumer.gate.model.GateResult.ChainResult;
 import com.kotsin.consumer.indicator.calculator.TechnicalIndicatorCalculator;
 import com.kotsin.consumer.indicator.model.TechnicalIndicators;
 import com.kotsin.consumer.logging.TraceContext;
-import com.kotsin.consumer.model.StrategyState;
 import com.kotsin.consumer.model.StrategyState.*;
 import com.kotsin.consumer.model.Timeframe;
 import com.kotsin.consumer.model.UnifiedCandle;
@@ -49,8 +48,6 @@ import org.springframework.stereotype.Service;
 
 import java.time.Duration;
 import java.time.Instant;
-import java.time.LocalDate;
-import java.time.temporal.ChronoUnit;
 import java.util.*;
 import java.util.concurrent.*;
 import java.util.concurrent.atomic.AtomicBoolean;
@@ -238,9 +235,21 @@ public class SignalEngine {
     private volatile boolean loggedBootstrapReady = false;
 
     // Cache: equity scripCode → ScripGroup (refreshed hourly)
+    // Bug #22: Bounded cache to prevent unbounded memory growth
+    private static final int MAX_SCRIP_GROUP_CACHE_SIZE = 500;
     private final Map<String, com.kotsin.consumer.metadata.model.ScripGroup> scripGroupCache = new ConcurrentHashMap<>();
     private final Map<String, Long> scripGroupCacheTimestamp = new ConcurrentHashMap<>();
     private static final long SCRIP_GROUP_CACHE_TTL_MS = 3600_000; // 1 hour
+
+    // Bug #20: Thread pool for parallel symbol processing
+    private ExecutorService symbolProcessorPool;
+
+    // Bug #28: Track bootstrap completion to skip per-symbol checks
+    private volatile boolean bootstrapComplete = false;
+
+    // Bug #11: Event-driven flag (set to false to revert to polling)
+    @Value("${signal.engine.event.driven:true}")
+    private boolean eventDriven;
 
     @PostConstruct
     public void start() {
@@ -254,24 +263,36 @@ public class SignalEngine {
 
         running.set(true);
 
+        // Bug #20: Create thread pool for parallel symbol processing
+        symbolProcessorPool = Executors.newFixedThreadPool(8);
+
         // Start processing scheduler
         scheduler = Executors.newScheduledThreadPool(2);
 
-        // IMPORTANT: Wait 30 seconds for bootstrap to start loading data
-        // Then process signals every 5 seconds (only bootstrapped symbols will be processed)
-        log.info("{} Waiting 30s for bootstrap to load initial data before strategy processing...", LOG_PREFIX);
-        scheduler.scheduleAtFixedRate(this::processAllSymbols, 30, 5, TimeUnit.SECONDS);
+        if (eventDriven) {
+            // Bug #11: Event-driven mode — no periodic polling of processAllSymbols
+            // Signals are processed via onCandleBoundary() event listener
+            log.info("{} Running in EVENT-DRIVEN mode (no 5s polling)", LOG_PREFIX);
+        } else {
+            // Fallback: poll-based mode for safety
+            log.info("{} Running in POLL mode (every 5s)", LOG_PREFIX);
+            scheduler.scheduleAtFixedRate(this::processAllSymbols, 30, 5, TimeUnit.SECONDS);
+        }
 
         // Check active signals for exits every second (start after 35s)
         scheduler.scheduleAtFixedRate(this::checkActiveSignals, 35, 1, TimeUnit.SECONDS);
 
-        log.info("{} Started successfully - will begin processing after bootstrap delay", LOG_PREFIX);
+        log.info("{} Started successfully", LOG_PREFIX);
     }
 
     @PreDestroy
     public void stop() {
         log.info("{} Stopping...", LOG_PREFIX);
         running.set(false);
+
+        if (symbolProcessorPool != null) {
+            symbolProcessorPool.shutdown();
+        }
 
         if (scheduler != null) {
             scheduler.shutdown();
@@ -313,36 +334,46 @@ public class SignalEngine {
             return;
         }
 
-        // Filter to only bootstrapped symbols
-        Set<String> bootstrappedSymbols = symbols.stream()
-            .filter(s -> historicalDataBootstrapService.isBootstrapped(s))
-            .collect(java.util.stream.Collectors.toSet());
+        // Bug #28: Once bootstrap is complete, skip per-symbol check
+        Set<String> bootstrappedSymbols;
+        if (bootstrapComplete) {
+            bootstrappedSymbols = symbols;
+        } else {
+            bootstrappedSymbols = symbols.stream()
+                .filter(s -> historicalDataBootstrapService.isBootstrapped(s))
+                .collect(java.util.stream.Collectors.toSet());
 
-        if (bootstrappedSymbols.isEmpty()) {
-            log.debug("{} No bootstrapped symbols to process yet", LOG_PREFIX);
-            return;
-        }
+            if (bootstrappedSymbols.isEmpty()) {
+                log.debug("{} No bootstrapped symbols to process yet", LOG_PREFIX);
+                return;
+            }
 
-        // Log "ready to trade" once when bootstrap is complete
-        if (!loggedBootstrapReady && historicalDataBootstrapService.isBootstrapComplete()) {
-            log.info("{} All bootstrap complete — processing {} symbols every 5s on timeframe={}",
-                LOG_PREFIX, bootstrappedSymbols.size(), primaryTimeframe);
-            loggedBootstrapReady = true;
+            // Log "ready to trade" once when bootstrap is complete
+            if (!loggedBootstrapReady && historicalDataBootstrapService.isBootstrapComplete()) {
+                log.info("{} All bootstrap complete — processing {} symbols on timeframe={}",
+                    LOG_PREFIX, bootstrappedSymbols.size(), primaryTimeframe);
+                loggedBootstrapReady = true;
+                bootstrapComplete = true;
+            }
         }
 
         Timeframe tf = Timeframe.fromLabel(primaryTimeframe);
         long cycleStart = System.currentTimeMillis();
 
+        // Bug #20: Process symbols in parallel
+        List<CompletableFuture<Void>> futures = new ArrayList<>();
         for (String symbol : bootstrappedSymbols) {
-            try {
-                processSymbol(symbol, tf);
-            } catch (Exception e) {
-                log.error("{} Error processing symbol={}: {}", LOG_PREFIX, symbol, e.getMessage());
-            }
+            futures.add(CompletableFuture.runAsync(() -> {
+                try {
+                    processSymbol(symbol, tf);
+                } catch (Exception e) {
+                    log.error("{} Error processing symbol={}: {}", LOG_PREFIX, symbol, e.getMessage());
+                }
+            }, symbolProcessorPool));
         }
+        CompletableFuture.allOf(futures.toArray(new CompletableFuture[0])).join();
 
         long cycleMs = System.currentTimeMillis() - cycleStart;
-        // Only log cycle timing if it's slow (>2s) or at debug level
         if (cycleMs > 2000) {
             log.warn("{} Slow processing cycle: {} symbols in {}ms ({}ms/symbol)",
                 LOG_PREFIX, bootstrappedSymbols.size(), cycleMs,
@@ -411,26 +442,36 @@ public class SignalEngine {
         log.debug("{} [EVENT] {} boundary crossed for {} at {}",
             LOG_PREFIX, timeframe.getLabel(), scripCode, data.getWindowEnd());
 
+        // Bug #27: Actually process the symbol on primary timeframe boundaries
+        Timeframe primaryTf = Timeframe.fromLabel(primaryTimeframe);
+        if (timeframe == primaryTf) {
+            // Process this symbol on the primary timeframe boundary
+            CompletableFuture.runAsync(() -> {
+                try {
+                    processSymbol(scripCode, primaryTf);
+                } catch (Exception e) {
+                    log.error("{} Error processing symbol={} on {} boundary: {}",
+                        LOG_PREFIX, scripCode, timeframe.getLabel(), e.getMessage());
+                }
+            }, symbolProcessorPool);
+        }
+
         // Route to appropriate processing based on timeframe
         switch (timeframe) {
             case M15:
-                // 15m boundary - PivotConfluenceTrigger LTF check will be triggered via its own listener
                 log.debug("{} {} 15m boundary - LTF confirmation will be refreshed", LOG_PREFIX, scripCode);
                 break;
 
             case M30:
-                // 30m boundary - FudkiiSignalTrigger processes this
                 log.debug("{} {} 30m boundary - FUDKII trigger processed via onCandleClose", LOG_PREFIX, scripCode);
                 break;
 
             case H1:
             case H4:
-                // HTF boundaries - recalculate bias
                 log.info("{} {} {} boundary - HTF bias will be refreshed", LOG_PREFIX, scripCode, timeframe.getLabel());
                 break;
 
             case D1:
-                // Daily close - full refresh
                 log.info("{} {} Daily close - full strategy refresh", LOG_PREFIX, scripCode);
                 break;
 
@@ -1334,6 +1375,16 @@ public class SignalEngine {
             // Cache result (including null for negative caching)
             scripGroupCacheTimestamp.put(equityScripCode, System.currentTimeMillis());
             if (group != null) {
+                // Bug #22: Evict oldest entries when cache is full
+                if (scripGroupCache.size() >= MAX_SCRIP_GROUP_CACHE_SIZE) {
+                    String oldest = scripGroupCacheTimestamp.entrySet().stream()
+                        .min(Map.Entry.comparingByValue())
+                        .map(Map.Entry::getKey).orElse(null);
+                    if (oldest != null) {
+                        scripGroupCache.remove(oldest);
+                        scripGroupCacheTimestamp.remove(oldest);
+                    }
+                }
                 scripGroupCache.put(equityScripCode, group);
                 log.info("{} ScripGroup cached: scripCode={} → {} (futures={}, options={})",
                     LOG_PREFIX, equityScripCode, group.getCompanyName(),
