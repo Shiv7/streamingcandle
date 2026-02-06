@@ -1,11 +1,15 @@
 package com.kotsin.consumer.service;
 
 import com.kotsin.consumer.event.CandleBoundaryEvent;
+import com.kotsin.consumer.model.AggregatedCandle;
 import com.kotsin.consumer.model.Timeframe;
+import com.kotsin.consumer.model.UnifiedCandle;
+import com.kotsin.consumer.repository.AggregatedCandleRepository;
 import lombok.Builder;
 import lombok.Data;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.context.annotation.Lazy;
 import org.springframework.context.event.EventListener;
 import org.springframework.data.redis.core.RedisTemplate;
 import org.springframework.stereotype.Service;
@@ -39,6 +43,16 @@ public class CompletedCandleService {
 
     @Autowired
     private RedisTemplate<String, Object> redisTemplate;
+
+    @Autowired
+    private RedisCacheService redisCacheService;
+
+    @Autowired
+    @Lazy // Avoid circular dependency since CandleService also uses Redis
+    private CandleService candleService;
+
+    @Autowired
+    private AggregatedCandleRepository aggregatedCandleRepository;
 
     // In-memory cache: key = scripCode:timeframe, value = list of completed candles
     // Using CopyOnWriteArrayList for thread safety
@@ -93,6 +107,28 @@ public class CompletedCandleService {
             .build();
 
         storeCandle(candle);
+
+        // Build full UnifiedCandle (with orderbook + OI) and cache in Redis + persist to MongoDB
+        try {
+            UnifiedCandle fullCandle = candleService.getCandle(
+                data.getScripCode(), data.getWindowStart(), data.getTimeframe());
+            if (fullCandle != null) {
+                // Cache in Redis for fast signal generation
+                redisCacheService.cacheAggregatedCandle(data.getScripCode(), data.getTimeframe(), fullCandle);
+
+                // Persist to MongoDB for nightly review (7-day TTL via index)
+                AggregatedCandle doc = AggregatedCandle.fromUnifiedCandle(
+                    fullCandle, data.getScripCode(), data.getSymbol(),
+                    data.getTimeframe(), data.getWindowStart(), data.getWindowEnd());
+                aggregatedCandleRepository.save(doc);
+
+                log.debug("{} {} {} Cached UnifiedCandle in Redis + MongoDB at {}",
+                    LOG_PREFIX, data.getScripCode(), data.getTimeframe().getLabel(), data.getWindowEnd());
+            }
+        } catch (Exception e) {
+            log.debug("{} {} Failed to cache UnifiedCandle: {}",
+                LOG_PREFIX, data.getScripCode(), e.getMessage());
+        }
     }
 
     /**

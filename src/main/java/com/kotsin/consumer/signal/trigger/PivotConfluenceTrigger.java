@@ -833,7 +833,7 @@ public class PivotConfluenceTrigger {
      * Analyze SMC Zones.
      */
     private SMCZoneAnalysis analyzeSMCZones(String scripCode, BiasDirection direction) {
-        log.debug("{} {} Analyzing SMC zones", LOG_PREFIX, scripCode);
+        log.debug("{} {} Analyzing SMC zones (5m + 15m)", LOG_PREFIX, scripCode);
 
         List<UnifiedCandle> candles = candleService.getCandleHistory(scripCode, Timeframe.M5, 100);
         if (candles == null || candles.isEmpty()) {
@@ -859,29 +859,65 @@ public class PivotConfluenceTrigger {
             ))
             .toList();
 
-        SMCResult smcResult = smcAnalyzer.analyze(scripCode, "5m", smcCandles);
+        // Run SMC on 5m (LTF)
+        SMCResult smcResult5m = smcAnalyzer.analyze(scripCode, "5m", smcCandles);
+
+        // Run SMC on 15m (HTF) — HTF OBs carry more institutional weight
+        SMCResult smcResult15m = null;
+        List<UnifiedCandle> candles15m = candleService.getCandleHistory(scripCode, Timeframe.M15, 50);
+        if (candles15m != null && !candles15m.isEmpty()) {
+            List<CandleData> smcCandles15m = candles15m.stream()
+                .map(c -> new CandleData(
+                    c.getTimestamp(),
+                    c.getOpen(),
+                    c.getHigh(),
+                    c.getLow(),
+                    c.getClose(),
+                    c.getVolume()
+                ))
+                .toList();
+            smcResult15m = smcAnalyzer.analyze(scripCode, "15m", smcCandles15m);
+        }
 
         boolean inOrderBlock = false;
         boolean nearFVG = false;
         boolean atLiquidity = false;
         BiasDirection smcBias = BiasDirection.NEUTRAL;
         OrderBlock.OrderBlockStrength obStrength = null;
+        boolean isHTF = false;
 
-        if (smcResult != null) {
-            // Check order blocks
-            for (OrderBlock ob : smcResult.getOrderBlocks()) {
+        // Check HTF (15m) first — if price is in a 15m OB, it takes priority
+        if (smcResult15m != null) {
+            for (OrderBlock ob : smcResult15m.getOrderBlocks()) {
                 if (ob.isPriceInZone(currentPrice)) {
                     inOrderBlock = true;
+                    isHTF = true;
                     smcBias = ob.isBullish() ? BiasDirection.BULLISH : BiasDirection.BEARISH;
                     obStrength = ob.getStrength();
-                    log.debug("{} {} In {} order block at {} (strength={})",
+                    log.info("{} {} In HTF (15m) {} order block at {} (strength={})",
                         LOG_PREFIX, scripCode, ob.getType(), String.format("%.2f", currentPrice), obStrength);
                     break;
                 }
             }
+        }
 
-            // Check FVGs
-            for (FairValueGap fvg : smcResult.getFairValueGaps()) {
+        // Fall back to 5m OB if no 15m OB found
+        if (smcResult5m != null) {
+            if (!inOrderBlock) {
+                for (OrderBlock ob : smcResult5m.getOrderBlocks()) {
+                    if (ob.isPriceInZone(currentPrice)) {
+                        inOrderBlock = true;
+                        smcBias = ob.isBullish() ? BiasDirection.BULLISH : BiasDirection.BEARISH;
+                        obStrength = ob.getStrength();
+                        log.debug("{} {} In 5m {} order block at {} (strength={})",
+                            LOG_PREFIX, scripCode, ob.getType(), String.format("%.2f", currentPrice), obStrength);
+                        break;
+                    }
+                }
+            }
+
+            // Check FVGs (use 5m — more granular)
+            for (FairValueGap fvg : smcResult5m.getFairValueGaps()) {
                 if (fvg.isPriceNearGap(currentPrice, 0.5)) {
                     nearFVG = true;
                     log.debug("{} {} Near {} FVG", LOG_PREFIX, scripCode, fvg.getType());
@@ -889,11 +925,22 @@ public class PivotConfluenceTrigger {
                 }
             }
 
-            // Check liquidity zones
-            for (LiquidityZone lz : smcResult.getLiquidityZones()) {
+            // Check liquidity zones (merge both timeframes)
+            for (LiquidityZone lz : smcResult5m.getLiquidityZones()) {
                 if (Math.abs(currentPrice - lz.getLevel()) / lz.getLevel() * 100 < 0.5) {
                     atLiquidity = true;
                     log.debug("{} {} At liquidity zone: {}", LOG_PREFIX, scripCode, String.format("%.2f", lz.getLevel()));
+                    break;
+                }
+            }
+        }
+
+        // Also check 15m liquidity zones if not found in 5m
+        if (!atLiquidity && smcResult15m != null) {
+            for (LiquidityZone lz : smcResult15m.getLiquidityZones()) {
+                if (Math.abs(currentPrice - lz.getLevel()) / lz.getLevel() * 100 < 0.5) {
+                    atLiquidity = true;
+                    log.debug("{} {} At HTF liquidity zone: {}", LOG_PREFIX, scripCode, String.format("%.2f", lz.getLevel()));
                     break;
                 }
             }
@@ -904,8 +951,9 @@ public class PivotConfluenceTrigger {
             .nearFVG(nearFVG)
             .atLiquidityZone(atLiquidity)
             .smcBias(smcBias)
-            .smcResult(smcResult)
+            .smcResult(smcResult5m)
             .obStrength(obStrength)
+            .isHTF(isHTF)
             .build();
     }
 
@@ -1172,13 +1220,16 @@ public class PivotConfluenceTrigger {
         // Pivot confluence (max 20)
         score += Math.min(pivotAnalysis.nearbyLevels * 5, 20);
 
-        // SMC zones (max 18) — quality-scaled by OB strength
+        // SMC zones (max 27) — quality-scaled by OB strength, 1.5x for HTF (15m) OBs
         if (smcAnalysis.inOrderBlock) {
             int obPoints = smcAnalysis.obStrength != null ? switch (smcAnalysis.obStrength) {
                 case STRONG -> 12;
                 case MODERATE -> 8;
                 case WEAK -> 4;
             } : 8;
+            if (smcAnalysis.isHTF) {
+                obPoints = (int)(obPoints * 1.5); // HTF OBs carry more institutional weight
+            }
             score += obPoints;
         }
         if (smcAnalysis.nearFVG) score += 4;
@@ -1462,6 +1513,7 @@ public class PivotConfluenceTrigger {
         private BiasDirection smcBias;
         private SMCResult smcResult;
         private OrderBlock.OrderBlockStrength obStrength; // Strength of nearest OB
+        private boolean isHTF; // True if OB came from 15m timeframe (1.5x weight)
     }
 
     @Data

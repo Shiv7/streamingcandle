@@ -508,6 +508,9 @@ public class SignalEngine {
         // Start trace context for this processing cycle
         String traceId = TraceContext.start(symbol, timeframe.getLabel());
 
+        // Clear per-cycle candle cache to avoid stale data from previous symbol
+        candleService.clearCycleCache();
+
         try {
             // CRITICAL: Skip processing if symbol not bootstrapped yet
             if (!historicalDataBootstrapService.isBootstrapped(symbol)) {
@@ -669,7 +672,8 @@ public class SignalEngine {
                 String.format("%.1f", score.getCompositeScore()));
 
         } finally {
-            // Always clear trace context
+            // Always clear trace context and cycle cache
+            candleService.clearCycleCache();
             TraceContext.clear();
         }
     }
@@ -2147,6 +2151,15 @@ public class SignalEngine {
         // Immediately activate
         signal.enterActive(adjustedScore, price, levels.entry, levels.stop, levels.target1, levels.target2);
 
+        // Capture full market context snapshot for nightly review
+        try {
+            TradingSignal.SignalContextSnapshot snapshot = captureSignalContext(
+                symbol, candle, strategyName, adjustedScore.getCompositeScore());
+            signal.setContextSnapshot(snapshot);
+        } catch (Exception e) {
+            log.debug("{} {} Failed to capture signal context: {}", LOG_PREFIX, symbol, e.getMessage());
+        }
+
         // Record to stats
         recordSignalToStats(signal, adjustedScore);
 
@@ -2186,6 +2199,123 @@ public class SignalEngine {
 
         signal.enterWatch(score, candle.getClose(), watchExpiryMinutes);
         return signal;
+    }
+
+    /**
+     * Capture full market context at signal creation time for nightly review.
+     */
+    private TradingSignal.SignalContextSnapshot captureSignalContext(
+            String symbol, UnifiedCandle candle, String triggerSource, double rawScore) {
+
+        TradingSignal.SignalContextSnapshot.SignalContextSnapshotBuilder builder =
+            TradingSignal.SignalContextSnapshot.builder()
+                .currentPrice(candle.getClose())
+                .vwap(candle.getVwap())
+                .triggerSource(triggerSource)
+                .rawTriggerScore((int) rawScore);
+
+        // Market regime
+        try {
+            MarketRegime regime = regimeDetector.getCurrentRegime(symbol);
+            if (regime != null) {
+                builder.regimeType(regime.getRegimeType() != null ? regime.getRegimeType().name() : "UNKNOWN")
+                    .trendStrength(regime.getAdxValue())
+                    .volatilityState(regime.getVolatilityState() != null ? regime.getVolatilityState().name() : "UNKNOWN")
+                    .adxValue(regime.getAdxValue())
+                    .atrPercent(regime.getAtrPercent());
+            }
+        } catch (Exception e) {
+            log.debug("{} {} Context: regime capture failed: {}", LOG_PREFIX, symbol, e.getMessage());
+        }
+
+        // Nearest pivot levels
+        try {
+            String scripCode = candle.getScripCode();
+            String exchange = candle.getExchange() != null ? candle.getExchange() : "N";
+            String exchType = candle.getExchangeType() != null ? candle.getExchangeType() : "C";
+            Optional<MultiTimeframePivotState> pivotOpt = pivotLevelService.getOrLoadPivotLevels(scripCode, exchange, exchType);
+            if (pivotOpt.isPresent()) {
+                PivotLevels daily = pivotOpt.get().getDailyPivot();
+                if (daily != null) {
+                    double price = candle.getClose();
+                    double support = daily.getNearestSupport(price);
+                    double resistance = daily.getNearestResistance(price);
+                    builder.nearestSupport(support);
+                    builder.nearestResistance(resistance);
+                    if (support > 0) {
+                        builder.distanceToSupportPct((price - support) / price * 100);
+                    }
+                    if (resistance > 0) {
+                        builder.distanceToResistancePct((resistance - price) / price * 100);
+                    }
+                }
+            }
+        } catch (Exception e) {
+            log.debug("{} {} Context: pivot capture failed: {}", LOG_PREFIX, symbol, e.getMessage());
+        }
+
+        // SMC context
+        try {
+            List<com.kotsin.consumer.smc.model.OrderBlock> obs = smcAnalyzer.getValidOrderBlocks(symbol);
+            if (obs != null && !obs.isEmpty()) {
+                double price = candle.getClose();
+                for (var ob : obs) {
+                    if (price >= ob.getLow() && price <= ob.getHigh()) {
+                        builder.inOrderBlock(true)
+                            .obStrength(ob.getStrength() != null ? ob.getStrength().name() : "UNKNOWN");
+                        break;
+                    }
+                }
+            }
+            List<com.kotsin.consumer.smc.model.FairValueGap> fvgs = smcAnalyzer.getValidFairValueGaps(symbol);
+            if (fvgs != null && !fvgs.isEmpty()) {
+                double price = candle.getClose();
+                for (var fvg : fvgs) {
+                    if (price >= fvg.getLow() && price <= fvg.getHigh()) {
+                        builder.inFairValueGap(true);
+                        break;
+                    }
+                }
+            }
+        } catch (Exception e) {
+            log.debug("{} {} Context: SMC capture failed: {}", LOG_PREFIX, symbol, e.getMessage());
+        }
+
+        // OI snapshot
+        try {
+            if (candle.isHasOI()) {
+                builder.oiInterpretation(candle.getOiInterpretation() != null ? candle.getOiInterpretation().name() : null)
+                    .oiChangePercent(candle.getOiChangePercent() != null ? candle.getOiChangePercent() : 0);
+            }
+        } catch (Exception e) {
+            log.debug("{} {} Context: OI capture failed: {}", LOG_PREFIX, symbol, e.getMessage());
+        }
+
+        // IPU / momentum state
+        try {
+            Optional<IpuState> ipuOpt = strategyStateService.getIpuState(symbol, primaryTimeframe);
+            if (ipuOpt.isPresent()) {
+                IpuState ipu = ipuOpt.get();
+                builder.momentumState(ipu.getCurrentMomentumState() != null ? ipu.getCurrentMomentumState() : "UNKNOWN")
+                    .exhaustionLevel(ipu.getCurrentExhaustion())
+                    .ipuRising(ipu.isIpuRising());
+            }
+        } catch (Exception e) {
+            log.debug("{} {} Context: IPU capture failed: {}", LOG_PREFIX, symbol, e.getMessage());
+        }
+
+        // Volume ratio
+        try {
+            List<UnifiedCandle> recent = candleService.getCandleHistory(symbol, Timeframe.M5, 20);
+            if (recent != null && recent.size() >= 2) {
+                double avgVol = recent.stream().mapToLong(UnifiedCandle::getVolume).average().orElse(1);
+                builder.volumeRatio(avgVol > 0 ? candle.getVolume() / avgVol : 1.0);
+            }
+        } catch (Exception e) {
+            log.debug("{} {} Context: volume ratio capture failed: {}", LOG_PREFIX, symbol, e.getMessage());
+        }
+
+        return builder.build();
     }
 
     /**

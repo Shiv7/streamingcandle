@@ -224,6 +224,12 @@ public class TradingSignal {
     @Builder.Default
     private List<String> alignedStrategyNames = new ArrayList<>();
 
+    // ==================== SIGNAL CONTEXT SNAPSHOT ====================
+    /**
+     * Full market context at signal creation time for nightly review.
+     */
+    private SignalContextSnapshot contextSnapshot;
+
     // ==================== PAPER TRADE LINK ====================
     /**
      * Paper trade ID (link to paper_trades collection).
@@ -278,6 +284,57 @@ public class TradingSignal {
         private String reason;
         private double score;
         private Instant checkedAt;
+    }
+
+    /**
+     * Full market context snapshot at signal creation time.
+     * Persisted to MongoDB for nightly trade review.
+     */
+    @Data
+    @Builder
+    @NoArgsConstructor
+    @AllArgsConstructor
+    public static class SignalContextSnapshot {
+        // Market regime
+        private String regimeType;
+        private double trendStrength;
+        private String volatilityState;
+        private double adxValue;
+        private double atrPercent;
+
+        // Nearest pivot levels
+        private double nearestSupport;
+        private String nearestSupportLabel;
+        private double nearestResistance;
+        private String nearestResistanceLabel;
+        private double distanceToSupportPct;
+        private double distanceToResistancePct;
+
+        // SMC context
+        private boolean inOrderBlock;
+        private String obStrength;
+        private boolean htfOrderBlock;
+        private boolean inFairValueGap;
+        private boolean nearLiquidityZone;
+
+        // OI snapshot
+        private String oiInterpretation;
+        private double oiChangePercent;
+        private Double putCallRatio;
+
+        // IPU state
+        private String momentumState;
+        private double exhaustionLevel;
+        private boolean ipuRising;
+
+        // Candle context
+        private double currentPrice;
+        private double vwap;
+        private double volumeRatio;
+
+        // Trigger source
+        private String triggerSource;
+        private int rawTriggerScore;
     }
 
     // ==================== LIFECYCLE METHODS ====================
