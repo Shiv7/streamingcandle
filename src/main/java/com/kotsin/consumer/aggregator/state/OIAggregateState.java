@@ -38,7 +38,7 @@ import java.time.Instant;
  * @see OIMetrics
  */
 @Slf4j
-public class OIAggregateState {
+public class OIAggregateState implements com.kotsin.consumer.aggregator.WindowedState {
 
     // ==================== IDENTITY ====================
 
@@ -537,6 +537,11 @@ public class OIAggregateState {
      */
     public int getUpdateCount() {
         return updateCount;
+    }
+
+    @Override
+    public boolean hasData() {
+        return updateCount > 0;
     }
 
     /**

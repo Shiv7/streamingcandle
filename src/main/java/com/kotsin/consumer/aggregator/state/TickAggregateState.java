@@ -57,7 +57,7 @@ import java.util.concurrent.ConcurrentHashMap;
  * @see com.kotsin.consumer.aggregator.TickAggregator
  * @see TickCandle
  */
-public class TickAggregateState {
+public class TickAggregateState implements com.kotsin.consumer.aggregator.WindowedState {
 
     // ==================== CONSTANTS ====================
 
@@ -719,5 +719,9 @@ public class TickAggregateState {
         return tickCount;
     }
 
+    @Override
+    public boolean hasData() {
+        return tickCount > 0;
+    }
 }
 
