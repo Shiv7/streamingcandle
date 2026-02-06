@@ -141,6 +141,9 @@ public class SignalEngine {
     @Autowired
     private BreakoutDetector breakoutDetector;
 
+    // Per-symbol breakout events cache (updated each processSymbol cycle)
+    private final ConcurrentHashMap<String, List<BreakoutEvent>> symbolBreakoutEvents = new ConcurrentHashMap<>();
+
     // ==================== STRATEGY TRIGGERS ====================
 
     @Autowired
@@ -583,6 +586,12 @@ public class SignalEngine {
             // ==================== BREAKOUT DETECTION ====================
             TraceContext.addStage("BREAKOUT_DETECTION");
             List<BreakoutEvent> breakoutEvents = detectBreakouts(symbol, current, candles, indicators);
+            // Cache for gate chain and other components
+            if (breakoutEvents != null && !breakoutEvents.isEmpty()) {
+                symbolBreakoutEvents.put(symbol, breakoutEvents);
+            } else {
+                symbolBreakoutEvents.remove(symbol);
+            }
 
             // ==================== STRATEGY 1: FUDKII TRIGGER (ST + BB on 30m) ====================
             TraceContext.addStage("FUDKII_TRIGGER");
@@ -595,6 +604,7 @@ public class SignalEngine {
 
             // ==================== STRATEGY 3: MICROALPHA TRIGGER (Microstructure Alpha) ====================
             TraceContext.addStage("MICROALPHA_TRIGGER");
+            microAlphaTrigger.setLevelContext(symbol, breakoutEvents);
             var microAlphaResult = checkMicroAlphaTrigger(symbol, current, indicators);
 
             // Process all strategy triggers independently (concurrent signal tracking)
@@ -1226,6 +1236,7 @@ public class SignalEngine {
                 .custom("macdHistogram", indicators.getMacdHistogram())
                 .custom("fudkiiScore", score)               // For QuantScoreGate
                 .custom("patternResult", patternResult)     // For PatternGate
+                .custom("breakoutEvents", symbolBreakoutEvents.get(symbol))  // For StructuralLevelGate
                 .build();
 
             return gateChain.evaluate(symbol, "FUDKII", context);
@@ -1911,6 +1922,21 @@ public class SignalEngine {
             String.format("%.2f", levels.target2),
             String.format("%.2f", Math.abs(levels.target1 - levels.entry) / risk),
             String.format("%.2f", (risk / levels.entry) * 100));
+
+        // Gate chain validation (applies to all strategies)
+        ChainResult gateResult = validateThroughGates(symbol, adjustedScore, indicators,
+            price, levels.target1, levels.stop, patternResult,
+            candle.getExchange());
+        if (gateResult != null && !gateResult.isPassed()) {
+            log.info("{} {} {} Signal blocked by gates: {}",
+                LOG_PREFIX, TraceContext.getShortPrefix(), strategyName, gateResult.getFailureReason());
+            return null; // Signal rejected by gates
+        }
+        if (gateResult != null) {
+            log.info("{} {} {} Gate score: {} ({})", LOG_PREFIX, TraceContext.getShortPrefix(),
+                strategyName, String.format("%.1f", gateResult.getTotalScore()),
+                gateResult.isHighQuality() ? "HIGH_QUALITY" : "STANDARD");
+        }
 
         // Immediately activate
         signal.enterActive(adjustedScore, price, levels.entry, levels.stop, levels.target1, levels.target2);

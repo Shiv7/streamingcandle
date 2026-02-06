@@ -21,6 +21,9 @@ import org.springframework.beans.factory.annotation.Value;
 import org.springframework.kafka.core.KafkaTemplate;
 import org.springframework.stereotype.Component;
 
+import com.kotsin.consumer.breakout.model.BreakoutEvent;
+import com.kotsin.consumer.breakout.model.BreakoutEvent.*;
+
 import java.time.*;
 import java.time.format.DateTimeFormatter;
 import java.util.*;
@@ -110,6 +113,23 @@ public class MicroAlphaTrigger {
     private final Map<String, Integer> dailySignalCount = new ConcurrentHashMap<>();
     private final Map<String, MicroAlphaScore> previousScore = new ConcurrentHashMap<>();
 
+    // Level context from BreakoutDetector (set by SignalEngine before evaluate)
+    private final ConcurrentHashMap<String, List<BreakoutEvent>> levelContext = new ConcurrentHashMap<>();
+
+    // ==================== LEVEL CONTEXT ====================
+
+    /**
+     * Set breakout/retest level context from BreakoutDetector.
+     * Called by SignalEngine before evaluate() to provide structural level awareness.
+     */
+    public void setLevelContext(String symbol, List<BreakoutEvent> events) {
+        if (events != null && !events.isEmpty()) {
+            levelContext.put(symbol, events);
+        } else {
+            levelContext.remove(symbol);
+        }
+    }
+
     // ==================== MAIN ENTRY POINT ====================
 
     /**
@@ -188,17 +208,27 @@ public class MicroAlphaTrigger {
             TriggerDirection direction = score.getDirection() == ConvictionDirection.BULLISH ?
                 TriggerDirection.BULLISH : TriggerDirection.BEARISH;
 
+            // Structural level conviction bonus: trading at a key level boosts conviction
+            double convictionBonus = calculateStructuralBonus(symbol);
+            if (convictionBonus > 0) {
+                log.info("{} {} Structural level bonus: +{} conviction", LOG_PREFIX, symbol,
+                    String.format("%.1f", convictionBonus));
+            }
+
             // Calculate risk management levels
             RiskLevels riskLevels = calculateRiskLevels(
                 candle, score, options, session, indicators, direction);
+
+            double finalConviction = score.getConviction() + (score.getConviction() > 0 ? convictionBonus : -convictionBonus);
+            double finalAbsConviction = Math.min(score.getAbsConviction() + convictionBonus, 100);
 
             MicroAlphaTriggerResult result = MicroAlphaTriggerResult.builder()
                 .triggered(true)
                 .direction(direction)
                 .score(score)
                 .tradingMode(score.getTradingMode())
-                .conviction(score.getConviction())
-                .absConviction(score.getAbsConviction())
+                .conviction(finalConviction)
+                .absConviction(finalAbsConviction)
                 .entryPrice(candle.getClose())
                 .stopLoss(riskLevels.getStopLoss())
                 .target(riskLevels.getTarget())
@@ -393,6 +423,20 @@ public class MicroAlphaTrigger {
                 passes.add("Price near session high");
             }
         }
+        // Level context: price at a registered structural level counts as extremity
+        if (!atExtremity) {
+            String symbol = String.valueOf(candle.getScripCode());
+            List<BreakoutEvent> events = levelContext.get(symbol);
+            if (events != null) {
+                for (BreakoutEvent event : events) {
+                    if (event.getType() == BreakoutType.RETEST && event.isRetestHeld()) {
+                        atExtremity = true;
+                        passes.add("At confirmed retest level: " + event.getLevelDescription());
+                        break;
+                    }
+                }
+            }
+        }
         if (!atExtremity) {
             fails.add("Price not at extremity");
         }
@@ -438,7 +482,7 @@ public class MicroAlphaTrigger {
             fails.add(String.format("Flow conviction insufficient (%.0f)", flowScore));
         }
 
-        // Check 3: Structural breakout (OR or VWAP)
+        // Check 3: Structural breakout (OR, VWAP, or registered level from BreakoutDetector)
         boolean structuralBreak = false;
         if (session != null && session.isOpeningRangeComplete()) {
             if (bullish && candle.getClose() > session.getOpeningRangeHigh30()) {
@@ -453,6 +497,24 @@ public class MicroAlphaTrigger {
             } else if (!bullish && session.isBelowVwap()) {
                 structuralBreak = true;
                 passes.add("Below VWAP (institutional flow breakdown)");
+            }
+        }
+        // Check BreakoutDetector events for structural break at registered levels
+        if (!structuralBreak) {
+            String symbol = String.valueOf(candle.getScripCode());
+            List<BreakoutEvent> events = levelContext.get(symbol);
+            if (events != null) {
+                for (BreakoutEvent event : events) {
+                    if (event.getType() == BreakoutType.BREAKOUT) {
+                        structuralBreak = true;
+                        passes.add("Breakout at " + event.getLevelDescription() + " (registered level)");
+                        break;
+                    } else if (event.getType() == BreakoutType.RETEST && event.isRetestHeld()) {
+                        structuralBreak = true;
+                        passes.add("Retest held at " + event.getLevelDescription() + " (confirmed)");
+                        break;
+                    }
+                }
             }
         }
         if (!structuralBreak) {
@@ -481,6 +543,32 @@ public class MicroAlphaTrigger {
      * Check that conviction is building, not spiking randomly.
      * Compare current score with previous score to ensure direction consistency.
      */
+    /**
+     * Calculate conviction bonus from structural level context.
+     * Trading at a confirmed retest or active breakout boosts conviction.
+     */
+    private double calculateStructuralBonus(String symbol) {
+        List<BreakoutEvent> events = levelContext.get(symbol);
+        if (events == null || events.isEmpty()) return 0;
+
+        double bonus = 0;
+        for (BreakoutEvent event : events) {
+            if (event.getType() == BreakoutType.RETEST && event.isRetestHeld()) {
+                RetestQuality quality = event.getRetestQuality();
+                if (quality == RetestQuality.PERFECT) {
+                    bonus = Math.max(bonus, 10);
+                } else if (quality == RetestQuality.GOOD) {
+                    bonus = Math.max(bonus, 7);
+                } else {
+                    bonus = Math.max(bonus, 3);
+                }
+            } else if (event.getType() == BreakoutType.BREAKOUT) {
+                bonus = Math.max(bonus, 5);
+            }
+        }
+        return bonus;
+    }
+
     private boolean hasConvictionMomentum(String symbol, MicroAlphaScore current) {
         MicroAlphaScore prev = previousScore.get(symbol);
         previousScore.put(symbol, current);
