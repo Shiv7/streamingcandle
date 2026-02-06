@@ -48,6 +48,7 @@ import org.springframework.stereotype.Component;
 // ==================== PROJECT IMPORTS ====================
 import com.kotsin.consumer.aggregator.state.OIAggregateState;
 import com.kotsin.consumer.aggregator.state.OptionMetadata;
+import com.kotsin.consumer.event.CandleBoundaryPublisher;
 import com.kotsin.consumer.model.OIMetrics;
 import com.kotsin.consumer.model.OpenInterest;
 import com.kotsin.consumer.model.Timeframe;
@@ -229,6 +230,12 @@ public class OIAggregator {
      */
     @Autowired
     private ScripMetadataService scripMetadataService;
+
+    /**
+     * Bug #8: Publishes boundary events for higher timeframe analysis.
+     */
+    @Autowired
+    private CandleBoundaryPublisher candleBoundaryPublisher;
 
     // ==================== STATE MANAGEMENT ====================
 
@@ -646,6 +653,12 @@ public class OIAggregator {
             persistToMongoDB(metricsToSave);
             cacheToRedis(metricsToSave);
             publishToKafka(metricsToSave);
+
+            // Bug #8: Publish boundary events for OI data
+            for (OIMetrics m : metricsToSave) {
+                candleBoundaryPublisher.onMetricsClose(
+                    m.getScripCode(), m.getExchange(), m.getWindowEnd(), "OI");
+            }
         }
 
         // Remove emitted states

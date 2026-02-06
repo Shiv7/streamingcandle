@@ -100,7 +100,8 @@ public class CandleBoundaryPublisher {
         Instant closeTime = candle1m.getWindowEnd();
 
         // Track for each popular timeframe
-        for (Timeframe tf : new Timeframe[]{Timeframe.M5, Timeframe.M15, Timeframe.M30, Timeframe.H1, Timeframe.H4}) {
+        // Bug #9: Track for all timeframes including M2, M3, H2
+        for (Timeframe tf : new Timeframe[]{Timeframe.M2, Timeframe.M3, Timeframe.M5, Timeframe.M15, Timeframe.M30, Timeframe.H1, Timeframe.H2, Timeframe.H4}) {
             Instant windowStart = tf.alignToWindowStart(closeTime);
             String key = scripCode + ":" + tf.getLabel() + ":" + windowStart.toEpochMilli();
 
@@ -180,6 +181,60 @@ public class CandleBoundaryPublisher {
             String.format("%.2f", low),
             String.format("%.2f", close),
             volume);
+    }
+
+    /**
+     * Bug #8: Called when OI/Orderbook metrics close a 1m window.
+     * Publishes boundary events for non-tick data types.
+     *
+     * @param scripCode  instrument identifier
+     * @param exchange   exchange code ("N", "M")
+     * @param windowEnd  end of the 1m window
+     * @param dataType   "OI" or "ORDERBOOK"
+     */
+    public void onMetricsClose(String scripCode, String exchange, Instant windowEnd, String dataType) {
+        if (scripCode == null || windowEnd == null) return;
+
+        if (exchange == null || exchange.isEmpty()) {
+            exchange = "N";
+        }
+
+        if (!TimeframeBoundary.isMarketHours(windowEnd, exchange)) {
+            return;
+        }
+
+        List<Timeframe> crossedBoundaries = TimeframeBoundary.getCrossedBoundaries(windowEnd, exchange);
+        if (crossedBoundaries.isEmpty()) {
+            return;
+        }
+
+        for (Timeframe tf : crossedBoundaries) {
+            String dedupKey = scripCode + ":" + dataType + ":" + tf.getLabel();
+            Instant windowStart = tf.alignToWindowStart(windowEnd);
+            Instant tfWindowEnd = tf.getWindowEnd(windowStart);
+
+            Instant lastPublished = lastPublishedBoundary.get(dedupKey);
+            if (lastPublished != null && lastPublished.equals(tfWindowEnd)) {
+                continue;
+            }
+
+            CandleBoundaryEvent.CandleBoundaryData data = CandleBoundaryEvent.CandleBoundaryData.builder()
+                .scripCode(scripCode)
+                .exchange(exchange)
+                .timeframe(tf)
+                .windowStart(windowStart)
+                .windowEnd(tfWindowEnd)
+                .dataType(dataType)
+                .eventTime(Instant.now())
+                .build();
+
+            eventPublisher.publishEvent(new CandleBoundaryEvent(this, data));
+            lastPublishedBoundary.put(dedupKey, tfWindowEnd);
+
+            log.debug("{} {} Published {} {} boundary event at {}",
+                LOG_PREFIX, scripCode, dataType, tf.getLabel(),
+                tfWindowEnd.atZone(IST).format(TIME_FMT));
+        }
     }
 
     /**

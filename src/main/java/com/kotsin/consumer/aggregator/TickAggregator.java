@@ -51,6 +51,7 @@ import com.kotsin.consumer.aggregator.state.TickAggregateState;
 import com.kotsin.consumer.event.CandleBoundaryPublisher;
 import com.kotsin.consumer.logging.TraceContext;
 import com.kotsin.consumer.model.TickCandle;
+import com.kotsin.consumer.model.TimeframeBoundary;
 import com.kotsin.consumer.model.TickData;
 import com.kotsin.consumer.model.Timeframe;
 import com.kotsin.consumer.repository.TickCandleRepository;
@@ -338,6 +339,10 @@ public class TickAggregator {
         // Start window emission scheduler (runs every second to check window close)
         emissionScheduler = Executors.newSingleThreadScheduledExecutor();
         emissionScheduler.scheduleAtFixedRate(this::checkWindowEmission, 1, 1, TimeUnit.SECONDS);
+
+        // Bug #15: Schedule periodic cleanup of pending candles (every 10 minutes)
+        emissionScheduler.scheduleAtFixedRate(
+            candleBoundaryPublisher::cleanupOldPendingCandles, 10, 10, TimeUnit.MINUTES);
 
         log.info("{} Started successfully", LOG_PREFIX);
 
@@ -813,6 +818,15 @@ public class TickAggregator {
      */
     private void triggerFudkiiSignals(List<TickCandle> candles) {
         try {
+            // Bug #7: FUDKII operates on 30m candles; skip if not a 30m boundary
+            if (!candles.isEmpty()) {
+                TickCandle first = candles.get(0);
+                String exchange = first.getExchange() != null ? first.getExchange() : "N";
+                if (!TimeframeBoundary.is30mBoundary(first.getWindowEnd(), exchange)) {
+                    return;
+                }
+            }
+
             for (TickCandle candle : candles) {
                 if (candle.getScripCode() != null) {
                     // Bug #17: FUDKII only for equity/index, not derivatives

@@ -89,6 +89,10 @@ public class CandleBoundaryEvent extends ApplicationEvent {
         // The 1m candles that make up this candle (for detailed analysis)
         private List<TickCandle> constituent1mCandles;
 
+        // Data type: "TICK", "OI", "ORDERBOOK" (Bug #8)
+        @Builder.Default
+        private String dataType = "TICK";
+
         // Timestamp when event was created
         private Instant eventTime;
 
