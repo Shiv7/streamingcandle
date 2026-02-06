@@ -201,6 +201,22 @@ public class TickCandle {
             return this == FUTURE || isOption();
         }
 
+        /**
+         * Bug #12: Detect instrument type from scrip type code (authoritative source).
+         * ScripType values: "EQ", "FUT", "CE", "PE", "IF" (index future), "IO" (index option)
+         */
+        public static InstrumentType fromScripType(String scripType) {
+            if (scripType == null) return null;
+            return switch (scripType.toUpperCase()) {
+                case "CE" -> OPTION_CE;
+                case "PE" -> OPTION_PE;
+                case "FUT", "IF" -> FUTURE;
+                case "EQ" -> EQUITY;
+                case "IO" -> EQUITY; // Index options - treat as equity for our purposes
+                default -> null;
+            };
+        }
+
         public static InstrumentType detect(String exchange, String exchangeType, String companyName) {
             if (companyName == null) return EQUITY;
 

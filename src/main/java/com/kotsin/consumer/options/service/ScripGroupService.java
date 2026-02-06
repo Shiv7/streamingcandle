@@ -1,7 +1,10 @@
 package com.kotsin.consumer.options.service;
 
+import com.kotsin.consumer.metadata.model.Scrip;
+import com.kotsin.consumer.metadata.model.ScripGroup;
 import com.kotsin.consumer.model.OIMetrics;
 import com.kotsin.consumer.repository.OIMetricsRepository;
+import com.kotsin.consumer.repository.ScripGroupRepository;
 import lombok.AllArgsConstructor;
 import lombok.Builder;
 import lombok.Data;
@@ -37,6 +40,12 @@ public class ScripGroupService {
     @Autowired
     private OIMetricsRepository oiMetricsRepository;
 
+    /**
+     * Bug #4: Repository for loading futures metadata from ScripGroup collection.
+     */
+    @Autowired
+    private ScripGroupRepository scripGroupRepository;
+
     @Value("${scripgroup.cache.refresh.minutes:5}")
     private int cacheRefreshMinutes;
 
@@ -46,12 +55,19 @@ public class ScripGroupService {
     private final Map<String, List<OptionInstrument>> optionsByUnderlying = new ConcurrentHashMap<>();
     private final Set<String> underlyingsWithOptions = ConcurrentHashMap.newKeySet();
 
+    // Bug #4: Futures caches
+    private final Map<String, FuturesInstrument> futuresByScripCode = new ConcurrentHashMap<>();
+    private final Map<String, List<FuturesInstrument>> futuresByUnderlying = new ConcurrentHashMap<>();
+    // Bug #5: Derivative → equity mapping
+    private final Map<String, String> derivativeToEquity = new ConcurrentHashMap<>();
+
     private volatile Instant lastRefresh = Instant.EPOCH;
 
     @PostConstruct
     public void init() {
         log.info("{} Initializing ScripGroupService from MongoDB", LOG_PREFIX);
         refreshFromDatabase();
+        loadFutures(); // Bug #4: Load futures metadata
     }
 
     /**
@@ -287,6 +303,91 @@ public class ScripGroupService {
             .build();
     }
 
+    // ==================== FUTURES LOADING (Bug #4) ====================
+
+    /**
+     * Bug #4: Load futures instruments from ScripGroup collection.
+     * Mirrors option loading but for futures contracts.
+     */
+    public void loadFutures() {
+        try {
+            List<ScripGroup> allGroups = scripGroupRepository.findAll();
+            if (allGroups.isEmpty()) {
+                log.warn("{} No ScripGroup entries found", LOG_PREFIX);
+                return;
+            }
+
+            futuresByScripCode.clear();
+            Map<String, List<FuturesInstrument>> tempByUnderlying = new HashMap<>();
+
+            for (ScripGroup group : allGroups) {
+                if (group.getFutures() == null || group.getFutures().isEmpty()) continue;
+
+                String equityScripCode = group.getEquityScripCode();
+                String underlying = group.getCompanyName();
+
+                for (Scrip fut : group.getFutures()) {
+                    if (fut.getScripCode() == null) continue;
+
+                    FuturesInstrument fi = FuturesInstrument.builder()
+                        .scripCode(fut.getScripCode())
+                        .symbol(fut.getSymbolRoot())
+                        .underlyingSymbol(underlying)
+                        .equityScripCode(equityScripCode)
+                        .exchange(fut.getExch())
+                        .exchangeType(fut.getExchType())
+                        .expiry(fut.getExpiry())
+                        .lotSize(fut.getLotSize())
+                        .build();
+
+                    futuresByScripCode.put(fi.getScripCode(), fi);
+                    tempByUnderlying.computeIfAbsent(underlying, k -> new ArrayList<>()).add(fi);
+
+                    // Bug #5: Map derivative → equity
+                    derivativeToEquity.put(fut.getScripCode(), equityScripCode);
+                }
+
+                // Bug #5: Also map option scripCodes → equity
+                if (group.getOptions() != null) {
+                    for (Scrip opt : group.getOptions()) {
+                        if (opt.getScripCode() != null) {
+                            derivativeToEquity.put(opt.getScripCode(), equityScripCode);
+                        }
+                    }
+                }
+            }
+
+            futuresByUnderlying.clear();
+            futuresByUnderlying.putAll(tempByUnderlying);
+
+            log.info("{} Loaded {} futures instruments for {} underlyings, {} derivative→equity mappings",
+                LOG_PREFIX, futuresByScripCode.size(), futuresByUnderlying.size(), derivativeToEquity.size());
+        } catch (Exception e) {
+            log.error("{} Failed to load futures: {}", LOG_PREFIX, e.getMessage());
+        }
+    }
+
+    /**
+     * Bug #4: Get futures for an underlying symbol.
+     */
+    public List<FuturesInstrument> getFuturesForUnderlying(String underlyingSymbol) {
+        return futuresByUnderlying.getOrDefault(underlyingSymbol, Collections.emptyList());
+    }
+
+    /**
+     * Bug #4: Get futures instrument by scripCode.
+     */
+    public Optional<FuturesInstrument> getFutureByScripCode(String scripCode) {
+        return Optional.ofNullable(futuresByScripCode.get(scripCode));
+    }
+
+    /**
+     * Bug #5: Get equity scripCode for a derivative scripCode.
+     */
+    public String getEquityScripCode(String derivativeScripCode) {
+        return derivativeToEquity.get(derivativeScripCode);
+    }
+
     // ==================== DATA CLASSES ====================
 
     @Data
@@ -310,6 +411,24 @@ public class ScripGroupService {
         public boolean isPut() {
             return "PE".equals(optionType);
         }
+    }
+
+    /**
+     * Bug #4: Futures instrument metadata.
+     */
+    @Data
+    @Builder
+    @NoArgsConstructor
+    @AllArgsConstructor
+    public static class FuturesInstrument {
+        private String scripCode;
+        private String symbol;
+        private String underlyingSymbol;
+        private String equityScripCode;
+        private String exchange;
+        private String exchangeType;
+        private String expiry;
+        private String lotSize;
     }
 
     @Data

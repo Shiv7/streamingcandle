@@ -563,8 +563,18 @@ public class TickAggregator {
                 ? OptionMetadata.fromScrip(scripMetadataService.getScripByCode(tick.getScripCode()))
                 : null;
 
+            // Bug #12: Resolve instrument type from ScripMetadataService
+            final String scripType = scripMetadataService.getScripType(tick.getScripCode());
+            final TickCandle.InstrumentType resolvedInstrumentType = scripType != null
+                ? TickCandle.InstrumentType.fromScripType(scripType)
+                : null;
+
             TickAggregateState state = aggregationState.computeIfAbsent(stateKey,
-                k -> new TickAggregateState(tick, tickWindowStart, tickWindowEnd, resolvedSymbol, optionMeta));
+                k -> {
+                    TickAggregateState s = new TickAggregateState(tick, tickWindowStart, tickWindowEnd, resolvedSymbol, optionMeta);
+                    s.setInstrumentType(resolvedInstrumentType);
+                    return s;
+                });
 
             // Update aggregation
             state.update(tick, tickTime);
