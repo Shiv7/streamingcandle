@@ -1,8 +1,10 @@
 package com.kotsin.consumer.service;
 
 import com.kotsin.consumer.client.FastAnalyticsClient;
+import com.kotsin.consumer.metadata.model.ScripGroup;
 import com.kotsin.consumer.model.HistoricalCandle;
 import com.kotsin.consumer.model.TickCandle;
+import com.kotsin.consumer.repository.ScripGroupRepository;
 import com.kotsin.consumer.repository.TickCandleRepository;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.beans.factory.annotation.Autowired;
@@ -11,13 +13,10 @@ import org.springframework.data.mongodb.core.BulkOperations;
 import org.springframework.data.mongodb.core.MongoTemplate;
 import org.springframework.stereotype.Service;
 
-import com.fasterxml.jackson.databind.JsonNode;
-import com.fasterxml.jackson.databind.ObjectMapper;
 import com.mongodb.bulk.BulkWriteResult;
 import com.mongodb.MongoBulkWriteException;
 import jakarta.annotation.PostConstruct;
 import jakarta.annotation.PreDestroy;
-import org.springframework.web.client.RestTemplate;
 import java.time.LocalDate;
 import java.time.format.DateTimeFormatter;
 import java.util.ArrayList;
@@ -31,8 +30,14 @@ import java.util.stream.Collectors;
 /**
  * HistoricalDataBootstrapService - Loads historical candle data on startup.
  *
- * Fetches 40 days of 1-minute candles from FastAnalytics API
- * and stores them in MongoDB for signal processing.
+ * On startup:
+ * 1. Reads instrument list directly from ScripGroup MongoDB collection (no REST API dependency)
+ * 2. For each instrument, checks if MongoDB already has enough candles (70% threshold)
+ * 3. Only fetches from FastAnalytics API if data is insufficient
+ * 4. Caches recent candles in Redis for quick access
+ *
+ * On restart: Most instruments will skip API fetch (data already in MongoDB).
+ * Typical restart bootstrap time: ~30-60s (MongoDB count checks only).
  */
 @Service
 @Slf4j
@@ -52,6 +57,9 @@ public class HistoricalDataBootstrapService {
     @Autowired
     private RedisCacheService redisCacheService;
 
+    @Autowired
+    private ScripGroupRepository scripGroupRepository;
+
     @Value("${bootstrap.historical.enabled:true}")
     private boolean enabled;
 
@@ -67,12 +75,9 @@ public class HistoricalDataBootstrapService {
     @Value("${bootstrap.historical.startup.enabled:true}")
     private boolean startupBootstrapEnabled;
 
-    @Value("${scripfinder.api.base-url:http://localhost:8102}")
-    private String scripFinderBaseUrl;
-
     private ExecutorService bootstrapExecutor;
-    private final ObjectMapper objectMapper = new ObjectMapper();
     private final ConcurrentHashMap<String, BootstrapStatus> bootstrapStatus = new ConcurrentHashMap<>();
+    private volatile boolean bootstrapComplete = false;
 
     public enum BootstrapStatus {
         NOT_STARTED, IN_PROGRESS, SUCCESS, FAILED
@@ -92,7 +97,7 @@ public class HistoricalDataBootstrapService {
             return t;
         });
 
-        log.info("{} Initialized with threads={}, historicalDays={}, delaySeconds={}",
+        log.info("{} Initialized: threads={}, historicalDays={}, delaySeconds={}",
             LOG_PREFIX, numThreads, historicalDays, delaySeconds);
 
         // Trigger startup bootstrap after delay
@@ -111,47 +116,64 @@ public class HistoricalDataBootstrapService {
     }
 
     /**
-     * Trigger startup bootstrap by fetching scripCodes from scripFinder API.
+     * Trigger startup bootstrap by reading instruments directly from ScripGroup MongoDB collection.
+     * No REST API dependency — reads from the same database that scripFinder populates.
      */
     private void triggerStartupBootstrap() {
-        log.info("{} Starting startup bootstrap from scripFinder API: {}", LOG_PREFIX, scripFinderBaseUrl);
+        long startTimeMs = System.currentTimeMillis();
+        log.info("{} Starting startup bootstrap from ScripGroup collection (direct MongoDB)", LOG_PREFIX);
 
-        try {
-            RestTemplate restTemplate = new RestTemplate();
-            String url = scripFinderBaseUrl + "/getDesiredWebSocket?tradingType=EQUITY";
+        List<InstrumentInfo> instruments = new ArrayList<>();
 
-            String response = restTemplate.getForObject(url, String.class);
-            JsonNode root = objectMapper.readTree(response);
+        // Load all three trading types directly from MongoDB
+        for (String tradingType : List.of("EQUITY", "COMMODITY", "CURRENCY")) {
+            long queryStart = System.currentTimeMillis();
+            try {
+                List<ScripGroup> groups = scripGroupRepository.findByTradingType(tradingType);
+                long queryMs = System.currentTimeMillis() - queryStart;
 
-            if (root.has("status") && root.get("status").asInt() == 200 && root.has("response")) {
-                JsonNode scripGroups = root.get("response");
-                List<InstrumentInfo> instruments = new ArrayList<>();
+                if (groups == null || groups.isEmpty()) {
+                    log.warn("{} No ScripGroup documents found for tradingType={} (query took {}ms)",
+                        LOG_PREFIX, tradingType, queryMs);
+                    continue;
+                }
 
-                for (JsonNode group : scripGroups) {
-                    String scripCode = group.has("equityScripCode") ? group.get("equityScripCode").asText() : null;
-                    JsonNode equity = group.has("equity") ? group.get("equity") : null;
-
-                    if (scripCode != null && equity != null) {
-                        String symbol = equity.has("name") ? equity.get("name").asText() : scripCode;
-                        String exch = equity.has("exch") ? equity.get("exch").asText() : "N";
-                        String exchType = equity.has("exchType") ? equity.get("exchType").asText() : "C";
-
-                        instruments.add(new InstrumentInfo(scripCode, symbol, exch, exchType));
+                int count = 0;
+                for (ScripGroup group : groups) {
+                    if (group.getEquityScripCode() == null || group.getEquity() == null) {
+                        continue;
                     }
+
+                    String scripCode = group.getEquityScripCode();
+                    String symbol = group.getEquity().getName() != null ?
+                        group.getEquity().getName() : scripCode;
+                    String exch = group.getEquity().getExch() != null ?
+                        group.getEquity().getExch() : "N";
+                    String exchType = group.getEquity().getExchType() != null ?
+                        group.getEquity().getExchType() : "C";
+
+                    instruments.add(new InstrumentInfo(scripCode, symbol, exch, exchType));
+                    count++;
                 }
 
-                log.info("{} Found {} instruments from scripFinder API", LOG_PREFIX, instruments.size());
+                log.info("{} Loaded {} instruments for tradingType={} from ScripGroup (query took {}ms)",
+                    LOG_PREFIX, count, tradingType, queryMs);
 
-                if (!instruments.isEmpty()) {
-                    bootstrapSymbols(Set.copyOf(instruments));
-                }
-            } else {
-                log.warn("{} Invalid response from scripFinder API: {}", LOG_PREFIX,
-                    root.has("message") ? root.get("message").asText() : "unknown");
+            } catch (Exception e) {
+                long queryMs = System.currentTimeMillis() - queryStart;
+                log.error("{} Failed to load {} instruments from ScripGroup (after {}ms): {}",
+                    LOG_PREFIX, tradingType, queryMs, e.getMessage());
             }
+        }
 
-        } catch (Exception e) {
-            log.error("{} Failed to fetch scripCodes from scripFinder API: {}", LOG_PREFIX, e.getMessage());
+        long loadMs = System.currentTimeMillis() - startTimeMs;
+        log.info("{} Instrument discovery complete: {} total instruments across all markets (took {}ms)",
+            LOG_PREFIX, instruments.size(), loadMs);
+
+        if (!instruments.isEmpty()) {
+            bootstrapSymbols(Set.copyOf(instruments));
+        } else {
+            log.error("{} No instruments found in ScripGroup collection - is scripFinder running?", LOG_PREFIX);
         }
     }
 
@@ -181,11 +203,9 @@ public class HistoricalDataBootstrapService {
         // Check if already bootstrapped
         BootstrapStatus status = bootstrapStatus.get(scripCode);
         if (status == BootstrapStatus.SUCCESS) {
-            log.debug("{} Already bootstrapped: {}", LOG_PREFIX, scripCode);
             return CompletableFuture.completedFuture(true);
         }
         if (status == BootstrapStatus.IN_PROGRESS) {
-            log.debug("{} Bootstrap in progress: {}", LOG_PREFIX, scripCode);
             return CompletableFuture.completedFuture(false);
         }
 
@@ -195,7 +215,7 @@ public class HistoricalDataBootstrapService {
             try {
                 return doBootstrap(scripCode, symbol, exch, exchType);
             } catch (Exception e) {
-                log.error("{} Bootstrap failed for {}: {}", LOG_PREFIX, scripCode, e.getMessage());
+                log.error("{} Bootstrap failed for {} ({}): {}", LOG_PREFIX, symbol, scripCode, e.getMessage());
                 bootstrapStatus.put(scripCode, BootstrapStatus.FAILED);
                 return false;
             }
@@ -203,38 +223,70 @@ public class HistoricalDataBootstrapService {
     }
 
     /**
-     * Perform the actual bootstrap.
+     * Perform the actual bootstrap for a single instrument.
+     *
+     * Fast-path (restart): If a recent candle exists in MongoDB, mark SUCCESS immediately.
+     * Uses findTop (O(1) index lookup) instead of count (O(n) full scan).
+     *
+     * Slow-path (first boot): If no recent candle, do full count check and API fetch.
      */
     private boolean doBootstrap(String scripCode, String symbol, String exch, String exchType) {
+        long startMs = System.currentTimeMillis();
+
+        // FAST-PATH: Check if recent candle exists (O(1) index lookup via scripCode_timestamp_idx)
+        // If a candle exists within historicalDays, data was already bootstrapped — skip entirely.
+        long checkStart = System.currentTimeMillis();
+        java.util.Optional<TickCandle> recentCandle =
+            tickCandleRepository.findTopByScripCodeOrderByTimestampDesc(scripCode);
+        long checkMs = System.currentTimeMillis() - checkStart;
+
+        if (recentCandle.isPresent()) {
+            java.time.Instant candleTime = recentCandle.get().getTimestamp();
+            java.time.Instant cutoff = java.time.Instant.now().minus(historicalDays, java.time.temporal.ChronoUnit.DAYS);
+
+            if (candleTime != null && candleTime.isAfter(cutoff)) {
+                bootstrapStatus.put(scripCode, BootstrapStatus.SUCCESS);
+                log.debug("{} READY {} ({}) - recent candle exists ({}ms)",
+                    LOG_PREFIX, symbol, scripCode, checkMs);
+                return true;
+            }
+        }
+
+        // SLOW-PATH: No recent candle found — do full count check
         String endDate = LocalDate.now().format(DateTimeFormatter.ISO_DATE);
         String startDate = LocalDate.now().minusDays(historicalDays).format(DateTimeFormatter.ISO_DATE);
 
-        // CHECK IF DATA ALREADY EXISTS IN MONGODB
+        long countStart = System.currentTimeMillis();
         long existingCount = tickCandleRepository.countByScripCode(scripCode);
+        long countMs = System.currentTimeMillis() - countStart;
+
         int minRequiredCandles = historicalDays * 375; // ~375 1m candles per trading day (6.25 hours)
         int acceptableThreshold = (int) (minRequiredCandles * 0.7); // 70% is acceptable
 
         if (existingCount >= acceptableThreshold) {
-            log.info("{} Skipping API fetch for {} ({}) - MongoDB already has {} candles (threshold: {})",
-                LOG_PREFIX, symbol, scripCode, existingCount, acceptableThreshold);
             bootstrapStatus.put(scripCode, BootstrapStatus.SUCCESS);
+            log.debug("{} SKIP {} ({}) - MongoDB has {} candles >= threshold {} (check={}ms, count={}ms)",
+                LOG_PREFIX, symbol, scripCode, existingCount, acceptableThreshold, checkMs, countMs);
             return true;
         }
 
-        log.info("{} Starting bootstrap for {} ({}) from {} to {} - MongoDB has {} candles, need {}",
-            LOG_PREFIX, symbol, scripCode, startDate, endDate, existingCount, acceptableThreshold);
+        log.info("{} FETCH {} ({}) - MongoDB has {} candles, need {} - fetching {} to {} (check={}ms, count={}ms)",
+            LOG_PREFIX, symbol, scripCode, existingCount, acceptableThreshold, startDate, endDate, checkMs, countMs);
 
         // Fetch historical data from FastAnalytics API
+        long fetchStart = System.currentTimeMillis();
         List<HistoricalCandle> candles = fastAnalyticsClient.getHistoricalData(
             exch, exchType, scripCode, startDate, endDate, "1m");
+        long fetchMs = System.currentTimeMillis() - fetchStart;
 
         if (candles == null || candles.isEmpty()) {
-            log.warn("{} No historical data for {} ({})", LOG_PREFIX, symbol, scripCode);
+            log.warn("{} EMPTY {} ({}) - no historical data returned (API took {}ms)",
+                LOG_PREFIX, symbol, scripCode, fetchMs);
             bootstrapStatus.put(scripCode, BootstrapStatus.FAILED);
             return false;
         }
 
-        log.info("{} Fetched {} candles for {} ({})", LOG_PREFIX, candles.size(), symbol, scripCode);
+        log.info("{} FETCHED {} ({}) - {} candles in {}ms", LOG_PREFIX, symbol, scripCode, candles.size(), fetchMs);
 
         // Convert to TickCandle entities
         List<TickCandle> tickCandles = candles.stream()
@@ -242,6 +294,7 @@ public class HistoricalDataBootstrapService {
             .collect(Collectors.toList());
 
         // Batch save to MongoDB with bulk unordered insert (skips duplicates automatically)
+        long saveStart = System.currentTimeMillis();
         int saved = 0;
         int skipped = 0;
         int batchSize = 1000;
@@ -251,29 +304,22 @@ public class HistoricalDataBootstrapService {
             List<TickCandle> batch = tickCandles.subList(i, end);
 
             try {
-                // Unordered bulk insert - continues past duplicate key errors
                 BulkOperations bulkOps = mongoTemplate.bulkOps(BulkOperations.BulkMode.UNORDERED, TickCandle.class);
                 bulkOps.insert(batch);
                 BulkWriteResult result = bulkOps.execute();
                 saved += result.getInsertedCount();
             } catch (MongoBulkWriteException e) {
-                // Some inserts succeeded, some were duplicates
                 saved += e.getWriteResult().getInsertedCount();
                 skipped += e.getWriteErrors().size();
             } catch (Exception e) {
-                log.warn("{} Bulk insert error for {}: {}", LOG_PREFIX, scripCode, e.getMessage());
-            }
-
-            if ((i + batchSize) % 5000 == 0) {
-                log.debug("{} Progress for {}: saved={}, skipped={} of {}",
-                    LOG_PREFIX, symbol, saved, skipped, tickCandles.size());
+                log.warn("{} Bulk insert error for {} ({}): {}", LOG_PREFIX, symbol, scripCode, e.getMessage());
             }
         }
-
-        log.info("{} Saved {} new candles to MongoDB for {} ({}) - {} skipped (duplicates)",
-            LOG_PREFIX, saved, symbol, scripCode, skipped);
+        long saveMs = System.currentTimeMillis() - saveStart;
 
         // Cache recent 100 candles in Redis for quick access
+        long redisStart = System.currentTimeMillis();
+        int redisCached = 0;
         try {
             List<TickCandle> recentCandles = tickCandles.stream()
                 .sorted(Comparator.comparing(TickCandle::getTimestamp).reversed())
@@ -282,33 +328,35 @@ public class HistoricalDataBootstrapService {
 
             for (TickCandle candle : recentCandles) {
                 redisCacheService.cacheTickCandle(candle);
+                redisCached++;
             }
-
-            log.debug("{} Cached {} recent candles in Redis for {}",
-                LOG_PREFIX, recentCandles.size(), symbol);
-
         } catch (Exception e) {
-            log.warn("{} Failed to cache in Redis for {}: {}",
-                LOG_PREFIX, scripCode, e.getMessage());
-            // Don't fail bootstrap for Redis errors
+            log.warn("{} Redis cache failed for {} ({}): {}", LOG_PREFIX, symbol, scripCode, e.getMessage());
         }
+        long redisMs = System.currentTimeMillis() - redisStart;
 
         bootstrapStatus.put(scripCode, BootstrapStatus.SUCCESS);
-        log.info("{} Bootstrap complete for {} ({}) - {} candles",
-            LOG_PREFIX, symbol, scripCode, tickCandles.size());
+        long totalMs = System.currentTimeMillis() - startMs;
+
+        log.info("{} DONE {} ({}) - saved={}, skipped={}, redisCached={} | timing: total={}ms (count={}ms, fetch={}ms, save={}ms, redis={}ms)",
+            LOG_PREFIX, symbol, scripCode, saved, skipped, redisCached, totalMs, countMs, fetchMs, saveMs, redisMs);
 
         return true;
     }
 
     /**
      * Bootstrap multiple symbols in parallel.
+     * Tracks progress with periodic status logs and a final summary.
      */
     public void bootstrapSymbols(Set<InstrumentInfo> instruments) {
         if (!enabled || instruments == null || instruments.isEmpty()) {
             return;
         }
 
-        log.info("{} Starting bootstrap for {} symbols", LOG_PREFIX, instruments.size());
+        long startMs = System.currentTimeMillis();
+        int totalInstruments = instruments.size();
+        log.info("{} Starting parallel bootstrap for {} instruments with {} threads",
+            LOG_PREFIX, totalInstruments, numThreads);
 
         AtomicInteger success = new AtomicInteger(0);
         AtomicInteger failed = new AtomicInteger(0);
@@ -316,16 +364,40 @@ public class HistoricalDataBootstrapService {
         List<CompletableFuture<Boolean>> futures = instruments.stream()
             .map(inst -> bootstrapSymbol(inst.scripCode, inst.symbol, inst.exch, inst.exchType)
                 .thenApply(result -> {
-                    if (result) success.incrementAndGet();
-                    else failed.incrementAndGet();
+                    if (result) {
+                        int s = success.incrementAndGet();
+                        // Log progress every 50 instruments
+                        if (s % 50 == 0) {
+                            long elapsedMs = System.currentTimeMillis() - startMs;
+                            log.info("{} Progress: {}/{} complete ({} success, {} failed) - elapsed {}ms",
+                                LOG_PREFIX, s + failed.get(), totalInstruments, s, failed.get(), elapsedMs);
+                        }
+                    } else {
+                        failed.incrementAndGet();
+                    }
                     return result;
                 }))
             .collect(Collectors.toList());
 
-        // Wait for all to complete
+        // Wait for all to complete, then log final summary
         CompletableFuture.allOf(futures.toArray(new CompletableFuture[0]))
-            .thenRun(() -> log.info("{} Bootstrap complete: {} success, {} failed",
-                LOG_PREFIX, success.get(), failed.get()));
+            .thenRun(() -> {
+                long totalMs = System.currentTimeMillis() - startMs;
+                bootstrapComplete = true;
+                log.info("{} ============================================================", LOG_PREFIX);
+                log.info("{} BOOTSTRAP COMPLETE - READY TO TRADE", LOG_PREFIX);
+                log.info("{} Total: {} instruments | Success: {} | Failed: {} | Duration: {}ms ({}s)",
+                    LOG_PREFIX, totalInstruments, success.get(), failed.get(), totalMs,
+                    String.format("%.1f", totalMs / 1000.0));
+                log.info("{} ============================================================", LOG_PREFIX);
+            });
+    }
+
+    /**
+     * Check if bootstrap is fully complete (all instruments processed).
+     */
+    public boolean isBootstrapComplete() {
+        return bootstrapComplete;
     }
 
     /**

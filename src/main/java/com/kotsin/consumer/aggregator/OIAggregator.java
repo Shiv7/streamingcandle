@@ -48,9 +48,11 @@ import org.springframework.stereotype.Component;
 // ==================== PROJECT IMPORTS ====================
 import com.kotsin.consumer.aggregator.state.OIAggregateState;
 import com.kotsin.consumer.aggregator.state.OptionMetadata;
+import com.kotsin.consumer.event.CandleBoundaryPublisher;
 import com.kotsin.consumer.model.OIMetrics;
 import com.kotsin.consumer.model.OpenInterest;
 import com.kotsin.consumer.model.Timeframe;
+import com.kotsin.consumer.model.TimeframeBoundary;
 import com.kotsin.consumer.repository.OIMetricsRepository;
 import com.kotsin.consumer.service.RedisCacheService;
 import com.kotsin.consumer.service.ScripMetadataService;
@@ -180,7 +182,7 @@ public class OIAggregator {
      * Number of parallel consumer threads.
      * <p>Default: 2</p>
      */
-    @Value("${v2.oi.aggregator.threads:2}")
+    @Value("${v2.oi.aggregator.threads:16}")
     private int numThreads;
 
     /**
@@ -191,16 +193,16 @@ public class OIAggregator {
     private String outputTopic;
 
     /**
-     * Comma-separated list of symbols for trace logging.
-     * <p>Empty = trace all symbols (FULL MODE)</p>
+     * Comma-separated list of scripcodes for trace logging.
+     * <p>Empty = trace all scripcodes (FULL MODE)</p>
      */
-    @Value("${logging.trace.symbols:}")
-    private String traceSymbolsStr;
+    @Value("${logging.trace.scripcodes:}")
+    private String traceScripCodesStr;
 
     /**
-     * Parsed set of symbols for trace logging.
+     * Parsed set of scripcodes for trace logging.
      */
-    private Set<String> traceSymbols;
+    private Set<String> traceScripCodes;
 
     // ==================== INJECTED DEPENDENCIES ====================
 
@@ -228,6 +230,12 @@ public class OIAggregator {
      */
     @Autowired
     private ScripMetadataService scripMetadataService;
+
+    /**
+     * Bug #8: Publishes boundary events for higher timeframe analysis.
+     */
+    @Autowired
+    private CandleBoundaryPublisher candleBoundaryPublisher;
 
     // ==================== STATE MANAGEMENT ====================
 
@@ -328,16 +336,16 @@ public class OIAggregator {
 
         log.info("{} Started successfully", LOG_PREFIX);
 
-        // Parse trace symbols
-        this.traceSymbols = new HashSet<>();
-        if (traceSymbolsStr != null && !traceSymbolsStr.isBlank()) {
-            String[] parts = traceSymbolsStr.split(",");
+        // Parse trace scripcodes (Bug #2: trace by scripcode, not symbol)
+        this.traceScripCodes = new HashSet<>();
+        if (traceScripCodesStr != null && !traceScripCodesStr.isBlank()) {
+            String[] parts = traceScripCodesStr.split(",");
             for (String part : parts) {
-                traceSymbols.add(part.trim().toUpperCase());
+                traceScripCodes.add(part.trim());
             }
-            log.info("{} Trace logging enabled for symbols: {}", LOG_PREFIX, traceSymbols);
+            log.info("{} Trace logging enabled for scripcodes: {}", LOG_PREFIX, traceScripCodes);
         } else {
-            log.info("{} Trace logging enabled for ALL symbols (FULL - NO SAMPLING)", LOG_PREFIX);
+            log.info("{} Trace logging enabled for ALL scripcodes (FULL - NO SAMPLING)", LOG_PREFIX);
         }
     }
 
@@ -452,13 +460,24 @@ public class OIAggregator {
     private void processOI(OpenInterest oi, long kafkaTimestamp) {
         if (oi == null || oi.getToken() == 0) return;
 
+        // Bug #13: Validate OI data
+        if (oi.getOpenInterest() == null || oi.getOpenInterest() < 0) {
+            log.debug("{} Rejected OI for token {}: invalid OI value={}", LOG_PREFIX, oi.getToken(), oi.getOpenInterest());
+            return;
+        }
+
         String key = oi.getExchange() + ":" + oi.getToken();
         Instant oiTime = Instant.ofEpochMilli(kafkaTimestamp);
 
-        // Trace logging
-        boolean isSpecific = (traceSymbols != null && !traceSymbols.isEmpty() &&
-                             traceSymbols.contains(String.valueOf(oi.getToken())));
-        boolean shouldLog = isSpecific || (traceSymbols == null || traceSymbols.isEmpty());
+        // Bug #23: Market hours enforcement
+        if (!TimeframeBoundary.isMarketHours(oiTime, oi.getExchange())) {
+            return;
+        }
+
+        // Trace logging (Bug #2: by scripcode)
+        boolean isSpecific = (traceScripCodes != null && !traceScripCodes.isEmpty() &&
+                             traceScripCodes.contains(String.valueOf(oi.getToken())));
+        boolean shouldLog = isSpecific || (traceScripCodes == null || traceScripCodes.isEmpty());
 
         if (shouldLog) {
             log.info("[OI-TRACE] Received OI for {}: OI={}, Time={}",
@@ -488,9 +507,10 @@ public class OIAggregator {
         // Composite key: exchange:token:windowStartMillis
         String stateKey = key + ":" + tickWindowStart.toEpochMilli();
 
-        // Resolve symbol using ScripMetadataService (authoritative source from database)
+        // Bug #24: token == scripCode in 5paisa's system; we convert to String for consistency
         final String scripCode = String.valueOf(oi.getToken());
-        final String resolvedSymbol = scripMetadataService.getSymbolRoot(scripCode, oi.getCompanyName());
+        // Resolve symbol using ScripMetadataService (authoritative source from database)
+        final String resolvedSymbol = scripMetadataService.getSymbolRoot(scripCode);
 
         // Get OptionMetadata from Scrip if this is an option (PREFERRED over companyName parsing)
         final OptionMetadata optionMeta = scripMetadataService.isOption(scripCode)
@@ -633,6 +653,12 @@ public class OIAggregator {
             persistToMongoDB(metricsToSave);
             cacheToRedis(metricsToSave);
             publishToKafka(metricsToSave);
+
+            // Bug #8: Publish boundary events for OI data
+            for (OIMetrics m : metricsToSave) {
+                candleBoundaryPublisher.onMetricsClose(
+                    m.getScripCode(), m.getExchange(), m.getWindowEnd(), "OI");
+            }
         }
 
         // Remove emitted states
@@ -656,9 +682,9 @@ public class OIAggregator {
             oiRepository.saveAll(metrics);
 
             // Trace individual saves if enabled
-            if (traceSymbols != null && !traceSymbols.isEmpty()) {
+            if (traceScripCodes != null && !traceScripCodes.isEmpty()) {
                 for (OIMetrics m : metrics) {
-                    if (traceSymbols.contains(m.getSymbol()) || traceSymbols.contains(m.getScripCode())) {
+                    if (traceScripCodes.contains(m.getScripCode())) {
                         log.info("[MONGO-WRITE] OIMetrics saved for {} @ {} | OI: {} | Interp: {}",
                             m.getSymbol(), formatTime(m.getWindowEnd()), m.getOpenInterest(), m.getInterpretation());
                     }

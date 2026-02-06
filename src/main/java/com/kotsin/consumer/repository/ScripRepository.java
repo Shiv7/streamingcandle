@@ -19,5 +19,4 @@ public interface ScripRepository extends MongoRepository<Scrip, String> {
     @Query("{ 'ScripCode': ?0 }")
     List<Scrip> findByScripCode(String scripCode);
 
-
 }

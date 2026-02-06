@@ -73,6 +73,16 @@ public class TimeframeBoundary {
             return crossed;
         }
 
+        // Bug #9: 2m boundary
+        if (minute % 2 == 0) {
+            crossed.add(Timeframe.M2);
+        }
+
+        // Bug #9: 3m boundary
+        if (minute % 3 == 0) {
+            crossed.add(Timeframe.M3);
+        }
+
         // 5m boundary: xx:00, xx:05, xx:10, xx:15, etc. (same for both)
         if (minute % 5 == 0) {
             crossed.add(Timeframe.M5);

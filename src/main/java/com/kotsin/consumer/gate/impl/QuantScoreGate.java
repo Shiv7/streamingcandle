@@ -62,11 +62,13 @@ public class QuantScoreGate implements SignalGate {
         double score = 0;
 
         try {
-            FudkiiScore fudkiiScore = (FudkiiScore) context.get("fudkiiScore");
+            Object fudkiiScoreObj = context.get("fudkiiScore");
 
-            if (fudkiiScore == null) {
+            if (fudkiiScoreObj == null || !(fudkiiScoreObj instanceof FudkiiScore)) {
                 return GateResult.fail(getName(), weight, "No FUDKII score available");
             }
+
+            FudkiiScore fudkiiScore = (FudkiiScore) fudkiiScoreObj;
 
             double compositeScore = fudkiiScore.getCompositeScore();
             double confidence = fudkiiScore.getConfidence();

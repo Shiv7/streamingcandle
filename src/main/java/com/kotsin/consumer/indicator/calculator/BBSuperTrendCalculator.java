@@ -206,14 +206,17 @@ public class BBSuperTrendCalculator {
                             stateApplied = true;
 
                             log.info("[BBST-CALC] {} Applied persisted state at index {} (window={}): " +
-                                "trend={}, ST={:.2f}, bandDiff={:.1f}%",
+                                "trend={}, ST={}, bandDiff={}%",
                                 symbol, matchingIndex, savedState.getLastCandleWindowStart(),
-                                savedState.getTrend(), savedState.getSuperTrendValue(), diff * 100);
+                                savedState.getTrend(), String.format("%.2f", savedState.getSuperTrendValue()),
+                                String.format("%.1f", diff * 100));
                         } else {
                             // Bands don't match - data context changed significantly
                             log.warn("[BBST-CALC] {} Persisted state bands don't match current data. " +
-                                "Expected upper ~{:.2f}, got {:.2f} (diff={:.1f}%). Calculating fresh.",
-                                symbol, expectedUpper, savedState.getFinalUpperBand(), diff * 100);
+                                "Expected upper ~{}, got {} (diff={}%). Calculating fresh.",
+                                symbol, String.format("%.2f", expectedUpper),
+                                String.format("%.2f", savedState.getFinalUpperBand()),
+                                String.format("%.1f", diff * 100));
                             clearState(symbol, timeframe);
                         }
                     } else {

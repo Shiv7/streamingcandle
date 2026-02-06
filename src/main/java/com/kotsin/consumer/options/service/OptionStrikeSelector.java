@@ -70,7 +70,7 @@ public class OptionStrikeSelector {
             return OptionRecommendation.noRecommendation("No signal direction");
         }
 
-        String underlying = extractUnderlying(signal.getSymbol(), signal.getCompanyName());
+        String underlying = extractUnderlying(signal.getSymbol());
         boolean isBullish = signal.getDirection() == FudkiiScore.Direction.BULLISH;
 
         log.info("{} Selecting option for {} {} at {}",
@@ -321,9 +321,9 @@ public class OptionStrikeSelector {
      * Extract underlying symbol from signal using ScripMetadataService.
      * Falls back to symbol parsing if scripCode not available.
      */
-    private String extractUnderlying(String symbol, String companyName) {
+    private String extractUnderlying(String symbol) {
         // Use ScripMetadataService for authoritative symbol resolution
-        return scripMetadataService.getSymbolRoot(symbol, companyName);
+        return scripMetadataService.getSymbolRoot(symbol);
     }
 
     /**

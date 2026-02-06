@@ -38,7 +38,11 @@ import java.time.Instant;
 @Document(collection = "orderbook_metrics_1m")
 @CompoundIndexes({
     @CompoundIndex(name = "symbol_timestamp_idx", def = "{'symbol': 1, 'timestamp': -1}"),
-    @CompoundIndex(name = "scripCode_timestamp_idx", def = "{'scripCode': 1, 'timestamp': -1}")
+    @CompoundIndex(name = "scripCode_timestamp_idx", def = "{'scripCode': 1, 'timestamp': -1}"),
+    // Bug #6 FIX: Include exchange in unique index to avoid MCX/NSE scripCode collisions
+    @CompoundIndex(name = "exchange_scripCode_windowStart_unique_idx",
+                   def = "{'exchange': 1, 'scripCode': 1, 'windowStart': 1}",
+                   unique = true)
 })
 public class OrderbookMetrics {
 

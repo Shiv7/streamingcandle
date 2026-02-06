@@ -271,6 +271,12 @@ public class TickAggregateState {
      */
     private OptionMetadata optionMetadata;
 
+    /**
+     * Bug #12: Instrument type resolved from ScripMetadataService.
+     * <p>More accurate than companyName-based detection.</p>
+     */
+    private TickCandle.InstrumentType instrumentType;
+
     // ==================== CONSTRUCTOR ====================
 
     /**
@@ -569,19 +575,18 @@ public class TickAggregateState {
             sellPressure = 0.5;
         }
 
-        // Use stored option metadata from Scrip database, fallback to parsing if not available
-        OptionMetadata optionMeta = this.optionMetadata != null
-            ? this.optionMetadata
-            : OptionMetadata.parse(companyName);
+        // Bug #3: Use stored option metadata from Scrip database only (no parse fallback)
+        OptionMetadata optionMeta = this.optionMetadata;
 
         TickCandle.TickCandleBuilder builder = TickCandle.builder()
-            .id(scripCode + "_" + windowEnd.toEpochMilli()) // IDEMPOTENCY FIX
+            .id(exchange + ":" + scripCode + "_" + windowEnd.toEpochMilli()) // IDEMPOTENCY FIX + Bug #6: exchange in ID
             .symbol(symbol)
             .scripCode(scripCode)
             .exchange(exchange)
             .exchangeType(exchangeType)
             .companyName(companyName)
-            .instrumentType(TickCandle.InstrumentType.detect(exchange, exchangeType, companyName))
+            // Bug #12: Use resolved instrumentType from metadata, fall back to detection
+            .instrumentType(instrumentType != null ? instrumentType : TickCandle.InstrumentType.detect(exchange, exchangeType, companyName))
             .timestamp(windowEnd)
             .windowStart(windowStart)
             .windowEnd(windowEnd)
@@ -670,6 +675,13 @@ public class TickAggregateState {
     }
 
     // ==================== ACCESSORS ====================
+
+    /**
+     * Bug #12: Set instrument type from ScripMetadataService.
+     */
+    public void setInstrumentType(TickCandle.InstrumentType instrumentType) {
+        this.instrumentType = instrumentType;
+    }
 
     /**
      * Get window start timestamp.

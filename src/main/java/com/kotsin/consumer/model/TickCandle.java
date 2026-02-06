@@ -44,9 +44,9 @@ import java.util.Map;
 @CompoundIndexes({
     @CompoundIndex(name = "symbol_timestamp_idx", def = "{'symbol': 1, 'timestamp': -1}"),
     @CompoundIndex(name = "scripCode_timestamp_idx", def = "{'scripCode': 1, 'timestamp': -1}"),
-    // Unique index for deduplication - prevents duplicate candles for same scripCode+windowStart
-    @CompoundIndex(name = "scripCode_windowStart_unique_idx",
-                   def = "{'scripCode': 1, 'windowStart': 1}",
+    // Bug #6 FIX: Include exchange in unique index to avoid MCX/NSE scripCode collisions
+    @CompoundIndex(name = "exchange_scripCode_windowStart_unique_idx",
+                   def = "{'exchange': 1, 'scripCode': 1, 'windowStart': 1}",
                    unique = true)
 })
 public class TickCandle {
@@ -199,6 +199,22 @@ public class TickCandle {
 
         public boolean isDerivative() {
             return this == FUTURE || isOption();
+        }
+
+        /**
+         * Bug #12: Detect instrument type from scrip type code (authoritative source).
+         * ScripType values: "EQ", "FUT", "CE", "PE", "IF" (index future), "IO" (index option)
+         */
+        public static InstrumentType fromScripType(String scripType) {
+            if (scripType == null) return null;
+            return switch (scripType.toUpperCase()) {
+                case "CE" -> OPTION_CE;
+                case "PE" -> OPTION_PE;
+                case "FUT", "IF" -> FUTURE;
+                case "EQ" -> EQUITY;
+                case "IO" -> EQUITY; // Index options - treat as equity for our purposes
+                default -> null;
+            };
         }
 
         public static InstrumentType detect(String exchange, String exchangeType, String companyName) {

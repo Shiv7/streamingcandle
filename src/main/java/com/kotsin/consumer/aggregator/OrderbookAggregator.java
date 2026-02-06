@@ -47,9 +47,11 @@ import org.springframework.stereotype.Component;
 
 // ==================== PROJECT IMPORTS ====================
 import com.kotsin.consumer.aggregator.state.OrderbookAggregateState;
+import com.kotsin.consumer.event.CandleBoundaryPublisher;
 import com.kotsin.consumer.model.OrderBookSnapshot;
 import com.kotsin.consumer.model.OrderbookMetrics;
 import com.kotsin.consumer.model.Timeframe;
+import com.kotsin.consumer.model.TimeframeBoundary;
 import com.kotsin.consumer.repository.OrderbookMetricsRepository;
 import com.kotsin.consumer.service.RedisCacheService;
 import com.kotsin.consumer.service.ScripMetadataService;
@@ -181,7 +183,7 @@ public class OrderbookAggregator {
      * Number of parallel consumer threads.
      * <p>Default: 2</p>
      */
-    @Value("${v2.orderbook.aggregator.threads:2}")
+    @Value("${v2.orderbook.aggregator.threads:16}")
     private int numThreads;
 
     /**
@@ -192,16 +194,16 @@ public class OrderbookAggregator {
     private String outputTopic;
 
     /**
-     * Comma-separated list of symbols for trace logging.
-     * <p>Empty = trace all symbols (FULL MODE)</p>
+     * Comma-separated list of scripcodes for trace logging.
+     * <p>Empty = trace all scripcodes (FULL MODE)</p>
      */
-    @Value("${logging.trace.symbols:}")
-    private String traceSymbolsStr;
+    @Value("${logging.trace.scripcodes:}")
+    private String traceScripCodesStr;
 
     /**
-     * Parsed set of symbols for trace logging.
+     * Parsed set of scripcodes for trace logging.
      */
-    private Set<String> traceSymbols;
+    private Set<String> traceScripCodes;
 
     // ==================== INJECTED DEPENDENCIES ====================
 
@@ -229,6 +231,12 @@ public class OrderbookAggregator {
      */
     @Autowired
     private ScripMetadataService scripMetadataService;
+
+    /**
+     * Bug #8: Publishes boundary events for higher timeframe analysis.
+     */
+    @Autowired
+    private CandleBoundaryPublisher candleBoundaryPublisher;
 
     // ==================== STATE MANAGEMENT ====================
 
@@ -329,16 +337,16 @@ public class OrderbookAggregator {
 
         log.info("{} Started successfully", LOG_PREFIX);
 
-        // Parse trace symbols
-        this.traceSymbols = new HashSet<>();
-        if (traceSymbolsStr != null && !traceSymbolsStr.isBlank()) {
-            String[] parts = traceSymbolsStr.split(",");
+        // Parse trace scripcodes (Bug #2: trace by scripcode, not symbol)
+        this.traceScripCodes = new HashSet<>();
+        if (traceScripCodesStr != null && !traceScripCodesStr.isBlank()) {
+            String[] parts = traceScripCodesStr.split(",");
             for (String part : parts) {
-                traceSymbols.add(part.trim().toUpperCase());
+                traceScripCodes.add(part.trim());
             }
-            log.info("{} Trace logging enabled for symbols: {}", LOG_PREFIX, traceSymbols);
+            log.info("{} Trace logging enabled for scripcodes: {}", LOG_PREFIX, traceScripCodes);
         } else {
-            log.info("{} Trace logging enabled for ALL symbols (FULL - NO SAMPLING)", LOG_PREFIX);
+            log.info("{} Trace logging enabled for ALL scripcodes (FULL - NO SAMPLING)", LOG_PREFIX);
         }
     }
 
@@ -453,13 +461,24 @@ public class OrderbookAggregator {
     private void processOrderbook(OrderBookSnapshot ob, long kafkaTimestamp) {
         if (ob == null || ob.getToken() <= 0) return;
 
+        // Bug #14: Validate orderbook structure
+        if (!ob.isValid()) {
+            log.debug("{} Rejected invalid orderbook for token {}", LOG_PREFIX, ob.getToken());
+            return;
+        }
+
         String key = ob.getExchange() + ":" + ob.getToken();
         Instant obTime = Instant.ofEpochMilli(kafkaTimestamp);
 
-        // Trace logging
-        boolean isSpecific = (traceSymbols != null && !traceSymbols.isEmpty() &&
-                             traceSymbols.contains(String.valueOf(ob.getToken())));
-        boolean shouldLog = isSpecific || (traceSymbols == null || traceSymbols.isEmpty());
+        // Bug #23: Market hours enforcement
+        if (!TimeframeBoundary.isMarketHours(obTime, ob.getExchange())) {
+            return;
+        }
+
+        // Trace logging (Bug #2: by scripcode)
+        boolean isSpecific = (traceScripCodes != null && !traceScripCodes.isEmpty() &&
+                             traceScripCodes.contains(String.valueOf(ob.getToken())));
+        boolean shouldLog = isSpecific || (traceScripCodes == null || traceScripCodes.isEmpty());
 
         if (shouldLog) {
             int bidCount = ob.getBids() != null ? ob.getBids().size() : 0;
@@ -492,8 +511,7 @@ public class OrderbookAggregator {
         String stateKey = key + ":" + tickWindowStart.toEpochMilli();
 
         // Resolve symbol using ScripMetadataService (authoritative source from database)
-        final String resolvedSymbol = scripMetadataService.getSymbolRoot(
-            String.valueOf(ob.getToken()), ob.getCompanyName());
+        final String resolvedSymbol = scripMetadataService.getSymbolRoot(String.valueOf(ob.getToken()));
 
         OrderbookAggregateState state = aggregationState.computeIfAbsent(stateKey,
             k -> new OrderbookAggregateState(ob, tickWindowStart, tickWindowEnd, resolvedSymbol));
@@ -630,6 +648,12 @@ public class OrderbookAggregator {
             persistToMongoDB(metricsToSave);
             cacheToRedis(metricsToSave);
             publishToKafka(metricsToSave);
+
+            // Bug #8: Publish boundary events for Orderbook data
+            for (OrderbookMetrics m : metricsToSave) {
+                candleBoundaryPublisher.onMetricsClose(
+                    m.getScripCode(), m.getExchange(), m.getWindowEnd(), "ORDERBOOK");
+            }
         }
 
         // Remove emitted states
@@ -653,9 +677,9 @@ public class OrderbookAggregator {
             orderbookRepository.saveAll(metrics);
 
             // Trace individual saves if enabled
-            if (traceSymbols != null && !traceSymbols.isEmpty()) {
+            if (traceScripCodes != null && !traceScripCodes.isEmpty()) {
                 for (OrderbookMetrics m : metrics) {
-                    if (traceSymbols.contains(m.getSymbol()) || traceSymbols.contains(m.getScripCode())) {
+                    if (traceScripCodes.contains(m.getScripCode())) {
                         log.info("[MONGO-WRITE] OrderbookMetrics saved for {} @ {} | OFI: {} | Spread: {}",
                             m.getSymbol(), formatTime(m.getWindowEnd()), m.getOfi(), m.getBidAskSpread());
                     }

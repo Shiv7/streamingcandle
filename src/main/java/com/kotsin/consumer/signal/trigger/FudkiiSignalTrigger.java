@@ -12,6 +12,10 @@ import com.kotsin.consumer.repository.TickCandleRepository;
 import com.kotsin.consumer.service.CandleService;
 import com.kotsin.consumer.service.RedisCacheService;
 import com.kotsin.consumer.service.ScripMetadataService;
+import com.kotsin.consumer.signal.model.FukaaAudit;
+import com.kotsin.consumer.signal.model.FukaaAudit.FukaaOutcome;
+import com.kotsin.consumer.signal.model.FukaaAudit.PassedCandle;
+import com.kotsin.consumer.signal.repository.FukaaAuditRepository;
 import lombok.Builder;
 import lombok.Data;
 import lombok.extern.slf4j.Slf4j;
@@ -125,6 +129,25 @@ public class FudkiiSignalTrigger {
     @Value("${fudkii.trigger.mcx.enabled:true}")
     private boolean mcxEnabled;
 
+    // ==================== FUKAA VOLUME FILTER CONFIG ====================
+    @Value("${fukaa.trigger.enabled:true}")
+    private boolean fukaaEnabled;
+
+    @Value("${fukaa.trigger.kafka.topic:kotsin_FUKAA}")
+    private String fukaaKafkaTopic;
+
+    @Value("${fukaa.trigger.volume.multiplier:2.0}")
+    private double fukaaVolumeMultiplier;
+
+    @Value("${fukaa.trigger.avg.candles:6}")
+    private int fukaaAvgCandles;
+
+    @Value("${fukaa.trigger.watching.ttl.minutes:35}")
+    private int fukaaWatchingTtlMinutes;
+
+    @Autowired
+    private FukaaAuditRepository fukaaAuditRepository;
+
     // Cache for historical 30m candles per symbol (already aggregated)
     // Limited to MAX_CACHED_CANDLES per symbol to prevent unbounded memory growth
     // FIX: Use CopyOnWriteArrayList for thread safety (ConcurrentHashMap only protects the map, not the list)
@@ -155,6 +178,8 @@ public class FudkiiSignalTrigger {
             LOG_PREFIX, bbPeriod, stPeriod, requireBothConditions);
         log.info("{} MCX Support: {}, Bootstrap Days Back: {}",
             LOG_PREFIX, mcxEnabled, bootstrapDaysBack);
+        log.info("{} FUKAA Volume Filter: enabled={}, multiplier={}x, avgCandles={}, watchingTTL={}min",
+            LOG_PREFIX, fukaaEnabled, fukaaVolumeMultiplier, fukaaAvgCandles, fukaaWatchingTtlMinutes);
     }
 
     /**
@@ -334,10 +359,16 @@ public class FudkiiSignalTrigger {
             log.info("{} {} Current Close: {}", LOG_PREFIX, scripCode, String.format("%.2f", newCandle30m.close));
             log.info("{} {} Price Position: {}", LOG_PREFIX, scripCode, bbst.getPricePosition());
 
-            // Step 8: Evaluate trigger conditions
+            // Step 8: Check for watching FUKAA signals from previous candle (T+1 evaluation)
+            // This must happen BEFORE we process new signals
+            if (fukaaEnabled) {
+                checkWatchingSignalForTPlus1(scripCode, newCandle30m, historicalCandles);
+            }
+
+            // Step 9: Evaluate trigger conditions
             FudkiiTriggerResult result = evaluateTrigger(scripCode, bbst, newCandle30m);
 
-            // Step 9: Cache state and mark as processed
+            // Step 10: Cache state and mark as processed
             lastBbstState.put(scripCode, bbst);
             redisCacheService.cacheBBSTState(scripCode, triggerTimeframe, bbst);
             lastProcessed30mWindow.put(scripCode, windowEnd);
@@ -346,8 +377,21 @@ public class FudkiiSignalTrigger {
                 log.info("{} {} *** FUDKII SIGNAL TRIGGERED *** direction={}, reason={}",
                     LOG_PREFIX, scripCode, result.getDirection(), result.getReason());
 
-                // Publish to Kafka topic
+                // Publish to FUDKII Kafka topic (always)
                 publishToKafka(scripCode, result);
+
+                // Step 11: FUKAA Volume Filter evaluation
+                if (fukaaEnabled) {
+                    FukaaEvaluation fukaaEval = evaluateFukaaVolume(result, historicalCandles, newCandle30m);
+
+                    if (fukaaEval.passed) {
+                        // Immediate pass - emit to FUKAA topic
+                        processImmediateFukaaPass(result, fukaaEval, newCandle30m);
+                    } else {
+                        // Store in watching mode for T+1 re-evaluation
+                        storeFukaaWatchingSignal(result, fukaaEval, newCandle30m);
+                    }
+                }
             }
 
             return result;
@@ -542,7 +586,7 @@ public class FudkiiSignalTrigger {
         String exchange = candles1m.get(0).getExchange();
 
         // Get symbol and company name from ScripMetadataService
-        String symbol = scripMetadataService.getSymbolRoot(scripCode, candles1m.get(0).getCompanyName());
+        String symbol = scripMetadataService.getSymbolRoot(scripCode);
         String companyName = scripMetadataService.getCompanyName(scripCode);
         if (companyName == null) {
             companyName = candles1m.get(0).getCompanyName();
@@ -749,7 +793,7 @@ public class FudkiiSignalTrigger {
             log.info("{} {} Fetched {} 30m candles from API", LOG_PREFIX, scripCode, apiCandles.size());
 
             // Get symbol and company name from ScripMetadataService
-            String symbol = scripMetadataService.getSymbolRoot(scripCode, null);
+            String symbol = scripMetadataService.getSymbolRoot(scripCode);
             String companyName = scripMetadataService.getCompanyName(scripCode);
 
             // Convert to Candle30m
@@ -868,17 +912,29 @@ public class FudkiiSignalTrigger {
         // Method 4: FIX - Fallback detection using barsInTrend
         // If barsInTrend is 1 and we have no previous state, this MIGHT be a flip
         // This is a heuristic - if trend just started (1 bar), it could be a flip
-        // FIX: Skip this heuristic on first candle of day (09:15 NSE, 09:00 MCX)
-        // because we have no intraday context to validate the flip
+        //
+        // GUARDS to prevent false positives:
+        // 1. Skip on first candle of day (09:15 NSE, 09:00 MCX) - no intraday context
+        // 2. Skip if Redis has state but in-memory doesn't - likely app restart, state will recover
+        // 3. Only trigger if price action strongly confirms direction
         if (!superTrendFlipped && prevBbst == null && bbst.getBarsInTrend() == 1) {
-            // Check if this is the first candle of the day
+            // Guard 1: Check if this is the first candle of the day
             boolean isFirstCandleOfDay = isFirstCandleOfDay(currentCandle.windowStart, currentCandle.exchange);
+
+            // Guard 2: Check if Redis has state we're missing (app restart scenario)
+            Object redisState = redisCacheService.getBBSTState(scripCode, triggerTimeframe);
+            boolean redisHasState = redisState != null;
 
             if (isFirstCandleOfDay) {
                 log.info("{} {} Skipping barsInTrend heuristic - first candle of day (no intraday context)",
                     LOG_PREFIX, scripCode);
+            } else if (redisHasState) {
+                // Redis has state but in-memory doesn't - likely app restart
+                // State will be recovered on next candle, don't trigger false positive now
+                log.info("{} {} Skipping barsInTrend heuristic - Redis state exists but in-memory missing (likely app restart)",
+                    LOG_PREFIX, scripCode);
             } else {
-                // Only trigger if price action strongly confirms the direction
+                // Guard 3: Only trigger if price action strongly confirms the direction
                 // (above upper BB for bullish flip, below lower BB for bearish flip)
                 PricePosition pos = bbst.getPricePosition();
                 if ((bbst.getTrend() == TrendDirection.UP && pos == PricePosition.ABOVE_UPPER) ||
@@ -956,6 +1012,10 @@ public class FudkiiSignalTrigger {
             return FudkiiTriggerResult.builder()
                 .triggered(true)
                 .direction(TriggerDirection.BULLISH)
+                .scripCode(currentCandle.getScripCode())
+                .symbol(currentCandle.getSymbol())
+                .companyName(currentCandle.getCompanyName())
+                .exchange(currentCandle.getExchange())
                 .reason(reason)
                 .bbst(bbst)
                 .triggerPrice(close)
@@ -973,6 +1033,10 @@ public class FudkiiSignalTrigger {
             return FudkiiTriggerResult.builder()
                 .triggered(true)
                 .direction(TriggerDirection.BEARISH)
+                .scripCode(currentCandle.getScripCode())
+                .symbol(currentCandle.getSymbol())
+                .companyName(currentCandle.getCompanyName())
+                .exchange(currentCandle.getExchange())
                 .reason(reason)
                 .bbst(bbst)
                 .triggerPrice(close)
@@ -1091,6 +1155,439 @@ public class FudkiiSignalTrigger {
         return Optional.ofNullable(lastBbstState.get(scripCode));
     }
 
+    // ==================== FUKAA VOLUME FILTER ====================
+
+    /**
+     * Evaluate FUKAA volume filter for a triggered FUDKII signal.
+     * Checks if T-1 or T candle volume > 2x average of last 6 candles.
+     *
+     * @param result The FUDKII trigger result
+     * @param historicalCandles Historical 30m candles (most recent last)
+     * @param currentCandle The current 30m candle (T)
+     * @return FukaaEvaluation with pass/fail status and volume data
+     */
+    private FukaaEvaluation evaluateFukaaVolume(FudkiiTriggerResult result,
+                                                 List<Candle30m> historicalCandles,
+                                                 Candle30m currentCandle) {
+        if (!fukaaEnabled) {
+            return FukaaEvaluation.builder()
+                .passed(true)
+                .reason("FUKAA disabled - all signals pass")
+                .build();
+        }
+
+        int totalCandles = historicalCandles.size();
+        if (totalCandles < fukaaAvgCandles + 2) {
+            // Not enough candles for calculation (need at least 8: 6 for avg + T-1 + T)
+            log.info("{} {} FUKAA: Insufficient candles for volume check (have={}, need={})",
+                LOG_PREFIX, result.getScripCode(), totalCandles, fukaaAvgCandles + 2);
+            return FukaaEvaluation.builder()
+                .passed(false)
+                .reason("Insufficient historical candles for volume average")
+                .build();
+        }
+
+        // Get T candle (current) and T-1 candle (previous)
+        // historicalCandles has most recent LAST, so:
+        // - T-1 is at index (totalCandles - 1) after current is added, but we have currentCandle separately
+        // - Need to get T-1 from historicalCandles (last element before current was added)
+        Candle30m candleTMinus1 = historicalCandles.get(totalCandles - 1);
+        long volumeT = currentCandle.volume;
+        long volumeTMinus1 = candleTMinus1.volume;
+
+        // Calculate average volume of candles T-3 to T-8 (6 candles)
+        // historicalCandles does NOT include current candle (T), so:
+        //   index (totalCandles - 1) = T-1
+        //   index (totalCandles - 2) = T-2
+        //   index (totalCandles - 3) = T-3  ← endIdx (start of avg window)
+        //   ...
+        //   index (totalCandles - 8) = T-8  ← startIdx (end of avg window)
+        int startIdx = totalCandles - 2 - fukaaAvgCandles; // = totalCandles - 8 (T-8)
+        int endIdx = totalCandles - 2 - 1;                  // = totalCandles - 3 (T-3)
+
+        if (startIdx < 0) {
+            log.info("{} {} FUKAA: Not enough candles for avg calculation (startIdx={})",
+                LOG_PREFIX, result.getScripCode(), startIdx);
+            return FukaaEvaluation.builder()
+                .passed(false)
+                .reason("Not enough historical candles for average volume")
+                .build();
+        }
+
+        double sumVolume = 0;
+        for (int i = startIdx; i <= endIdx; i++) {
+            sumVolume += historicalCandles.get(i).volume;
+        }
+        double avgVolume = sumVolume / fukaaAvgCandles;
+
+        // Calculate surge ratios
+        double surgeTMinus1 = avgVolume > 0 ? (double) volumeTMinus1 / avgVolume : 0;
+        double surgeT = avgVolume > 0 ? (double) volumeT / avgVolume : 0;
+
+        // Check if either passes the volume multiplier threshold
+        boolean tMinus1Passes = surgeTMinus1 >= fukaaVolumeMultiplier;
+        boolean tPasses = surgeT >= fukaaVolumeMultiplier;
+        boolean passed = tMinus1Passes || tPasses;
+
+        // Determine which candle triggered and calculate rank
+        PassedCandle passedCandle = PassedCandle.NONE;
+        double rank = 0;
+        if (passed) {
+            if (tPasses && tMinus1Passes) {
+                // Both pass - use higher surge for rank
+                rank = Math.max(surgeT, surgeTMinus1);
+                passedCandle = surgeT >= surgeTMinus1 ? PassedCandle.T : PassedCandle.T_MINUS_1;
+            } else if (tPasses) {
+                rank = surgeT;
+                passedCandle = PassedCandle.T;
+            } else {
+                rank = surgeTMinus1;
+                passedCandle = PassedCandle.T_MINUS_1;
+            }
+        }
+
+        log.info("{} {} FUKAA Volume Check: T-1={} (surge={}x, pass={}), T={} (surge={}x, pass={}), avg={}, threshold={}x, RESULT={}",
+            LOG_PREFIX, result.getScripCode(),
+            volumeTMinus1, String.format("%.2f", surgeTMinus1), tMinus1Passes,
+            volumeT, String.format("%.2f", surgeT), tPasses,
+            String.format("%.0f", avgVolume), fukaaVolumeMultiplier,
+            passed ? "PASS" : "WATCHING");
+
+        return FukaaEvaluation.builder()
+            .passed(passed)
+            .passedCandle(passedCandle)
+            .volumeTMinus1(volumeTMinus1)
+            .volumeT(volumeT)
+            .avgVolume(avgVolume)
+            .surgeTMinus1(surgeTMinus1)
+            .surgeT(surgeT)
+            .rank(rank)
+            .reason(passed ?
+                String.format("Volume surge detected: %s candle at %.2fx (threshold=%.1fx)",
+                    passedCandle, rank, fukaaVolumeMultiplier) :
+                String.format("No volume surge: T-1=%.2fx, T=%.2fx (need %.1fx)",
+                    surgeTMinus1, surgeT, fukaaVolumeMultiplier))
+            .build();
+    }
+
+    /**
+     * Check watching signals for T+1 volume evaluation.
+     * Called at each 30m boundary to evaluate signals from previous candle.
+     *
+     * @param scripCode The scripCode to check
+     * @param currentCandle The current 30m candle (this is T+1 for watching signals)
+     * @param historicalCandles Historical candles for average calculation
+     */
+    private void checkWatchingSignalForTPlus1(String scripCode, Candle30m currentCandle,
+                                               List<Candle30m> historicalCandles) {
+        if (!fukaaEnabled) return;
+
+        // Get watching signal from Redis
+        Map<String, Object> watchingData = redisCacheService.getFukaaWatchingSignal(scripCode);
+        if (watchingData == null) {
+            return; // No watching signal for this scripCode
+        }
+
+        log.info("{} {} Evaluating T+1 for watching FUKAA signal", LOG_PREFIX, scripCode);
+
+        try {
+            // Extract data from watching signal with null checks
+            Object avgVolumeObj = watchingData.get("avgVolume");
+            Object directionObj = watchingData.get("direction");
+            Object triggerScoreObj = watchingData.get("triggerScore");
+            Object triggerPriceObj = watchingData.get("triggerPrice");
+            Object signalTimeObj = watchingData.get("signalTime");
+            Object volumeTMinus1Obj = watchingData.get("volumeTMinus1");
+            Object volumeTObj = watchingData.get("volumeT");
+            Object surgeTMinus1Obj = watchingData.get("surgeTMinus1");
+            Object surgeTObj = watchingData.get("surgeT");
+
+            // Validate required fields exist
+            if (avgVolumeObj == null || signalTimeObj == null) {
+                log.warn("{} {} FUKAA watching data corrupted (missing required fields), removing",
+                    LOG_PREFIX, scripCode);
+                redisCacheService.removeFukaaWatchingSignal(scripCode);
+                return;
+            }
+
+            double avgVolume = ((Number) avgVolumeObj).doubleValue();
+            String direction = directionObj != null ? directionObj.toString() : "UNKNOWN";
+            double triggerScore = triggerScoreObj != null ? ((Number) triggerScoreObj).doubleValue() : 0;
+            double triggerPrice = triggerPriceObj != null ? ((Number) triggerPriceObj).doubleValue() : 0;
+            Instant signalTime = Instant.parse(signalTimeObj.toString());
+            long volumeTMinus1 = volumeTMinus1Obj != null ? ((Number) volumeTMinus1Obj).longValue() : 0;
+            long volumeT = volumeTObj != null ? ((Number) volumeTObj).longValue() : 0;
+            double surgeTMinus1 = surgeTMinus1Obj != null ? ((Number) surgeTMinus1Obj).doubleValue() : 0;
+            double surgeT = surgeTObj != null ? ((Number) surgeTObj).doubleValue() : 0;
+
+            // Validate T+1 time alignment (current candle should be ~30 min after signal)
+            Instant expectedTPlus1 = signalTime.plus(Duration.ofMinutes(30));
+            Duration timeDiff = Duration.between(expectedTPlus1, currentCandle.windowStart);
+            if (Math.abs(timeDiff.toMinutes()) > 5) {
+                log.warn("{} {} FUKAA T+1 time mismatch: signalTime={}, expectedT+1={}, actualCandle={}, diff={}min",
+                    LOG_PREFIX, scripCode, signalTime, expectedTPlus1, currentCandle.windowStart, timeDiff.toMinutes());
+                // Continue processing but log warning - TTL should prevent major issues
+            }
+
+            // Calculate T+1 surge
+            long volumeTPlus1 = currentCandle.volume;
+            double surgeTPlus1 = avgVolume > 0 ? (double) volumeTPlus1 / avgVolume : 0;
+            boolean tPlus1Passes = surgeTPlus1 >= fukaaVolumeMultiplier;
+
+            log.info("{} {} T+1 Volume Check: volume={}, surge={}x, threshold={}x, RESULT={}",
+                LOG_PREFIX, scripCode, volumeTPlus1, String.format("%.2f", surgeTPlus1), fukaaVolumeMultiplier,
+                tPlus1Passes ? "PASS" : "EXPIRED");
+
+            // Create audit record
+            FukaaAudit audit = FukaaAudit.builder()
+                .scripCode(scripCode)
+                .symbol(currentCandle.symbol)
+                .companyName(currentCandle.companyName)
+                .exchange(currentCandle.exchange)
+                .direction(direction)
+                .triggerScore(triggerScore)
+                .triggerPrice(triggerPrice)
+                .signalTime(signalTime)
+                .volumeTMinus1(volumeTMinus1)
+                .volumeT(volumeT)
+                .volumeTPlus1(volumeTPlus1)
+                .avgVolume(avgVolume)
+                .volumeMultiplier(fukaaVolumeMultiplier)
+                .surgeTMinus1(surgeTMinus1)
+                .surgeT(surgeT)
+                .surgeTPlus1(surgeTPlus1)
+                .createdAt(signalTime)
+                .evaluatedAt(Instant.now())
+                .build();
+
+            if (tPlus1Passes) {
+                // T+1 passed - emit to FUKAA
+                audit.setOutcome(FukaaOutcome.T_PLUS_1_PASS);
+                audit.setPassedCandle(PassedCandle.T_PLUS_1);
+                audit.setRank(surgeTPlus1);
+                audit.setEmittedAt(Instant.now());
+
+                // Build payload and publish to FUKAA
+                Map<String, Object> fukaaPayload = buildFukaaPayload(watchingData, audit);
+                publishToFukaaKafka(scripCode, fukaaPayload);
+
+                log.info("{} {} *** FUKAA T+1 PASS *** rank={}, publishing to {}",
+                    LOG_PREFIX, scripCode, String.format("%.2f", surgeTPlus1), fukaaKafkaTopic);
+            } else {
+                // T+1 failed - signal expired
+                audit.setOutcome(FukaaOutcome.EXPIRED);
+                audit.setPassedCandle(PassedCandle.NONE);
+                audit.setRank(0);
+
+                log.info("{} {} FUKAA signal EXPIRED - no volume surge at T-1, T, or T+1",
+                    LOG_PREFIX, scripCode);
+            }
+
+            // Save audit and remove from watching
+            fukaaAuditRepository.save(audit);
+            redisCacheService.removeFukaaWatchingSignal(scripCode);
+
+        } catch (Exception e) {
+            log.error("{} {} Error processing FUKAA T+1 evaluation: {}", LOG_PREFIX, scripCode, e.getMessage(), e);
+            // Remove corrupted watching signal to prevent repeated errors
+            redisCacheService.removeFukaaWatchingSignal(scripCode);
+        }
+    }
+
+    /**
+     * Store a signal in watching mode for T+1 re-evaluation.
+     * Handles collision: if existing watching signal exists, mark it as EXPIRED first.
+     */
+    private void storeFukaaWatchingSignal(FudkiiTriggerResult result, FukaaEvaluation eval,
+                                          Candle30m currentCandle) {
+        // Check for existing watching signal (collision handling)
+        Map<String, Object> existingWatching = redisCacheService.getFukaaWatchingSignal(result.getScripCode());
+        if (existingWatching != null) {
+            log.warn("{} {} FUKAA watching signal collision - marking existing signal as EXPIRED",
+                LOG_PREFIX, result.getScripCode());
+
+            // Create EXPIRED audit for the old signal that's being overwritten
+            try {
+                FukaaAudit expiredAudit = FukaaAudit.builder()
+                    .scripCode(result.getScripCode())
+                    .symbol(existingWatching.get("symbol") != null ? existingWatching.get("symbol").toString() : null)
+                    .companyName(existingWatching.get("companyName") != null ? existingWatching.get("companyName").toString() : null)
+                    .exchange(existingWatching.get("exchange") != null ? existingWatching.get("exchange").toString() : null)
+                    .direction(existingWatching.get("direction") != null ? existingWatching.get("direction").toString() : null)
+                    .triggerScore(existingWatching.get("triggerScore") != null ? ((Number) existingWatching.get("triggerScore")).doubleValue() : 0)
+                    .triggerPrice(existingWatching.get("triggerPrice") != null ? ((Number) existingWatching.get("triggerPrice")).doubleValue() : 0)
+                    .signalTime(existingWatching.get("signalTime") != null ? Instant.parse(existingWatching.get("signalTime").toString()) : null)
+                    .avgVolume(existingWatching.get("avgVolume") != null ? ((Number) existingWatching.get("avgVolume")).doubleValue() : 0)
+                    .volumeTMinus1(existingWatching.get("volumeTMinus1") != null ? ((Number) existingWatching.get("volumeTMinus1")).longValue() : 0)
+                    .volumeT(existingWatching.get("volumeT") != null ? ((Number) existingWatching.get("volumeT")).longValue() : 0)
+                    .surgeTMinus1(existingWatching.get("surgeTMinus1") != null ? ((Number) existingWatching.get("surgeTMinus1")).doubleValue() : 0)
+                    .surgeT(existingWatching.get("surgeT") != null ? ((Number) existingWatching.get("surgeT")).doubleValue() : 0)
+                    .volumeMultiplier(fukaaVolumeMultiplier)
+                    .outcome(FukaaOutcome.EXPIRED)
+                    .passedCandle(PassedCandle.NONE)
+                    .rank(0)
+                    .createdAt(existingWatching.get("signalTime") != null ? Instant.parse(existingWatching.get("signalTime").toString()) : Instant.now())
+                    .evaluatedAt(Instant.now())
+                    .build();
+                fukaaAuditRepository.save(expiredAudit);
+            } catch (Exception e) {
+                log.warn("{} {} Failed to create EXPIRED audit for collided signal: {}",
+                    LOG_PREFIX, result.getScripCode(), e.getMessage());
+            }
+        }
+
+        // Build new watching signal data
+        Map<String, Object> watchingData = new HashMap<>();
+        watchingData.put("scripCode", result.getScripCode());
+        watchingData.put("symbol", result.getSymbol());
+        watchingData.put("companyName", result.getCompanyName());
+        watchingData.put("exchange", result.getExchange());
+        watchingData.put("direction", result.getDirection().name());
+        watchingData.put("triggerScore", result.getTriggerScore());
+        watchingData.put("triggerPrice", result.getTriggerPrice());
+        watchingData.put("signalTime", result.getTriggerTime().toString());
+        watchingData.put("avgVolume", eval.avgVolume);
+        watchingData.put("volumeTMinus1", eval.volumeTMinus1);
+        watchingData.put("volumeT", eval.volumeT);
+        watchingData.put("surgeTMinus1", eval.surgeTMinus1);
+        watchingData.put("surgeT", eval.surgeT);
+
+        // Store in Redis (will overwrite existing)
+        redisCacheService.storeFukaaWatchingSignal(result.getScripCode(), watchingData, fukaaWatchingTtlMinutes);
+
+        // Create audit record in WATCHING state for new signal
+        FukaaAudit audit = FukaaAudit.builder()
+            .scripCode(result.getScripCode())
+            .symbol(result.getSymbol())
+            .companyName(result.getCompanyName())
+            .exchange(result.getExchange())
+            .direction(result.getDirection().name())
+            .triggerScore(result.getTriggerScore())
+            .triggerPrice(result.getTriggerPrice())
+            .signalTime(result.getTriggerTime())
+            .volumeTMinus1(eval.volumeTMinus1)
+            .volumeT(eval.volumeT)
+            .avgVolume(eval.avgVolume)
+            .volumeMultiplier(fukaaVolumeMultiplier)
+            .surgeTMinus1(eval.surgeTMinus1)
+            .surgeT(eval.surgeT)
+            .outcome(FukaaOutcome.WATCHING)
+            .passedCandle(PassedCandle.NONE)
+            .rank(0)
+            .createdAt(Instant.now())
+            .build();
+        fukaaAuditRepository.save(audit);
+
+        log.info("{} {} Stored in FUKAA watching mode - will check at T+1",
+            LOG_PREFIX, result.getScripCode());
+    }
+
+    /**
+     * Build FUKAA Kafka payload from result and audit data.
+     */
+    private Map<String, Object> buildFukaaPayload(Map<String, Object> signalData, FukaaAudit audit) {
+        Map<String, Object> payload = new HashMap<>(signalData);
+        payload.put("fukaaOutcome", audit.getOutcome().name());
+        payload.put("passedCandle", audit.getPassedCandle().name());
+        payload.put("rank", audit.getRank());
+        payload.put("volumeTMinus1", audit.getVolumeTMinus1());
+        payload.put("volumeT", audit.getVolumeT());
+        payload.put("volumeTPlus1", audit.getVolumeTPlus1());
+        payload.put("avgVolume", audit.getAvgVolume());
+        payload.put("surgeTMinus1", audit.getSurgeTMinus1());
+        payload.put("surgeT", audit.getSurgeT());
+        payload.put("surgeTPlus1", audit.getSurgeTPlus1());
+        payload.put("fukaaEmittedAt", Instant.now().toString());
+        return payload;
+    }
+
+    /**
+     * Publish FUKAA signal to Kafka.
+     */
+    private void publishToFukaaKafka(String scripCode, Map<String, Object> payload) {
+        try {
+            kafkaTemplate.send(fukaaKafkaTopic, scripCode, payload);
+            log.info("{} {} Published FUKAA signal to Kafka topic: {}", LOG_PREFIX, scripCode, fukaaKafkaTopic);
+        } catch (Exception e) {
+            log.error("{} {} Failed to publish FUKAA to Kafka: {}", LOG_PREFIX, scripCode, e.getMessage());
+        }
+    }
+
+    /**
+     * Process immediate FUKAA pass - emit to FUKAA topic.
+     */
+    private void processImmediateFukaaPass(FudkiiTriggerResult result, FukaaEvaluation eval,
+                                           Candle30m currentCandle) {
+        // Create audit record
+        FukaaAudit audit = FukaaAudit.builder()
+            .scripCode(result.getScripCode())
+            .symbol(result.getSymbol())
+            .companyName(result.getCompanyName())
+            .exchange(result.getExchange())
+            .direction(result.getDirection().name())
+            .triggerScore(result.getTriggerScore())
+            .triggerPrice(result.getTriggerPrice())
+            .signalTime(result.getTriggerTime())
+            .volumeTMinus1(eval.volumeTMinus1)
+            .volumeT(eval.volumeT)
+            .avgVolume(eval.avgVolume)
+            .volumeMultiplier(fukaaVolumeMultiplier)
+            .surgeTMinus1(eval.surgeTMinus1)
+            .surgeT(eval.surgeT)
+            .outcome(FukaaOutcome.IMMEDIATE_PASS)
+            .passedCandle(eval.passedCandle)
+            .rank(eval.rank)
+            .createdAt(Instant.now())
+            .emittedAt(Instant.now())
+            .build();
+        fukaaAuditRepository.save(audit);
+
+        // Build payload from result
+        Map<String, Object> payload = new HashMap<>();
+        payload.put("scripCode", result.getScripCode());
+        payload.put("symbol", result.getSymbol());
+        payload.put("companyName", result.getCompanyName());
+        payload.put("exchange", result.getExchange());
+        payload.put("triggered", true);
+        payload.put("direction", result.getDirection().name());
+        payload.put("reason", result.getReason());
+        payload.put("triggerPrice", result.getTriggerPrice());
+        payload.put("triggerTime", result.getTriggerTime().toString());
+        payload.put("triggerScore", result.getTriggerScore());
+
+        if (result.getBbst() != null) {
+            BBSuperTrend bbst = result.getBbst();
+            payload.put("bbUpper", bbst.getBbUpper());
+            payload.put("bbMiddle", bbst.getBbMiddle());
+            payload.put("bbLower", bbst.getBbLower());
+            payload.put("superTrend", bbst.getSuperTrend());
+            payload.put("trend", bbst.getTrend().name());
+            payload.put("trendChanged", bbst.isTrendChanged());
+            payload.put("pricePosition", bbst.getPricePosition().name());
+        }
+
+        // Add FUKAA-specific data
+        Map<String, Object> fukaaPayload = buildFukaaPayload(payload, audit);
+        publishToFukaaKafka(result.getScripCode(), fukaaPayload);
+
+        log.info("{} {} *** FUKAA IMMEDIATE PASS *** rank={}, passedCandle={}, publishing to {}",
+            LOG_PREFIX, result.getScripCode(), String.format("%.2f", eval.rank), eval.passedCandle, fukaaKafkaTopic);
+    }
+
+    @Data
+    @Builder
+    private static class FukaaEvaluation {
+        private boolean passed;
+        private PassedCandle passedCandle;
+        private long volumeTMinus1;
+        private long volumeT;
+        private double avgVolume;
+        private double surgeTMinus1;
+        private double surgeT;
+        private double rank;
+        private String reason;
+    }
+
     /**
      * Publish FUDKII trigger result to Kafka.
      */
@@ -1099,6 +1596,9 @@ public class FudkiiSignalTrigger {
             // Build a serializable DTO for Kafka
             Map<String, Object> payload = new HashMap<>();
             payload.put("scripCode", scripCode);
+            payload.put("symbol", result.getSymbol());
+            payload.put("companyName", result.getCompanyName());
+            payload.put("exchange", result.getExchange());
             payload.put("triggered", result.isTriggered());
             payload.put("direction", result.getDirection() != null ? result.getDirection().name() : null);
             payload.put("reason", result.getReason());

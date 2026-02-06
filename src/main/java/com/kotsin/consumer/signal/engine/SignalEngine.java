@@ -6,7 +6,6 @@ import com.kotsin.consumer.gate.model.GateResult.ChainResult;
 import com.kotsin.consumer.indicator.calculator.TechnicalIndicatorCalculator;
 import com.kotsin.consumer.indicator.model.TechnicalIndicators;
 import com.kotsin.consumer.logging.TraceContext;
-import com.kotsin.consumer.model.StrategyState;
 import com.kotsin.consumer.model.StrategyState.*;
 import com.kotsin.consumer.model.Timeframe;
 import com.kotsin.consumer.model.UnifiedCandle;
@@ -47,6 +46,7 @@ import org.springframework.context.event.EventListener;
 import org.springframework.kafka.core.KafkaTemplate;
 import org.springframework.stereotype.Service;
 
+import java.time.Duration;
 import java.time.Instant;
 import java.util.*;
 import java.util.concurrent.*;
@@ -142,6 +142,9 @@ public class SignalEngine {
     private com.kotsin.consumer.signal.trigger.PivotConfluenceTrigger pivotConfluenceTrigger;
 
     @Autowired
+    private com.kotsin.consumer.signal.trigger.MicroAlphaTrigger microAlphaTrigger;
+
+    @Autowired
     private com.kotsin.consumer.indicator.calculator.BBSuperTrendCalculator bbstCalculator;
 
     // ==================== PATTERN & QUANT SCORE PRODUCERS ====================
@@ -162,6 +165,17 @@ public class SignalEngine {
 
     @Autowired
     private com.kotsin.consumer.options.service.ScripGroupService scripGroupService;
+
+    @Autowired
+    private com.kotsin.consumer.options.calculator.OptionsAnalyticsCalculator optionsAnalyticsCalculator;
+
+    // ==================== DERIVATIVE DATA PIPELINE (MicroAlpha) ====================
+
+    @Autowired
+    private com.kotsin.consumer.repository.ScripGroupRepository scripGroupRepository;
+
+    @Autowired
+    private com.kotsin.consumer.repository.OIMetricsRepository oiMetricsRepository;
 
     @Autowired
     private KafkaTemplate<String, Object> kafkaTemplate;
@@ -216,6 +230,27 @@ public class SignalEngine {
     // Signal listeners
     private final List<SignalListener> listeners = new CopyOnWriteArrayList<>();
 
+    // Bootstrap status tracking (avoid noisy repeated logs)
+    private volatile int lastLoggedBootstrapSuccess = -1;
+    private volatile boolean loggedBootstrapReady = false;
+
+    // Cache: equity scripCode → ScripGroup (refreshed hourly)
+    // Bug #22: Bounded cache to prevent unbounded memory growth
+    private static final int MAX_SCRIP_GROUP_CACHE_SIZE = 500;
+    private final Map<String, com.kotsin.consumer.metadata.model.ScripGroup> scripGroupCache = new ConcurrentHashMap<>();
+    private final Map<String, Long> scripGroupCacheTimestamp = new ConcurrentHashMap<>();
+    private static final long SCRIP_GROUP_CACHE_TTL_MS = 3600_000; // 1 hour
+
+    // Bug #20: Thread pool for parallel symbol processing
+    private ExecutorService symbolProcessorPool;
+
+    // Bug #28: Track bootstrap completion to skip per-symbol checks
+    private volatile boolean bootstrapComplete = false;
+
+    // Bug #11: Event-driven flag (set to false to revert to polling)
+    @Value("${signal.engine.event.driven:true}")
+    private boolean eventDriven;
+
     @PostConstruct
     public void start() {
         if (!enabled) {
@@ -228,24 +263,36 @@ public class SignalEngine {
 
         running.set(true);
 
+        // Bug #20: Create thread pool for parallel symbol processing
+        symbolProcessorPool = Executors.newFixedThreadPool(8);
+
         // Start processing scheduler
         scheduler = Executors.newScheduledThreadPool(2);
 
-        // IMPORTANT: Wait 30 seconds for bootstrap to start loading data
-        // Then process signals every 5 seconds (only bootstrapped symbols will be processed)
-        log.info("{} Waiting 30s for bootstrap to load initial data before strategy processing...", LOG_PREFIX);
-        scheduler.scheduleAtFixedRate(this::processAllSymbols, 30, 5, TimeUnit.SECONDS);
+        if (eventDriven) {
+            // Bug #11: Event-driven mode — no periodic polling of processAllSymbols
+            // Signals are processed via onCandleBoundary() event listener
+            log.info("{} Running in EVENT-DRIVEN mode (no 5s polling)", LOG_PREFIX);
+        } else {
+            // Fallback: poll-based mode for safety
+            log.info("{} Running in POLL mode (every 5s)", LOG_PREFIX);
+            scheduler.scheduleAtFixedRate(this::processAllSymbols, 30, 5, TimeUnit.SECONDS);
+        }
 
         // Check active signals for exits every second (start after 35s)
         scheduler.scheduleAtFixedRate(this::checkActiveSignals, 35, 1, TimeUnit.SECONDS);
 
-        log.info("{} Started successfully - will begin processing after bootstrap delay", LOG_PREFIX);
+        log.info("{} Started successfully", LOG_PREFIX);
     }
 
     @PreDestroy
     public void stop() {
         log.info("{} Stopping...", LOG_PREFIX);
         running.set(false);
+
+        if (symbolProcessorPool != null) {
+            symbolProcessorPool.shutdown();
+        }
 
         if (scheduler != null) {
             scheduler.shutdown();
@@ -265,14 +312,19 @@ public class SignalEngine {
     private void processAllSymbols() {
         if (!running.get()) return;
 
-        // Check bootstrap status
+        // Check bootstrap status — only log when status changes (not every 5s)
         var bootstrapStats = historicalDataBootstrapService.getStats();
-        log.info("{} Bootstrap status: {} total, {} success, {} in-progress, {} failed",
-            LOG_PREFIX, bootstrapStats.total(), bootstrapStats.success(),
-            bootstrapStats.inProgress(), bootstrapStats.failed());
+        int currentSuccess = bootstrapStats.success();
 
-        if (bootstrapStats.success() == 0) {
-            log.info("{} No symbols bootstrapped yet, waiting...", LOG_PREFIX);
+        if (currentSuccess != lastLoggedBootstrapSuccess) {
+            log.info("{} Bootstrap status: {} total, {} success, {} in-progress, {} failed",
+                LOG_PREFIX, bootstrapStats.total(), currentSuccess,
+                bootstrapStats.inProgress(), bootstrapStats.failed());
+            lastLoggedBootstrapSuccess = currentSuccess;
+        }
+
+        if (currentSuccess == 0) {
+            log.debug("{} No symbols bootstrapped yet, waiting...", LOG_PREFIX);
             return;
         }
 
@@ -282,26 +334,52 @@ public class SignalEngine {
             return;
         }
 
-        // Filter to only bootstrapped symbols
-        Set<String> bootstrappedSymbols = symbols.stream()
-            .filter(s -> historicalDataBootstrapService.isBootstrapped(s))
-            .collect(java.util.stream.Collectors.toSet());
+        // Bug #28: Once bootstrap is complete, skip per-symbol check
+        Set<String> bootstrappedSymbols;
+        if (bootstrapComplete) {
+            bootstrappedSymbols = symbols;
+        } else {
+            bootstrappedSymbols = symbols.stream()
+                .filter(s -> historicalDataBootstrapService.isBootstrapped(s))
+                .collect(java.util.stream.Collectors.toSet());
 
-        if (bootstrappedSymbols.isEmpty()) {
-            log.debug("{} No bootstrapped symbols to process yet", LOG_PREFIX);
-            return;
+            if (bootstrappedSymbols.isEmpty()) {
+                log.debug("{} No bootstrapped symbols to process yet", LOG_PREFIX);
+                return;
+            }
+
+            // Log "ready to trade" once when bootstrap is complete
+            if (!loggedBootstrapReady && historicalDataBootstrapService.isBootstrapComplete()) {
+                log.info("{} All bootstrap complete — processing {} symbols on timeframe={}",
+                    LOG_PREFIX, bootstrappedSymbols.size(), primaryTimeframe);
+                loggedBootstrapReady = true;
+                bootstrapComplete = true;
+            }
         }
 
         Timeframe tf = Timeframe.fromLabel(primaryTimeframe);
-        log.info("{} Processing {} bootstrapped symbols (out of {} total)",
-            LOG_PREFIX, bootstrappedSymbols.size(), symbols.size());
+        long cycleStart = System.currentTimeMillis();
 
-        for (String symbol : symbols) {
-            try {
-                processSymbol(symbol, tf);
-            } catch (Exception e) {
-                log.error("{} Error processing symbol={}: {}", LOG_PREFIX, symbol, e.getMessage());
-            }
+        // Bug #20: Process symbols in parallel
+        List<CompletableFuture<Void>> futures = new ArrayList<>();
+        for (String symbol : bootstrappedSymbols) {
+            futures.add(CompletableFuture.runAsync(() -> {
+                try {
+                    processSymbol(symbol, tf);
+                } catch (Exception e) {
+                    log.error("{} Error processing symbol={}: {}", LOG_PREFIX, symbol, e.getMessage());
+                }
+            }, symbolProcessorPool));
+        }
+        CompletableFuture.allOf(futures.toArray(new CompletableFuture[0])).join();
+
+        long cycleMs = System.currentTimeMillis() - cycleStart;
+        if (cycleMs > 2000) {
+            log.warn("{} Slow processing cycle: {} symbols in {}ms ({}ms/symbol)",
+                LOG_PREFIX, bootstrappedSymbols.size(), cycleMs,
+                bootstrappedSymbols.isEmpty() ? 0 : cycleMs / bootstrappedSymbols.size());
+        } else {
+            log.debug("{} Processed {} symbols in {}ms", LOG_PREFIX, bootstrappedSymbols.size(), cycleMs);
         }
     }
 
@@ -364,26 +442,36 @@ public class SignalEngine {
         log.debug("{} [EVENT] {} boundary crossed for {} at {}",
             LOG_PREFIX, timeframe.getLabel(), scripCode, data.getWindowEnd());
 
+        // Bug #27: Actually process the symbol on primary timeframe boundaries
+        Timeframe primaryTf = Timeframe.fromLabel(primaryTimeframe);
+        if (timeframe == primaryTf) {
+            // Process this symbol on the primary timeframe boundary
+            CompletableFuture.runAsync(() -> {
+                try {
+                    processSymbol(scripCode, primaryTf);
+                } catch (Exception e) {
+                    log.error("{} Error processing symbol={} on {} boundary: {}",
+                        LOG_PREFIX, scripCode, timeframe.getLabel(), e.getMessage());
+                }
+            }, symbolProcessorPool);
+        }
+
         // Route to appropriate processing based on timeframe
         switch (timeframe) {
             case M15:
-                // 15m boundary - PivotConfluenceTrigger LTF check will be triggered via its own listener
                 log.debug("{} {} 15m boundary - LTF confirmation will be refreshed", LOG_PREFIX, scripCode);
                 break;
 
             case M30:
-                // 30m boundary - FudkiiSignalTrigger processes this
                 log.debug("{} {} 30m boundary - FUDKII trigger processed via onCandleClose", LOG_PREFIX, scripCode);
                 break;
 
             case H1:
             case H4:
-                // HTF boundaries - recalculate bias
                 log.info("{} {} {} boundary - HTF bias will be refreshed", LOG_PREFIX, scripCode, timeframe.getLabel());
                 break;
 
             case D1:
-                // Daily close - full refresh
                 log.info("{} {} Daily close - full strategy refresh", LOG_PREFIX, scripCode);
                 break;
 
@@ -427,26 +515,6 @@ public class SignalEngine {
             log.debug("{} {} Candles loaded: count={}, price={}",
                 LOG_PREFIX, TraceContext.getShortPrefix(),
                 candles.size(), String.format("%.2f", current.getClose()));
-
-            // ==================== HISTORICAL DATA BOOTSTRAP ====================
-            // If we have insufficient history (<50 candles), trigger bootstrap to fetch 40 days from 5paisa API
-            if (candles.size() < 50 && !historicalDataBootstrapService.isBootstrapped(symbol)) {
-                String exch = current.getExchange();
-                String exchType = current.getExchangeType();
-                String symbolName = current.getSymbol();
-
-                log.info("{} {} Insufficient history ({} candles), triggering bootstrap from 5paisa API",
-                    LOG_PREFIX, TraceContext.getShortPrefix(), candles.size());
-
-                // Async bootstrap - will complete in background
-                historicalDataBootstrapService.bootstrapSymbol(symbol, symbolName, exch, exchType)
-                    .thenAccept(success -> {
-                        if (success) {
-                            log.info("{} Historical data bootstrap completed for {} - refresh on next cycle",
-                                LOG_PREFIX, symbol);
-                        }
-                    });
-            }
 
             // Update session structure (exchange-aware for MCX/NSE)
             TraceContext.addStage("SESSION");
@@ -512,13 +580,17 @@ public class SignalEngine {
             TraceContext.addStage("PIVOT_TRIGGER");
             var pivotResult = checkPivotConfluenceTrigger(symbol, current);
 
+            // ==================== STRATEGY 3: MICROALPHA TRIGGER (Microstructure Alpha) ====================
+            TraceContext.addStage("MICROALPHA_TRIGGER");
+            var microAlphaResult = checkMicroAlphaTrigger(symbol, current, indicators);
+
             // Get current signal for this symbol
             TradingSignal signal = activeSignals.get(symbol);
 
             // Process state machine with strategy triggers
             TraceContext.addStage("STATE_MACHINE");
             signal = processStateMachineWithTriggers(symbol, current, score, signal, pivotState,
-                indicators, patternResult, fudkiiResult, pivotResult);
+                indicators, patternResult, fudkiiResult, pivotResult, microAlphaResult);
 
             // Update active signals map
             if (signal != null && signal.getState().isActive()) {
@@ -1068,7 +1140,7 @@ public class SignalEngine {
                 recordSignalToStats(currentSignal, score);
 
                 // Execute paper trade if enabled
-                executePaperTrade(currentSignal, levels);
+                executePaperTrade(currentSignal, levels, "FUDKII");
 
                 saveAndNotify(currentSignal, SignalEvent.ACTIVE_TRIGGERED);
 
@@ -1203,8 +1275,280 @@ public class SignalEngine {
     }
 
     /**
+     * Check Strategy 3: MicroAlpha trigger (Microstructure Alpha Engine).
+     *
+     * Derivative Data Pipeline:
+     * 1. Resolve equity scripCode → ScripGroup (equity + futures + options family)
+     * 2. Enrich candle with FUT OI (cross-instrument: equity price + FUT OI)
+     * 3. Fetch real options analytics from option chain (GEX, PCR, IV, max pain)
+     * 4. Evaluate MicroAlpha with enriched derivative data
+     */
+    private com.kotsin.consumer.signal.trigger.MicroAlphaTrigger.MicroAlphaTriggerResult checkMicroAlphaTrigger(
+            String symbol, UnifiedCandle current, TechnicalIndicators indicators) {
+        try {
+            log.debug("{} {} Checking MicroAlpha trigger for scripCode={}", LOG_PREFIX, TraceContext.getShortPrefix(), symbol);
+
+            // --- Step 1: Resolve equity scripCode → ScripGroup ---
+            com.kotsin.consumer.metadata.model.ScripGroup group = getScripGroup(symbol);
+            String underlyingSymbol = null;
+            if (group != null) {
+                underlyingSymbol = group.getCompanyName();
+                log.debug("{} {} MicroAlpha ScripGroup resolved: scripCode={} → underlying={}, futures={}, options={}",
+                    LOG_PREFIX, TraceContext.getShortPrefix(), symbol, underlyingSymbol,
+                    group.getFutures() != null ? group.getFutures().size() : 0,
+                    group.getOptions() != null ? group.getOptions().size() : 0);
+            } else {
+                // Fallback: use candle symbol name
+                underlyingSymbol = current.getSymbol() != null ? current.getSymbol() : symbol;
+                log.debug("{} {} MicroAlpha no ScripGroup for scripCode={}, fallback to symbol={}",
+                    LOG_PREFIX, TraceContext.getShortPrefix(), symbol, underlyingSymbol);
+            }
+
+            // --- Step 2: Enrich candle with FUT OI (cross-instrument lookup) ---
+            boolean oiEnriched = enrichWithFuturesOI(current, group, symbol);
+            if (oiEnriched) {
+                log.debug("{} {} MicroAlpha FUT OI enriched: interp={}, oiChange={}%, velocity={}",
+                    LOG_PREFIX, TraceContext.getShortPrefix(),
+                    current.getOiInterpretation(),
+                    String.format("%.2f", current.getOiChangePercent()),
+                    String.format("%.2f", current.getOiVelocity() != null ? current.getOiVelocity() : 0.0));
+            } else {
+                log.debug("{} {} MicroAlpha no FUT OI available for {}",
+                    LOG_PREFIX, TraceContext.getShortPrefix(), underlyingSymbol);
+            }
+
+            // --- Step 3: Fetch real options analytics from option chain ---
+            com.kotsin.consumer.options.model.OptionsAnalytics options = fetchOptionsAnalytics(underlyingSymbol, current.getClose());
+            if (options != null && options.getPcrByOI() > 0) {
+                log.debug("{} {} MicroAlpha options loaded: PCR={}, maxPain={}, GEX={}, callWall={}, putWall={}",
+                    LOG_PREFIX, TraceContext.getShortPrefix(),
+                    String.format("%.2f", options.getPcrByOI()),
+                    String.format("%.0f", options.getMaxPain()),
+                    String.format("%.0f", options.getTotalGEX()),
+                    String.format("%.0f", options.getCallOIWall()),
+                    String.format("%.0f", options.getPutOIWall()));
+            } else {
+                log.debug("{} {} MicroAlpha no option chain for {}",
+                    LOG_PREFIX, TraceContext.getShortPrefix(), underlyingSymbol);
+            }
+
+            // --- Step 4: Evaluate MicroAlpha with enriched data ---
+            var result = microAlphaTrigger.evaluate(symbol, current, indicators, options);
+
+            if (result.isTriggered()) {
+                log.info("{} {} MICROALPHA TRIGGER FIRED: direction={}, conviction={}, mode={}, reason={}",
+                    LOG_PREFIX, TraceContext.getShortPrefix(),
+                    result.getDirection(),
+                    String.format("%.1f", result.getConviction()),
+                    result.getTradingMode(),
+                    result.getReason());
+            } else {
+                log.debug("{} {} MicroAlpha no trigger: {}",
+                    LOG_PREFIX, TraceContext.getShortPrefix(), result.getReason());
+            }
+
+            return result;
+        } catch (Exception e) {
+            log.warn("{} {} MicroAlpha trigger check failed: {}",
+                LOG_PREFIX, TraceContext.getShortPrefix(), e.getMessage());
+            return com.kotsin.consumer.signal.trigger.MicroAlphaTrigger.MicroAlphaTriggerResult.noTrigger("Error: " + e.getMessage());
+        }
+    }
+
+    // ==================== MICROALPHA DERIVATIVE DATA HELPERS ====================
+
+    /**
+     * Get ScripGroup for equity scripCode (cached, 1hr TTL).
+     * ScripGroup maps equity → futures[] + options[] in one document.
+     */
+    private com.kotsin.consumer.metadata.model.ScripGroup getScripGroup(String equityScripCode) {
+        // Check cache
+        Long cachedAt = scripGroupCacheTimestamp.get(equityScripCode);
+        if (cachedAt != null && (System.currentTimeMillis() - cachedAt) < SCRIP_GROUP_CACHE_TTL_MS) {
+            return scripGroupCache.get(equityScripCode); // may be null (no ScripGroup exists)
+        }
+
+        try {
+            com.kotsin.consumer.metadata.model.ScripGroup group =
+                scripGroupRepository.findByEquityScripCode(equityScripCode);
+
+            // Cache result (including null for negative caching)
+            scripGroupCacheTimestamp.put(equityScripCode, System.currentTimeMillis());
+            if (group != null) {
+                // Bug #22: Evict oldest entries when cache is full
+                if (scripGroupCache.size() >= MAX_SCRIP_GROUP_CACHE_SIZE) {
+                    String oldest = scripGroupCacheTimestamp.entrySet().stream()
+                        .min(Map.Entry.comparingByValue())
+                        .map(Map.Entry::getKey).orElse(null);
+                    if (oldest != null) {
+                        scripGroupCache.remove(oldest);
+                        scripGroupCacheTimestamp.remove(oldest);
+                    }
+                }
+                scripGroupCache.put(equityScripCode, group);
+                log.info("{} ScripGroup cached: scripCode={} → {} (futures={}, options={})",
+                    LOG_PREFIX, equityScripCode, group.getCompanyName(),
+                    group.getFutures() != null ? group.getFutures().size() : 0,
+                    group.getOptions() != null ? group.getOptions().size() : 0);
+            } else {
+                scripGroupCache.remove(equityScripCode);
+                log.debug("{} No ScripGroup found for scripCode={}", LOG_PREFIX, equityScripCode);
+            }
+
+            return group;
+        } catch (Exception e) {
+            log.warn("{} ScripGroup lookup failed for {}: {}", LOG_PREFIX, equityScripCode, e.getMessage());
+            scripGroupCacheTimestamp.put(equityScripCode, System.currentTimeMillis());
+            return null;
+        }
+    }
+
+    /**
+     * Enrich equity UnifiedCandle with Futures OI data from ScripGroup.
+     *
+     * Flow: ScripGroup.futures[0].ScripCode → OIMetricsRepository → enrich candle
+     * OI interpretation is recalculated against equity price change (not FUT price change).
+     */
+    private boolean enrichWithFuturesOI(UnifiedCandle candle,
+                                         com.kotsin.consumer.metadata.model.ScripGroup group,
+                                         String equityScripCode) {
+        try {
+            if (group == null || group.getFutures() == null || group.getFutures().isEmpty()) {
+                return false;
+            }
+
+            // Get nearest-month FUT scripCode from ScripGroup
+            // ScripGroup already filters to current month, pick first (nearest expiry)
+            String futScripCode = null;
+            String futExpiry = null;
+            String today = java.time.LocalDate.now().toString();
+            for (com.kotsin.consumer.metadata.model.Scrip fut : group.getFutures()) {
+                String expiry = fut.getExpiry();
+                String sc = fut.getScripCode();
+                if (sc != null && expiry != null && expiry.compareTo(today) >= 0) {
+                    if (futScripCode == null || expiry.compareTo(futExpiry) < 0) {
+                        futScripCode = sc;
+                        futExpiry = expiry;
+                    }
+                }
+            }
+            // Fallback: if all expired, use first available
+            if (futScripCode == null && !group.getFutures().isEmpty()) {
+                com.kotsin.consumer.metadata.model.Scrip first = group.getFutures().get(0);
+                futScripCode = first.getScripCode();
+                futExpiry = first.getExpiry();
+            }
+            if (futScripCode == null) {
+                return false;
+            }
+
+            log.debug("{} {} FUT lookup: {} → FUT scripCode={} (expiry={})",
+                LOG_PREFIX, TraceContext.getShortPrefix(), group.getCompanyName(), futScripCode, futExpiry);
+
+            // Fetch latest FUT OI from MongoDB
+            com.kotsin.consumer.model.OIMetrics futOI = oiMetricsRepository
+                .findTopByScripCodeOrderByTimestampDesc(futScripCode)
+                .orElse(null);
+
+            if (futOI == null || futOI.getOpenInterest() <= 0) {
+                log.debug("{} {} No FUT OI data for scripCode={}", LOG_PREFIX, TraceContext.getShortPrefix(), futScripCode);
+                return false;
+            }
+
+            // Check staleness (OI data older than 5 min is stale)
+            if (futOI.getTimestamp() != null &&
+                futOI.getTimestamp().isBefore(Instant.now().minus(5, java.time.temporal.ChronoUnit.MINUTES))) {
+                long ageSec = Duration.between(futOI.getTimestamp(), Instant.now()).getSeconds();
+                log.debug("{} {} FUT OI stale for {} (age={}s, scripCode={})",
+                    LOG_PREFIX, TraceContext.getShortPrefix(), group.getCompanyName(), ageSec, futScripCode);
+                return false;
+            }
+
+            // Recalculate OI interpretation against EQUITY price change (not FUT price)
+            double priceChange = 0;
+            if (candle.getOpen() > 0) {
+                priceChange = (candle.getClose() - candle.getOpen()) / candle.getOpen() * 100.0;
+            }
+
+            com.kotsin.consumer.model.OIMetrics.OIInterpretation interp =
+                com.kotsin.consumer.model.OIMetrics.OIInterpretation.determine(
+                    priceChange, futOI.getOiChangePercent(), 0.1, 0.5);
+
+            double priceConfidence = Math.min(1.0, Math.abs(priceChange) / 1.0);
+            double oiConfidence = Math.min(1.0, Math.abs(futOI.getOiChangePercent()) / 5.0);
+            double confidence = (priceConfidence + oiConfidence) / 2.0;
+
+            // Build enriched OIMetrics with equity-aware interpretation
+            com.kotsin.consumer.model.OIMetrics enriched = com.kotsin.consumer.model.OIMetrics.builder()
+                .symbol(group.getCompanyName())
+                .scripCode(futScripCode)
+                .openInterest(futOI.getOpenInterest())
+                .oiChange(futOI.getOiChange())
+                .oiChangePercent(futOI.getOiChangePercent())
+                .interpretation(interp)
+                .interpretationConfidence(confidence)
+                .suggestsReversal(interp.suggestsExhaustion())
+                .oiVelocity(futOI.getOiVelocity())
+                .oiAcceleration(futOI.getOiAcceleration())
+                .timestamp(futOI.getTimestamp())
+                .build();
+
+            // Enrich the equity candle with FUT OI
+            candle.withOI(enriched);
+
+            log.debug("{} {} FUT OI enriched for {}: FUT={}, OI={}, change={}%, interp={}, confidence={}",
+                LOG_PREFIX, TraceContext.getShortPrefix(), group.getCompanyName(),
+                futScripCode, futOI.getOpenInterest(),
+                String.format("%.2f", futOI.getOiChangePercent()),
+                interp, String.format("%.2f", confidence));
+
+            return true;
+        } catch (Exception e) {
+            log.debug("{} {} FUT OI enrichment failed for scripCode={}: {}",
+                LOG_PREFIX, TraceContext.getShortPrefix(), equityScripCode, e.getMessage());
+            return false;
+        }
+    }
+
+    /**
+     * Fetch real options analytics for underlying using OptionsAnalyticsCalculator.
+     * Uses calculateFromChainOnly() which queries MongoDB for real OI data and calculates
+     * GEX, PCR, IV, max pain from the actual option chain.
+     */
+    private com.kotsin.consumer.options.model.OptionsAnalytics fetchOptionsAnalytics(
+            String underlyingSymbol, double spotPrice) {
+        try {
+            // Check if underlying has options data via ScripGroupService
+            if (!scripGroupService.hasDerivatives(underlyingSymbol)) {
+                return null;
+            }
+
+            // Use calculateFromChainOnly - queries MongoDB OI data directly
+            com.kotsin.consumer.options.model.OptionsAnalytics analytics =
+                optionsAnalyticsCalculator.calculateFromChainOnly(underlyingSymbol);
+
+            if (analytics == null) {
+                return null;
+            }
+
+            // Validate we got real data (not just a timestamp-only stub)
+            if (analytics.getPcrByOI() <= 0 && analytics.getMaxPain() <= 0) {
+                log.debug("{} {} Option chain empty for {} — no strikes with OI",
+                    LOG_PREFIX, TraceContext.getShortPrefix(), underlyingSymbol);
+                return null;
+            }
+
+            return analytics;
+        } catch (Exception e) {
+            log.debug("{} {} Options analytics failed for {}: {}",
+                LOG_PREFIX, TraceContext.getShortPrefix(), underlyingSymbol, e.getMessage());
+            return null;
+        }
+    }
+
+    /**
      * Process signal state machine with strategy triggers.
-     * This combines both FUDKII and Pivot Confluence strategies.
+     * This combines FUDKII, Pivot Confluence, and MicroAlpha strategies.
      */
     private TradingSignal processStateMachineWithTriggers(
             String symbol,
@@ -1215,7 +1559,8 @@ public class SignalEngine {
             TechnicalIndicators indicators,
             PatternResult patternResult,
             com.kotsin.consumer.signal.trigger.FudkiiSignalTrigger.FudkiiTriggerResult fudkiiResult,
-            com.kotsin.consumer.signal.trigger.PivotConfluenceTrigger.PivotTriggerResult pivotResult) {
+            com.kotsin.consumer.signal.trigger.PivotConfluenceTrigger.PivotTriggerResult pivotResult,
+            com.kotsin.consumer.signal.trigger.MicroAlphaTrigger.MicroAlphaTriggerResult microAlphaResult) {
 
         double price = candle.getClose();
 
@@ -1258,6 +1603,24 @@ public class SignalEngine {
                 symbol, candle, score, pivotState, indicators, patternResult,
                 "PIVOT_CONFLUENCE", pivotResult.getDirection().name(),
                 pivotResult.getReason(), stopLoss
+            );
+        }
+
+        // Strategy 3: MicroAlpha (Microstructure Alpha - regime-adaptive)
+        if (microAlphaResult != null && microAlphaResult.isTriggered()) {
+            log.info("{} {} STRATEGY 3 (MICROALPHA) ACTIVATED: {} at {}, conviction={}, mode={}",
+                LOG_PREFIX, TraceContext.getShortPrefix(),
+                microAlphaResult.getDirection(), String.format("%.2f", price),
+                String.format("%.1f", microAlphaResult.getConviction()),
+                microAlphaResult.getTradingMode());
+
+            double stopLoss = microAlphaResult.getStopLoss() > 0 ?
+                microAlphaResult.getStopLoss() : price * 0.99;
+
+            return createAndActivateSignal(
+                symbol, candle, score, pivotState, indicators, patternResult,
+                "MICROALPHA", microAlphaResult.getDirection().name(),
+                microAlphaResult.getReason(), stopLoss
             );
         }
 
@@ -1364,14 +1727,14 @@ public class SignalEngine {
 
         // Log detailed entry levels
         double risk = Math.abs(levels.entry - levels.stop);
-        log.info("{} {} {} Entry Levels: entry={}, stop={}, T1={}, T2={}, R:R={}, Risk%={:.2f}%",
+        log.info("{} {} {} Entry Levels: entry={}, stop={}, T1={}, T2={}, R:R={}, Risk%={}%",
             LOG_PREFIX, TraceContext.getShortPrefix(), strategyName,
             String.format("%.2f", levels.entry),
             String.format("%.2f", levels.stop),
             String.format("%.2f", levels.target1),
             String.format("%.2f", levels.target2),
             String.format("%.2f", Math.abs(levels.target1 - levels.entry) / risk),
-            (risk / levels.entry) * 100);
+            String.format("%.2f", (risk / levels.entry) * 100));
 
         // Immediately activate
         signal.enterActive(adjustedScore, price, levels.entry, levels.stop, levels.target1, levels.target2);
@@ -1381,7 +1744,7 @@ public class SignalEngine {
 
         // Execute paper trade if enabled
         if (paperTradeEnabled) {
-            executePaperTrade(signal, levels);
+            executePaperTrade(signal, levels, strategyName);
         }
 
         // Save and notify
@@ -1564,13 +1927,13 @@ public class SignalEngine {
 
         // Log the calculation details
         double finalRR = Math.abs(levels.target1 - levels.entry) / actualStopDistance;
-        log.info("{} {} Entry Levels Calculated: entry={}, stop={} ({}), T1={} ({}), T2={}, R:R={:.2f}, ATR={:.2f}",
+        log.info("{} {} Entry Levels Calculated: entry={}, stop={} ({}), T1={} ({}), T2={}, R:R={}, ATR={}",
             LOG_PREFIX, scripCode,
             String.format("%.2f", levels.entry),
             String.format("%.2f", levels.stop), stopSource,
             String.format("%.2f", levels.target1), targetSource,
             String.format("%.2f", levels.target2),
-            finalRR, atr);
+            String.format("%.2f", finalRR), String.format("%.2f", atr));
 
         return levels;
     }
@@ -1823,7 +2186,7 @@ public class SignalEngine {
     /**
      * Execute paper trade for activated signal and link trade ID back to signal.
      */
-    private void executePaperTrade(TradingSignal signal, EntryLevels levels) {
+    private void executePaperTrade(TradingSignal signal, EntryLevels levels, String strategyName) {
         if (!paperTradeEnabled) return;
 
         try {
@@ -1838,7 +2201,7 @@ public class SignalEngine {
                 levels.target1,
                 levels.stop,
                 signal.getSignalId(),
-                "FUDKII"
+                strategyName
             );
 
             // Link paper trade ID back to the signal for tracking
@@ -2098,6 +2461,27 @@ public class SignalEngine {
             }
 
             payload.put("publishedAt", Instant.now().toString());
+
+            // FIX: Add fields expected by QuantSignalConsumer (schema alignment)
+            // timestamp as epoch millis for age check
+            Instant signalTimestamp = signal.getTriggeredAt() != null ? signal.getTriggeredAt()
+                    : signal.getWatchedAt() != null ? signal.getWatchedAt()
+                    : signal.getCreatedAt() != null ? signal.getCreatedAt()
+                    : Instant.now();
+            payload.put("timestamp", signalTimestamp.toEpochMilli());
+
+            // Map compositeScore -> quantScore for consumer compatibility
+            if (score != null) {
+                payload.put("quantScore", score.getCompositeScore());
+                payload.put("quantLabel", score.getStrength() != null ? score.getStrength().name() : null);
+            }
+
+            // Map signal state to actionable flag and signalType
+            boolean isActionable = signal.getState() == SignalState.ACTIVE
+                    && signal.getEntryPrice() > 0 && signal.getStopLoss() > 0 && signal.getTarget1() > 0;
+            payload.put("actionable", isActionable);
+            payload.put("signalType", "FUDKII");
+            payload.put("riskRewardRatio", signal.getRiskReward());
 
             kafkaTemplate.send(tradingSignalsTopic, signal.getScripCode(), payload);
             log.info("{} {} Published TradingSignal to Kafka topic: {} (event={})",

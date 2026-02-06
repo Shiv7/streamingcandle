@@ -727,11 +727,12 @@ public class PivotConfluenceTrigger {
         double reward = Math.abs(target - entryPrice);
         double riskReward = risk > 0 ? reward / risk : 0;
 
-        log.info("{} {} Pivot-based R:R: stop={} ({}), target={} ({}), R:R={:.2f}, ATR={:.2f}, Risk%={:.2f}%",
+        log.info("{} {} Pivot-based R:R: stop={} ({}), target={} ({}), R:R={}, ATR={}, Risk%={}%",
             LOG_PREFIX, scripCode,
             String.format("%.2f", stopLoss), stopSource,
             String.format("%.2f", target), targetSource,
-            riskReward, atr, (risk / entryPrice) * 100);
+            String.format("%.2f", riskReward), String.format("%.2f", atr),
+            String.format("%.2f", (risk / entryPrice) * 100));
 
         return RiskRewardCalculation.builder()
             .entryPrice(entryPrice)
@@ -1003,11 +1004,22 @@ public class PivotConfluenceTrigger {
         if (candles == null || candles.size() < period) {
             return candles != null && !candles.isEmpty() ? candles.get(0).getClose() : 0;
         }
+        double multiplier = 2.0 / (period + 1);
+
+        // Candles list is newest-first (index 0 = latest). EMA processes oldest to newest.
+        // Seed EMA with SMA of the oldest `period` candles
+        int oldestIdx = candles.size() - 1;
         double sum = 0;
-        for (int i = 0; i < period; i++) {
+        for (int i = oldestIdx; i > oldestIdx - period; i--) {
             sum += candles.get(i).getClose();
         }
-        return sum / period;
+        double ema = sum / period;
+
+        // Apply EMA formula from oldest+period towards newest (index 0)
+        for (int i = oldestIdx - period; i >= 0; i--) {
+            ema = (candles.get(i).getClose() - ema) * multiplier + ema;
+        }
+        return ema;
     }
 
     /**

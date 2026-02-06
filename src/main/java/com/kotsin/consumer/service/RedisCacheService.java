@@ -303,62 +303,90 @@ public class RedisCacheService {
 
     /**
      * Cache current price for a scripCode (for OI interpretation).
-     * Also stores previous price before updating.
+     * Bug #25 FIX: Backward-compatible overload defaulting exchange to "N".
      */
     public void cachePrice(String scripCode, double price) {
+        cachePrice("N", scripCode, price);
+    }
+
+    /**
+     * Cache current price for a scripCode with exchange (for OI interpretation).
+     * Bug #25 FIX: Include exchange in key to avoid MCX/NSE price collisions.
+     * Also stores previous price before updating.
+     */
+    public void cachePrice(String exchange, String scripCode, double price) {
         if (scripCode == null || price <= 0) return;
+        String exch = (exchange != null && !exchange.isEmpty()) ? exchange : "N";
 
         try {
-            String priceKey = PRICE_KEY_PREFIX + scripCode;
-            String prevPriceKey = PREV_PRICE_KEY_PREFIX + scripCode;
-            
+            String priceKey = PRICE_KEY_PREFIX + exch + ":" + scripCode;
+            String prevPriceKey = PREV_PRICE_KEY_PREFIX + exch + ":" + scripCode;
+
             // Get current price to store as previous
             Object current = redisTemplate.opsForValue().get(priceKey);
             if (current != null) {
-                redisTemplate.opsForValue().set(prevPriceKey, current, 
+                redisTemplate.opsForValue().set(prevPriceKey, current,
                     Duration.ofMinutes(tickLatestTtlMinutes));
             }
-            
+
             // Store new price
             redisTemplate.opsForValue().set(priceKey, price,
                 Duration.ofMinutes(tickLatestTtlMinutes));
         } catch (Exception e) {
-            log.debug("[REDIS-CACHE] Failed to cache price for scripCode={}: {}", scripCode, e.getMessage());
+            log.debug("[REDIS-CACHE] Failed to cache price for {}:{}: {}", exch, scripCode, e.getMessage());
         }
     }
 
     /**
-     * Get last known price for a scripCode.
+     * Get last known price for a scripCode (backward-compatible, defaults to NSE).
      */
     public Double getLastPrice(String scripCode) {
+        return getLastPrice("N", scripCode);
+    }
+
+    /**
+     * Get last known price for a scripCode with exchange.
+     * Bug #25 FIX: Include exchange in key lookup.
+     */
+    public Double getLastPrice(String exchange, String scripCode) {
         if (scripCode == null) return null;
+        String exch = (exchange != null && !exchange.isEmpty()) ? exchange : "N";
 
         try {
-            String key = PRICE_KEY_PREFIX + scripCode;
+            String key = PRICE_KEY_PREFIX + exch + ":" + scripCode;
             Object value = redisTemplate.opsForValue().get(key);
             if (value instanceof Number) {
                 return ((Number) value).doubleValue();
             }
         } catch (Exception e) {
-            log.debug("[REDIS-CACHE] Failed to get price for scripCode={}: {}", scripCode, e.getMessage());
+            log.debug("[REDIS-CACHE] Failed to get price for {}:{}: {}", exch, scripCode, e.getMessage());
         }
         return null;
     }
 
     /**
-     * Get previous price for a scripCode.
+     * Get previous price for a scripCode (backward-compatible, defaults to NSE).
      */
     public Double getPreviousPrice(String scripCode) {
+        return getPreviousPrice("N", scripCode);
+    }
+
+    /**
+     * Get previous price for a scripCode with exchange.
+     * Bug #25 FIX: Include exchange in key lookup.
+     */
+    public Double getPreviousPrice(String exchange, String scripCode) {
         if (scripCode == null) return null;
+        String exch = (exchange != null && !exchange.isEmpty()) ? exchange : "N";
 
         try {
-            String key = PREV_PRICE_KEY_PREFIX + scripCode;
+            String key = PREV_PRICE_KEY_PREFIX + exch + ":" + scripCode;
             Object value = redisTemplate.opsForValue().get(key);
             if (value instanceof Number) {
                 return ((Number) value).doubleValue();
             }
         } catch (Exception e) {
-            log.debug("[REDIS-CACHE] Failed to get previous price for scripCode={}: {}", scripCode, e.getMessage());
+            log.debug("[REDIS-CACHE] Failed to get previous price for {}:{}: {}", exch, scripCode, e.getMessage());
         }
         return null;
     }
@@ -465,6 +493,88 @@ public class RedisCacheService {
         } catch (Exception e) {
             log.debug("[REDIS-CACHE] Failed to clear ST flip for {}:{}: {}",
                 scripCode, timeframe, e.getMessage());
+        }
+    }
+
+    // ==================== FUKAA WATCHING SIGNALS (Volume Filter) ====================
+
+    private static final String FUKAA_WATCHING_PREFIX = "fukaa:watching:";
+    private static final String FUKAA_WATCHING_SET = "fukaa:watching:all";
+
+    /**
+     * Store a FUDKII signal in watching mode for T+1 volume re-evaluation.
+     * Signal will be checked on next 30m candle close.
+     *
+     * @param scripCode The script code
+     * @param signalData Map containing signal data (result, avgVolume, signalTime, etc.)
+     * @param ttlMinutes TTL for watching signal (should be > 30 min for T+1)
+     */
+    public void storeFukaaWatchingSignal(String scripCode, java.util.Map<String, Object> signalData, int ttlMinutes) {
+        if (scripCode == null || signalData == null) return;
+
+        try {
+            String key = FUKAA_WATCHING_PREFIX + scripCode;
+            redisTemplate.opsForValue().set(key, signalData, Duration.ofMinutes(ttlMinutes));
+            // Also add to set of all watching scripCodes for efficient lookup
+            redisTemplate.opsForSet().add(FUKAA_WATCHING_SET, scripCode);
+            redisTemplate.expire(FUKAA_WATCHING_SET, Duration.ofHours(24));
+            log.info("[REDIS-CACHE] Stored FUKAA watching signal for {} (TTL={}min)", scripCode, ttlMinutes);
+        } catch (Exception e) {
+            log.error("[REDIS-CACHE] Failed to store FUKAA watching signal for {}: {}", scripCode, e.getMessage());
+        }
+    }
+
+    /**
+     * Get a watching signal for T+1 evaluation.
+     */
+    @SuppressWarnings("unchecked")
+    public java.util.Map<String, Object> getFukaaWatchingSignal(String scripCode) {
+        if (scripCode == null) return null;
+
+        try {
+            String key = FUKAA_WATCHING_PREFIX + scripCode;
+            Object value = redisTemplate.opsForValue().get(key);
+            if (value instanceof java.util.Map) {
+                return (java.util.Map<String, Object>) value;
+            }
+        } catch (Exception e) {
+            log.debug("[REDIS-CACHE] Failed to get FUKAA watching signal for {}: {}", scripCode, e.getMessage());
+        }
+        return null;
+    }
+
+    /**
+     * Get all scripCodes with watching signals (for T+1 batch check).
+     */
+    public Set<String> getAllFukaaWatchingScripCodes() {
+        try {
+            Set<Object> members = redisTemplate.opsForSet().members(FUKAA_WATCHING_SET);
+            if (members != null) {
+                Set<String> result = new java.util.HashSet<>();
+                for (Object m : members) {
+                    if (m != null) result.add(m.toString());
+                }
+                return result;
+            }
+        } catch (Exception e) {
+            log.debug("[REDIS-CACHE] Failed to get FUKAA watching scripCodes: {}", e.getMessage());
+        }
+        return java.util.Collections.emptySet();
+    }
+
+    /**
+     * Remove a watching signal (after T+1 evaluation or expiry).
+     */
+    public void removeFukaaWatchingSignal(String scripCode) {
+        if (scripCode == null) return;
+
+        try {
+            String key = FUKAA_WATCHING_PREFIX + scripCode;
+            redisTemplate.delete(key);
+            redisTemplate.opsForSet().remove(FUKAA_WATCHING_SET, scripCode);
+            log.debug("[REDIS-CACHE] Removed FUKAA watching signal for {}", scripCode);
+        } catch (Exception e) {
+            log.debug("[REDIS-CACHE] Failed to remove FUKAA watching signal for {}: {}", scripCode, e.getMessage());
         }
     }
 }

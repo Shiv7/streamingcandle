@@ -51,6 +51,7 @@ import com.kotsin.consumer.aggregator.state.TickAggregateState;
 import com.kotsin.consumer.event.CandleBoundaryPublisher;
 import com.kotsin.consumer.logging.TraceContext;
 import com.kotsin.consumer.model.TickCandle;
+import com.kotsin.consumer.model.TimeframeBoundary;
 import com.kotsin.consumer.model.TickData;
 import com.kotsin.consumer.model.Timeframe;
 import com.kotsin.consumer.repository.TickCandleRepository;
@@ -177,7 +178,7 @@ public class TickAggregator {
      * Number of parallel consumer threads.
      * <p>Default: 4</p>
      */
-    @Value("${v2.tick.aggregator.threads:4}")
+    @Value("${v2.tick.aggregator.threads:16}")
     private int numThreads;
 
     /**
@@ -188,16 +189,16 @@ public class TickAggregator {
     private String outputTopic;
 
     /**
-     * Comma-separated list of symbols for trace logging.
-     * <p>Empty = trace all symbols (FULL MODE)</p>
+     * Comma-separated list of scripcodes for trace logging.
+     * <p>Empty = trace all scripcodes (FULL MODE)</p>
      */
-    @Value("${logging.trace.symbols:}")
-    private String traceSymbolsStr;
+    @Value("${logging.trace.scripcodes:}")
+    private String traceScripCodesStr;
 
     /**
-     * Parsed set of symbols for trace logging.
+     * Parsed set of scripcodes for trace logging.
      */
-    private Set<String> traceSymbols;
+    private Set<String> traceScripCodes;
 
     // ==================== INJECTED DEPENDENCIES ====================
 
@@ -339,18 +340,22 @@ public class TickAggregator {
         emissionScheduler = Executors.newSingleThreadScheduledExecutor();
         emissionScheduler.scheduleAtFixedRate(this::checkWindowEmission, 1, 1, TimeUnit.SECONDS);
 
+        // Bug #15: Schedule periodic cleanup of pending candles (every 10 minutes)
+        emissionScheduler.scheduleAtFixedRate(
+            candleBoundaryPublisher::cleanupOldPendingCandles, 10, 10, TimeUnit.MINUTES);
+
         log.info("{} Started successfully", LOG_PREFIX);
 
-        // Parse trace symbols
-        this.traceSymbols = new HashSet<>();
-        if (traceSymbolsStr != null && !traceSymbolsStr.isBlank()) {
-            String[] parts = traceSymbolsStr.split(",");
+        // Parse trace scripcodes (Bug #2: trace by scripcode, not symbol)
+        this.traceScripCodes = new HashSet<>();
+        if (traceScripCodesStr != null && !traceScripCodesStr.isBlank()) {
+            String[] parts = traceScripCodesStr.split(",");
             for (String part : parts) {
-                traceSymbols.add(part.trim().toUpperCase());
+                traceScripCodes.add(part.trim());
             }
-            log.info("{} Trace logging enabled for symbols: {}", LOG_PREFIX, traceSymbols);
+            log.info("{} Trace logging enabled for scripcodes: {}", LOG_PREFIX, traceScripCodes);
         } else {
-            log.info("{} Trace logging enabled for ALL symbols (FULL - NO SAMPLING)", LOG_PREFIX);
+            log.info("{} Trace logging enabled for ALL scripcodes (FULL - NO SAMPLING)", LOG_PREFIX);
         }
     }
 
@@ -509,19 +514,19 @@ public class TickAggregator {
         //good key building as nse or mcx might have same scripcode so use of exchange is good idea
         String key = buildKey(tick);
         // Extract symbol from ScripMetadataService (authoritative source from database)
-        String symbol = scripMetadataService.getSymbolRoot(tick.getScripCode(), tick.getCompanyName());
+        String symbol = scripMetadataService.getSymbolRoot(tick.getScripCode());
 
-        // [TICK-TRACE] Log everything if list is empty, or specific symbol
-        boolean specificSymbol = traceSymbols.contains(symbol);
-        boolean shouldLog = specificSymbol || traceSymbols.isEmpty();
+        // [TICK-TRACE] Log everything if list is empty, or specific scripcode (Bug #2)
+        boolean specificScripCode = traceScripCodes.contains(tick.getScripCode());
+        boolean shouldLog = specificScripCode || traceScripCodes.isEmpty();
 
         if (shouldLog) {
             log.info("[TICK-TRACE] Received tick for {}: Price={}, Vol={}, Time={}",
                 symbol, tick.getLastRate(), tick.getLastQuantity(), tick.getTickDt());
         }
 
-        // Start trace context
-        TraceContext.start(symbol, "1m");
+        // Bug #19: Start trace context with scripcode for consistency
+        TraceContext.start(tick.getScripCode(), "1m");
         try {
             // Use Kafka timestamp for consistency with OI and Orderbook aggregators
             Instant tickTime = Instant.ofEpochMilli(kafkaTimestamp);
@@ -558,8 +563,18 @@ public class TickAggregator {
                 ? OptionMetadata.fromScrip(scripMetadataService.getScripByCode(tick.getScripCode()))
                 : null;
 
+            // Bug #12: Resolve instrument type from ScripMetadataService
+            final String scripType = scripMetadataService.getScripType(tick.getScripCode());
+            final TickCandle.InstrumentType resolvedInstrumentType = scripType != null
+                ? TickCandle.InstrumentType.fromScripType(scripType)
+                : null;
+
             TickAggregateState state = aggregationState.computeIfAbsent(stateKey,
-                k -> new TickAggregateState(tick, tickWindowStart, tickWindowEnd, resolvedSymbol, optionMeta));
+                k -> {
+                    TickAggregateState s = new TickAggregateState(tick, tickWindowStart, tickWindowEnd, resolvedSymbol, optionMeta);
+                    s.setInstrumentType(resolvedInstrumentType);
+                    return s;
+                });
 
             // Update aggregation
             state.update(tick, tickTime);
@@ -584,6 +599,18 @@ public class TickAggregator {
         // Check price > 0
         if (tick.getLastRate() <= 0) {
             return "Price <= 0";
+        }
+
+        // Check quantity > 0 (Bug #26), but allow qty=0 for INDEX instruments
+        if (tick.getLastQuantity() < 0) {
+            return "Quantity < 0";
+        }
+        if (tick.getLastQuantity() == 0) {
+            TickCandle.InstrumentType type = TickCandle.InstrumentType.detect(
+                tick.getExchange(), tick.getExchangeType(), tick.getCompanyName());
+            if (type != TickCandle.InstrumentType.INDEX) {
+                return "Quantity = 0 (non-INDEX)";
+            }
         }
 
         return null; // Valid
@@ -763,9 +790,9 @@ public class TickAggregator {
             log.info("{} Saved {} candles to MongoDB", LOG_PREFIX, candles.size());
 
             // Trace individual saves if enabled
-            if (traceSymbols != null && !traceSymbols.isEmpty()) {
+            if (traceScripCodes != null && !traceScripCodes.isEmpty()) {
                 for (TickCandle c : candles) {
-                    if (traceSymbols.contains(c.getSymbol()) || traceSymbols.contains(c.getScripCode())) {
+                    if (traceScripCodes.contains(c.getScripCode())) {
                         log.info("[MONGO-WRITE] TickCandle saved for {} @ {} | Close: {} | Vol: {}",
                             c.getSymbol(), formatTime(c.getWindowEnd()), c.getClose(), c.getVolume());
                     }
@@ -785,8 +812,8 @@ public class TickAggregator {
         try {
             for (TickCandle candle : candles) {
                 redisCacheService.cacheTickCandle(candle);
-                // v2.1: Cache price for OI interpretation (keyed by scripCode)
-                redisCacheService.cachePrice(candle.getScripCode(), candle.getClose());
+                // v2.1: Cache price for OI interpretation (Bug #25 FIX: keyed by exchange:scripCode)
+                redisCacheService.cachePrice(candle.getExchange(), candle.getScripCode(), candle.getClose());
             }
             log.debug("{} Cached {} candles in Redis", LOG_PREFIX, candles.size());
         } catch (Exception e) {
@@ -801,8 +828,22 @@ public class TickAggregator {
      */
     private void triggerFudkiiSignals(List<TickCandle> candles) {
         try {
+            // Bug #7: FUDKII operates on 30m candles; skip if not a 30m boundary
+            if (!candles.isEmpty()) {
+                TickCandle first = candles.get(0);
+                String exchange = first.getExchange() != null ? first.getExchange() : "N";
+                if (!TimeframeBoundary.is30mBoundary(first.getWindowEnd(), exchange)) {
+                    return;
+                }
+            }
+
             for (TickCandle candle : candles) {
                 if (candle.getScripCode() != null) {
+                    // Bug #17: FUDKII only for equity/index, not derivatives
+                    TickCandle.InstrumentType type = candle.getInstrumentType();
+                    if (type != null && type.isDerivative()) {
+                        continue;
+                    }
                     fudkiiSignalTrigger.onCandleClose(candle.getScripCode(), candle);
                 }
             }

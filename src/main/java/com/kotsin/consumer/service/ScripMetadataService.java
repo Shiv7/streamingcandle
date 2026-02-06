@@ -1,6 +1,7 @@
 package com.kotsin.consumer.service;
 
 import com.kotsin.consumer.metadata.model.Scrip;
+import com.kotsin.consumer.options.service.ScripGroupService;
 import com.kotsin.consumer.repository.ScripRepository;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.beans.factory.annotation.Autowired;
@@ -44,16 +45,28 @@ public class ScripMetadataService {
     private ScripRepository scripRepository;
 
     /**
+     * Bug #5: ScripGroupService for derivative→equity mapping.
+     */
+    @Autowired(required = false)
+    private ScripGroupService scripGroupService;
+
+    // Bug #16: Bounded cache with max size
+    private static final int MAX_CACHE_SIZE = 5000;
+
+    // Bug #16: Not-found cache TTL (1 hour in millis)
+    private static final long NOT_FOUND_TTL_MS = 3600_000L;
+
+    /**
      * In-memory cache for scrip lookups.
      * Key: scripCode, Value: Scrip object
      */
     private final Map<String, Scrip> scripCache = new ConcurrentHashMap<>();
 
     /**
-     * Cache for scripCodes that don't exist in database.
-     * Prevents repeated failed lookups.
+     * Bug #16: Cache for scripCodes that don't exist in database.
+     * Value is timestamp when entry was cached (for TTL expiry).
      */
-    private final Map<String, Boolean> notFoundCache = new ConcurrentHashMap<>();
+    private final Map<String, Long> notFoundCache = new ConcurrentHashMap<>();
 
     // ==================== SYMBOL EXTRACTION ====================
 
@@ -61,48 +74,33 @@ public class ScripMetadataService {
      * Get the clean symbol root for a scripCode.
      *
      * <p>This is the authoritative way to get a symbol from scripCode.</p>
-     * <p>Falls back to company name parsing if scrip not found in database.</p>
      *
      * @param scripCode   exchange scrip code
-     * @param companyName company name for fallback parsing
      * @return symbol root (e.g., "NIFTY", "BANKNIFTY", "RELIANCE")
      */
-    public String getSymbolRoot(String scripCode, String companyName) {
-        if (scripCode == null) {
-            return extractSymbolFromCompanyName(companyName, null);
-        }
-
+    public String getSymbolRoot(String scripCode) {
         // Check cache first
         Scrip cached = scripCache.get(scripCode);
         if (cached != null && cached.getSymbolRoot() != null) {
             return cached.getSymbolRoot();
         }
-
-        // Check if already known to not exist
-        if (notFoundCache.containsKey(scripCode)) {
-            return extractSymbolFromCompanyName(companyName, scripCode);
-        }
-
         // Lookup from database
         try {
             List<Scrip> scrips = scripRepository.findByScripCode(scripCode);
             if (scrips != null && !scrips.isEmpty()) {
                 Scrip scrip = scrips.get(0);
                 scripCache.put(scripCode, scrip);
-
                 if (scrip.getSymbolRoot() != null && !scrip.getSymbolRoot().isEmpty()) {
                     return scrip.getSymbolRoot();
                 }
             } else {
-                notFoundCache.put(scripCode, true);
+                notFoundCache.put(scripCode, System.currentTimeMillis());
             }
         } catch (Exception e) {
             log.warn("{} Failed to lookup scripCode {}: {}", LOG_PREFIX, scripCode, e.getMessage());
-            notFoundCache.put(scripCode, true);
+            notFoundCache.put(scripCode, System.currentTimeMillis());
         }
-
-        // Fallback to company name parsing
-        return extractSymbolFromCompanyName(companyName, scripCode);
+        return "";
     }
 
     /**
@@ -139,17 +137,21 @@ public class ScripMetadataService {
         if (cached != null) return cached;
 
         // Check not found cache
-        if (notFoundCache.containsKey(scripCode)) return null;
+                // Bug #16: Check not-found cache with TTL
+        Long notFoundAt = notFoundCache.get(scripCode);
+        if (notFoundAt != null && (System.currentTimeMillis() - notFoundAt) < NOT_FOUND_TTL_MS) return null;
+        if (notFoundAt != null) notFoundCache.remove(scripCode); // TTL expired, retry
 
         // Lookup
         try {
             List<Scrip> scrips = scripRepository.findByScripCode(scripCode);
             if (scrips != null && !scrips.isEmpty()) {
                 Scrip scrip = scrips.get(0);
+                enforceMaxCacheSize();
                 scripCache.put(scripCode, scrip);
                 return scrip;
             } else {
-                notFoundCache.put(scripCode, true);
+                notFoundCache.put(scripCode, System.currentTimeMillis());
             }
         } catch (Exception e) {
             log.warn("{} Failed to lookup scripCode {}: {}", LOG_PREFIX, scripCode, e.getMessage());
@@ -178,7 +180,7 @@ public class ScripMetadataService {
             }
         } catch (Exception e) {
             log.warn("{} Failed to lookup scripCode {} with exchange {}/{}: {}",
-                LOG_PREFIX, scripCode, exchange, exchangeType, e.getMessage());
+                    LOG_PREFIX, scripCode, exchange, exchangeType, e.getMessage());
         }
         return Optional.empty();
     }
@@ -405,7 +407,7 @@ public class ScripMetadataService {
         int lotSize = getLotSize(scripCode);
         if (quantity % lotSize != 0) {
             return String.format("Quantity %d is not a multiple of lot size %d. Valid quantities: %d, %d, %d...",
-                quantity, lotSize, lotSize, lotSize * 2, lotSize * 3);
+                    quantity, lotSize, lotSize, lotSize * 2, lotSize * 3);
         }
 
         int qtyLimit = getQuantityLimit(scripCode);
@@ -416,7 +418,37 @@ public class ScripMetadataService {
         return null; // Valid
     }
 
+    // ==================== FAMILY CORRELATION (Bug #5) ====================
+
+    /**
+     * Bug #5: Get the equity scripCode for a derivative (future/option) scripCode.
+     * Uses ScripGroup lookup via ScripGroupService.
+     *
+     * @param scripCode derivative scripCode
+     * @return equity scripCode, or null if not found or not a derivative
+     */
+    public String getEquityScripCode(String scripCode) {
+        if (scripGroupService == null || scripCode == null) return null;
+        return scripGroupService.getEquityScripCode(scripCode);
+    }
+
     // ==================== CACHE MANAGEMENT ====================
+
+    /**
+     * Bug #16: Enforce max cache size by removing oldest entries.
+     */
+    private void enforceMaxCacheSize() {
+        if (scripCache.size() > MAX_CACHE_SIZE) {
+            // Remove ~10% of entries to avoid constant eviction
+            int toRemove = scripCache.size() - (int)(MAX_CACHE_SIZE * 0.9);
+            scripCache.keySet().stream().limit(toRemove).toList()
+                .forEach(scripCache::remove);
+            log.debug("{} Evicted {} entries from scripCache (size={})", LOG_PREFIX, toRemove, scripCache.size());
+        }
+        // Also clean expired not-found entries periodically
+        long now = System.currentTimeMillis();
+        notFoundCache.entrySet().removeIf(e -> (now - e.getValue()) > NOT_FOUND_TTL_MS);
+    }
 
     /**
      * Clear all caches. Useful for testing or when scrip data is updated.
@@ -434,54 +466,8 @@ public class ScripMetadataService {
      */
     public Map<String, Object> getCacheStats() {
         return Map.of(
-            "cachedScrips", scripCache.size(),
-            "notFoundEntries", notFoundCache.size()
+                "cachedScrips", scripCache.size(),
+                "notFoundEntries", notFoundCache.size()
         );
-    }
-
-    // ==================== FALLBACK PARSING ====================
-
-    /**
-     * Extract symbol from company name when database lookup fails.
-     *
-     * <p>Handles special cases for index options:</p>
-     * <ul>
-     *   <li>"BANK NIFTY ..." → "BANKNIFTY"</li>
-     *   <li>"NIFTY BANK ..." → "BANKNIFTY"</li>
-     *   <li>"FIN NIFTY ..." → "FINNIFTY"</li>
-     * </ul>
-     *
-     * @param companyName full company name
-     * @param scripCode   fallback scripCode
-     * @return extracted symbol
-     */
-    private String extractSymbolFromCompanyName(String companyName, String scripCode) {
-        if (companyName == null || companyName.isEmpty()) {
-            return scripCode;
-        }
-
-        String upper = companyName.toUpperCase().trim();
-
-        // Handle special cases for index options
-        if (upper.startsWith("BANK NIFTY") || upper.startsWith("BANKNIFTY")) {
-            return "BANKNIFTY";
-        }
-        if (upper.startsWith("NIFTY BANK")) {
-            return "BANKNIFTY";
-        }
-        if (upper.startsWith("FIN NIFTY") || upper.startsWith("FINNIFTY")) {
-            return "FINNIFTY";
-        }
-        if (upper.startsWith("NIFTY")) {
-            return "NIFTY";
-        }
-
-        // Extract first word (skip if purely numeric)
-        String[] parts = upper.split("\\s+");
-        if (parts.length > 0 && !parts[0].matches("^\\d+$")) {
-            return parts[0];
-        }
-
-        return scripCode;
     }
 }
